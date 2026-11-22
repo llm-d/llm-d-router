@@ -18,22 +18,25 @@ package contextlengthaware
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	concretedatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 )
 
 const (
@@ -44,6 +47,10 @@ const (
 	migrationPrefixProducer    = "precise-prefix"
 	migrationP2PProducer       = "session-migration-p2p"
 	migrationLongSourceAddress = "10.0.0.10"
+	// P-long's data parallel rank; its P2P tier port is the rank-0 port plus
+	// this.
+	migrationLongSourceRank   = 1
+	migrationP2PConnectorPort = 7777
 )
 
 // tokenizedPromptTestProducer satisfies the scorer's tokenized-request
@@ -55,7 +62,7 @@ func (p *tokenizedPromptTestProducer) TypedName() fwkplugin.TypedName {
 }
 
 func (p *tokenizedPromptTestProducer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}}
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{}}
 }
 
 func (p *tokenizedPromptTestProducer) Produce(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
@@ -109,6 +116,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 		PrefixMatchInfoProducerName: migrationPrefixProducer,
 		MinCachedTokenDelta:         1,
 		PrefillProfileName:          "prefill",
+		P2PConnectorPort:            migrationP2PConnectorPort,
 	})
 	workRouter := NewContextLengthAware("prefill-work-router", &contextLengthAwareParameters{
 		Label:                      migrationWorkRangeLabel,
@@ -132,13 +140,14 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	require.Len(t, coldCandidates, 1)
 	assert.Equal(t, "p-long", coldCandidates[0].GetMetadata().ID.Name)
 	require.NoError(t, p2p.PreRequest(ctx, coldRequest, migrationPrefillResult(coldCandidates[0])))
-	assert.NotContains(t, coldRequest.Headers, routing.KVCacheSourceHeader)
+	assert.Nil(t, migrationKVSource(coldRequest))
 
 	// The next turn has 102400 CPU-tier tokens on P-long and 1024 new tokens.
 	// Produce publishes that request-wide reusable floor before filtering, so
 	// the work-range filter selects P-short and PreRequest points it at P-long.
 	warmLong := migrationPrefiller("p-long", migrationLongSourceAddress, "8193-131072",
 		prefixDataKey, migrationInitialTokens/migrationBlockSize, migrationFollowUpTokens/migrationBlockSize)
+	warmLong.GetMetadata().RankIndex = migrationLongSourceRank
 	warmShort := migrationPrefiller("p-short", "10.0.0.20", "0-8192",
 		prefixDataKey, 0, migrationFollowUpTokens/migrationBlockSize)
 	followUpRequest := migrationTokenizedRequest("follow-up-101k", migrationFollowUpTokens)
@@ -151,7 +160,20 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	require.Len(t, warmCandidates, 1)
 	assert.Equal(t, "p-short", warmCandidates[0].GetMetadata().ID.Name)
 	require.NoError(t, p2p.PreRequest(ctx, followUpRequest, migrationPrefillResult(warmCandidates[0])))
-	assert.Equal(t, migrationLongSourceAddress+":8080", followUpRequest.Headers[routing.KVCacheSourceHeader])
+	source := migrationKVSource(followUpRequest)
+	assert.Equal(t, migrationLongSourceAddress, source[reqcommon.FieldRemoteHost])
+	assert.Equal(t, migrationP2PConnectorPort+migrationLongSourceRank, source[reqcommon.FieldRemotePort])
+	assert.Equal(t, net.JoinHostPort(migrationLongSourceAddress, strconv.Itoa(migrationP2PConnectorPort+migrationLongSourceRank)),
+		followUpRequest.Headers[routing.KVCacheSourceHeader])
+}
+
+// migrationKVSource returns the kv_transfer_params.remote_kv_source block the
+// p2p-source-producer wrote into the request body, or nil when absent.
+func migrationKVSource(request *scheduling.InferenceRequest) map[string]any {
+	payload, _ := request.Body.Payload.(fwkrequest.PayloadMap)
+	params, _ := payload[reqcommon.FieldKVTransferParams].(map[string]any)
+	source, _ := params[reqcommon.FieldRemoteKVSource].(map[string]any)
+	return source
 }
 
 func migrationPrefiller(
@@ -178,9 +200,10 @@ func migrationTokenizedRequest(requestID string, tokenCount int) *scheduling.Inf
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,
 		Headers:   map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
+		Body: &fwkrequest.InferenceRequestBody{
+			Payload: fwkrequest.PayloadMap{},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
 			},
 		},
 	}

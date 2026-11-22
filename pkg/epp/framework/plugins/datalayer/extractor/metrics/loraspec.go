@@ -50,11 +50,14 @@ func parseStringToLoRASpec(spec string) (*LoRASpec, error) {
 // series is its creation timestamp so we can retrieve the latest by sorting on
 // that the value first.
 //
-// vLLM only emits vllm:lora_requests_info once an adapter has been loaded, so a
-// vanilla deployment scrape legitimately has no family present. Both "family
-// missing" and "family present but no matching labels" are reported as a nil
-// metric so the extractor can skip the LoRA section silently rather than
-// incrementing LlmdDataLayerExtractErrorsTotal on every poll (#926).
+// vLLM creates vllm:lora_requests_info only when LoRA is enabled, so a scrape
+// of a server without LoRA legitimately has no family present. With LoRA
+// enabled, the family has no series until the engine first reports scheduler
+// stats; after that it is set on every logging interval, with empty adapter
+// labels when no adapter has requests. Both "family missing" and "family
+// present but no matching labels" are reported as a nil metric so the extractor
+// can skip the LoRA section silently rather than incrementing
+// LlmdDataLayerExtractErrorsTotal on every poll (#926).
 func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) *dto.Metric {
 	family, exists := families[spec.Name]
 	if !exists || len(family.GetMetric()) == 0 {

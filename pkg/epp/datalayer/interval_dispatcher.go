@@ -47,12 +47,21 @@ func newIntervalDispatcher(d fwkdl.PollingDispatcher, period int) fwkdl.PollingD
 }
 
 func (d *intervalDispatcher) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
-	d.remaining--
-	if d.remaining > 0 {
+	if !d.due() {
 		return nil
 	}
-	d.remaining = d.period
 	return d.PollingDispatcher.Dispatch(ctx, ep)
+}
+
+// due advances the countdown by one base tick and reports whether the wrapped
+// dispatcher fires on this tick.
+func (d *intervalDispatcher) due() bool {
+	d.remaining--
+	if d.remaining > 0 {
+		return false
+	}
+	d.remaining = d.period
+	return true
 }
 
 // periodTicks converts a configured scrape interval into a positive number of

@@ -240,6 +240,7 @@ endpoints:
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
     rankIndex: <int>            # optional -- defaults to 0, must be >= 0
+    zmqPort: <int>              # optional -- KV-events socket port, 1-65535
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
@@ -304,11 +305,55 @@ endpoints:
     rankIndex: 1
 ```
 
+#### Per-worker KV events
+
+With `kvEventsConfig.discoverPods: true`, the `precise-prefix-cache-producer`
+subscribes to the KV-events socket of every endpoint the discovery plugin adds
+and drops the subscriber when the endpoint is removed. This works the same way
+for file discovery as for Kubernetes pods, so every EPP replica builds a full
+KV index from the same endpoints file. Wire the producer as an extractor of an
+`endpoint-notification-source`:
+
+```yaml
+plugins:
+  - type: endpoint-notification-source
+  - type: precise-prefix-cache-producer
+    parameters:
+      kvEventsConfig:
+        discoverPods: true
+        podDiscoveryConfig:
+          socketPort: 5557
+dataLayer:
+  sources:
+    - pluginRef: endpoint-notification-source
+      extractors:
+        - pluginRef: precise-prefix-cache-producer
+```
+
+The producer dials `tcp://<address>:<socketPort + rankIndex>`. An entry whose
+socket is on another port sets `zmqPort`, which is used as the exact port.
+`replaySocketPort` and `snapshotSocketPort` use the configured port plus
+`rankIndex`, so a `zmqPort` entry runs without replay and snapshot and indexes
+live events only. `podLabelSelector` filters endpoints by their `labels`.
+
+```yaml
+endpoints:
+  - name: vllm-0
+    address: "10.0.0.1"
+    port: "8000"
+    zmqPort: 6001
+  - name: vllm-1
+    address: "10.0.0.1"
+    port: "8001"
+    zmqPort: 7002
+```
+
 **Constraints:**
 
 - `address` must be a literal IPv4 address (IPv6 is not supported).
 - `port` must be a decimal integer in the range 1-65535.
 - `rankIndex` must be an integer greater than or equal to 0.
+- `zmqPort`, when set, must be an integer in the range 1-65535.
 - The file must not exceed 1 MiB.
 - Duplicate names within the same namespace result in the last `Upsert`
   winning (the file is processed top-to-bottom).
@@ -323,6 +368,11 @@ terminate the plugin -- the datastore retains its previous state.
 
 Atomic file replacement (write to a temp file then rename) triggers a
 `Create` event and is handled correctly.
+
+On Docker Desktop for macOS, a host-side atomic replace of a bind-mounted
+endpoints file does not reach the watch inside the container, and later
+changes to the file are not reloaded until the EPP restarts. Edit the file in
+place, or restart the EPP after replacing it.
 
 ### Validation rules
 
@@ -344,8 +394,30 @@ that depends on a Kubernetes API server is inactive:
   canary). The reconciler is not started; `ds.ModelRewriteGet` returns nil
   for every request. There is no file-mode equivalent today.
 - **`InferenceObjective`** (per-request SLO objectives). The reconciler is
-  not started; objective lookups return nil. Plugins that depend on
-  per-request SLO data will see no objectives configured.
+  not started. Without `--objectives-file`, objective lookups return nil
+  and every request gets priority 0. With it, objectives are loaded from
+  the file once at startup:
+
+  ```yaml
+  objectives:
+    - name: interactive
+      priority: 10
+    - name: batch      # priority < 0 is sheddable
+      priority: -1
+    - name: default    # priority defaults to 0
+  ```
+
+  - The `x-llm-d-inference-objective` header value must equal an
+    objective's `name`. Any other value runs at priority 0 without an error.
+  - Every objective applies to this EPP; pool targeting is not evaluated.
+    In Kubernetes mode an objective that does not target the served pool
+    is dropped.
+  - With the `flowControl` feature gate, a band is provisioned for each
+    priority before the EPP serves. With the gate off there are no bands,
+    but priority < 0 is still sheddable under the legacy admission
+    controller.
+  - The file is not re-read; the file-discovery `watchFile` option does
+    not apply to it.
 - **`k8s-notification-source` data layer plugin** (and any other notification
   source that needs the controller manager). The plugin loads from config
   but is never bound to a manager, so it produces no events. Remove it from
@@ -424,8 +496,12 @@ endpoints:
 
 Save as `/etc/epp/config.yaml`.  This example uses the default KV-cache
 utilization scorer and random picker -- adapt scheduling plugins as needed.
+With a single scheduling profile, the EPP adds the `single-profile-handler`
+itself, so the configuration does not list a profile handler.
 
 ```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
 plugins:
   - name: file-disc
     type: file-discovery
@@ -439,16 +515,11 @@ plugins:
   - name: random-picker
     type: random-picker
 
-  - name: single-profile
-    type: single-profile-handler
-    parameters:
-      scorer: kv-cache-scorer
-      picker: random-picker
-
 schedulingProfiles:
   - name: default
     plugins:
-      - pluginRef: single-profile
+      - pluginRef: kv-cache-scorer
+      - pluginRef: random-picker
 
 dataLayer:
   discovery:
@@ -464,16 +535,22 @@ epp \
   --config-file /etc/epp/config.yaml \
   --grpc-port 9002 \
   --grpc-health-port 9003 \
-  --metrics-port 9090
+  --metrics-port 9090 \
+  --secure-serving=false
 ```
+
+The EPP serves the `ext_proc` gRPC listener over TLS with a self-signed
+certificate by default. `--secure-serving=false` serves it in plaintext,
+which matches the `epp` cluster in the Envoy config below. To keep TLS
+enabled, see [TLS](tls.md).
 
 `--pool-name` is optional in file discovery mode and defaults to `epp` if
 unset. It is used as the internal pool identifier in the scheduler and
 metrics. The value is arbitrary -- it does not need to match any
 Kubernetes object.
 
-The EPP logs `EPP starting (file discovery mode)` on startup and emits a
-log line for each endpoint loaded from the file.
+The EPP logs `EPP starting (file discovery mode)` on startup, and
+`watching endpoints file for changes` when `watchFile` is `true`.
 
 ### 4. Envoy config
 
@@ -637,10 +714,11 @@ func (d *MyDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotifie
 }
 ```
 
-Register the factory in the runner before calling `Run`:
+Register the factory in the runner before calling `Run` (see
+[Registering out-of-tree plugins](plugins-vs-builtins.md#registering-out-of-tree-plugins)):
 
 ```go
-fwkplugin.Register(myplugin.PluginType, myplugin.Factory)
+fwkplugin.Register(myplugin.PluginType, fwkplugin.StabilityAlpha, myplugin.Factory)
 ```
 
 Then reference it in the EPP config:

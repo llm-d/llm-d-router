@@ -25,6 +25,98 @@ import (
 	"testing"
 )
 
+func TestNormalizeChatPart(t *testing.T) {
+	tests := []struct {
+		name     string
+		part     string
+		want     string
+		wantType string
+	}{
+		{
+			name:     "image object preserves options",
+			part:     `{"image_url":{"url":"image","detail":"low"},"uuid":"client"}`,
+			want:     `{"type":"image_url","image_url":{"url":"image","detail":"low"},"uuid":"client"}`,
+			wantType: PartTypeImageURL,
+		},
+		{
+			name:     "image string",
+			part:     `{"image_url":"image"}`,
+			want:     `{"type":"image_url","image_url":{"url":"image"}}`,
+			wantType: PartTypeImageURL,
+		},
+		{
+			name:     "null type",
+			part:     `{"type":null,"image_url":"image"}`,
+			want:     `{"type":"image_url","image_url":{"url":"image"}}`,
+			wantType: PartTypeImageURL,
+		},
+		{
+			name:     "audio string",
+			part:     `{"audio_url":"audio"}`,
+			want:     `{"type":"audio_url","audio_url":{"url":"audio"}}`,
+			wantType: PartTypeAudioURL,
+		},
+		{
+			name:     "inline audio",
+			part:     `{"input_audio":{"data":"AA==","format":"wav"}}`,
+			want:     `{"type":"input_audio","input_audio":{"data":"AA==","format":"wav"}}`,
+			wantType: PartTypeInputAudio,
+		},
+		{
+			name:     "video string",
+			part:     `{"video_url":"video"}`,
+			want:     `{"type":"video_url","video_url":{"url":"video"}}`,
+			wantType: PartTypeVideoURL,
+		},
+		{
+			name:     "image precedes audio",
+			part:     `{"audio_url":"audio","image_url":"image"}`,
+			want:     `{"type":"image_url","audio_url":"audio","image_url":{"url":"image"}}`,
+			wantType: PartTypeImageURL,
+		},
+		{
+			name:     "explicit type is unchanged",
+			part:     `{"type":"audio_url","audio_url":"audio","image_url":"image"}`,
+			want:     `{"type":"audio_url","audio_url":"audio","image_url":"image"}`,
+			wantType: PartTypeAudioURL,
+		},
+		{
+			name: "invalid type is unchanged",
+			part: `{"type":42,"image_url":"image"}`,
+			want: `{"type":42,"image_url":"image"}`,
+		},
+		{
+			name: "empty type is unchanged",
+			part: `{"type":"","image_url":"image"}`,
+			want: `{"type":"","image_url":"image"}`,
+		},
+		{
+			name: "no media",
+			part: `{"text":"hello"}`,
+			want: `{"text":"hello"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var part, want map[string]any
+			if err := json.Unmarshal([]byte(tt.part), &part); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tt.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if got := NormalizeChatPart(part); got != tt.wantType {
+					t.Errorf("NormalizeChatPart() = %q, want %q", got, tt.wantType)
+				}
+				if !reflect.DeepEqual(part, want) {
+					t.Errorf("part = %#v, want %#v", part, want)
+				}
+			}
+		})
+	}
+}
+
 func TestAnthropicImageURL(t *testing.T) {
 	tests := []struct {
 		name       string

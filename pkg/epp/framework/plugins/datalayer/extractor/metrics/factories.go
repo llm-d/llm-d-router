@@ -62,6 +62,17 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels).
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// CacheTotalTokensSpec defines the metric specification string for the KV cache capacity in
+		// tokens of the engine's offload-extended cache (e.g. SGLang's HiCache host pool). Optional:
+		// a scrape without the metric leaves KvCacheMaxTokenCapacity unchanged and logs no error.
+		CacheTotalTokensSpec string `json:"cacheTotalTokensSpec,omitempty"`
+		// CacheTotalTokensLabelName names a label on the CacheTotalTokensSpec metric that carries the
+		// capacity (e.g. vLLM's cpu_kv_cache_size_tokens on vllm:kv_offload_config_info). Empty reads
+		// the gauge value.
+		CacheTotalTokensLabelName string `json:"cacheTotalTokensLabelName,omitempty"`
+		// CacheOffloadDetectionSpec defines a metric whose value above zero reports that the engine has
+		// offloaded KV cache to another tier (e.g. vLLM's OffloadingConnector transfer counters). Optional.
+		CacheOffloadDetectionSpec string `json:"cacheOffloadDetectionSpec,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
 	}
@@ -71,6 +82,10 @@ type (
 		AttributeKey string `json:"attributeKey"`
 		// MetricSpec defines the source metric specification string.
 		MetricSpec string `json:"metricSpec"`
+		// Aggregation selects how matching series produce one value. Empty reads
+		// the latest matching series. "sum" adds the values of every matching
+		// series and is the only supported aggregation.
+		Aggregation metricAggregation `json:"aggregation,omitempty"`
 		// Optional skips the metric, without an extraction error, on a scrape
 		// where the endpoint does not report it.
 		Optional bool `json:"optional,omitempty"`
@@ -92,21 +107,43 @@ type (
 
 // Default engine configurations for vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
-	{
+	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
 		Name:                "vllm",
 		QueuedRequestsSpec:  "vllm:num_requests_waiting",
 		RunningRequestsSpec: "vllm:num_requests_running",
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
-		// vLLM reports these only when it runs with the NixlConnector.
+		// The CPU offload tier reports its capacity as a label of
+		// vllm:kv_offload_config_info (vLLM after v0.32.0, from the engine's first
+		// scheduler step). With TieringOffloadingSpec the label is on the
+		// tier="0:primary" series. The connector registers the transfer counters at
+		// zero on startup, before that label exists, so offloading is detected
+		// from a counter above zero. total_bytes is the one name that exists on
+		// releases both before and after the counters were renamed to load_bytes
+		// and store_bytes. It is deprecated upstream; remove
+		// CacheOffloadDetectionSpec once the oldest supported vLLM reports
+		// kv_offload_config_info, since the warning it drives has nothing to say
+		// on those releases.
+		CacheTotalTokensSpec:      "vllm:kv_offload_config_info",
+		CacheTotalTokensLabelName: "cpu_kv_cache_size_tokens",
+		CacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total",
+		// vLLM reports the tiering counters only when it runs with TieringOffloadingSpec,
+		// and creates each series on its first event.
 		CustomMetrics: []customMetricConfigParams{
+			{AttributeKey: "tiering_chunk_hits", MetricSpec: `vllm:kv_offload_tiering_chunk_hits_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_chunk_queries", MetricSpec: `vllm:kv_offload_tiering_chunk_queries_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_read_bytes", MetricSpec: `vllm:kv_offload_tiering_read_bytes_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_read_time", MetricSpec: `vllm:kv_offload_tiering_read_time_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_promotion_failures", MetricSpec: `vllm:kv_offload_tiering_promotion_job_failures_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_allocation_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_allocation_failures_total", Aggregation: metricAggregationSum, Optional: true},
+			// vLLM reports these only when it runs with the NixlConnector.
 			{AttributeKey: attrmetrics.NixlFailedTransfersKey, MetricSpec: "vllm:nixl_num_failed_transfers_total", Optional: true},
 			{AttributeKey: attrmetrics.NixlFailedNotificationsKey, MetricSpec: "vllm:nixl_num_failed_notifications_total", Optional: true},
 			{AttributeKey: attrmetrics.NixlKVExpiredRequestsKey, MetricSpec: "vllm:nixl_num_kv_expired_reqs_total", Optional: true},
 		},
 	},
-	{
+	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
 		Name:                "sglang",
 		QueuedRequestsSpec:  "sglang:num_queue_reqs",
 		RunningRequestsSpec: "sglang:num_running_reqs",
@@ -115,6 +152,11 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "",
 		CacheBlockSizeSpec:  "sglang:page_size",
 		CacheNumBlocksSpec:  "sglang:num_pages",
+		// SGLang v0.5.10 and later report the HiCache host pool capacity when
+		// hierarchical caching is enabled. SGLang requires the host pool to be
+		// larger than the device pool, and the host pool holds a copy of every
+		// device page, so this gauge alone is the cache's total capacity.
+		CacheTotalTokensSpec: "sglang:hicache_host_total_tokens",
 	},
 	{
 		Name:                "atom",
@@ -122,7 +164,8 @@ var defaultEngineConfigs = []engineConfigParams{
 		RunningRequestsSpec: "atom:requests_running",
 		KVUsageSpec:         "atom:kv_cache_usage_ratio",
 		LoRASpec:            "",
-		CacheInfoSpec:       "atom:cache_config_info",
+		// ATOM exports no cache_config_info family and no block-size gauge.
+		CacheInfoSpec: "",
 	},
 	{
 		Name:                "trtllm-serve",
@@ -167,9 +210,11 @@ var defaultEngineConfigs = []engineConfigParams{
 	// - "trtllm-serve" is for TensorRT-LLM's standalone C++ server orchestrator, which exposes similar
 	//   LLM-specific metrics under different names.
 	{
-		Name:                "triton",
-		QueuedRequestsSpec:  "nv_inference_pending_request_count",
-		RunningRequestsSpec: "nv_inference_exec_count",
+		Name:               "triton",
+		QueuedRequestsSpec: "nv_inference_pending_request_count",
+		// Triton has no gauge of executing requests; nv_inference_exec_count is a
+		// lifetime counter of batch executions, not a running-request count.
+		RunningRequestsSpec: "",
 		KVUsageSpec:         "",
 		LoRASpec:            "",
 		CacheInfoSpec:       "",
@@ -239,22 +284,25 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			return nil, fmt.Errorf("engine config name cannot be %q (reserved)", DefaultEngineType)
 		}
 
-		customMetrics, customMetricErrs := customMetricConfigs(engineConfig.CustomMetrics)
+		customMetrics, customMetricErrs := parseCustomMetricConfigs(engineConfig.CustomMetrics)
 		if len(customMetricErrs) != 0 {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(customMetricErrs...))
 		}
 
 		mapping, err := NewMappingFromConfig(MappingConfig{
-			Queue:               engineConfig.QueuedRequestsSpec,
-			Running:             engineConfig.RunningRequestsSpec,
-			KVUsage:             engineConfig.KVUsageSpec,
-			Lora:                engineConfig.LoRASpec,
-			CacheInfo:           engineConfig.CacheInfoSpec,
-			CacheBlockSizeLabel: engineConfig.CacheBlockSizeLabelName,
-			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
-			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
-			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
-			CustomMetrics:       customMetrics,
+			Queue:                 engineConfig.QueuedRequestsSpec,
+			Running:               engineConfig.RunningRequestsSpec,
+			KVUsage:               engineConfig.KVUsageSpec,
+			Lora:                  engineConfig.LoRASpec,
+			CacheInfo:             engineConfig.CacheInfoSpec,
+			CacheBlockSizeLabel:   engineConfig.CacheBlockSizeLabelName,
+			CacheNumBlocksLabel:   engineConfig.CacheNumBlocksLabelName,
+			CacheBlockSize:        engineConfig.CacheBlockSizeSpec,
+			CacheNumBlocks:        engineConfig.CacheNumBlocksSpec,
+			CacheTotalTokens:      engineConfig.CacheTotalTokensSpec,
+			CacheTotalTokensLabel: engineConfig.CacheTotalTokensLabelName,
+			CacheOffloadDetection: engineConfig.CacheOffloadDetectionSpec,
+			CustomMetrics:         customMetrics,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, err)
@@ -289,22 +337,23 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 	return extractor, nil
 }
 
-func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
-	custom := make([]CustomMetric, 0, len(configs))
+func parseCustomMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
+	metrics := make([]CustomMetric, 0, len(configs))
 	var errs []error
 	for _, cfg := range configs {
 		spec, err := parseStringToSpec(cfg.MetricSpec)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", cfg.AttributeKey, err))
+			errs = append(errs, fmt.Errorf("customMetrics entry %q metricSpec: %w", cfg.AttributeKey, err))
 			continue
 		}
-		custom = append(custom, CustomMetric{
+		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         spec,
+			Aggregation:  cfg.Aggregation,
 			Optional:     cfg.Optional,
 		})
 	}
-	return custom, errs
+	return metrics, errs
 }
 
 func defaultExtractorParams() *modelServerExtractorParams {

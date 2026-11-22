@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -76,6 +77,12 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
+		return s.executeSGLangGRPC(ctx, reqCtx, g)
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
+	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
@@ -106,6 +113,11 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	defer resp.Body.Close()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	if reader, ok := s.kv.(kv.PrefillResponseReader); ok {
+		if err := reader.ReadPrefillResponse(reqCtx, resp.Header); err != nil {
+			return fmt.Errorf("prefill: %w", err)
+		}
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
@@ -113,28 +125,38 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
-	// kv-nixl always requests a remote-decode handoff, so missing
-	// kv_transfer_params means decode will recompute the whole prompt. Older
-	// engines (< v0.29.0) silently drop top-level transfer params on this route,
-	// which is the most common cause. Empty params are not a failure for the
-	// other connectors: kv-shared-storage carries no wire fields at all.
-	decodeRecomputesPrompt := len(reqCtx.KVTransferParams) == 0 && s.kv.Name() == kv.NIXL
-	if decodeRecomputesPrompt {
-		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
-			"kvConnector", s.kv.Name(), "path", path)
+	var cachedTokens *int
+	if prefillResp.Usage != nil {
+		n, _ := usage.CachedTokens(prefillResp.Usage)
+		cachedTokens = &n
 	}
-	// Only a prefill response that measured the prompt cache, for a request
-	// whose blocks decode will reuse, can correct the count decode reports; see
-	// RequestContext.PrefillCachedTokens for what the two states mean.
-	if prefillResp.Usage != nil && !decodeRecomputesPrompt {
-		cachedTokens, _ := usage.CachedTokens(prefillResp.Usage)
-		reqCtx.PrefillCachedTokens = &cachedTokens
-	}
+	recordPrefillOutcome(logger, reqCtx, s.kv.Name(), path, cachedTokens)
 
 	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
+}
+
+// recordPrefillOutcome logs a missing kv-nixl handoff and stores prefill's
+// prompt-cache hit count on reqCtx when decode will reuse prefill's KV blocks.
+func recordPrefillOutcome(logger logr.Logger, reqCtx *pipeline.RequestContext, kvName, path string, cachedTokens *int) {
+	// kv-nixl always requests a remote-decode handoff, so missing
+	// kv_transfer_params means decode will recompute the whole prompt. Older
+	// engines (< v0.29.0) silently drop top-level transfer params on this route,
+	// which is the most common cause. Empty params are not a failure for the
+	// other connectors: kv-shared-storage carries no wire fields at all.
+	decodeRecomputesPrompt := len(reqCtx.KVTransferParams) == 0 && kvName == kv.NIXL
+	if decodeRecomputesPrompt {
+		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
+			"kvConnector", kvName, "path", path)
+	}
+	// Only a prefill response that measured the prompt cache, for a request
+	// whose blocks decode will reuse, can correct the count decode reports; see
+	// RequestContext.PrefillCachedTokens for what the two states mean.
+	if cachedTokens != nil && !decodeRecomputesPrompt {
+		reqCtx.PrefillCachedTokens = cachedTokens
+	}
 }
 
 func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
@@ -165,10 +187,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"prompt":                        prompt,
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
+		copyPrefillCacheFields(body, reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
-		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
-			body["features"] = features
-		}
+		// Completions never carries multimodal entries (see render.executeCompletions).
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
 		}
@@ -181,9 +202,10 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"model":                         reqCtx.Model,
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
+		copyPrefillCacheFields(body, reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
-		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
-			body["features"] = features
+		if err := s.applyGenerateMMInputs(ctx, reqCtx, ecParams, body); err != nil {
+			return nil, err
 		}
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
@@ -198,6 +220,42 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	}
 }
 
+// applyGenerateMMInputs sets the multimodal input on a generate prefill body:
+// features when the entries carry tensors, or when the tensors were omitted but
+// every entry has mm_metadata and EC coverage; otherwise the client's media as
+// content_parts with the collapsed token_ids. The two forms are exclusive on
+// the wire; see docs/communication.md stage 5.
+func (s *PrefillStep) applyGenerateMMInputs(ctx context.Context, reqCtx *pipeline.RequestContext, ecParams map[string]any, body map[string]any) error {
+	entries := reqCtx.MultimodalEntries
+	if reqCtx.MMPayload == "" {
+		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
+		// see buildPrefillMMFeatures. A text-only request omits features
+		// entirely.
+		if features := buildPrefillMMFeatures(entries, ecParams); features != nil {
+			body["features"] = features
+		}
+		return nil
+	}
+	withMetadata, err := entriesWithECMetadata(entries, ecParams)
+	if err == nil {
+		body["features"] = buildPrefillMMFeatures(withMetadata, ecParams)
+		return nil
+	}
+	log.FromContext(ctx).WithName(PrefillStepName).V(logutil.DEFAULT).Info(
+		"cannot send features with mm_metadata; sending media as content_parts", "reason", err.Error())
+	tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, entries)
+	if err != nil {
+		return err
+	}
+	parts, err := generateContentParts(reqCtx)
+	if err != nil {
+		return err
+	}
+	body["token_ids"] = tokenIDs
+	body["content_parts"] = parts
+	return nil
+}
+
 type prefillResponse struct {
 	// KVTransferParams is decoded as any (not map[string]any) so a non-object
 	// value does not fail the decode; coerceParamsMap coerces it.
@@ -205,4 +263,16 @@ type prefillResponse struct {
 	// Usage is decoded as any for the same reason, and is read by
 	// usage.CachedTokens.
 	Usage any `json:"usage"`
+}
+
+// copyPrefillCacheFields copies the client fields a fresh prefill body needs:
+// vLLM salts the prompt's first block hash with cache_salt, so dropping it lets
+// unsalted requests reuse the salted prefix, and priority orders the prefill in
+// the engine scheduler.
+func copyPrefillCacheFields(dst, src map[string]any) {
+	for _, field := range []string{reqcommon.FieldCacheSalt, reqcommon.FieldPriority} {
+		if v, ok := src[field]; ok {
+			dst[field] = v
+		}
+	}
 }

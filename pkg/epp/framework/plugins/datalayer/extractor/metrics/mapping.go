@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 )
 
 // Mapping holds specifications for the well-known metrics defined
@@ -42,26 +44,47 @@ type Mapping struct {
 	// config as separate gauge values rather than labels on an info metric.
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
-	CustomMetrics  []CustomMetric
+	// CacheTotalTokens reads the KV cache capacity in tokens of the engine's
+	// offload-extended cache. Optional: a scrape without the metric is not an
+	// error and leaves the endpoint's KvCacheMaxTokenCapacity unchanged. When
+	// CacheTotalTokensLabel is set, the value is read from that label of the
+	// matching series instead of the gauge value.
+	CacheTotalTokens      *Spec
+	CacheTotalTokensLabel string
+	// CacheOffloadDetection is a metric whose value above zero reports that the
+	// engine has offloaded KV cache to another tier. Optional.
+	CacheOffloadDetection *Spec
+	CustomMetrics         []CustomMetric
 }
 
 // MappingConfig holds configuration used to build a Mapping.
 type MappingConfig struct {
-	Queue               string
-	Running             string
-	KVUsage             string
-	Lora                string
-	CacheInfo           string
-	CacheBlockSizeLabel string
-	CacheNumBlocksLabel string
-	CacheBlockSize      string
-	CacheNumBlocks      string
-	CustomMetrics       []CustomMetric
+	Queue                 string
+	Running               string
+	KVUsage               string
+	Lora                  string
+	CacheInfo             string
+	CacheBlockSizeLabel   string
+	CacheNumBlocksLabel   string
+	CacheBlockSize        string
+	CacheNumBlocks        string
+	CacheTotalTokens      string
+	CacheTotalTokensLabel string
+	CacheOffloadDetection string
+	CustomMetrics         []CustomMetric
 }
 
+type metricAggregation string
+
+const (
+	metricAggregationSum metricAggregation = "sum"
+)
+
+// CustomMetric pairs a metric spec with the endpoint attribute key where its extracted value is stored.
 type CustomMetric struct {
 	AttributeKey string
 	Spec         *Spec
+	Aggregation  metricAggregation
 	Optional     bool
 }
 
@@ -119,6 +142,16 @@ func (m *Mapping) MetricNames() []string {
 	return names
 }
 
+// hasCustomMetric reports whether CustomMetrics defines an enabled entry for attributeKey.
+func (m *Mapping) hasCustomMetric(attributeKey string) bool {
+	for _, custom := range m.CustomMetrics {
+		if custom.Spec != nil && custom.AttributeKey == attributeKey {
+			return true
+		}
+	}
+	return false
+}
+
 // NewMapping creates a metrics.Mapping from the input specification strings.
 func NewMapping(queue, running, kvusage, lora, cacheInfo string) (*Mapping, error) {
 	return NewMappingFromConfig(MappingConfig{
@@ -162,6 +195,17 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	cacheTotalTokensSpec, err := parseStringToSpec(cfg.CacheTotalTokens)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if cacheTotalTokensSpec == nil && cfg.CacheTotalTokensLabel != "" {
+		errs = append(errs, errors.New("cacheTotalTokensLabelName requires cacheTotalTokensSpec"))
+	}
+	cacheOffloadDetectionSpec, err := parseStringToSpec(cfg.CacheOffloadDetection)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
 	errs = append(errs, customErrs...)
 
@@ -169,16 +213,19 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		return nil, errors.Join(errs...)
 	}
 	return &Mapping{
-		TotalQueuedRequests:  queueSpec,
-		TotalRunningRequests: runningSpec,
-		KVCacheUtilization:   kvusageSpec,
-		LoraRequestInfo:      loraSpec,
-		CacheInfo:            cacheInfoSpec,
-		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
-		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
-		CacheBlockSize:       cacheBlockSizeSpec,
-		CacheNumBlocks:       cacheNumBlocksSpec,
-		CustomMetrics:        customMetrics,
+		TotalQueuedRequests:   queueSpec,
+		TotalRunningRequests:  runningSpec,
+		KVCacheUtilization:    kvusageSpec,
+		LoraRequestInfo:       loraSpec,
+		CacheInfo:             cacheInfoSpec,
+		CacheBlockSizeLabel:   cfg.CacheBlockSizeLabel,
+		CacheNumBlocksLabel:   cfg.CacheNumBlocksLabel,
+		CacheBlockSize:        cacheBlockSizeSpec,
+		CacheNumBlocks:        cacheNumBlocksSpec,
+		CacheTotalTokens:      cacheTotalTokensSpec,
+		CacheTotalTokensLabel: cfg.CacheTotalTokensLabel,
+		CacheOffloadDetection: cacheOffloadDetectionSpec,
+		CustomMetrics:         customMetrics,
 	}, nil
 }
 
@@ -188,21 +235,36 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 	seenKeys := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
 		if cfg.AttributeKey == "" {
-			errs = append(errs, errors.New("custom metric attributeKey cannot be empty"))
+			errs = append(errs, errors.New("customMetrics entry attributeKey cannot be empty"))
+			continue
+		}
+		if attrmetrics.IsReservedAttributeKey(cfg.AttributeKey) {
+			errs = append(errs, fmt.Errorf(
+				"customMetrics entry attributeKey %q uses a prefix reserved for scalar sample keys", cfg.AttributeKey))
 			continue
 		}
 		if _, ok := seenKeys[cfg.AttributeKey]; ok {
-			errs = append(errs, fmt.Errorf("custom metric attributeKey %q is duplicated", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("customMetrics entry attributeKey %q is duplicated", cfg.AttributeKey))
 			continue
 		}
 		seenKeys[cfg.AttributeKey] = struct{}{}
 		if cfg.Spec == nil {
-			errs = append(errs, fmt.Errorf("custom metric %q spec cannot be empty", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("customMetrics entry %q metricSpec cannot be empty", cfg.AttributeKey))
+			continue
+		}
+		if cfg.Aggregation != "" && cfg.Aggregation != metricAggregationSum {
+			errs = append(errs, fmt.Errorf(
+				"customMetrics entry %q has unsupported aggregation %q; use %q or omit aggregation",
+				cfg.AttributeKey,
+				cfg.Aggregation,
+				metricAggregationSum,
+			))
 			continue
 		}
 		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         cfg.Spec,
+			Aggregation:  cfg.Aggregation,
 			Optional:     cfg.Optional,
 		})
 	}

@@ -1,0 +1,5 @@
+# HELP llm_d_epp_scheduler_failures_total [ALPHA] Total number of failed scheduling attempts, by reason.
+# TYPE llm_d_epp_scheduler_failures_total counter
+llm_d_epp_scheduler_failures_total{reason="all_filtered"} 2
+llm_d_epp_scheduler_failures_total{reason="no_profile_selected"} 1
+llm_d_epp_scheduler_failures_total{reason="profile_handler_error"} 1

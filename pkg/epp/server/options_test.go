@@ -38,6 +38,15 @@ const (
 	testConfigFile = "fake-config.yaml"
 )
 
+func TestToolCallingTelemetryOption(t *testing.T) {
+	opts := NewOptions()
+	require.False(t, opts.EnableToolCallingTelemetry)
+	fs := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry"}))
+	require.True(t, opts.EnableToolCallingTelemetry)
+}
+
 // TestEndpointTargetPorts
 func TestEndpointTargetPorts(t *testing.T) {
 	tests := []struct {
@@ -241,6 +250,53 @@ func TestGRPCFlags(t *testing.T) {
 			}
 			if opts.GRPCMaxSendMsgSize != tt.expectedMaxSendSize {
 				t.Errorf("GRPCMaxSendMsgSize mismatch: got %v, want %v", opts.GRPCMaxSendMsgSize, tt.expectedMaxSendSize)
+			}
+		})
+	}
+}
+
+func TestMaxRequestBodySizeFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        int
+		expectError bool
+	}{
+		{name: "Default is unlimited", want: 0},
+		{name: "Raw integer", args: []string{"--max-request-body-size", "1048576"}, want: 1048576},
+		{name: "Binary unit with B suffix", args: []string{"--max-request-body-size", "64MiB"}, want: 64 << 20},
+		{name: "Decimal unit", args: []string{"--max-request-body-size", "64M"}, want: 64000000},
+		{name: "Invalid unit", args: []string{"--max-request-body-size", "64invalid"}, expectError: true},
+		{name: "Negative", args: []string{"--max-request-body-size", "-1Mi"}, expectError: true},
+		{name: "Overflow", args: []string{"--max-request-body-size", "10Ei"}, expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := append([]string{"--pool-name", testPoolName, "--config-file", testConfigFile}, tt.args...)
+			if err := fs.Parse(argv); err != nil {
+				t.Fatalf("Failed to parse flags: %v", err)
+			}
+
+			err := opts.Complete()
+			if err == nil {
+				err = opts.Validate()
+			}
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("Expected Complete() or Validate() to fail, but it succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Complete/Validate failed unexpectedly with error: %v", err)
+			}
+			if opts.MaxRequestBodySize != tt.want {
+				t.Errorf("MaxRequestBodySize mismatch: got %v, want %v", opts.MaxRequestBodySize, tt.want)
 			}
 		})
 	}
@@ -513,6 +569,63 @@ func TestValidateMetricsMTLS(t *testing.T) {
 	}
 }
 
+// The serving-listener client CA mirrors the metrics one: it is only
+// meaningful with TLS on, and Complete parses it so a bad file fails startup.
+func TestClientCAFile(t *testing.T) {
+	validCA := writeCAFile(t)
+	badPEM := filepath.Join(t.TempDir(), "bad.crt")
+	require.NoError(t, os.WriteFile(badPEM, []byte("not a pem"), 0o600))
+
+	t.Run("flag", func(t *testing.T) {
+		opts := NewOptions()
+		fs := pflag.NewFlagSet("flag", pflag.ContinueOnError)
+		opts.AddFlags(fs)
+		require.NoError(t, fs.Parse([]string{"--pool-name", testPoolName, "--client-ca-file", validCA}))
+		require.Equal(t, validCA, opts.ClientCAFile)
+	})
+
+	t.Run("requires secure serving", func(t *testing.T) {
+		opts := NewOptions()
+		opts.AddFlags(pflag.NewFlagSet("validate", pflag.ContinueOnError))
+		opts.PoolName = testPoolName
+		opts.ClientCAFile = validCA
+		opts.SecureServing = false
+		require.ErrorIs(t, opts.Validate(), errClientCARequiresSecureServing)
+		opts.SecureServing = true
+		require.NoError(t, opts.Validate())
+	})
+
+	t.Run("complete", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			path    string
+			wantErr error
+		}{
+			{name: "valid CA", path: validCA},
+			{name: "missing file", path: filepath.Join(t.TempDir(), "missing.crt"), wantErr: errReadClientCA},
+			{name: "not a certificate", path: badPEM, wantErr: errNoValidClientCA},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				opts := NewOptions()
+				opts.AddFlags(pflag.NewFlagSet(tc.name, pflag.ContinueOnError))
+				opts.ClientCAFile = tc.path
+				err := opts.Complete()
+				if tc.wantErr != nil {
+					require.ErrorIs(t, err, tc.wantErr)
+					require.Nil(t, opts.ClientCAPool())
+					return
+				}
+				require.NoError(t, err)
+				require.NotNil(t, opts.ClientCAPool())
+			})
+		}
+		empty := NewOptions()
+		empty.AddFlags(pflag.NewFlagSet("empty", pflag.ContinueOnError))
+		require.NoError(t, empty.Complete())
+		require.Nil(t, empty.ClientCAPool(), "no flag means no client certificate requirement")
+	})
+}
+
 func TestCompleteMetricsCertFiles(t *testing.T) {
 	dir := t.TempDir()
 
@@ -564,6 +677,11 @@ func TestTLSMinVersionFlag(t *testing.T) {
 			wantErrContains: "unknown TLS version",
 		},
 		{
+			name:            "lowercase versiontls12",
+			args:            []string{"--tls-min-version", "versiontls12"},
+			wantErrContains: "unknown TLS version",
+		},
+		{
 			name:            "VersionTLS10",
 			args:            []string{"--tls-min-version", "VersionTLS10"},
 			wantErrContains: "below the TLS 1.2 minimum",
@@ -596,10 +714,10 @@ func TestTLSMinVersionFlag(t *testing.T) {
 
 func TestTLSCipherSuitesFlag(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		wantSuites []uint16
-		wantErr    bool
+		name            string
+		args            []string
+		wantSuites      []uint16
+		wantErrContains string
 	}{
 		{
 			name: "single cipher",
@@ -617,14 +735,53 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			},
 		},
 		{
+			name:       "leading space",
+			args:       []string{"--tls-cipher-suites", " TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			name: "space after comma",
+			args: []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			wantSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:       "trailing comma",
+			args:       []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			// Stays nil so tls.Config falls back to its defaults; a non-nil empty slice would disable every TLS 1.2 suite.
+			name:       "only empty elements",
+			args:       []string{"--tls-cipher-suites=,"},
+			wantSuites: nil,
+		},
+		{
 			name:       "not set",
 			args:       []string{},
 			wantSuites: nil,
 		},
 		{
-			name:    "unknown cipher",
-			args:    []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
-			wantErr: true,
+			name:       "legacy CHACHA20 alias",
+			args:       []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
+		},
+		{
+			name:            "unknown cipher",
+			args:            []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
+			wantErrContains: "invalid tls-cipher-suites: Cipher suite FAKE_CIPHER_SUITE not supported or doesn't exist",
+		},
+		{
+			name:            "insecure cipher",
+			args:            []string{"--tls-cipher-suites", "TLS_RSA_WITH_RC4_128_SHA"},
+			wantErrContains: `invalid tls-cipher-suites: insecure cipher suite "TLS_RSA_WITH_RC4_128_SHA"`,
+		},
+		{
+			name:            "insecure cipher among secure ones",
+			args:            []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
+			wantErrContains: `invalid tls-cipher-suites: insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"`,
 		},
 	}
 	for _, tt := range tests {
@@ -637,39 +794,14 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			require.NoError(t, fs.Parse(argv))
 
 			err := opts.Complete()
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.wantErrContains != "" {
+				require.ErrorContains(t, err, tt.wantErrContains)
 				return
 			}
 			require.NoError(t, err)
 			require.Equal(t, tt.wantSuites, opts.TLSCipherSuiteValues())
 		})
 	}
-}
-
-func TestParseTLSVersion(t *testing.T) {
-	for name, want := range tlsVersions {
-		got, err := parseTLSVersion(name)
-		require.NoError(t, err, name)
-		require.Equal(t, want, got, name)
-	}
-	_, err := parseTLSVersion("invalid")
-	require.Error(t, err)
-}
-
-func TestParseCipherSuites(t *testing.T) {
-	ids, err := parseCipherSuites([]string{
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint16{
-		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-	}, ids)
-
-	_, err = parseCipherSuites([]string{"BOGUS"})
-	require.Error(t, err)
 }
 
 func TestValidatePoolGroupFlag(t *testing.T) {

@@ -19,10 +19,14 @@ package proxy
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -36,13 +40,18 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 
 	var testInfo *sidecarTestInfo
 
-	const p2pConnectorPort = 7777
-	// A private pod-range peer address (the kind an InferencePool would allow).
-	const kvCacheSource = "10.9.9.9:8000"
+	// A private pod-range peer (the kind an InferencePool would allow), as
+	// EPP's p2p-source-producer writes it into the request body.
+	kvSource := map[string]any{
+		reqcommon.FieldKVRequestID: "k2-from-epp",
+		reqcommon.FieldRemoteHost:  "10.9.9.9",
+		reqcommon.FieldRemotePort:  p2pConnectorPort,
+	}
+	// The same peer as EPP sets it on the source header.
+	kvSourceHostPort := net.JoinHostPort("10.9.9.9", strconv.Itoa(p2pConnectorPort))
 
 	BeforeEach(func() {
 		testInfo = sidecarConnectionTestSetup(constants.KVConnectorNIXLV2)
-		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 		// SSRF allowlist disabled in-test (an enabled one requires a live
 		// InferencePool), so a well-formed source passes.
 		testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
@@ -64,22 +73,6 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		return "http://" + testInfo.proxy.addr.String()
 	}
 
-	sendRequest := func(proxyBaseAddr string, headers map[string]string) {
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
-			bytes.NewReader([]byte(chatCompletionsRequestBody)))
-		Expect(err).ToNot(HaveOccurred())
-		for k, v := range headers {
-			req.Header.Add(k, v)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		Expect(err).ToNot(HaveOccurred())
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			bp, _ := io.ReadAll(resp.Body)
-			Fail(string(bp))
-		}
-	}
-
 	// prefillKV returns the kv_transfer_params of the single captured prefill
 	// request. The serial NIXL path completes prefill before the response
 	// returns, so no polling is needed.
@@ -96,9 +89,9 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		proxyBaseAddr := startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		sendRequest(proxyBaseAddr, map[string]string{
+		postChatCompletions(proxyBaseAddr, sourceBody(kvSource, nil), map[string]string{
 			routing.PrefillEndpointHeader: prefillHostPort,
-			routing.KVCacheSourceHeader:   kvCacheSource,
+			routing.KVCacheSourceHeader:   kvSourceHostPort,
 		})
 
 		kv := prefillKV()
@@ -106,36 +99,77 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
 		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldDoRemotePrefill, false))
 		// The remote_kv_source block drives the OffloadingConnector's cached-prefix pull.
-		p2p, ok := kv[requestFieldRemoteKVSource].(map[string]any)
+		p2p, ok := kv[reqcommon.FieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
+		Expect(p2p[reqcommon.FieldKVRequestID]).To(Equal("k2-from-epp"))
 		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
 		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 	})
 
-	It("ignores the source header on the NIXL path without --enable-p2p-pull", func() {
+	// prefillSourceBody returns a body whose source names the prefill pod's
+	// host on port, next to the header values EPP sets for it.
+	prefillSourceBody := func(prefillHostPort string, port int) (string, map[string]string) {
+		source := map[string]any{
+			reqcommon.FieldKVRequestID: "k2-from-epp",
+			reqcommon.FieldRemoteHost:  extractHost(prefillHostPort),
+			reqcommon.FieldRemotePort:  port,
+		}
+		return sourceBody(source, nil), map[string]string{
+			routing.PrefillEndpointHeader: prefillHostPort,
+			routing.KVCacheSourceHeader:   net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port)),
+			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
+		}
+	}
+
+	It("drops a source that names the prefill pod's own P2P tier", func() {
+		testInfo.proxy.config.EnableP2PPull = true
+		var logged []string
+		testInfo.ctx = log.IntoContext(testInfo.ctx, funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{}))
+		proxyBaseAddr := startProxy()
+
+		body, headers := prefillSourceBody(testInfo.prefillBackend.URL[len("http://"):], p2pConnectorPort)
+		postChatCompletions(proxyBaseAddr, body, headers)
+
+		kv := prefillKV()
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+		Expect(kv).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
+		Expect(logged).To(ContainElement(ContainSubstring("prefill pod's own P2P tier")))
+	})
+
+	It("keeps a source on another rank of the prefill pod", func() {
+		testInfo.proxy.config.EnableP2PPull = true
+		proxyBaseAddr := startProxy()
+
+		body, headers := prefillSourceBody(testInfo.prefillBackend.URL[len("http://"):], p2pConnectorPort+1)
+		postChatCompletions(proxyBaseAddr, body, headers)
+
+		p2p, ok := prefillKV()[reqcommon.FieldRemoteKVSource].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort+1))
+	})
+
+	It("ignores the body source on the NIXL path without --enable-p2p-pull", func() {
 		proxyBaseAddr := startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		sendRequest(proxyBaseAddr, map[string]string{
+		postChatCompletions(proxyBaseAddr, sourceBody(kvSource, nil), map[string]string{
 			routing.PrefillEndpointHeader: prefillHostPort,
-			routing.KVCacheSourceHeader:   kvCacheSource,
+			routing.KVCacheSourceHeader:   kvSourceHostPort,
 		})
 
-		Expect(prefillKV()).ToNot(HaveKey(requestFieldRemoteKVSource))
+		Expect(prefillKV()).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
 	})
 
-	It("does not compose a p2p pull when the source is the prefiller itself", func() {
+	It("does not compose a p2p pull when the body carries no source", func() {
 		testInfo.proxy.config.EnableP2PPull = true
 		proxyBaseAddr := startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		sendRequest(proxyBaseAddr, map[string]string{
+		postChatCompletions(proxyBaseAddr, chatCompletionsRequestBody, map[string]string{
 			routing.PrefillEndpointHeader: prefillHostPort,
-			routing.KVCacheSourceHeader:   prefillHostPort,
 		})
 
-		Expect(prefillKV()).ToNot(HaveKey(requestFieldRemoteKVSource))
+		Expect(prefillKV()).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
 	})
 
 	// The parallel-dispatch (MoRI-IO WRITE) path builds the prefill request in a
@@ -144,14 +178,13 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 			c.EnableP2PPull = true
-			c.P2PConnectorPort = p2pConnectorPort
 		})
 
 		req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions,
-			bytes.NewReader([]byte(chatCompletionsRequestBody)))
+			bytes.NewReader([]byte(sourceBody(kvSource, nil))))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, env.prefillBackend.URL[len("http://"):])
-		req.Header.Add(routing.KVCacheSourceHeader, kvCacheSource)
+		req.Header.Add(routing.KVCacheSourceHeader, kvSourceHostPort)
 
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -162,9 +195,34 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		// Prefill request keeps the NIXL WRITE fields and gains the composed remote_kv_source block.
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
-		p2p, ok := pkv[requestFieldRemoteKVSource].(map[string]any)
+		p2p, ok := pkv[reqcommon.FieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
 		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+	})
+
+	It("drops a source that names the prefill pod's own P2P tier in parallel-dispatch mode", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIOParallelDispatch = true
+			c.EnableP2PPull = true
+		})
+
+		prefillHostPort := env.prefillBackend.URL[len("http://"):]
+		body, headers := prefillSourceBody(prefillHostPort, p2pConnectorPort)
+		req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		for k, v := range headers {
+			req.Header.Add(k, v)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(respBody))
+
+		pkv := kvParams(env.prefillHandler, 0)
+		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+		Expect(pkv).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
 	})
 })

@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
 
 // endpointStaleAfter drops a pod entry that holds no sessions and has not been
@@ -141,10 +141,10 @@ func (p *endpointState) occupancy(now time.Time) float64 {
 
 // reclaimableLocked reports whether the session's room can be taken for
 // another turn: it is admitted and counted in full, has no turn in flight,
-// and has been idle for at least the idle lease since its last response.
+// and has been idle for at least idleGracePeriod since its last response.
 func (m *sessionManager) reclaimableLocked(s *session, now time.Time) bool {
 	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0 &&
-		now.Sub(s.lastResponseAt) >= m.idleLease
+		now.Sub(s.lastResponseAt) >= m.idleGracePeriod
 }
 
 // idleSessionsLocked returns the endpoint's sessions whose room can be
@@ -200,16 +200,16 @@ type sessionManager struct {
 	endpoints map[string]*endpointState
 
 	ttl time.Duration
-	// idleLease is how long a session keeps its room after its last response.
-	idleLease time.Duration
+	// idleGracePeriod is how long a session keeps its room after its last response.
+	idleGracePeriod time.Duration
 }
 
 func newSessionManager(cfg Config) *sessionManager {
 	return &sessionManager{
-		sessions:  make(map[string]*session),
-		endpoints: make(map[string]*endpointState),
-		ttl:       time.Duration(cfg.EvictionTTLSeconds * float64(time.Second)),
-		idleLease: time.Duration(cfg.IdleLeaseSeconds * float64(time.Second)),
+		sessions:        make(map[string]*session),
+		endpoints:       make(map[string]*endpointState),
+		ttl:             2 * max(cfg.ForceAdmitTimeout.Duration, defaultForceAdmitTimeout),
+		idleGracePeriod: cfg.IdleGracePeriod.Duration,
 	}
 }
 
@@ -266,7 +266,7 @@ func estimateTokens(sizeBytes int) int64 {
 	if sizeBytes <= 0 {
 		return 0
 	}
-	return int64(sizeBytes / fwkrh.BytesPerToken)
+	return int64(sizeBytes / fwkrequest.BytesPerToken)
 }
 
 // gaugeSnapshot is the ledger state the metrics collector reports.
@@ -318,6 +318,7 @@ func (m *sessionManager) removeEndpoint(id string) {
 	}
 	for _, s := range p.sessions {
 		s.endpoint = nil
+		s.paused = false
 	}
 	delete(m.endpoints, id)
 }

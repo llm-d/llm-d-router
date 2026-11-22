@@ -100,6 +100,26 @@ func TestStringToMetricSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:  "label with negative matcher",
+			input: "my_metric{label1!=\"value1\"}",
+			want: &Spec{
+				Name:      "my_metric",
+				Labels:    map[string]string{},
+				NotLabels: map[string]string{"label1": "value1"},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "label with unquoted negative matcher",
+			input: "my_metric{label1!=value1}",
+			want: &Spec{
+				Name:      "my_metric",
+				Labels:    map[string]string{},
+				NotLabels: map[string]string{"label1": "value1"},
+			},
+			wantErr: false,
+		},
+		{
 			name:  "multiple labels",
 			input: "my_metric{label1=value1,label2=value2}",
 			want: &Spec{
@@ -492,6 +512,30 @@ func TestLabelsMatch(t *testing.T) {
 			spec:         &Spec{Labels: map[string]string{"a": "c"}},
 			want:         false,
 		},
+		{
+			name:         "negative matcher with another value",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"a": "c"}},
+			want:         true,
+		},
+		{
+			name:         "negative matcher with excluded value",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"a": "b"}},
+			want:         false,
+		},
+		{
+			name:         "negative matcher with missing label",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"c": "d"}},
+			want:         true,
+		},
+		{
+			name:         "negative matcher with missing label and empty excluded value",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"c": ""}},
+			want:         false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -500,6 +544,27 @@ func TestLabelsMatch(t *testing.T) {
 			assert.Equal(t, tt.want, got, "labelsMatch() mismatch")
 		})
 	}
+}
+
+func TestNoMatchingMetricErrorIncludesLabelMatchers(t *testing.T) {
+	spec := &Spec{
+		Name: "metric",
+		NotLabels: map[string]string{
+			"tier": "0:primary",
+		},
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"metric": makeMetricFamily(
+			"metric",
+			makeMetric(map[string]string{"tier": "0:primary"}, 1, 0),
+		),
+	}
+
+	_, err := spec.getLatestMetric(families)
+	require.ErrorContains(t, err, "excluded label values map[tier:0:primary]")
+
+	_, err = spec.aggregateMetric(families, aggregateSum)
+	require.ErrorContains(t, err, "excluded label values map[tier:0:primary]")
 }
 
 func TestExtractValue(t *testing.T) {
@@ -533,6 +598,13 @@ func TestExtractValue(t *testing.T) {
 				Counter: &dto.Counter{Value: ptr.To(99.9)},
 			},
 			want: 99.9,
+		},
+		{
+			name: "untyped metric",
+			metric: &dto.Metric{
+				Untyped: &dto.Untyped{Value: ptr.To(7.5)},
+			},
+			want: 7.5,
 		},
 	}
 
@@ -581,6 +653,7 @@ func TestAggregateMetric(t *testing.T) {
 		makeMetric(map[string]string{"request_type": "active", "gpu": "0"}, 50, 0),
 		makeMetric(map[string]string{"request_type": "waiting", "gpu": "1"}, 4, 0),
 		makeMetric(map[string]string{"request_type": "active", "gpu": "1"}, 60, 0),
+		makeMetric(map[string]string{"gpu": "2"}, 9, 0),
 	)
 	nonFinite := func(v float64) *dto.MetricFamily {
 		return makeMetricFamily("non_finite",
@@ -610,6 +683,11 @@ func TestAggregateMetric(t *testing.T) {
 			name: "sum only label-matching series",
 			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
 			agg:  aggregateSum, want: 7,
+		},
+		{
+			name: "sum series excluding one label value",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", NotLabels: map[string]string{"request_type": "active"}},
+			agg:  aggregateSum, want: 16,
 		},
 		{
 			name: "max only label-matching series",
@@ -642,6 +720,55 @@ func TestAggregateMetric(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.InDelta(t, tt.want, got, 1e-9)
+		})
+	}
+}
+
+// TestHasPositiveValue determines when a detection metric reports a value above zero.
+func TestHasPositiveValue(t *testing.T) {
+	nonFinite := func(v float64) *dto.MetricFamily {
+		return makeMetricFamily("non_finite",
+			makeMetric(map[string]string{"engine": "0"}, 4096, 0),
+			makeMetric(map[string]string{"engine": "1"}, v, 0),
+		)
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"bytes": makeMetricFamily("bytes",
+			makeMetric(map[string]string{"transfer_type": "CPU_to_GPU"}, 0, 0),
+			makeMetric(map[string]string{"transfer_type": "GPU_to_CPU"}, 4096, 0),
+		),
+		"ratio":   makeMetricFamily("ratio", makeMetric(nil, 0.25, 0)),
+		"idle":    makeMetricFamily("idle", makeMetric(nil, 0, 0)),
+		"nan":     nonFinite(math.NaN()),
+		"pos_inf": nonFinite(math.Inf(1)),
+		"neg_inf": nonFinite(math.Inf(-1)),
+	}
+
+	tests := []struct {
+		name         string
+		spec         *Spec
+		wantDetected bool
+		wantOK       bool
+	}{
+		{name: "one series above zero", spec: &Spec{Name: "bytes"}, wantDetected: true, wantOK: true},
+		{name: "fraction below one", spec: &Spec{Name: "ratio"}, wantDetected: true, wantOK: true},
+		{name: "every series at zero", spec: &Spec{Name: "idle"}, wantOK: true},
+		{
+			name:   "only label-matching series",
+			spec:   &Spec{Name: "bytes", Labels: map[string]string{"transfer_type": "CPU_to_GPU"}},
+			wantOK: true,
+		},
+		{name: "family not found", spec: &Spec{Name: "absent"}, wantOK: true},
+		{name: "NaN series", spec: &Spec{Name: "nan"}},
+		{name: "+Inf series", spec: &Spec{Name: "pos_inf"}},
+		{name: "-Inf series", spec: &Spec{Name: "neg_inf"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detected, ok := tt.spec.hasPositiveValue(families)
+			assert.Equal(t, tt.wantDetected, detected, "detected")
+			assert.Equal(t, tt.wantOK, ok, "ok")
 		})
 	}
 }

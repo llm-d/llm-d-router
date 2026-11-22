@@ -30,7 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -91,16 +91,25 @@ func (c *SessionIDConfig) ApplyDefaults() {
 // a usable eviction schedule. It expects a config already passed through
 // applyDefaults.
 func (c *SessionIDConfig) Validate() error {
-	for i, source := range c.Sources {
-		if err := source.validate(); err != nil {
-			return fmt.Errorf("sources[%d]: %w", i, err)
-		}
+	if err := ValidateSources(c.Sources); err != nil {
+		return err
 	}
 	if c.EvictionTTLSeconds <= 0 {
 		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
 	}
 	if c.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	}
+	return nil
+}
+
+// ValidateSources rejects a source that does not set exactly one of Header or
+// Attribute.
+func ValidateSources(sources []SessionIDSource) error {
+	for i, source := range sources {
+		if err := source.validate(); err != nil {
+			return fmt.Errorf("sources[%d]: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -145,8 +154,14 @@ type SessionIDHeader struct {
 // The value witness is nil because attributeString accepts any value of string
 // kind, so no single concrete type describes the key.
 func (s *SessionIDHeader) Consumes() plugin.DataDependencies {
+	return SourcesConsumes(s.sources)
+}
+
+// SourcesConsumes declares the request attributes named by sources as optional
+// dependencies; see SessionIDHeader.Consumes.
+func SourcesConsumes(sources []SessionIDSource) plugin.DataDependencies {
 	optional := map[plugin.DataKey]any{}
-	for _, source := range s.sources {
+	for _, source := range sources {
 		if source.Attribute == "" {
 			continue
 		}
@@ -158,15 +173,17 @@ func (s *SessionIDHeader) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{Optional: optional}
 }
 
-// boundPodPresence records, for one request, whether the session's bound pod
-// was present in the candidate set scored. PreRequest reads this so it can
-// tell a genuine absence from the picker merely choosing a different pod.
+// boundPodPresence records, for one request, which pod the session was bound
+// to and whether it was present in the candidate set scored. PreRequest reads
+// this so it can tell a genuine absence from the picker merely choosing a
+// different pod, and ignore an absence of a pod the session has since left.
 type boundPodPresence struct {
+	podName string
 	present bool
 }
 
 func (b *boundPodPresence) Clone() plugin.StateData {
-	return &boundPodPresence{present: b.present}
+	return &boundPodPresence{podName: b.podName, present: b.present}
 }
 
 // NewSessionIDHeader builds the shared session_id strategy implementation and
@@ -198,10 +215,16 @@ type binding struct {
 // generated: a router-minted value is unique per request, so it could never
 // match a stored binding.
 func (s *SessionIDHeader) resolveSessionID(ctx context.Context, request *scheduling.InferenceRequest) string {
+	return ResolveSessionID(ctx, request, s.sources)
+}
+
+// ResolveSessionID returns the trimmed session identifier from the first of
+// sources that yields a non-empty value, or "" when none do.
+func ResolveSessionID(ctx context.Context, request *scheduling.InferenceRequest, sources []SessionIDSource) string {
 	if request == nil {
 		return ""
 	}
-	for _, source := range s.sources {
+	for _, source := range sources {
 		if source.Header != "" {
 			if id := strings.TrimSpace(request.Headers[NormalizeHeader(source.Header)]); id != "" {
 				return id
@@ -264,7 +287,7 @@ func (s *SessionIDHeader) Choose(ctx context.Context, request *scheduling.Infere
 	}
 
 	if podName != "" {
-		s.pluginState.Write(request.RequestID, s.pluginKey, &boundPodPresence{present: target != nil})
+		s.pluginState.Write(request.RequestID, s.pluginKey, &boundPodPresence{podName: podName, present: target != nil})
 	}
 
 	if target == nil {
@@ -323,11 +346,12 @@ func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.In
 		return
 	}
 
-	// Migrate only on a confirmed absence recorded by this request's own Choose
-	// call. A missing record (e.g. a concurrent first-bind race) is not treated
-	// as absence, so it never forces a migration.
+	// Migrate only on a confirmed absence of the currently bound pod, recorded by
+	// this request's own Choose call. A missing record (e.g. a concurrent
+	// first-bind race) is not treated as absence, and neither is a record about
+	// a pod a concurrent request has already migrated the session away from.
 	present, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, request.RequestID, s.pluginKey)
-	if err != nil || present == nil || present.present {
+	if err != nil || present == nil || present.present || present.podName != existing.podName {
 		return
 	}
 
@@ -361,7 +385,7 @@ func (s *SessionIDHeader) pickedPodName(schedulingResult *scheduling.SchedulingR
 
 // ResponseHeader is a no-op: under session_id the client owns its
 // session identifier.
-func (s *SessionIDHeader) ResponseHeader(context.Context, *scheduling.InferenceRequest, *requestcontrol.Response, *datalayer.EndpointMetadata) {
+func (s *SessionIDHeader) ResponseHeader(context.Context, *scheduling.InferenceRequest, *fwkrh.Response, *datalayer.EndpointMetadata) {
 }
 
 // expired reports whether a binding last used at lastSeen has outlived the TTL.

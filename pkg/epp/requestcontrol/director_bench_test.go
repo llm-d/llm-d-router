@@ -18,6 +18,7 @@ package requestcontrol
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	uberzap "go.uber.org/zap"
@@ -27,8 +28,8 @@ import (
 	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 )
 
@@ -45,7 +46,7 @@ const (
 func newStreamingDirectorFixture(name string) (*Director, *testResponseStreaming, context.Context) {
 	plugin := newTestResponseStreaming(name)
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
-		NewConfig().WithResponseStreamingPlugins(plugin))
+		NewConfig().WithResponseStreamingPlugins(plugin), "")
 	// Info level leaves V(DEBUG) and V(TRACE) disabled, as in production. A
 	// discarding logger would hide the cost of deriving one, which is exactly
 	// what this benchmark exists to track.
@@ -65,7 +66,7 @@ func newStreamingRequestContext(requestID string) *handlers.RequestContext {
 		TargetPod: &fwkdl.EndpointMetadata{
 			ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
 		},
-		Usage: fwkrh.Usage{},
+		Usage: fwkrequest.Usage{},
 	}
 }
 
@@ -114,4 +115,53 @@ func BenchmarkHandleResponseBody(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		streamOneResponse(ctx, director, reqCtx, plugin)
 	}
+}
+
+// BenchmarkToSchedulerEndpoints measures the per-request construction of the
+// scheduler endpoint snapshot. Director.HandleRequest builds this slice once
+// per request before scheduling, so its cost is paid on every inference
+// request.
+//
+// Run:
+//
+//	go test -run='^$' -bench=BenchmarkToSchedulerEndpoints -benchmem -count=10 \
+//	    ./pkg/epp/requestcontrol/ | tee bench.out
+//	benchstat bench.out
+func BenchmarkToSchedulerEndpoints(b *testing.B) {
+	for _, n := range []int{5, 25, 100} {
+		endpoints := makeBenchmarkDatastoreEndpoints(n)
+		director := &Director{}
+		b.Run(fmt.Sprintf("endpoints=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = director.toSchedulerEndpoints(endpoints)
+			}
+		})
+	}
+}
+
+// makeBenchmarkDatastoreEndpoints builds datastore endpoints with the metadata
+// and metrics shapes the request path copies: labels, two model maps, and a
+// populated metrics snapshot.
+func makeBenchmarkDatastoreEndpoints(n int) []fwkdl.Endpoint {
+	endpoints := make([]fwkdl.Endpoint, n)
+	for i := 0; i < n; i++ {
+		endpoints[i] = fwkdl.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				ID:      types.NamespacedName{Namespace: "ns", Name: fmt.Sprintf("pod%d", i)},
+				Address: "10.0.0.1",
+				Port:    "8000",
+				Labels:  map[string]string{"app": "vllm", "role": "decode"},
+			},
+			&fwkdl.Metrics{
+				ActiveModels:        map[string]int{"baseline": 1},
+				WaitingModels:       map[string]int{},
+				WaitingQueueSize:    i % 8,
+				KVCacheUsagePercent: float64(i%10) / 10,
+				RunningRequestsSize: i % 4,
+			},
+		)
+	}
+	return endpoints
 }

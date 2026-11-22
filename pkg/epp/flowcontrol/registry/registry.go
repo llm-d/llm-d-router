@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
@@ -315,7 +316,8 @@ func (fr *FlowRegistry) WithConnection(key flowcontrol.FlowKey, fn func(conn con
 			fr.clock,
 		)
 	}
-	defer state.unpin(fr.clock.Now())
+	// Read the clock when the lease is released, not when the defer is set up.
+	defer func() { state.unpin(fr.clock.Now()) }()
 
 	// 2. Flow provisioning: Ensure physical resources exist.
 	// We use sync.Once to ensure we only pay the initialization cost exactly once per flowState object.
@@ -425,9 +427,12 @@ func (fr *FlowRegistry) CapacitySnapshot(priority int) (contracts.CapacitySnapsh
 		return contracts.CapacitySnapshot{}, fmt.Errorf("failed to get capacity snapshot for priority %d: %w",
 			priority, contracts.ErrPriorityBandNotFound)
 	}
+	band := val.(*priorityBand)
 	return contracts.CapacitySnapshot{
-		Band:   val.(*priorityBand).capacityDimension(),
-		Global: fr.globalCapacityDimension(),
+		Band:               band.capacityDimension(),
+		Global:             fr.globalCapacityDimension(),
+		MaxBytesPerFlow:    band.config.MaxBytesPerFlow,
+		MaxRequestsPerFlow: band.config.MaxRequestsPerFlow,
 	}, nil
 }
 
@@ -488,11 +493,14 @@ func (fr *FlowRegistry) gcFlows() {
 
 		// Prune the flows' metric series. Fairness IDs come from client input, so without pruning the
 		// per-flow metric vectors grow monotonically with every fairness ID ever observed. Done after
-		// cleanupFlowResources and outside fr.mu: DeletePartialMatch scans whole metric vectors, which
-		// must not run under the registry write lock.
-		for _, key := range keysToClean {
-			metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
-		}
+		// cleanupFlowResources, on a separate goroutine: DeletePartialMatch scans whole metric vectors,
+		// which must not run under the registry write lock or on the Processor loop that runs GC.
+		go func() {
+			defer utilruntime.HandleCrashWithLogger(fr.logger)
+			for _, key := range keysToClean {
+				metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
+			}
+		}()
 	}
 }
 

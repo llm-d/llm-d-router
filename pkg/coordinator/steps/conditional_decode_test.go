@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -291,6 +292,63 @@ func TestConditionalDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
 	}
 }
 
+// With forward_prompt_token_ids set, chat-shaped probes carry the rendered IDs
+// in kv_transfer_params.prompt_token_ids; multimodal, unrendered and
+// non-chat requests, and probes with the parameter unset, carry none.
+func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
+	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
+	forward := map[string]any{ParamForwardPromptTokenIDs: true}
+	tests := []struct {
+		name    string
+		params  map[string]any
+		path    string
+		tokens  []int
+		entries []pipeline.MultimodalEntry
+		extra   map[string]any
+		want    bool
+	}{
+		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
+		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
+		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
+		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
+		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
+		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
+		{name: "return_prompt_text on responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
+		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
+		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
+		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
+		{name: "off by default", params: nil, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
+			require.NoError(t, err)
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				TokenIDs:          tc.tokens,
+				MultimodalEntries: tc.entries,
+				Body:              map[string]any{"model": testModelName},
+			}
+			maps.Copy(reqCtx.Body, tc.extra)
+			body, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx)
+			require.NoError(t, err)
+			kvParams, _ := body[reqcommon.FieldKVTransferParams].(map[string]any)
+			got, ok := kvParams[reqcommon.FieldPromptTokenIDs]
+			require.Equal(t, tc.want, ok, "prompt_token_ids present (body %v)", body)
+			if tc.want {
+				require.Equal(t, tc.tokens, got)
+			}
+			_, onClientBody := reqCtx.Body[reqcommon.FieldKVTransferParams]
+			require.False(t, onClientBody, "prepareBody must not write to reqCtx.Body")
+		})
+	}
+}
+
+func TestConditionalDecodeStep_ForwardPromptTokenIDs_RejectsNonBool(t *testing.T) {
+	_, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), map[string]any{ParamForwardPromptTokenIDs: "yes"})
+	require.Error(t, err)
+}
+
 func TestConditionalDecodeStep_CacheHit_Streaming(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -478,6 +536,47 @@ func TestConditionalDecodeStep_TransportError(t *testing.T) {
 			probeCount(t, reg, other), 1e-9,
 			"response-based bucket %q must not increment on transport failure", other,
 		)
+	}
+}
+
+// The client leaves while the worker is silent: the context error, not
+// ErrPipelineDone, and no probe result.
+func TestConditionalDecodeStep_ClientCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// The worker never answers; release lets srv.Close finish.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(ctx, reqCtx)
+	require.ErrorIs(t, err, context.Canceled, "a cancelled probe must not read as a cache hit")
+	for _, result := range []string{
+		coordmetrics.ProbeResultServed,
+		coordmetrics.ProbeResultDeferred,
+		coordmetrics.ProbeResultError,
+		coordmetrics.ProbeResultTransportError,
+	} {
+		require.InDelta(t, 0.0, probeCount(t, reg, result), 1e-9, "no probe result for %q on client cancel", result)
 	}
 }
 

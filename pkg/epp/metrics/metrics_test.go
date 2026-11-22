@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -131,8 +133,8 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestCounter(req.modelName, req.targetModelName, req.fairnessID, 0)
-				RecordRequestSizes(req.modelName, req.targetModelName, req.fairnessID, "0", req.reqSize)
+				RecordRequestCounter(req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, req.fairnessID, 0)
+				RecordRequestSizes(req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, req.fairnessID, "0", req.reqSize)
 			}
 
 			// Verify llm_d_epp metrics.
@@ -198,7 +200,7 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestErrCounter(req.modelName, req.targetModelName, "", "0", req.error)
+				RecordRequestErrCounter(context.Background(), req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "", "0", req.error)
 			}
 
 			// Verify llm_d_epp metric.
@@ -274,7 +276,7 @@ func TestRecordRequestLatencies(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, "", "0", req.receivedTime, req.completeTime)
+				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "", "0", req.receivedTime, req.completeTime)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}
@@ -372,7 +374,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordNormalizedTimePerOutputToken(ctx, req.modelName, req.targetModelName, "tenant-a", "3", req.receivedTime, req.completeTime, req.outputTokens)
+				success := RecordNormalizedTimePerOutputToken(ctx, req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "tenant-a", "3", req.receivedTime, req.completeTime, req.outputTokens)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}
@@ -390,7 +392,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 
 			// Verify llm_d_epp metric labels directly.
 			if !scenario.invalid {
-				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "3")
+				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), observed.GetSampleCount())
 				require.InEpsilon(t, 0.03, observed.GetSampleSum(), 0.000001)
@@ -452,10 +454,10 @@ func TestRecordResponseMetrics(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, resp := range scenario.resp {
-				RecordInputTokens(resp.modelName, resp.targetModelName, "", "0", resp.inputToken)
-				RecordOutputTokens(resp.modelName, resp.targetModelName, "", "0", resp.outputToken)
-				RecordResponseSizes(resp.modelName, resp.targetModelName, "", "0", resp.respSize)
-				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, "", "0", resp.cachedToken)
+				RecordInputTokens(resp.modelName, resp.targetModelName, reqcommon.APISurfaceUnknown, "", "0", resp.inputToken)
+				RecordOutputTokens(resp.modelName, resp.targetModelName, reqcommon.APISurfaceUnknown, "", "0", resp.outputToken)
+				RecordResponseSizes(resp.modelName, resp.targetModelName, reqcommon.APISurfaceUnknown, "", "0", resp.respSize)
+				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, reqcommon.APISurfaceUnknown, "", "0", resp.cachedToken)
 			}
 
 			// Verify llm_d_epp metrics.
@@ -542,9 +544,9 @@ func TestRunningRequestsMetrics(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.requests {
 				if req.complete {
-					DecRunningRequests(req.modelName, req.targetModel, req.fairnessID, req.priority)
+					DecRunningRequests(req.modelName, req.targetModel, reqcommon.APISurfaceUnknown, req.fairnessID, req.priority)
 				} else {
-					IncRunningRequests(req.modelName, req.targetModel, req.fairnessID, req.priority)
+					IncRunningRequests(req.modelName, req.targetModel, reqcommon.APISurfaceUnknown, req.fairnessID, req.priority)
 				}
 			}
 
@@ -790,7 +792,7 @@ func TestRequestProcessingLatency(t *testing.T) {
 		150 * time.Millisecond,
 	}
 	for _, duration := range durations {
-		RecordRequestProcessingLatency(duration)
+		RecordRequestProcessingLatency(reqcommon.APISurfaceUnknown, duration)
 	}
 
 	want, err := os.Open("testdata/llm_d_request_processing_duration_seconds_metric")
@@ -817,7 +819,7 @@ func TestResponseProcessingLatency(t *testing.T) {
 		150 * time.Millisecond,
 	}
 	for _, duration := range durations {
-		RecordResponseProcessingLatency(duration)
+		RecordResponseProcessingLatency(reqcommon.APISurfaceUnknown, duration)
 	}
 
 	want, err := os.Open("testdata/llm_d_response_processing_duration_seconds_metric")
@@ -1270,27 +1272,27 @@ func TestRecordRequestTTFT(t *testing.T) {
 	timeBaseline := time.Now()
 
 	t.Run("valid streaming requests", func(t *testing.T) {
-		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(10*time.Millisecond)))
-		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
-		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", "tenant-b", "5", false, timeBaseline, timeBaseline.Add(120*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, timeBaseline.Add(10*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", reqcommon.APISurfaceUnknown, "tenant-b", "5", false, timeBaseline, timeBaseline.Add(120*time.Millisecond)))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", "true")
+		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String(), "true")
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), h.GetSampleCount())
 		require.InDelta(t, 1.61, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", "false")
+		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", reqcommon.APISurfaceUnknown.String(), "false")
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.12, h.GetSampleSum(), 0.001)
 	})
 
 	t.Run("zero first token timestamp", func(t *testing.T) {
-		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, time.Time{}))
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, time.Time{}))
 	})
 
 	t.Run("first token before received", func(t *testing.T) {
-		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline.Add(10*time.Millisecond), timeBaseline))
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline.Add(10*time.Millisecond), timeBaseline))
 	})
 }
 
@@ -1303,9 +1305,9 @@ func TestRecordRequestTPOT(t *testing.T) {
 		received := timeBaseline
 		firstToken := timeBaseline.Add(500 * time.Millisecond)
 		complete := timeBaseline.Add(2000 * time.Millisecond)
-		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, received, firstToken, complete, 11))
+		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, received, firstToken, complete, 11))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3")
+		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.15, h.GetSampleSum(), 0.001)
@@ -1315,27 +1317,27 @@ func TestRecordRequestTPOT(t *testing.T) {
 		received := timeBaseline
 		firstToken := timeBaseline.Add(500 * time.Millisecond)
 		// Non-streaming: the whole body arrives at once, so complete == firstToken.
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", false, received, firstToken, firstToken, 11))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", false, received, firstToken, firstToken, 11))
 	})
 
 	t.Run("single token skipped", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
 	})
 
 	t.Run("zero tokens skipped", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
 	})
 
 	t.Run("zero first token timestamp", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
 	})
 
 	t.Run("first token before received", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
 	})
 
 	t.Run("complete before first token", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
 	})
 }
 
@@ -1344,28 +1346,28 @@ func TestRecordInterTokenLatency(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
 	t.Run("valid observations", func(t *testing.T) {
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.05))
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.08))
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.12))
-		require.True(t, RecordInterTokenLatency(ctx, "m20", "t20", "tenant-b", "5", 0.03))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", 0.05))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", 0.08))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", 0.12))
+		require.True(t, RecordInterTokenLatency(ctx, "m20", "t20", reqcommon.APISurfaceUnknown, "tenant-b", "5", 0.03))
 
-		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3")
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
 		require.NoError(t, err)
 		require.Equal(t, uint64(3), h.GetSampleCount())
 		require.InDelta(t, 0.25, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20", "tenant-b", "5")
+		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20", "tenant-b", "5", reqcommon.APISurfaceUnknown.String())
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.03, h.GetSampleSum(), 0.001)
 	})
 
 	t.Run("zero latency accepted", func(t *testing.T) {
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", 0))
 	})
 
 	t.Run("negative latency rejected", func(t *testing.T) {
-		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", -0.01))
+		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", -0.01))
 	})
 }
 
@@ -1431,4 +1433,117 @@ func TestRecordPluginDataScopeViolation(t *testing.T) {
 		"llm_d_epp_plugin_data_scope_violations_total"); err != nil {
 		t.Error(err)
 	}
+}
+
+func TestRecordSchedulerFilterEliminated(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	RecordSchedulerFilterEliminated("decode", "test-filter", "f1", 2)
+	RecordSchedulerFilterEliminated("decode", "test-filter", "f1", 3)
+	RecordSchedulerFilterEliminated("prefill", "test-filter", "f1", 1)
+
+	want, err := os.Open("testdata/llm_d_scheduler_filter_eliminated_total_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want,
+		"llm_d_epp_scheduler_filter_eliminated_total"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestRecordSchedulerFailure(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	RecordSchedulerFailure(SchedulerFailureReasonAllFiltered)
+	RecordSchedulerFailure(SchedulerFailureReasonAllFiltered)
+	RecordSchedulerFailure(SchedulerFailureReasonNoProfileSelected)
+	RecordSchedulerFailure(SchedulerFailureReasonProfileHandlerError)
+
+	want, err := os.Open("testdata/llm_d_scheduler_failures_total_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want,
+		"llm_d_epp_scheduler_failures_total"); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestRecordDataLayerPoll confirms both poll families reach the scrape with
+// their outcome and duration samples, and that Reset clears them.
+func TestRecordDataLayerPoll(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	polls := []struct {
+		sourceType, outcome string
+		duration            time.Duration
+	}{
+		{"http-type", DataLayerPollOutcomeSuccess, 250 * time.Millisecond},
+		{"http-type", DataLayerPollOutcomeSuccess, 125 * time.Millisecond},
+		{"http-type", DataLayerPollOutcomeError, 500 * time.Millisecond},
+		{"http-type", DataLayerPollOutcomeTimeout, time.Second},
+		{"dcgm-type", DataLayerPollOutcomeSuccess, 2 * time.Second},
+	}
+	for _, p := range polls {
+		RecordDataLayerPoll(p.sourceType, p.outcome, p.duration)
+	}
+
+	for _, tc := range []struct{ golden, family string }{
+		{"llm_d_datalayer_polls_total_metric", "llm_d_epp_datalayer_polls_total"},
+		{"llm_d_datalayer_poll_duration_seconds_metric", "llm_d_epp_datalayer_poll_duration_seconds"},
+	} {
+		t.Run(tc.family, func(t *testing.T) {
+			want, err := openGoldenFile(tc.golden)
+			require.NoError(t, err)
+			defer want.Close()
+			require.NoError(t, promtestutil.GatherAndCompare(metrics.Registry, want, tc.family))
+		})
+	}
+
+	Reset()
+	require.Zero(t, promtestutil.CollectAndCount(LlmdDataLayerPollsTotal))
+	require.Zero(t, promtestutil.CollectAndCount(LlmdDataLayerPollDuration))
+}
+
+// TestInitDataLayerPollMetrics confirms every outcome series and the histogram
+// exist at zero after init, that init is idempotent, and that a later poll
+// increments the pre-existing series rather than creating one.
+func TestInitDataLayerPollMetrics(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	InitDataLayerPollMetrics("http-type")
+	InitDataLayerPollMetrics("http-type")
+
+	want := `
+# HELP llm_d_epp_datalayer_polls_total [ALPHA] Data-source polls per source type and outcome.
+# TYPE llm_d_epp_datalayer_polls_total counter
+llm_d_epp_datalayer_polls_total{outcome="error",source_type="http-type"} 0
+llm_d_epp_datalayer_polls_total{outcome="success",source_type="http-type"} 0
+llm_d_epp_datalayer_polls_total{outcome="timeout",source_type="http-type"} 0
+`
+	require.NoError(t, promtestutil.GatherAndCompare(metrics.Registry, strings.NewReader(want), "llm_d_epp_datalayer_polls_total"))
+	require.Equal(t, 1, promtestutil.CollectAndCount(LlmdDataLayerPollDuration), "one histogram series per source type")
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() == "llm_d_epp_datalayer_poll_duration_seconds" {
+			require.Len(t, f.GetMetric(), 1)
+			require.Zero(t, f.GetMetric()[0].GetHistogram().GetSampleCount(), "histogram exists with no observations")
+		}
+	}
+
+	RecordDataLayerPoll("http-type", DataLayerPollOutcomeTimeout, time.Second)
+	require.Equal(t, 3, promtestutil.CollectAndCount(LlmdDataLayerPollsTotal), "no new series after a poll")
+	require.Equal(t, float64(1), promtestutil.ToFloat64(LlmdDataLayerPollsTotal.WithLabelValues("http-type", DataLayerPollOutcomeTimeout)))
 }

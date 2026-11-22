@@ -130,7 +130,7 @@ func MaxSaturationDetectorFactory(
 // themselves plugins in the configuration, so the framework already validates and orders their
 // data dependencies directly; re-declaring the union here would additionally subject those keys
 // to the data graph's layer-order check, which places a plugin implementing no scheduling or
-// requestcontrol interface before every producer and rejects the configuration.
+// requesthandling interface before every producer and rejects the configuration.
 var (
 	_ flowcontrol.SaturationDetector         = &detector{}
 	_ flowcontrol.DispatchReservationTracker = &detector{}

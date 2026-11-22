@@ -1,0 +1,450 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package epp
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/testing/protocmp"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
+)
+
+// renderRecorder captures the bodies of the render requests a token-producer
+// sends, so a test can assert which requests reached the renderer. The
+// token-producer's warmup probes hit the same server; their bodies carry
+// "warmup", so counts are taken by request marker rather than in total.
+type renderRecorder struct {
+	mutex  sync.Mutex
+	bodies []string
+}
+
+func (r *renderRecorder) handle(w http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	r.mutex.Lock()
+	r.bodies = append(r.bodies, string(body))
+	r.mutex.Unlock()
+	// Chat and Messages render response shape.
+	_, _ = w.Write([]byte(`{"token_ids":[5,6,7]}`))
+}
+
+func (r *renderRecorder) callsContaining(marker string) int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	n := 0
+	for _, body := range r.bodies {
+		if strings.Contains(body, marker) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestClientPromptTokenIDsSkipRender drives a chat-completions request through
+// the ext-proc stream with a token-producer backed by a recording render
+// server. A request carrying kv_transfer_params.prompt_token_ids must route
+// without any render call; a request without it must render once.
+func TestClientPromptTokenIDsSkipRender(t *testing.T) {
+	recorder := &renderRecorder{}
+	renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
+	t.Cleanup(renderSrv.Close)
+
+	configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+requestHandler:
+  propagatePriority: true
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+	cases := []struct {
+		name        string
+		marker      string
+		body        string
+		wantBody    map[string]any
+		wantRenders int
+	}{
+		{
+			name:   "prompt_token_ids skips rendering",
+			marker: "skip-marker",
+			body: `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"skip-marker"}],` +
+				`"max_tokens":100,"kv_transfer_params":{"prompt_token_ids":[7,8,9]}}`,
+			wantBody: map[string]any{
+				"kv_transfer_params": json.RawMessage(`{"prompt_token_ids":[7,8,9]}`),
+				"max_tokens":         json.Number("100"),
+				"messages":           json.RawMessage(`[{"role":"user","content":"skip-marker"}]`),
+				"model":              modelMyModelTarget,
+				"priority":           2,
+			},
+			wantRenders: 0,
+		},
+		{
+			name:   "no prompt_token_ids renders once",
+			marker: "render-marker",
+			body:   `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"render-marker"}],"max_tokens":100}`,
+			wantBody: map[string]any{
+				"max_tokens": json.Number("100"),
+				"messages":   json.RawMessage(`[{"role":"user","content":"render-marker"}]`),
+				"model":      modelMyModelTarget,
+				"priority":   2,
+			},
+			wantRenders: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+			pods := []eppharness.PodState{
+				eppharness.P(0, 0, 0.1, modelMyModelTarget),
+				eppharness.P(1, 5, 0.5, modelMyModelTarget),
+			}
+			h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+
+			requests := fwkepp.ReqRaw(map[string]string{
+				":path":                      "/v1/chat/completions",
+				"hi":                         "mom",
+				reqcommon.RequestIDHeaderKey: "test-request-id",
+				metadata.ObjectiveKey:        modelMyModel,
+				metadata.ModelNameRewriteKey: modelMyModelTarget,
+			}, tc.body)
+
+			responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
+			require.NoError(t, err)
+
+			// The repackage rewrites the model to the target, injects the
+			// resolved priority, and re-marshals the payload map with sorted
+			// keys; nested objects keep their original bytes.
+			expectedBody, err := json.Marshal(tc.wantBody)
+			require.NoError(t, err)
+			wantResponses := fwkepp.NewRequestBufferedResponse("192.168.1.1:8000", expectedBody,
+				&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: ":path", RawValue: []byte("/v1/chat/completions")}},
+				&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
+				&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+					Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("test-request-id"),
+				}},
+			)
+			if diff := cmp.Diff(wantResponses, responses,
+				protocmp.Transform(),
+				protocmp.SortRepeated(func(a, b *envoyCorev3.HeaderValueOption) bool {
+					return a.GetHeader().GetKey() < b.GetHeader().GetKey()
+				}),
+				protocmp.SortRepeated(func(a, b string) bool { return a < b }),
+			); diff != "" {
+				t.Errorf("Response mismatch (-want +got): %v", diff)
+			}
+
+			require.Equal(t, tc.wantRenders, recorder.callsContaining(tc.marker),
+				"render calls carrying the request body")
+		})
+	}
+}
+
+// TestClientPromptTokenIDsKeyPrefixCache checks that supplied prompt token IDs
+// are what the prefix cache keys on: a second request with the same IDs and
+// different message text routes to the pod that served the first, even when
+// another pod scores better on queue depth and KV utilization.
+func TestClientPromptTokenIDsKeyPrefixCache(t *testing.T) {
+	recorder := &renderRecorder{}
+	renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
+	t.Cleanup(renderSrv.Close)
+
+	configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: approx-prefix-cache-producer
+    parameters:
+      autoTune: false
+      blockSizeTokens: 4
+  - type: prefix-cache-scorer
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-scorer
+        weight: 10
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+	// Pod 1 scores better on queue depth and KV utilization, so only a prefix
+	// cache hit can send the second request to pod 0.
+	pods := []eppharness.PodState{
+		eppharness.P(0, 0, 0.1, modelMyModelTarget),
+		eppharness.P(1, 0, 0.0, modelMyModelTarget),
+	}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
+
+	const tokenIDs = `[11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]`
+	route := func(content string, subset []string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
+		require.NoError(t, err)
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"` + content + `"}],` +
+			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+		// The EPP reads the subset hint from the end-of-stream body message.
+		requests[len(requests)-1].MetadataContext = &envoyCorev3.Metadata{FilterMetadata: fwkepp.GenerateRequestMetadata(subset)}
+		// The response phase completes the stream. A stream closed after the
+		// request phase reports an aborted request, and the prefix entries it
+		// indexed are removed.
+		requests = append(requests, ReqResponseOnly(
+			map[string]string{"content-type": "application/json", "status": "200"},
+			`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ok","role":"assistant"}}],"usage":{"completion_tokens":1,"prompt_tokens":16,"total_tokens":17}}`,
+		)...)
+		for _, req := range requests {
+			require.NoError(t, client.Send(req))
+		}
+		headersResp, err := client.Recv()
+		require.NoError(t, err)
+		endpoint := headerValue(headersResp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+		require.NotEmpty(t, endpoint)
+		for range 3 {
+			_, err = client.Recv()
+			require.NoError(t, err)
+		}
+		require.NoError(t, client.CloseSend())
+		return endpoint
+	}
+
+	// Pin the first request to pod 0 so the cached prefix lands on the pod the
+	// other scorers rank lower.
+	require.Equal(t, "192.168.1.1:8000", route("first request", []string{"192.168.1.1:8000"}))
+
+	// The prefix index is updated after routing, off the request path.
+	require.Eventually(t, func() bool {
+		return route("different text, same token ids", nil) == "192.168.1.1:8000"
+	}, 5*time.Second, 100*time.Millisecond, "a request with the same token ids must route to the pod that cached them")
+	// The render stub returns fixed tokens, so a rendered request would also hit the prefix.
+	require.Zero(t, recorder.callsContaining("first request"))
+	require.Zero(t, recorder.callsContaining("different text, same token ids"))
+}
+
+// TestClientPromptTokenIDsKeyPrefixCacheStreamAbort checks what a response
+// stream torn down under the EPP does to the prefix entries its request
+// indexed. A teardown after a body chunk keeps the entries: the model server
+// produced output, so it ran prefill and holds the blocks. A teardown before
+// any body chunk removes them: the request never ran, and a retry must not be
+// routed as cached.
+func TestClientPromptTokenIDsKeyPrefixCacheStreamAbort(t *testing.T) {
+	recorder := &renderRecorder{}
+	renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
+	t.Cleanup(renderSrv.Close)
+
+	configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: approx-prefix-cache-producer
+    parameters:
+      autoTune: false
+      blockSizeTokens: 4
+  - type: prefix-cache-scorer
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-scorer
+        weight: 10
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+	// Pod 1 scores better on queue depth and KV utilization, so only a prefix
+	// cache hit can send a request to pod 0.
+	pods := []eppharness.PodState{
+		eppharness.P(0, 0, 0.1, modelMyModelTarget),
+		eppharness.P(1, 0, 0.0, modelMyModelTarget),
+	}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
+
+	// route sends a complete transaction for tokenIDs and returns the
+	// scheduled endpoint.
+	route := func(tokenIDs, content string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
+		require.NoError(t, err)
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"` + content + `"}],` +
+			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+		requests = append(requests, ReqResponseOnly(
+			map[string]string{"content-type": "application/json", "status": "200"},
+			`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ok","role":"assistant"}}],"usage":{"completion_tokens":1,"prompt_tokens":16,"total_tokens":17}}`,
+		)...)
+		for _, req := range requests {
+			require.NoError(t, client.Send(req))
+		}
+		headersResp, err := client.Recv()
+		require.NoError(t, err)
+		endpoint := headerValue(headersResp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+		require.NotEmpty(t, endpoint)
+		// Two request-phase and two response-phase messages were sent, so
+		// three responses remain after the header mutation.
+		for range 3 {
+			_, err = client.Recv()
+			require.NoError(t, err)
+		}
+		require.NoError(t, client.CloseSend())
+		return endpoint
+	}
+
+	// abortStream routes a request with tokenIDs pinned to pod 0 and tears the
+	// stream down under the EPP. midStream delivers the response headers and
+	// one body chunk before the teardown; otherwise the teardown precedes any
+	// response body.
+	abortStream := func(tokenIDs string, midStream bool) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
+		require.NoError(t, err)
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"aborted stream"}],` +
+			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+		requests[len(requests)-1].MetadataContext = &envoyCorev3.Metadata{FilterMetadata: fwkepp.GenerateRequestMetadata([]string{"192.168.1.1:8000"})}
+		for _, req := range requests {
+			require.NoError(t, client.Send(req))
+		}
+		for range 2 {
+			_, err = client.Recv()
+			require.NoError(t, err)
+		}
+		if midStream {
+			chunk := `data: {"choices":[{"delta":{"content":"tok"},"index":0,"finish_reason":null}],"id":"123","created":1,"model":"` + modelMyModel + `","object":"chat.completion.chunk"}` + "\n"
+			respPhase := ReqResponseOnly(map[string]string{"content-type": "text/event-stream", "status": "200"}, chunk)
+			// The teardown must land mid-stream, so the chunk is not marked
+			// end-of-stream.
+			respPhase[len(respPhase)-1].GetResponseBody().EndOfStream = false
+			for _, req := range respPhase {
+				require.NoError(t, client.Send(req))
+			}
+			for range 2 {
+				_, err = client.Recv()
+				require.NoError(t, err)
+			}
+		}
+		cancel()
+	}
+
+	// A teardown before any body chunk removes the entries, so the retry
+	// follows the scorers to pod 1. The rollback runs in the stream's deferred
+	// completion; wait it out before probing, since a probe that races it
+	// would index pod 0 and mask the rollback.
+	abortStream(`[201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216]`, false)
+	time.Sleep(500 * time.Millisecond)
+	require.Equal(t, "192.168.1.2:8000", route(`[201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216]`, "retry after early teardown"),
+		"a stream torn down before any body chunk leaves no cached prefix")
+
+	// A teardown after a body chunk keeps the entries, so the retry follows
+	// the prefix to pod 0.
+	abortStream(`[101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116]`, true)
+	require.Eventually(t, func() bool {
+		return route(`[101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116]`, "retry after mid-stream teardown") == "192.168.1.1:8000"
+	}, 5*time.Second, 100*time.Millisecond, "a stream torn down after a body chunk keeps its cached prefix")
+}

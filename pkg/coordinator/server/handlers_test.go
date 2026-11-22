@@ -31,12 +31,15 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	ctrl "sigs.k8s.io/controller-runtime"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -520,6 +523,15 @@ func TestDecodeRequestBody(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestBody_PreservesLargeIntegers(t *testing.T) {
+	body := `{"model":"m","response_format":{"json_schema":{"schema":{"enum":[9007199254740993]}}},"seed":9007199254740993}`
+	parsed, err := decodeRequestBody([]byte(body))
+	require.NoError(t, err)
+	out, err := json.Marshal(parsed)
+	require.NoError(t, err)
+	require.Equal(t, body, string(out))
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
@@ -574,46 +586,39 @@ func TestNew_RejectsUnparsableGatewayURL(t *testing.T) {
 	}
 }
 
-// deadlineRecorder wraps httptest.ResponseRecorder with a SetWriteDeadline
-// method so http.NewResponseController can reach it; it records the deadline
-// the handler sets.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	deadlineSet   bool
-	deadlineValue time.Time
-}
+func TestHandleInference_StreamRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		stream    bool
+		wantError bool
+	}{
+		{name: "absent", body: `{"model":"m"}`},
+		{name: "null", body: `{"model":"m","stream":null}`},
+		{name: "true", body: `{"model":"m","stream":true}`, stream: true},
+		{name: "false", body: `{"model":"m","stream":false}`},
+		{name: "string", body: `{"model":"m","stream":"true"}`, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := &capturingStep{}
+			p := pipeline.New([]pipeline.Step{step})
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
 
-func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	d.deadlineSet = true
-	d.deadlineValue = t
-	return nil
-}
+			srv.handleInference(rec, req)
 
-func TestHandleInference_StreamingClearsWriteDeadline(t *testing.T) {
-	// A streaming request must clear the connection write deadline (zero value)
-	// before executing the pipeline, so a long stream is not cut by WriteTimeout.
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
-	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
-	newTestServer(nil).handleInference(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for streaming request, got %d", rec.Code)
-	}
-	if !rec.deadlineSet {
-		t.Fatal("streaming request did not clear the write deadline")
-	}
-	if !rec.deadlineValue.IsZero() {
-		t.Fatalf("expected zero deadline to disable the timeout, got %v", rec.deadlineValue)
-	}
-}
-
-func TestHandleInference_NonStreamingDoesNotTouchWriteDeadline(t *testing.T) {
-	// A non-streaming request must leave the write deadline alone, keeping
-	// WriteTimeout as a slow-client guard.
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
-	newTestServer(nil).handleInference(rec, req)
-	if rec.deadlineSet {
-		t.Fatal("non-streaming request must not change the write deadline")
+			if tc.wantError {
+				require.Equal(t, http.StatusBadRequest, rec.Code)
+				require.Nil(t, step.captured, "invalid stream must not reach the pipeline")
+				require.JSONEq(t, `{"error":{"message":"stream must be a boolean","type":"invalid_request_error","code":400}}`, rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.NotNil(t, step.captured)
+			require.Equal(t, tc.stream, step.captured.Stream)
+		})
 	}
 }
 
@@ -681,6 +686,83 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	}
 	if got := step.captured.OriginalHeaders.Get("x-user-data"); got != "keep-me" {
 		t.Fatalf("unrelated headers must pass through, got %q", got)
+	}
+}
+
+// handlerLog captures the request-scoped handler logger, which hangs off the
+// process-wide controller-runtime logger. That logger is fulfilled once per
+// process, so the capture is installed once and tests read it by position.
+var handlerLog struct {
+	once  sync.Once
+	mu    sync.Mutex
+	lines []string
+}
+
+func handlerLogLines(t *testing.T, run func()) []string {
+	t.Helper()
+	handlerLog.once.Do(func() {
+		ctrl.SetLogger(funcr.New(func(_, args string) {
+			handlerLog.mu.Lock()
+			defer handlerLog.mu.Unlock()
+			handlerLog.lines = append(handlerLog.lines, args)
+		}, funcr.Options{Verbosity: logutil.DEFAULT}))
+	})
+	handlerLog.mu.Lock()
+	start := len(handlerLog.lines)
+	handlerLog.mu.Unlock()
+	run()
+	handlerLog.mu.Lock()
+	defer handlerLog.mu.Unlock()
+	return append([]string(nil), handlerLog.lines[start:]...)
+}
+
+// The drop is logged by presence only: the value carries a host, a port and a
+// request id, so none of it may reach the log.
+func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
+	const dropped = "dropped client-supplied kv_transfer_params"
+	const host = "10.9.9.9"
+	cases := map[string]struct {
+		body     string
+		wantDrop bool
+	}{
+		"client block": {body: `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":` +
+			`{"kv_request_id":"x","remote_host":"` + host + `","remote_port":7777}}}`, wantDrop: true},
+		"no block": {body: `{"model":"m","messages":[]}`},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			step := &capturingStep{}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			lines := handlerLogLines(t, func() { srv.handleInference(httptest.NewRecorder(), req) })
+
+			if step.captured == nil {
+				t.Fatal("pipeline step did not run")
+			}
+			if _, ok := step.captured.Body[reqcommon.FieldKVTransferParams]; ok {
+				t.Fatalf("client-supplied kv_transfer_params must be dropped, body: %v", step.captured.Body)
+			}
+			for _, field := range []string{"model", "messages"} {
+				if _, ok := step.captured.Body[field]; !ok {
+					t.Fatalf("%s must be kept, body: %v", field, step.captured.Body)
+				}
+			}
+			var drops int
+			for _, line := range lines {
+				if strings.Contains(line, dropped) {
+					drops++
+				}
+				if strings.Contains(line, host) {
+					t.Fatalf("log line carries the client value: %s", line)
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.wantDrop]; drops != want {
+				t.Fatalf("%d drop lines, want %d: %v", drops, want, lines)
+			}
+		})
 	}
 }
 
@@ -809,6 +891,74 @@ func TestHandleInference_StepWrittenErrorClassifiedAndNotOverwritten(t *testing.
 		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeBadRequest})),
 		1e-9,
 	)
+}
+
+// A step returns after the client's request context ended; only the context
+// error itself goes uncounted.
+func TestHandleInference_AbortedRequestAccounting(t *testing.T) {
+	cases := []struct {
+		name       string
+		returns    error  // error the step returns; nil returns the context error
+		wantCode   string // request_error_total{wantCode}; "" counts nothing
+		wantStatus int    // status written; 0 writes nothing
+	}{
+		{name: "step returns the context error"},
+		{
+			name:     "decode streamed a 500 before the client left",
+			returns:  &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError},
+			wantCode: coordmetrics.ErrorCodeUpstream5xx,
+		},
+		{
+			name:       "upstream answered 503 before the client left",
+			returns:    &pipeline.UpstreamError{Step: "decode", StatusCode: http.StatusServiceUnavailable},
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+			wantStatus: http.StatusBadGateway,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			step := stubStep{name: "decode", fn: func(ctx context.Context, _ *pipeline.RequestContext) error {
+				cancel()
+				if tc.returns != nil {
+					return tc.returns
+				}
+				return ctx.Err()
+			}}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
+
+			if tc.wantStatus == 0 {
+				require.Empty(t, rec.Body.String())
+			} else {
+				require.Equal(t, tc.wantStatus, rec.Code)
+			}
+			if tc.wantCode == "" {
+				require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"))
+				require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+			} else {
+				require.InDelta(t, 1.0,
+					promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": tc.wantCode})),
+					1e-9,
+				)
+				require.Equal(t, 1, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+			}
+			require.InDelta(t, 1.0,
+				promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+				1e-9,
+			)
+			require.InDelta(t, 0.0,
+				promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+				1e-9,
+			)
+		})
+	}
 }
 
 func TestHandleInference_PipelineDoneRecordsNoError(t *testing.T) {

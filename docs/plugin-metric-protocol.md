@@ -71,7 +71,6 @@ If absent, the value is taken from the `approximate-prefix` plugin's `BlockSizeT
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `block_size` |
 | SGLang | `sglang:page_size` | — |
-| ATOM | `atom:cache_config_info` | `block_size` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}` | — |
 | trtllm-serve | `trtllm_kv_cache_tokens_per_block` | — |
 
@@ -87,13 +86,45 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `num_gpu_blocks` |
 | SGLang | `sglang:num_pages` | — |
-| ATOM | `atom:cache_config_info` | `num_gpu_blocks` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | — |
 | trtllm-serve | `trtllm_kv_cache_max_blocks` | — |
 
+With trtllm-serve's default KV cache manager, `trtllm_kv_cache_max_blocks` counts GPU and host
+(`kv_cache_config.host_cache_size`) blocks together, so the auto-tuned capacity already covers the
+host tier. With `use_kv_cache_manager_v2` the gauge counts GPU blocks only and the host tier is not
+reported (NVIDIA/TensorRT-LLM#21395); set `lruCapacityPerServer` with `autoTune: false` on such
+deployments.
+
+### TotalKVCacheTokens (optional)
+
+The capacity in tokens of the model server's offload-extended KV cache, for example a host-memory
+tier that holds a copy of the HBM cache. Used to auto-tune the approximate prefix cache: the
+per-pod index is sized to the larger of this value and NumGPUBlocks x BlockSize, or to one of
+them when the producer's `capacityTiers` lists a single tier. Absent on model servers without an
+offload tier.
+
+- **Type:** Labeled/Gauge
+- **Required by:** `prefix-cache-scorer`, `prefix-cache-affinity-filter` (via `approximate-prefix` when `AutoTune` is enabled)
+
+| Model server | Metric | Label | Notes |
+| --- | --- | --- | --- |
+| vLLM | `vllm:kv_offload_config_info` | `cpu_kv_cache_size_tokens` | Releases after v0.32.0, with `CPUOffloadingSpec` or `TieringOffloadingSpec`. The series appears after the engine's first scheduler step. |
+| SGLang | `sglang:hicache_host_total_tokens` | — | v0.5.10 and later, with `--enable-hierarchical-cache`. |
+| trtllm-serve | — | — | Not needed under the default KV cache manager, see NumGPUBlocks. |
+
+### KVCacheOffloadDetection (optional)
+
+A metric whose value above zero reports that the model server has offloaded KV cache to another
+tier. When it is above zero and TotalKVCacheTokens is not reported, the approximate prefix cache
+logs a warning, once per pod, that the index covers the HBM tier only.
+
+| Model server | Metric |
+| --- | --- |
+| vLLM | `vllm:kv_offload_total_bytes_total`. The `OffloadingConnector` registers it at zero on startup, so a zero value does not count. |
+
 ## LoRA Adapter Serving
 
-**Required by:** `lora-affinity-scorer`
+**Required by:** `lora-affinity-scorer`; `lora-residency-scorer` reads only `max_lora` and `running_lora_adapters`
 
 Model servers that support dynamic LoRA serving can benefit from the LoRA affinity algorithm. Note
 the current LoRA affinity algorithm in this EPP is highly biased towards vLLM's current
@@ -113,14 +144,14 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
     requested adapter. Example: `"max_lora": "8"`.
   * `running_lora_adapters`: A comma separated list of adapters that are currently loaded in GPU
     memory and ready to serve requests. Example: `"running_lora_adapters": "adapter1, adapter2"`
-  * `waiting_lora_adapters`: A comma separated list of adapters that are waiting to be served.
-    Example: `"waiting_lora_adapters": "adapter1, adapter2"`
+  * `waiting_lora_adapters` (required by `lora-affinity-scorer` only): A comma separated list of
+    adapters that are waiting to be served. Example: `"waiting_lora_adapters": "adapter1, adapter2"`
 
 ## Prefix Cache Reuse
 
 **Required by:** `precise-prefix-cache-producer`, `prefix-cache-scorer`, `prefix-cache-affinity-filter`
 
 The EPP supports prefix cache optimized request scheduling via the
-[precise prefix cache producer](../pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/README.md).
+[precise prefix cache producer](../pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache/README.md).
 To benefit from optimal prefix-aware request scheduling, model servers SHOULD support prefix
 cache reuse, such as the [vllm automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html) feature.

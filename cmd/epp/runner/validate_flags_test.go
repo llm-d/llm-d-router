@@ -40,4 +40,8 @@ func TestValidateKubernetesDiscoveryFlags(t *testing.T) {
 
 	opts.PoolName = "pool"
 	require.ErrorContains(t, validateKubernetesDiscoveryFlags(opts), "cannot both be set")
+
+	opts.EndpointSelector = nil
+	opts.ObjectivesFile = "/etc/epp/objectives.yaml"
+	require.ErrorContains(t, validateKubernetesDiscoveryFlags(opts), "objectives-file requires file discovery")
 }

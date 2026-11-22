@@ -39,6 +39,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 const (
@@ -163,7 +164,7 @@ func newTestSyncer(t testing.TB, server *miniredis.Miniredis, replicaID string) 
 
 func seedReplica(t testing.TB, server *miniredis.Miniredis, key fwkdl.StateKey, replicaID string, value any) {
 	t.Helper()
-	data, err := encodeValue(value)
+	data, err := crossreplica.EncodeValue(value)
 	require.NoError(t, err)
 	server.HSet(string(key)+":"+testEndpointID, replicaID, string(data))
 }
@@ -240,7 +241,7 @@ func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	server := miniredis.RunT(t)
 	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	hashKey := syncer.hashKey(testStateKey, testEndpointID)
-	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
+	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7})
 
 	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	_, cached := syncer.cache.Load(hashKey)
@@ -295,7 +296,7 @@ func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 }
 
 func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
-	data, err := encodeValue(&customValue{Count: 7})
+	data, err := crossreplica.EncodeValue(&customValue{Count: 7})
 	require.NoError(t, err)
 
 	decoder := gob.NewDecoder(bytes.NewReader(data))
@@ -306,10 +307,10 @@ func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
 
 func TestEncodeValueSupportsInFlightLoad(t *testing.T) {
 	want := &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}
-	data, err := encodeValue(want)
+	data, err := crossreplica.EncodeValue(want)
 	require.NoError(t, err)
 
-	actual, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
+	actual, err := crossreplica.DecodeValue(data, &attrconcurrency.InFlightLoad{})
 	require.NoError(t, err)
 	require.Equal(t, want, actual)
 }
@@ -398,43 +399,6 @@ func TestSetSkipsUndecodableFields(t *testing.T) {
 	require.Equal(t, 11, total)
 }
 
-func TestExpiredPeerAggregateFallsBackToLiveLocal(t *testing.T) {
-	server := miniredis.RunT(t)
-	syncer, _ := newTestSyncer(t, server, testReplicaID)
-	hashKey := syncer.hashKey(testStateKey, testEndpointID)
-	syncer.cache.Store(hashKey, &aggregateCacheEntry{
-		value:     11,
-		expiresAt: time.Now().Add(-time.Second),
-	})
-
-	aggregateCalls := 0
-	value := syncer.get(context.Background(), testStateKey, testEndpointID, 4, func(values []any) any {
-		aggregateCalls++
-		return sumInts(values)
-	})
-
-	require.Equal(t, 4, value)
-	require.Zero(t, aggregateCalls)
-	_, cached := syncer.cache.Load(hashKey)
-	require.False(t, cached)
-}
-
-func TestSetExpiresAggregatesFromLocalRefreshTime(t *testing.T) {
-	server := miniredis.RunT(t)
-	syncer, _ := newTestSyncer(t, server, testReplicaID)
-	hashKey := syncer.hashKey(testStateKey, testEndpointID)
-	seedReplica(t, server, testStateKey, "epp-b", 7)
-	seedReplica(t, server, testStateKey, "epp-c", 9)
-
-	refreshedAt := time.Now()
-	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	cached, ok := syncer.cache.Load(hashKey)
-	require.True(t, ok)
-	entry := cached.(*aggregateCacheEntry)
-
-	require.WithinDuration(t, refreshedAt.Add(testStateTTL), entry.expiresAt, 100*time.Millisecond)
-}
-
 func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
 	server := miniredis.RunT(t)
 	syncer, _ := newTestSyncer(t, server, testReplicaID)
@@ -457,7 +421,7 @@ func TestDeleteInvalidatesAggregateWhenRedisFails(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	syncer := &RedisSyncer{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
 	hashKey := syncer.hashKey(testStateKey, testEndpointID)
-	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
+	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7})
 
 	err := syncer.Delete(context.Background(), testStateKey, testEndpointID)
 
@@ -583,7 +547,7 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	ctx := context.Background()
 
-	peer, err := encodeValue(7)
+	peer, err := crossreplica.EncodeValue(7)
 	require.NoError(t, err)
 	server.HSet(syncer.hashKey("request", "request-id"), "epp-b", string(peer))
 	require.NoError(t, syncer.set(ctx, "request", "request-id", 4, sumInts))
@@ -703,7 +667,7 @@ func TestFactoryConfiguration(t *testing.T) {
 		{
 			name:                "defaults",
 			params:              fmt.Sprintf("{\"address\": %q}", server.Addr()),
-			wantStateTTL:        defaultStateTTL,
+			wantStateTTL:        crossreplica.DefaultStateTTL,
 			wantCoordinationTTL: defaultCoordinationTTL,
 		},
 		{
@@ -827,4 +791,41 @@ func TestFactoryGeneratesDistinctReplicaIDs(t *testing.T) {
 	syncerB := newSyncer()
 
 	require.NotEqual(t, syncerA.replicaID, syncerB.replicaID)
+}
+
+func TestPeerAggregateHeldWhileRedisIsUnreachable(t *testing.T) {
+	server := miniredis.RunT(t)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	syncer.stateTTL = 20 * time.Millisecond
+	seedReplica(t, server, testStateKey, "epp-b", 7)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+
+	server.Close()
+	time.Sleep(3 * syncer.stateTTL)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	require.Error(t, syncer.set(ctx, testStateKey, testEndpointID, 4, sumInts))
+
+	require.Equal(t, 11, getSum(t, syncer, testStateKey, testEndpointID, 4))
+}
+
+func TestSetAfterOutageDropsDepartedPeers(t *testing.T) {
+	server := miniredis.RunT(t)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	seedReplica(t, server, testStateKey, "epp-b", 7)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+
+	server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	require.Error(t, syncer.set(ctx, testStateKey, testEndpointID, 4, sumInts))
+	require.Equal(t, 11, getSum(t, syncer, testStateKey, testEndpointID, 4))
+
+	require.NoError(t, server.Restart())
+	server.HDel(string(testStateKey)+":"+testEndpointID, "epp-b")
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+
+	require.Equal(t, 4, getSum(t, syncer, testStateKey, testEndpointID, 4))
+	_, cached := syncer.cache.Load(syncer.hashKey(testStateKey, testEndpointID))
+	require.False(t, cached)
 }

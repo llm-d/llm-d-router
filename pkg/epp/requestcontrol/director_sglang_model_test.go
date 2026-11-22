@@ -19,7 +19,6 @@ package requestcontrol
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -41,8 +40,8 @@ func TestDirector_ModelRewriteIfNeeded_SGLangGenerate(t *testing.T) {
 	require.Equal(t, "llama-3-8b", parsed.Body.Model, "parser must read the /generate model")
 
 	mockDs := &mockDatastore{}
-	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)
-	director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig())
+	endpointCandidates := NewDatastoreEndpointCandidates(mockDs)
+	director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig(), "")
 
 	// HandleRequest seeds IncomingModelName from the parsed body before resolving
 	// the target.

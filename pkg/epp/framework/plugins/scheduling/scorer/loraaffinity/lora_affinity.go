@@ -99,10 +99,18 @@ func (s *LoraAffinityScorer) Score(_ context.Context, request *fwksched.Inferenc
 			}
 		}
 
+		// MaxActiveModels is 0 until the model server has reported max_lora.
+		// vLLM publishes vllm:lora_requests_info only once its engine has
+		// stepped, so an endpoint that has not served a request yet reports
+		// nothing. Treat that as unknown capacity, not as no capacity: scoring
+		// it 0.0 keeps requests away from it, so it never reports and stays
+		// at 0.0.
+		hasCapacity := m.MaxActiveModels == 0 || unionCount < m.MaxActiveModels
+
 		switch {
 		case active:
 			scores[endpoint] = 1.0
-		case unionCount < m.MaxActiveModels:
+		case hasCapacity:
 			scores[endpoint] = 0.8
 		// Unreachable against current vLLM (waiting implies active), but
 		// reachable with the simulator and future backends.

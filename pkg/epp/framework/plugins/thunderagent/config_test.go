@@ -17,37 +17,40 @@ limitations under the License.
 package thunderagent
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// The defaults are valid; each gate parameter rejects values outside its
-// range, and the idle TTL must outlast the starvation deadline.
+// The defaults are valid, zero boundaries on duration fields are allowed,
+// and out-of-range values are rejected.
 func TestConfigValidate(t *testing.T) {
-	require.NoError(t, defaultConfig().validate())
+	cfg := defaultConfig()
+	require.NoError(t, cfg.validate())
+	require.Equal(t, int64(4194304), cfg.FallbackCapacityTokens)
+	require.Equal(t, 1.0, cfg.UsableCapacityRatio)
+	require.Equal(t, 30*time.Second, cfg.IdleGracePeriod.Duration)
+	require.Equal(t, 5*time.Minute, cfg.ForceAdmitTimeout.Duration)
 
 	for name, mutate := range map[string]func(*Config){
-		"utilThreshold zero":            func(c *Config) { c.UtilThreshold = 0 },
-		"utilThreshold above one":       func(c *Config) { c.UtilThreshold = 1.1 },
-		"negative idleLeaseSeconds":     func(c *Config) { c.IdleLeaseSeconds = -1 },
-		"negative headWaitStarvationMs": func(c *Config) { c.HeadWaitStarvationMs = -1 },
-		"TTL not above starvation":      func(c *Config) { c.EvictionTTLSeconds, c.HeadWaitStarvationMs = 60, 60000 },
-		"capacityTokens zero":           func(c *Config) { c.CapacityTokens = 0 },
-		"evictionTtlSeconds zero":       func(c *Config) { c.EvictionTTLSeconds = 0 },
+		"fallbackCapacityTokens zero":     func(c *Config) { c.FallbackCapacityTokens = 0 },
+		"fallbackCapacityTokens negative": func(c *Config) { c.FallbackCapacityTokens = -1 },
+		"usableCapacityRatio zero":        func(c *Config) { c.UsableCapacityRatio = 0 },
+		"usableCapacityRatio negative":    func(c *Config) { c.UsableCapacityRatio = -0.1 },
+		"usableCapacityRatio above one":   func(c *Config) { c.UsableCapacityRatio = 1.1 },
+		"usableCapacityRatio NaN":         func(c *Config) { c.UsableCapacityRatio = math.NaN() },
+		"negative idleGracePeriod":        func(c *Config) { c.IdleGracePeriod = metav1.Duration{Duration: -time.Second} },
+		"negative forceAdmitTimeout":      func(c *Config) { c.ForceAdmitTimeout = metav1.Duration{Duration: -time.Second} },
 	} {
-		cfg := defaultConfig()
-		mutate(&cfg)
-		require.Error(t, cfg.validate(), name)
+		c := defaultConfig()
+		mutate(&c)
+		require.Error(t, c.validate(), name)
 	}
 
-	cfg := defaultConfig()
-	cfg.IdleLeaseSeconds = 0
-	require.NoError(t, cfg.validate(), "a zero lease reclaims idle sessions at once")
-}
-
-// The default starvation deadline fires before the flow control default
-// request TTL (60s) sheds the request.
-func TestDefaultStarvationBelowRequestTTL(t *testing.T) {
-	require.Less(t, defaultConfig().HeadWaitStarvationMs, float64(60000))
+	cfg.IdleGracePeriod = metav1.Duration{Duration: 0}
+	cfg.ForceAdmitTimeout = metav1.Duration{Duration: 0}
+	require.NoError(t, cfg.validate(), "0s idleGracePeriod and 0s forceAdmitTimeout are valid")
 }

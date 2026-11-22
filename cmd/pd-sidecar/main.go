@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/spf13/pflag"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,6 +29,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	// Initialize options with defaults
 	opts := proxy.NewOptions()
 
@@ -44,13 +49,13 @@ func main() {
 	// Complete options (handles migration from deprecated flags, populates Config)
 	if err := opts.Complete(); err != nil {
 		logger.Error(err, "Failed to complete configuration")
-		return
+		return 1
 	}
 
 	// Validate options
 	if err := opts.Validate(); err != nil {
 		logger.Error(err, "Invalid configuration")
-		return
+		return 1
 	}
 
 	tracing.InitTextMapPropagator()
@@ -76,5 +81,7 @@ func main() {
 	proxyServer := proxy.NewProxy(opts.Config)
 	if err := proxyServer.Start(ctx); err != nil {
 		logger.Error(err, "failed to start proxy server")
+		return 1
 	}
+	return 0
 }

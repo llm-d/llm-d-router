@@ -28,8 +28,8 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
@@ -48,11 +48,11 @@ func mmEndpoint(name string, info *attrprefix.PrefixCacheMatchInfo) fwksched.End
 	return ep
 }
 
-func requestWithMMFeatures(features ...fwkrh.MultiModalFeature) *fwksched.InferenceRequest {
+func requestWithMMFeatures(features ...fwkrequest.MultiModalFeature) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{MultiModalFeatures: features}},
 			},
 		},
 	}
@@ -153,7 +153,7 @@ func TestPrefixPluginScoreEmitsMultimodalAttributes(t *testing.T) {
 		{
 			name: "multimodal miss reports false",
 			request: requestWithMMFeatures(
-				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
+				fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
 			),
 			endpoints: []fwksched.Endpoint{
 				mmEndpoint("pod1", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16).WithMM(attrprefix.MMMatchInfo{MatchBlocks: 0})),
@@ -165,8 +165,8 @@ func TestPrefixPluginScoreEmitsMultimodalAttributes(t *testing.T) {
 		{
 			name: "multimodal hit reports true",
 			request: requestWithMMFeatures(
-				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
-				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityAudio, Hash: "h2"},
+				fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
+				fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityAudio, Hash: "h2"},
 			),
 			endpoints: []fwksched.Endpoint{
 				mmEndpoint("pod1", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16).WithMM(attrprefix.MMMatchInfo{MatchBlocks: 3})),

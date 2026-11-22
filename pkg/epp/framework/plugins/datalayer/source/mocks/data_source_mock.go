@@ -19,7 +19,6 @@ package mocks
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,8 +37,8 @@ var (
 )
 
 // MetricsDataSource is a test PollingDispatcher: on Dispatch it writes the
-// preconfigured metrics into the endpoint and returns a sentinel error. The
-// sentinel signals "test dispatch ran" without producing real Poll data.
+// preconfigured metrics into the endpoint, or fails with the error configured
+// for the endpoint.
 type MetricsDataSource struct {
 	mu        sync.RWMutex
 	typedName plugin.TypedName
@@ -70,22 +69,23 @@ func (fds *MetricsDataSource) SetErrors(errors map[types.NamespacedName]error) {
 	fds.errors = errors
 }
 
-// Dispatch satisfies PollingDispatcher. Preserves the original mock side
-// effect (write metrics into the endpoint when keyed by NamespacedName) and
-// returns the sentinel error so tests can detect the dispatch ran.
+// Dispatch satisfies PollingDispatcher. It returns the error configured for
+// the endpoint without touching its metrics; otherwise it writes the metrics
+// configured for the endpoint, if any.
 func (fds *MetricsDataSource) Dispatch(_ context.Context, ep fwkdl.Endpoint) error {
 	atomic.AddInt64(&fds.CallCount, 1)
 	fds.mu.RLock()
 	defer fds.mu.RUnlock()
 	nn := ep.GetMetadata().Clone().ID
-	if metrics, ok := fds.metrics[nn]; ok {
-		if _, ok := fds.errors[nn]; !ok {
-			clone := metrics.Clone()
-			clone.UpdateTime = time.Now()
-			ep.UpdateMetrics(clone)
-		}
+	if err, ok := fds.errors[nn]; ok {
+		return err
 	}
-	return errors.New("sentinel nothing polled")
+	if metrics, ok := fds.metrics[nn]; ok {
+		clone := metrics.Clone()
+		clone.UpdateTime = time.Now()
+		ep.UpdateMetrics(clone)
+	}
+	return nil
 }
 
 // AppendExtractor is a no-op: this mock sets endpoint metrics directly in

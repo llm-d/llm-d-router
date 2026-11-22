@@ -282,6 +282,12 @@ func (d *detector) Filter(
 	return filtered
 }
 
+// FailsOpen reports whether Filter returns every endpoint when all are over
+// their limit, which hides from a caller that no endpoint has room.
+func (d *detector) FailsOpen() bool {
+	return !d.config.failClosed
+}
+
 // admits reports whether an endpoint can take the request within its safety limit for the active mode.
 // An endpoint must be below each limit, and its token load plus the request's tokens must fit within
 // the token limit unless the endpoint has no in-flight tokens.

@@ -733,6 +733,273 @@ func TestMetricsExtractionNixlFailureCounters(t *testing.T) {
 	}
 }
 
+// vllmTieringExposition is the tiering counter part of a vLLM /metrics
+// response with a filesystem secondary tier. The tier="0:primary" series come
+// first in the families that carry them, so a selector that fails to exclude
+// them returns them.
+const vllmTieringExposition = `# TYPE vllm:kv_offload_tiering_chunk_hits_total counter
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 900.0
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 120.0
+# TYPE vllm:kv_offload_tiering_chunk_queries_total counter
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 1000.0
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 200.0
+# TYPE vllm:kv_offload_tiering_read_bytes_total counter
+vllm:kv_offload_tiering_read_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 4096.0
+# TYPE vllm:kv_offload_tiering_read_time_total counter
+vllm:kv_offload_tiering_read_time_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 2.5
+# TYPE vllm:kv_offload_tiering_promotion_job_failures_total counter
+vllm:kv_offload_tiering_promotion_job_failures_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 3.0
+# TYPE vllm:kv_offload_tiering_promotion_allocation_failures_total counter
+vllm:kv_offload_tiering_promotion_allocation_failures_total{engine="0",model_name="Qwen/Qwen3-8B"} 7.0
+`
+
+// vllmTieringPrimaryOnlyExposition is a scrape with the primary tier's lookup series and no series for any secondary tier
+const vllmTieringPrimaryOnlyExposition = `# TYPE vllm:kv_offload_tiering_chunk_hits_total counter
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 900.0
+# TYPE vllm:kv_offload_tiering_chunk_queries_total counter
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 1000.0
+`
+
+// vllmTieringDataParallelExposition is a scrape from a Pod that runs two
+// engine ranks. Each rank reports the primary tier and one filesystem tier.
+const vllmTieringDataParallelExposition = `# TYPE vllm:kv_offload_tiering_chunk_hits_total counter
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 900.0
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 120.0
+vllm:kv_offload_tiering_chunk_hits_total{engine="1",model_name="Qwen/Qwen3-8B",tier="0:primary"} 800.0
+vllm:kv_offload_tiering_chunk_hits_total{engine="1",model_name="Qwen/Qwen3-8B",tier="1:fs"} 30.0
+# TYPE vllm:kv_offload_tiering_chunk_queries_total counter
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 1000.0
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 200.0
+vllm:kv_offload_tiering_chunk_queries_total{engine="1",model_name="Qwen/Qwen3-8B",tier="0:primary"} 900.0
+vllm:kv_offload_tiering_chunk_queries_total{engine="1",model_name="Qwen/Qwen3-8B",tier="1:fs"} 50.0
+# TYPE vllm:kv_offload_tiering_read_bytes_total counter
+vllm:kv_offload_tiering_read_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 4096.0
+vllm:kv_offload_tiering_read_bytes_total{engine="1",model_name="Qwen/Qwen3-8B",tier="1:fs"} 1024.0
+# TYPE vllm:kv_offload_tiering_read_time_total counter
+vllm:kv_offload_tiering_read_time_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 2.5
+vllm:kv_offload_tiering_read_time_total{engine="1",model_name="Qwen/Qwen3-8B",tier="1:fs"} 0.5
+# TYPE vllm:kv_offload_tiering_promotion_job_failures_total counter
+vllm:kv_offload_tiering_promotion_job_failures_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 3.0
+vllm:kv_offload_tiering_promotion_job_failures_total{engine="1",model_name="Qwen/Qwen3-8B",tier="1:fs"} 1.0
+# TYPE vllm:kv_offload_tiering_promotion_allocation_failures_total counter
+vllm:kv_offload_tiering_promotion_allocation_failures_total{engine="0",model_name="Qwen/Qwen3-8B"} 7.0
+vllm:kv_offload_tiering_promotion_allocation_failures_total{engine="1",model_name="Qwen/Qwen3-8B"} 2.0
+`
+
+// vllmTieringTwoTiersExposition is a scrape with a filesystem tier ("1:fs")
+// and a peer-to-peer tier ("2:p2p"). The allocation failure counter has no tier.
+const vllmTieringTwoTiersExposition = `# TYPE vllm:kv_offload_tiering_chunk_hits_total counter
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 900.0
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 120.0
+vllm:kv_offload_tiering_chunk_hits_total{engine="0",model_name="Qwen/Qwen3-8B",tier="2:p2p"} 80.0
+# TYPE vllm:kv_offload_tiering_chunk_queries_total counter
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="0:primary"} 1000.0
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 200.0
+vllm:kv_offload_tiering_chunk_queries_total{engine="0",model_name="Qwen/Qwen3-8B",tier="2:p2p"} 100.0
+# TYPE vllm:kv_offload_tiering_read_bytes_total counter
+vllm:kv_offload_tiering_read_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 4096.0
+vllm:kv_offload_tiering_read_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",tier="2:p2p"} 2048.0
+# TYPE vllm:kv_offload_tiering_read_time_total counter
+vllm:kv_offload_tiering_read_time_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 2.5
+vllm:kv_offload_tiering_read_time_total{engine="0",model_name="Qwen/Qwen3-8B",tier="2:p2p"} 1.5
+# TYPE vllm:kv_offload_tiering_promotion_job_failures_total counter
+vllm:kv_offload_tiering_promotion_job_failures_total{engine="0",model_name="Qwen/Qwen3-8B",tier="1:fs"} 3.0
+vllm:kv_offload_tiering_promotion_job_failures_total{engine="0",model_name="Qwen/Qwen3-8B",tier="2:p2p"} 2.0
+# TYPE vllm:kv_offload_tiering_promotion_allocation_failures_total counter
+vllm:kv_offload_tiering_promotion_allocation_failures_total{engine="0",model_name="Qwen/Qwen3-8B"} 7.0
+`
+
+// TestMetricsExtractionTieredOffloading verifies that the built-in vllm engine
+// config stores the tiering counters of the secondary tiers as endpoint
+// attributes, whatever label value vLLM gives a tier. It checks that the
+// counters of all ranks and all secondary tiers are summed, that the primary
+// tier's series are left out, that a non-finite value leaves only its own
+// attribute unset, and that extraction succeeds when an endpoint reports
+// nothing for a secondary tier.
+func TestMetricsExtractionTieredOffloading(t *testing.T) {
+	tests := []struct {
+		name       string
+		exposition string
+		want       map[string]float64
+	}{
+		{
+			name:       "filesystem secondary tier",
+			exposition: vllmSchedulingExposition + vllmTieringExposition,
+			want: map[string]float64{
+				"tiering_chunk_hits":          120,
+				"tiering_chunk_queries":       200,
+				"tiering_read_bytes":          4096,
+				"tiering_read_time":           2.5,
+				"tiering_promotion_failures":  3,
+				"tiering_allocation_failures": 7,
+			},
+		},
+		{
+			name:       "secondary tier under another label value",
+			exposition: vllmSchedulingExposition + strings.ReplaceAll(vllmTieringExposition, "1:fs", "2:remote"),
+			want: map[string]float64{
+				"tiering_chunk_hits":          120,
+				"tiering_chunk_queries":       200,
+				"tiering_read_bytes":          4096,
+				"tiering_read_time":           2.5,
+				"tiering_promotion_failures":  3,
+				"tiering_allocation_failures": 7,
+			},
+		},
+		{
+			name:       "engine ranks are summed",
+			exposition: vllmSchedulingExposition + vllmTieringDataParallelExposition,
+			want: map[string]float64{
+				"tiering_chunk_hits":          150,
+				"tiering_chunk_queries":       250,
+				"tiering_read_bytes":          5120,
+				"tiering_read_time":           3,
+				"tiering_promotion_failures":  4,
+				"tiering_allocation_failures": 9,
+			},
+		},
+		{
+			name:       "secondary tiers are summed",
+			exposition: vllmSchedulingExposition + vllmTieringTwoTiersExposition,
+			want: map[string]float64{
+				"tiering_chunk_hits":          200,
+				"tiering_chunk_queries":       300,
+				"tiering_read_bytes":          6144,
+				"tiering_read_time":           4,
+				"tiering_promotion_failures":  5,
+				"tiering_allocation_failures": 7,
+			},
+		},
+		{
+			name:       "non-finite value leaves only its attribute unset",
+			exposition: vllmSchedulingExposition + strings.ReplaceAll(vllmTieringExposition, `tier="1:fs"} 120.0`, `tier="1:fs"} NaN`),
+			want: map[string]float64{
+				"tiering_chunk_queries":       200,
+				"tiering_read_bytes":          4096,
+				"tiering_read_time":           2.5,
+				"tiering_promotion_failures":  3,
+				"tiering_allocation_failures": 7,
+			},
+		},
+		{
+			name:       "only the primary tier reported",
+			exposition: vllmSchedulingExposition + vllmTieringPrimaryOnlyExposition,
+		},
+		{
+			name:       "endpoint without tiered offloading",
+			exposition: vllmSchedulingExposition,
+		},
+	}
+
+	keys := []string{
+		"tiering_chunk_hits",
+		"tiering_chunk_queries",
+		"tiering_read_bytes",
+		"tiering_read_time",
+		"tiering_promotion_failures",
+		"tiering_allocation_failures",
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := serveMetricsText(t, tt.exposition)
+
+			p, err := buildPipeline(t, srv.URL, nil)
+			require.NoError(t, err)
+
+			ctx := context.Background()
+			ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+				DefaultEngineTypeLabelKey: "vllm",
+			})
+
+			data, err := p.source.Poll(ctx, ep)
+			require.NoError(t, err)
+			require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
+
+			for _, key := range keys {
+				got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey(key))
+				want, wantOK := tt.want[key]
+				require.Equal(t, wantOK, ok, "attribute %q presence", key)
+				assert.InDelta(t, want, float64(got), 0.001, "attribute %q", key)
+			}
+		})
+	}
+}
+
+// TestMetricsExtractionCustomMetricNegativeLabelMatcher verifies that a
+// customMetrics selector can exclude one label value and select the same label
+// value exactly.
+func TestMetricsExtractionCustomMetricNegativeLabelMatcher(t *testing.T) {
+	const primaryHits = `vllm:kv_offload_tiering_chunk_hits_total{tier="0:primary"}`
+	const secondaryHits = `vllm:kv_offload_tiering_chunk_hits_total{tier!="0:primary"}`
+	params := &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{{
+			Name: "vllm",
+			CustomMetrics: []customMetricConfigParams{
+				{AttributeKey: "secondary_hits", MetricSpec: secondaryHits, Aggregation: metricAggregationSum, Optional: true},
+				{AttributeKey: "primary_hits", MetricSpec: primaryHits},
+			},
+		}},
+	}
+	srv := serveMetricsText(t, vllmSchedulingExposition+vllmTieringExposition)
+
+	p, err := buildPipeline(t, srv.URL, params)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+	data, err := p.source.Poll(ctx, ep)
+	require.NoError(t, err)
+	require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
+
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey("secondary_hits"))
+	require.True(t, ok, "negative matcher should read the secondary tier")
+	assert.InDelta(t, 120.0, float64(got), 0.001)
+
+	got, ok = attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey("primary_hits"))
+	require.True(t, ok, "exact matcher should read the primary tier")
+	assert.InDelta(t, 900.0, float64(got), 0.001)
+}
+
+// TestMetricsExtractionTieredOffloadingStopsBeingReported verifies what an
+// endpoint keeps when a tiering counter disappears from its scrape while the
+// endpoint object stays registered: the attribute keeps its last value, and a
+// later scrape reporting the counter overwrites it.
+func TestMetricsExtractionTieredOffloadingStopsBeingReported(t *testing.T) {
+	var exposition atomic.Pointer[string]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(*exposition.Load()))
+	}))
+	t.Cleanup(srv.Close)
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	scrape := func(text string) float64 {
+		t.Helper()
+		exposition.Store(&text)
+		data, err := p.source.Poll(ctx, ep)
+		require.NoError(t, err)
+		require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
+		got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey("tiering_chunk_hits"))
+		require.True(t, ok, "tiering_chunk_hits attribute should be present")
+		return float64(got)
+	}
+
+	assert.InDelta(t, 120.0, scrape(vllmSchedulingExposition+vllmTieringExposition), 0.001, "reported value")
+	assert.InDelta(t, 120.0, scrape(vllmSchedulingExposition), 0.001, "value after the counter stops being reported")
+	restarted := strings.ReplaceAll(vllmTieringExposition, `tier="1:fs"} 120.0`, `tier="1:fs"} 5.0`)
+	assert.InDelta(t, 5.0, scrape(vllmSchedulingExposition+restarted), 0.001, "value once the counter is reported again")
+}
+
 // TestMetricsExtractionNixlCounterStopsBeingReported verifies what an
 // endpoint keeps when the NIXL counters disappear from its scrape while the
 // endpoint object stays registered: the attribute keeps its last value, and a
@@ -837,4 +1104,52 @@ func TestMetricsExtractionOptionalCustomMetric(t *testing.T) {
 			assert.False(t, ok, "unreported custom metric should not be stored")
 		})
 	}
+}
+
+func TestMetricsExtractionCustomMetricLatestSeries(t *testing.T) {
+	params, err := json.Marshal(map[string]any{
+		"engineConfigs": []map[string]any{
+			{
+				"name": "vllm",
+				"customMetrics": []map[string]any{
+					{"attributeKey": "custom.latest", "metricSpec": "custom_multi"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	plugin, err := CoreMetricsExtractorFactory("test", fwkplugin.StrictDecoder(params), nil)
+	require.NoError(t, err)
+	ext, ok := plugin.(*Extractor)
+	require.True(t, ok)
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm"},
+	}, nil)
+	err = ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Endpoint: ep,
+		Payload: sourcemetrics.PrometheusMetricMap{
+			"custom_multi": {
+				Type: dto.MetricType_GAUGE.Enum(),
+				Metric: []*dto.Metric{
+					{
+						Label:       []*dto.LabelPair{{Name: ptr.To("engine"), Value: ptr.To("0")}},
+						Gauge:       &dto.Gauge{Value: ptr.To(7.0)},
+						TimestampMs: ptr.To(int64(100)),
+					},
+					{
+						Label:       []*dto.LabelPair{{Name: ptr.To("engine"), Value: ptr.To("1")}},
+						Gauge:       &dto.Gauge{Value: ptr.To(11.0)},
+						TimestampMs: ptr.To(int64(200)),
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey("custom.latest"))
+	require.True(t, ok, "customMetrics entry without aggregation should read a series")
+	assert.InDelta(t, 11.0, float64(got), 0.001, "customMetrics entry without aggregation should read the latest series")
 }

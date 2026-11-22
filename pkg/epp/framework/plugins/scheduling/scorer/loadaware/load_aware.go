@@ -58,8 +58,8 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 // NewLoadAware creates a new load based scorer
 func NewLoadAware(ctx context.Context, queueThreshold int) *LoadAware {
 	if queueThreshold <= 0 {
-		queueThreshold = QueueThresholdDefault
 		log.FromContext(ctx).V(logutil.DEFAULT).Info(fmt.Sprintf("queueThreshold %d should be positive, using default queue threshold %d", queueThreshold, QueueThresholdDefault))
+		queueThreshold = QueueThresholdDefault
 	}
 
 	return &LoadAware{
@@ -96,12 +96,17 @@ func (s *LoadAware) Category() scheduling.ScorerCategory {
 // Pod with empty waiting requests queue is scored with 0.5
 // Pod with requests in the queue will get score between 0.5 and 0.
 // Score 0 will get pod with number of requests in the queue equal to the threshold used in load-based filter
+// Pods with no written metrics are left unscored
 // In the future, pods with additional capacity will get score higher than 0.5
 func (s *LoadAware) Score(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 
 	for _, endpoint := range endpoints {
-		waitingRequests := float64(endpoint.GetMetrics().WaitingQueueSize)
+		podMetrics := endpoint.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		waitingRequests := float64(podMetrics.WaitingQueueSize)
 
 		if waitingRequests == 0 {
 			scoredEndpoints[endpoint] = 0.5

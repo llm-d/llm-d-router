@@ -23,6 +23,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -73,8 +74,8 @@ func (p *PassthroughParser) WithName(name string) *PassthroughParser {
 // ParseRequest converts the request to RawPayload.
 func (p *PassthroughParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	return &fwkrh.ParseResult{
-		Body: &fwkrh.InferenceRequestBody{
-			Payload: fwkrh.RawPayload(body),
+		Body: &fwkrequest.InferenceRequestBody{
+			Payload: fwkrequest.RawPayload(body),
 		},
 		SkipResponseProcessing: false,
 	}, nil

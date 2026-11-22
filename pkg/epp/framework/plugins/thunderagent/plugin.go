@@ -39,10 +39,10 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
 // ThunderAgentPluginType is the plugin type registered with the framework.
@@ -54,8 +54,8 @@ const ThunderAgentPluginType = "thunder-agent"
 var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgentPluginType)
 
 var (
-	_ fwkrc.PreRequest            = &ThunderAgent{}
-	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
+	_ fwkrh.PreRequest            = &ThunderAgent{}
+	_ fwkrh.ResponseBodyProcessor = &ThunderAgent{}
 	_ fwkplugin.ConsumerPlugin    = &ThunderAgent{}
 	_ fwkplugin.StateDumper       = &ThunderAgent{}
 	_ fwkdl.Registrant            = &ThunderAgent{}
@@ -70,9 +70,9 @@ var (
 type ThunderAgent struct {
 	typedName fwkplugin.TypedName
 
-	capacityTokens       float64
-	utilThreshold        float64
-	headWaitStarvationMs float64
+	fallbackCapacityTokens float64
+	usableCapacityRatio    float64
+	forceAdmitTimeout      time.Duration
 
 	mgr     *sessionManager
 	metrics *thunderMetrics
@@ -98,7 +98,6 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 				return nil, fmt.Errorf("failed to register metrics of the '%s' plugin: %w", ThunderAgentPluginType, err)
 			}
 		}
-		sweepInterval := time.Duration(cfg.EvictionSweepSeconds * float64(time.Second))
 		go a.runSweep(handle.Context(), sweepInterval)
 	}
 	return a, nil
@@ -121,12 +120,12 @@ func (a *ThunderAgent) runSweep(ctx context.Context, interval time.Duration) {
 func newThunderAgent(name string, cfg Config) *ThunderAgent {
 	mgr := newSessionManager(cfg)
 	return &ThunderAgent{
-		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
-		capacityTokens:       float64(cfg.CapacityTokens),
-		utilThreshold:        cfg.UtilThreshold,
-		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
-		mgr:                  mgr,
-		metrics:              newThunderMetrics(mgr),
+		typedName:              fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
+		fallbackCapacityTokens: float64(cfg.FallbackCapacityTokens),
+		usableCapacityRatio:    cfg.UsableCapacityRatio,
+		forceAdmitTimeout:      cfg.ForceAdmitTimeout.Duration,
+		mgr:                    mgr,
+		metrics:                newThunderMetrics(mgr),
 	}
 }
 

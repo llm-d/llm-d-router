@@ -24,16 +24,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
-	grpcutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 )
 
@@ -90,7 +92,7 @@ func (p *VllmGRPCParser) Claims() fwkrh.Claims {
 func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	logger := log.FromContext(ctx)
 
-	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
+	parsedPayload, err := grpcframe.ParsePayload(body)
 	if err != nil {
 		return nil, errors.New("invalid or unsupported gRPC payload")
 	}
@@ -114,7 +116,7 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 		if err := proto.Unmarshal(parsedPayload, &req); err != nil {
 			return nil, fmt.Errorf("unmarshaling GenerateRequest: %w", err)
 		}
-		extractedBody, err := convertToInferenceRequestBody(&req)
+		extractedBody, err := convertToInferenceRequestBody(&req, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -124,8 +126,8 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 	default:
 		logger.V(logutil.TRACE).Info("unsupported gRPC path, skipping", "path", headers[parsers.MethodPathKey])
 		return &fwkrh.ParseResult{
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
+			Body: &fwkrequest.InferenceRequestBody{
+				Payload: fwkrequest.RawPayload(body),
 			},
 			SkipResponseProcessing: true,
 		}, nil
@@ -135,6 +137,14 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 // ParseResponse parses the response body and returns a ParsedResponse
 func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
 	logger := log.FromContext(ctx)
+
+	// The handler calls the parser once more with an empty body when a gRPC
+	// stream ends on its trailer. There is no frame to read, so report no usage
+	// rather than a parse error that would be logged on every completed stream.
+	if len(body) == 0 {
+		return &fwkrh.ParsedResponse{}, nil
+	}
+
 	resp := &pb.GenerateResponse{}
 
 	// Try to parse as GenerateResponse first. If it fails or the response field is nil,
@@ -145,7 +155,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 			logger.V(logutil.DEBUG).Info("parsed EmbedResponse", "promptTokens", embedResp.PromptTokens)
 			result := &fwkrh.ParsedResponse{}
 			if embedResp.PromptTokens > 0 {
-				result.Usage = &fwkrh.Usage{
+				result.Usage = &fwkrequest.Usage{
 					PromptTokens:     int(embedResp.PromptTokens),
 					CompletionTokens: 0,
 					TotalTokens:      int(embedResp.PromptTokens),
@@ -165,7 +175,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		// Streaming chunks often leave this empty until the final chunk.
 		promptToken, completionToken, cachedToken := int(v.Chunk.PromptTokens), int(v.Chunk.CompletionTokens), int(v.Chunk.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
-			result.Usage = requestControlUsage(promptToken, completionToken, cachedToken)
+			result.Usage = parsers.NewUsage(promptToken, completionToken, cachedToken)
 		}
 
 	case *pb.GenerateResponse_Complete:
@@ -173,7 +183,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		// Populate Usage for complete, non-streaming responses.
 		promptToken, completionToken, cachedToken := int(v.Complete.PromptTokens), int(v.Complete.CompletionTokens), int(v.Complete.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
-			result.Usage = requestControlUsage(promptToken, completionToken, cachedToken)
+			result.Usage = parsers.NewUsage(promptToken, completionToken, cachedToken)
 		}
 
 	default:
@@ -183,34 +193,23 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 	return result, nil
 }
 
-func requestControlUsage(promptToken, completionToken, cachedToken int) *fwkrh.Usage {
-	return &fwkrh.Usage{
-		PromptTokens:     promptToken,
-		CompletionTokens: completionToken,
-		TotalTokens:      promptToken + completionToken,
-		PromptTokenDetails: &fwkrh.PromptTokenDetails{
-			CachedTokens: cachedToken,
-		},
-	}
-}
-
 func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(payload)
+	parsedPayload, err := grpcframe.ParsePayload(payload)
 	if err != nil {
 		return err
 	}
 	return proto.Unmarshal(parsedPayload, resp)
 }
 
-func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceRequestBody, error) {
-	var body *fwkrh.InferenceRequestBody
+func convertToInferenceRequestBody(pbReq *pb.GenerateRequest, logger logr.Logger) (*fwkrequest.InferenceRequestBody, error) {
+	var body *fwkrequest.InferenceRequestBody
 	switch pbReq.Input.(type) {
 	case *pb.GenerateRequest_Text:
-		body = &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: pbReq.GetText()},
+		body = &fwkrequest.InferenceRequestBody{
+			Completions: &fwkrequest.CompletionsRequest{
+				Prompt: fwkrequest.Prompt{Raw: pbReq.GetText()},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload: fwkrequest.PayloadProto{Message: pbReq},
 		}
 	case *pb.GenerateRequest_Tokenized:
 		tokenized := pbReq.GetTokenized()
@@ -220,15 +219,15 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		inputIDs := tokenized.GetInputIds()
 		copiedTokenIDsInt := make([]uint32, len(inputIDs))
 		copy(copiedTokenIDsInt, inputIDs)
-		body = &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
+		body = &fwkrequest.InferenceRequestBody{
+			Completions: &fwkrequest.CompletionsRequest{
+				Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{
+			Payload: fwkrequest.PayloadProto{Message: pbReq},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
 					TokenIDs:           copiedTokenIDsInt,
-					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs(), logger),
 				}},
 			},
 		}
@@ -244,25 +243,47 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 	return body, nil
 }
 
-func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModalFeature {
+// convertMultiModalFeatures pairs mm_placeholders with mm_hashes by index.
+// Features without a hash stay in the list: multimodal detection (for example
+// the E/P/D encode decider) counts them, and their spans still account for
+// media tokens. Every cache-key path (tokenizer.ConvertMMFeaturesFromUpstream
+// and prefixhash.mmBlockExtra) excludes empty hashes, so they cannot
+// contribute a content-blind identity to prefix block keys. A length mismatch
+// makes positional pairing ambiguous, so no hash is paired at all.
+func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs, logger logr.Logger) []fwkrequest.MultiModalFeature {
 	if mmInputs == nil {
 		return nil
 	}
 
 	placeholders := mmInputs.GetMmPlaceholders()
+	hashes := mmInputs.GetMmHashes()
+	debugLogger := logger.V(logutil.DEBUG)
 	if len(placeholders) == 0 {
+		if len(hashes) > 0 {
+			debugLogger.Info("mm_hashes without mm_placeholders; dropping multimodal hashes",
+				"hashes", len(hashes))
+		}
 		return nil
 	}
+	pairHashes := len(hashes) == len(placeholders)
+	if len(hashes) > 0 && !pairHashes {
+		debugLogger.Info("mm_hashes and mm_placeholders lengths differ; no hash is paired",
+			"hashes", len(hashes), "placeholders", len(placeholders))
+	}
 
-	hashes := mmInputs.GetMmHashes()
-	features := make([]fwkrh.MultiModalFeature, 0, len(placeholders))
+	features := make([]fwkrequest.MultiModalFeature, 0, len(placeholders))
+	debugEnabled := debugLogger.Enabled()
+	var hashlessIndices []int
 	for i, placeholder := range placeholders {
 		hash := ""
-		if i < len(hashes) {
+		if pairHashes {
 			hash = hashes[i]
 		}
+		if debugEnabled && hash == "" {
+			hashlessIndices = append(hashlessIndices, i)
+		}
 
-		feature := fwkrh.MultiModalFeature{
+		feature := fwkrequest.MultiModalFeature{
 			Modality: reqcommon.ModalityImage,
 			Hash:     hash,
 		}
@@ -273,23 +294,27 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModal
 
 		features = append(features, feature)
 	}
+	if len(hashlessIndices) > 0 {
+		debugLogger.Info("multimodal placeholders without hashes are excluded from cache keys",
+			"count", len(hashlessIndices), "indices", hashlessIndices, "totalFeatures", len(features))
+	}
 
 	return features
 }
 
-func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.InferenceRequestBody, error) {
-	var body *fwkrh.InferenceRequestBody
+func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrequest.InferenceRequestBody, error) {
+	var body *fwkrequest.InferenceRequestBody
 	if pbReq.Tokenized != nil {
 		inputIDs := pbReq.GetTokenized().InputIds
 		tokenIDs := make([]uint32, len(inputIDs))
 		copy(tokenIDs, inputIDs)
-		body = &fwkrh.InferenceRequestBody{
-			Embeddings: &fwkrh.EmbeddingsRequest{
-				Input: fwkrh.EmbeddingsInput{
+		body = &fwkrequest.InferenceRequestBody{
+			Embeddings: &fwkrequest.EmbeddingsRequest{
+				Input: fwkrequest.EmbeddingsInput{
 					TokenIDs: [][]uint32{tokenIDs},
 				},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload: fwkrequest.PayloadProto{Message: pbReq},
 		}
 	} else {
 		return nil, errors.New("missing tokenized input in EmbedRequest")
@@ -298,7 +323,7 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 }
 
 func toEmbedResponse(payload []byte, resp *pb.EmbedResponse) error {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(payload)
+	parsedPayload, err := grpcframe.ParsePayload(payload)
 	if err != nil {
 		return err
 	}

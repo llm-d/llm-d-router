@@ -24,12 +24,27 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
+var vllmWireSchema = eventWireSchema{
+	name:                 "vLLM",
+	minimumBatchFields:   2,
+	minimumStoredFields:  5,
+	minimumRemovedFields: 2,
+	storedFields:         vllmBlockStoredFieldDecoders,
+	removedFields:        vllmBlockRemovedFieldDecoders,
+	storedEvent:          (*typedEventFields).blockStoredEvent,
+	skipUnknownTags:      true,
+}
+
 // VLLMAdapter parses vLLM KV-cache events.
 type VLLMAdapter struct{}
 
 // NewVLLMAdapter creates a vLLM adapter.
 func NewVLLMAdapter() *VLLMAdapter {
 	return &VLLMAdapter{}
+}
+
+func init() {
+	Register(EngineTypeVLLM, func() kvevents.EngineAdapter { return NewVLLMAdapter() })
 }
 
 // ShardingKey extracts the pod ID from a vLLM message topic.
@@ -40,9 +55,9 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 
 // ParseMessage decodes one vLLM event batch.
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	podID, modelName := parseTopic(msg.Topic)
+	podID, modelName := topicIdentity(msg)
 
-	var vllmBatch msgpackVLLMEventBatch
+	vllmBatch := msgpackTypedEventBatch{schema: &vllmWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}

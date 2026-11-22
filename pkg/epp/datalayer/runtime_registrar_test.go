@@ -199,7 +199,10 @@ func TestConfigure_PendingRegistrationYieldsToConfigByType(t *testing.T) {
 	}
 }
 
-func TestConfigure_PendingVsPending_FirstWinsOnSameType(t *testing.T) {
+// Two plugins registering extractors of the same Type on the same source are
+// distinct instances (different Owner Names); each must be wired so each
+// receives endpoint events and installs its own name-qualified attribute.
+func TestConfigure_PendingVsPending_BothBoundOnSameType(t *testing.T) {
 	r := NewRuntime(0)
 	logger := newTestLogger(t)
 
@@ -223,8 +226,46 @@ func TestConfigure_PendingVsPending_FirstWinsOnSameType(t *testing.T) {
 
 	exts, ok := r.extractors.Get(notifications.EndpointNotificationSourceType)
 	require.True(t, ok)
-	require.Len(t, exts, 1, "second pending must yield to first when Types collide")
-	assert.Equal(t, "first-pending", exts[0].TypedName().Name)
+	require.Len(t, exts, 2, "both pending extractors must be bound when Types collide")
+	gotNames := []string{exts[0].TypedName().Name, exts[1].TypedName().Name}
+	assert.ElementsMatch(t, []string{"first-pending", "second-pending"}, gotNames)
+}
+
+// User-config extractors of a Type outrank every pending registration of that
+// Type, including when several plugins registered pending registrations for it.
+func TestConfigure_SiblingPendingRegistrationsYieldToConfigByType(t *testing.T) {
+	r := NewRuntime(0)
+	logger := newTestLogger(t)
+
+	src := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-src")
+	configExt := extractormocks.NewEndpointExtractor("config-ext")
+	first := extractormocks.NewEndpointExtractor("first-pending")
+	second := extractormocks.NewEndpointExtractor("second-pending")
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{
+			Plugin:     src,
+			Extractors: []fwkplugin.Plugin{configExt},
+		}},
+	}
+
+	require.NoError(t, r.Register(fwkdl.PendingRegistration{
+		Owner:      fwkplugin.TypedName{Type: "plugin-a", Name: "a"},
+		SourceType: notifications.EndpointNotificationSourceType,
+		Extractor:  first,
+	}))
+	require.NoError(t, r.Register(fwkdl.PendingRegistration{
+		Owner:      fwkplugin.TypedName{Type: "plugin-b", Name: "b"},
+		SourceType: notifications.EndpointNotificationSourceType,
+		Extractor:  second,
+	}))
+
+	require.NoError(t, r.Configure(cfg, logger))
+
+	exts, ok := r.extractors.Get("ep-src")
+	require.True(t, ok)
+	require.Len(t, exts, 1, "both pending registrations must yield to the user-configured extractor")
+	assert.Equal(t, "config-ext", exts[0].TypedName().Name)
 }
 
 // Pins rejection of duplicate-Type extractors per source. Append dedups silently otherwise.

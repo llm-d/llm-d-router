@@ -100,6 +100,29 @@ func (a *Attributes) Get(key fwkplugin.DataKey) (Cloneable, bool) {
 	return nil, false
 }
 
+// Peek returns the stored attribute without cloning. Callers must not mutate
+// the result. DynamicAttribute is resolved but not cloned again (Get() is
+// expected to return a fresh value). Prefer Get when the caller may write.
+func (a *Attributes) Peek(key fwkplugin.DataKey) (Cloneable, bool) {
+	val, ok := a.data.Load(key)
+	if !ok {
+		return nil, false
+	}
+
+	if dynamic, ok := val.(*DynamicAttribute); ok {
+		realVal := dynamic.Get()
+		if realVal == nil {
+			return nil, false
+		}
+		return realVal, true
+	}
+
+	if cloneable, ok := val.(Cloneable); ok {
+		return cloneable, true
+	}
+	return nil, false
+}
+
 // Keys returns all keys in the attribute map.
 func (a *Attributes) Keys() []fwkplugin.DataKey {
 	var keys []fwkplugin.DataKey

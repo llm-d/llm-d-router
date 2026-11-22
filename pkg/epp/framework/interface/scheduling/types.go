@@ -23,16 +23,12 @@ import (
 	"reflect"
 	"sync"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 const nilString = "<nil>"
-
-type TokenizedRequest = fwkrh.TokenizedRequest
-
-type MultiModalFeature = fwkrh.MultiModalFeature
 
 // RequestObjectives represents the scheduling objectives parsed from the InferenceObjectiveSpec, to be used in scheduling decisions.
 type RequestObjectives struct {
@@ -46,8 +42,12 @@ type InferenceRequest struct {
 	// TargetModel is the final target model after traffic split.
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.
-	Body *fwkrh.InferenceRequestBody
-	// Headers is a map of the request headers.
+	Body *fwkrequest.InferenceRequestBody
+	// Headers is a map of the request headers. Edits made before the request is
+	// forwarded apply to it, except to EPP-owned headers: a header set in the
+	// map is forwarded with its value, and a client header deleted from the map
+	// is removed. Envoy never removes a pseudo-header or host, so deleting one
+	// forwards the client's value.
 	Headers map[string]string
 	// Request Objective
 	Objectives RequestObjectives
@@ -79,6 +79,9 @@ func (r *InferenceRequest) String() string {
 }
 
 type Endpoint interface {
+	// GetMetadata and GetMetrics return snapshots that may be shared with the
+	// datastore and with concurrent requests. Callers must treat them as
+	// read-only and Clone before modifying.
 	GetMetadata() *fwkdl.EndpointMetadata
 	GetMetrics() *fwkdl.Metrics
 	String() string
@@ -108,20 +111,44 @@ func (ep *endpoint) Clone() fwkdl.AttributeMap {
 	return ep.AttributeMap.Clone()
 }
 
+// Peek returns an uncloned attribute view when the embedded map supports it.
+// Callers must not mutate the result. Falls back to Get otherwise.
+func (ep *endpoint) Peek(key fwkplugin.DataKey) (fwkdl.Cloneable, bool) {
+	type peeker interface {
+		Peek(fwkplugin.DataKey) (fwkdl.Cloneable, bool)
+	}
+	if p, ok := ep.AttributeMap.(peeker); ok {
+		return p.Peek(key)
+	}
+	return ep.Get(key)
+}
+
 type endpoint struct {
 	*fwkdl.EndpointMetadata
 	*fwkdl.Metrics
 	fwkdl.AttributeMap
 }
 
+// NewEndpoint builds a scheduling endpoint that copies its inputs, so later
+// mutations of meta or metrics do not affect the endpoint.
 func NewEndpoint(meta *fwkdl.EndpointMetadata, metrics *fwkdl.Metrics, attr fwkdl.AttributeMap) Endpoint {
+	return NewEndpointFromSnapshot(meta.Clone(), metrics.Clone(), attr)
+}
+
+// NewEndpointFromSnapshot builds a scheduling endpoint that shares meta and
+// metrics with the caller. The caller must pass immutable snapshots and must
+// not mutate them after the call. The datastore replaces both wholesale, so
+// request-path callers use this to avoid a per-request copy. Attributes are
+// cloned because data producers write per-request values into the scheduling
+// endpoint.
+func NewEndpointFromSnapshot(meta *fwkdl.EndpointMetadata, metrics *fwkdl.Metrics, attr fwkdl.AttributeMap) Endpoint {
 	if attr == nil {
 		attr = fwkdl.NewAttributes()
 	}
 
 	return &endpoint{
-		EndpointMetadata: meta.Clone(),
-		Metrics:          metrics.Clone(),
+		EndpointMetadata: meta,
+		Metrics:          metrics,
 		AttributeMap:     attr.Clone(),
 	}
 }
@@ -162,6 +189,19 @@ func ScoredEndpointComparer(a, b ScoredEndpoint) bool {
 type ScoredEndpoint struct {
 	Endpoint
 	Score float64
+}
+
+// EndpointScores implements logr.Marshaler to render scored endpoints as a map
+// of namespaced name to score. The map is built only when the log line is
+// actually written.
+type EndpointScores []*ScoredEndpoint
+
+func (s EndpointScores) MarshalLog() interface{} {
+	scores := make(map[string]float64, len(s))
+	for _, ep := range s {
+		scores[ep.GetMetadata().GetNamespacedName().String()] = ep.Score
+	}
+	return scores
 }
 
 // ProfileRunResult captures the profile run result.

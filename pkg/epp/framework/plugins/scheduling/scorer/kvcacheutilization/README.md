@@ -32,7 +32,7 @@ The scorer returns category `Distribution`, so it helps spread traffic away from
 
 The plugin consumes:
 
-- `metrics.KVCacheUsagePercentKey` (`float64`)
+- `metrics.KVCacheUsagePercentKey` (`ScalarMetricValue`)
 
 ## Configuration
 

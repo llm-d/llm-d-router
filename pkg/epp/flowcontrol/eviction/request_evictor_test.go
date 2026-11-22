@@ -19,6 +19,7 @@ package eviction
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -30,7 +31,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -86,7 +88,7 @@ func TestRequestEvictor_ResponseBody_DeregistersEvictChannel(t *testing.T) {
 	require.NoError(t, re.PreRequest(ctx, request, makeSchedulingResult()))
 	require.NotNil(t, re.EvictionRegistry().Get("req-1"))
 
-	re.ResponseBody(ctx, request, &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, request, &fwkrh.Response{EndOfStream: true}, nil)
 
 	assert.Nil(t, re.EvictionRegistry().Get("req-1"), "EvictCh should be deregistered after completion")
 	assert.Equal(t, 0, re.queue.InFlightLen())
@@ -104,7 +106,7 @@ func TestRequestEvictor_SharedRequestIDHeaderTrackedIndependently(t *testing.T) 
 	require.NoError(t, re.PreRequest(ctx, second, makeSchedulingResult()))
 	require.Equal(t, 2, re.queue.InFlightLen())
 
-	re.ResponseBody(ctx, first, &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, first, &fwkrh.Response{EndOfStream: true}, nil)
 
 	assert.Nil(t, re.EvictionRegistry().Get("req-1"))
 	assert.NotNil(t, re.EvictionRegistry().Get("req-2"), "completing one request must not untrack another")
@@ -177,7 +179,7 @@ func TestRequestEvictor_RaceBetweenEvictAndCompletion(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for _, req := range requests {
-			re.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+			re.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -234,7 +236,7 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 
 	// The ResponseBody from the first eviction fires via defer in real code.
 	// Simulate it here.
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	// Re-track and evict again.
 	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
@@ -260,7 +262,7 @@ func TestRequestEvictor_CleanupWorksWithNoOpEvictor(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	assert.Equal(t, 0, re.queue.InFlightLen())
 }
@@ -294,15 +296,15 @@ func TestRequestEvictor_EvictionTerminatedListener_NotifiedOncePerEvictedRequest
 	evictedID := evicted[0]
 
 	// Stream termination for the evicted request notifies; the idempotent second cleanup does not.
-	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
-	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &fwkrh.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	// A naturally completing request must not notify.
 	naturalID := "req-natural"
 	if evictedID == naturalID {
 		naturalID = "req-evicted"
 	}
-	re.ResponseBody(ctx, makeInferenceRequest(naturalID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(naturalID, -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -330,7 +332,7 @@ func TestRequestEvictor_FailedEviction_DoesNotNotifyListener(t *testing.T) {
 	assert.Empty(t, evicted, "failed eviction should evict nothing")
 
 	// The request later completes naturally: still no notification.
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -369,4 +371,74 @@ func TestRequestEvictor_EvictN_PriorityBound(t *testing.T) {
 	inFlight, evictable := re.Stats()
 	assert.Equal(t, 1, inFlight, "the at-bound victim must remain tracked")
 	assert.Equal(t, 1, evictable, "the at-bound victim must remain evictable for future decisions")
+}
+
+type countingFilter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (f *countingFilter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "counting-filter", Name: "test"}
+}
+
+func (f *countingFilter) Accept(item *flowcontrol.EvictionItem) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.counts[item.RequestID]++
+	return true
+}
+
+func (f *countingFilter) count(requestID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.counts[requestID]
+}
+
+func TestRequestEvictor_EvictN_PriorityBoundDoesNotPopAndReTrack(t *testing.T) {
+	t.Parallel()
+	filter := &countingFilter{counts: make(map[string]int)}
+	re := NewRequestEvictor(&testOrdering{}, filter, NewImmediateResponseEvictor())
+
+	ctx := context.Background()
+	req := makeInferenceRequest("req-at-bound", -1)
+	require.NoError(t, re.PreRequest(ctx, req, makeSchedulingResult()))
+	require.Equal(t, 1, filter.count("req-at-bound"))
+
+	evicted, err := re.EvictN(ctx, 1, -1)
+	require.NoError(t, err)
+	assert.Empty(t, evicted)
+	assert.Equal(t, 1, filter.count("req-at-bound"),
+		"EvictN must not pop and re-track an item whose priority is >= priorityBound")
+
+	// Verify concurrent EvictN calls with a stricter priorityBound never re-insert a completed
+	// request into EvictionQueue.
+	const iterations = 200
+	stopCh := make(chan struct{})
+	var evictWG sync.WaitGroup
+	evictWG.Add(1)
+	go func() {
+		defer evictWG.Done()
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				_, _ = re.EvictN(ctx, 1, -5)
+			}
+		}
+	}()
+
+	re.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
+	for i := range iterations {
+		r := makeInferenceRequest("req-concurrent-"+strconv.Itoa(i), -1)
+		require.NoError(t, re.PreRequest(ctx, r, makeSchedulingResult()))
+		re.ResponseBody(ctx, r, &fwkrh.Response{EndOfStream: true}, nil)
+	}
+	close(stopCh)
+	evictWG.Wait()
+
+	inFlight, evictable := re.Stats()
+	assert.Equal(t, 0, inFlight, "completed requests must not remain in flight after concurrent EvictN")
+	assert.Equal(t, 0, evictable, "completed requests must not remain evictable after concurrent EvictN")
 }

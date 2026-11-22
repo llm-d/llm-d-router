@@ -48,10 +48,18 @@ type EndpointEntry struct {
 	Address   string            `json:"address"             yaml:"address"`
 	Port      string            `json:"port"                yaml:"port"`
 	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
+	// Attributes declares string attributes to stamp onto the endpoint's
+	// attribute map at construction (keyed with
+	// fwkdl.DiscoveryAttributesProducer) — e.g. routing hints a downstream
+	// plugin reads, without going through label-to-attribute mapping.
+	Attributes map[string]string `json:"attributes,omitempty" yaml:"attributes,omitempty"`
 	// RankIndex is the endpoint's pod-local rank, used to offset well-known
 	// ports (for example the KV-events socket) when multiple engines are
 	// co-located on the same address. Defaults to 0.
 	RankIndex int `json:"rankIndex,omitempty" yaml:"rankIndex,omitempty"`
+	// ZMQPort is the endpoint's KV-events socket port, used as-is instead of
+	// the producer's socketPort + rankIndex. Optional; when set, 1-65535.
+	ZMQPort *int `json:"zmqPort,omitempty" yaml:"zmqPort,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -277,6 +285,14 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid rankIndex %d", e.Name, e.RankIndex))
 			continue
 		}
+		zmqPort := 0 // 0 means unset downstream
+		if e.ZMQPort != nil {
+			if *e.ZMQPort < 1 || *e.ZMQPort > 65535 {
+				errs = append(errs, fmt.Errorf("endpoint %q: invalid zmqPort %d", e.Name, *e.ZMQPort))
+				continue
+			}
+			zmqPort = *e.ZMQPort
+		}
 		ns := e.Namespace
 		if ns == "" {
 			ns = "default"
@@ -293,7 +309,9 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			Port:        e.Port,
 			MetricsHost: net.JoinHostPort(e.Address, e.Port),
 			Labels:      e.Labels,
+			Attributes:  e.Attributes,
 			RankIndex:   e.RankIndex,
+			ZMQPort:     zmqPort,
 		}
 		incoming[meta.ID] = struct{}{}
 		notifier.Upsert(meta)

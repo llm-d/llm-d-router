@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strconv"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -42,6 +44,7 @@ type RequestDroppedReason string
 const (
 	// Rejected — request never reached an inference server.
 	RequestDroppedReasonSaturated        RequestDroppedReason = "rejected-saturated"
+	RequestDroppedReasonFlowLimit        RequestDroppedReason = "rejected-flow-limit"
 	RequestDroppedReasonNoEndpoints      RequestDroppedReason = "rejected-no-endpoints"
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
@@ -70,10 +73,13 @@ const (
 	Forbidden          = "Forbidden"
 	NotFound           = "NotFound"
 	PreconditionFailed = "PreconditionFailed"
+	PayloadTooLarge    = "PayloadTooLarge"
 	Internal           = "Internal"
 	ServiceUnavailable = "ServiceUnavailable"
 	ModelServerError   = "ModelServerError"
 	ResourceExhausted  = "ResourceExhausted"
+	// ModelServerClientError is a 4xx response from a model server. ModelServerError is a 5xx.
+	ModelServerClientError = "ModelServerClientError"
 )
 
 // Error returns a string version of the error.
@@ -90,6 +96,21 @@ func CanonicalCode(err error) string {
 	return Unknown
 }
 
+// ModelServerStatusCode returns the error code for a model server response
+// status, or "" when the status is not an error. A status that is not a number
+// is a server error.
+func ModelServerStatusCode(status string) string {
+	code, err := strconv.Atoi(status)
+	switch {
+	case err != nil || code >= http.StatusInternalServerError:
+		return ModelServerError
+	case code >= http.StatusBadRequest:
+		return ModelServerClientError
+	default:
+		return ""
+	}
+}
+
 // httpCodes maps a canonical code to the HTTP status it is answered with. The
 // envelope derives its error type from the status (reqcommon.ErrorEnvelope).
 var httpCodes = map[string]envoyTypePb.StatusCode{
@@ -98,6 +119,7 @@ var httpCodes = map[string]envoyTypePb.StatusCode{
 	Forbidden:          envoyTypePb.StatusCode_Forbidden,
 	NotFound:           envoyTypePb.StatusCode_NotFound,
 	PreconditionFailed: envoyTypePb.StatusCode_PreconditionFailed,
+	PayloadTooLarge:    envoyTypePb.StatusCode_PayloadTooLarge,
 	ResourceExhausted:  envoyTypePb.StatusCode_TooManyRequests,
 	Internal:           envoyTypePb.StatusCode_InternalServerError,
 	ServiceUnavailable: envoyTypePb.StatusCode_ServiceUnavailable,

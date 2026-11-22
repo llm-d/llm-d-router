@@ -10,7 +10,11 @@ You may obtain a copy of the License at
 
 package epp
 
-import "testing"
+import (
+	"testing"
+
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
+)
 
 // e2eConfigsForSmoke mirrors the YAML strings in test/e2e/configs_test.go so
 // the hermetic harness validates that the e2e fixtures actually parse +
@@ -195,10 +199,10 @@ schedulingProfiles:
 `,
 	// Regression test for #1471: a precise-prefix-cache-producer paired with
 	// an explicit vllm-backed token-producer must load cleanly through the full
-	// runner path, which is where ValidateTokenProducer runs (after auto-defaults,
-	// order-independent). The mirror case (no token-producer or estimate-backed)
-	// is covered by the unit test TestValidateTokenProducer in the
-	// preciseprefixcache producer package.
+	// runner path, which is where ValidateAndOrderDataDependencies runs Level-2
+	// attribute validation (after auto-defaults, order-independent). The mirror
+	// case (no token-producer or estimate-backed) is covered by the unit test
+	// TestTokenProducerDependencyValidation in the preciseprefixcache producer package.
 	"preciseConfigWithVLLMTokenProducer": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
@@ -295,14 +299,66 @@ schedulingProfiles:
     weight: 1.0
   - pluginRef: max-score-picker
 `,
+	"endpointAttributeBuiltinMetricsConfig": `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: endpoint-attribute-filter
+  name: running-requests-filter
+  parameters:
+    attribute: RunningRequestsSize
+    onMissing: Pass
+    algorithm:
+      type: threshold
+      threshold:
+        operator: LessThan
+        value: 64
+- type: endpoint-attribute-scorer
+  name: ea-queue-scorer
+  parameters:
+    attributeKey: WaitingQueueSize
+    algorithm:
+      type: linear_lower_is_better
+      normalization:
+        adaptiveRange: {}
+- type: endpoint-attribute-scorer
+  name: ea-kv-cache-scorer
+  parameters:
+    attributeKey: KVCacheUsagePercent
+    algorithm:
+      type: linear_lower_is_better
+      normalization:
+        fixedRange:
+          min: 0.0
+          max: 1.0
+- type: queue-scorer
+- type: running-requests-size-scorer
+- type: kv-cache-utilization-scorer
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: running-requests-filter
+  - pluginRef: ea-queue-scorer
+    weight: 2
+  - pluginRef: ea-kv-cache-scorer
+    weight: 2
+  - pluginRef: queue-scorer
+    weight: 1
+  - pluginRef: running-requests-size-scorer
+    weight: 1
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 1
+  - pluginRef: max-score-picker
+`,
 }
 
 func TestE2EConfigs_StartupParseSmoke(t *testing.T) {
 	for name, yaml := range e2eConfigsForSmoke {
 		t.Run(name, func(t *testing.T) {
-			// NewTestHarness fails the test if config-parse / plugin-init
+			// eppharness.NewTestHarness fails the test if config-parse / plugin-init
 			// errors — exactly what we want to catch before pushing.
-			_ = NewTestHarness(t.Context(), t, WithConfigText(yaml))
+			_ = eppharness.NewTestHarness(t.Context(), t, eppharness.WithConfigText(yaml))
 		})
 	}
 }

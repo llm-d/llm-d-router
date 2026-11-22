@@ -22,10 +22,12 @@ limitations under the License.
 package maxscore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -89,23 +91,24 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	logger := log.FromContext(ctx)
 	if logger.V(logutil.DEBUG).Enabled() {
 		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
-			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", fwksched.EndpointScores(scoredEndpoints))
 	}
 
-	slices.SortStableFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first
+	slices.SortFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first, ties by name
 		if i.Score > j.Score {
 			return -1
 		}
 		if i.Score < j.Score {
 			return 1
 		}
-		return 0
+		a, b := i.GetMetadata().GetNamespacedName(), j.GetMetadata().GetNamespacedName()
+		return cmp.Or(strings.Compare(a.Namespace, b.Namespace), strings.Compare(a.Name, b.Name))
 	})
 
 	// RotateScoredEndpoints provides deterministic round-robin tie-breaking
 	// for equal-score candidates. Rotating within each equal-score tier ensures
 	// traffic is distributed evenly without distortion from lower-scoring endpoints.
-	counter := picker.PickerRand.NextCounter()
+	counter := picker.PickerRand.NextCounter(picker.PoolKey(scoredEndpoints))
 	for start := 0; start < len(scoredEndpoints) && start < p.maxNumOfEndpoints; {
 		end := start + 1
 		for end < len(scoredEndpoints) && scoredEndpoints[end].Score == scoredEndpoints[start].Score {

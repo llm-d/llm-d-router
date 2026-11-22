@@ -14,6 +14,10 @@ For each candidate endpoint, the scorer reads the pod's current waiting-queue si
 - Pods with requests queued score between `0.5` and `0.0` — the more queued, the lower the score.
 - Pods with queue depth at or beyond `threshold` score `0.0`.
 
+Endpoints with no written metrics (nil metrics, or a zero `UpdateTime`) are left unscored.
+The scheduler treats an omitted score as a zero contribution from this plugin.
+An endpoint that has reported an empty waiting queue still scores `0.5`.
+
 ## How It Works
 
 The score is computed from the live `WaitingQueueSize` metric using a piecewise linear function:
@@ -60,7 +64,7 @@ schedulingProfiles:
 
 - Its maximum of 0.5 (vs. the usual 1.0 ceiling of other scorers) means its effective pull under weighted aggregation is roughly half its configured weight — raise weight to compensate.
 - Treats all queued requests equally regardless of size or remaining work — a queue of one long request scores the same as a queue of one short request.
-- Depends on accurate, fresh `WaitingQueueSize` metrics; stale or missing metrics make the scorer degenerate (all pods tied at `0.5`).
+- Depends on accurate, fresh `WaitingQueueSize` metrics; a stale value is scored like a current one.
 
 ## Related Documentation
 

@@ -18,37 +18,47 @@ package loadaware_test
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types" // Import config for thresholds
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
+func scraped(m fwkdl.Metrics) *fwkdl.Metrics {
+	m.UpdateTime = time.Now()
+	return &m
+}
+
 func TestLoadBasedScorer(t *testing.T) {
 	endpointA := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-a"}},
-		&fwkdl.Metrics{
+		scraped(fwkdl.Metrics{
 			WaitingQueueSize: 2,
-		},
+		}),
 		nil,
 	)
 	endpointB := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-b"}},
-		&fwkdl.Metrics{
+		scraped(fwkdl.Metrics{
 			WaitingQueueSize: 0,
-		},
+		}),
 		nil,
 	)
 	endpointC := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-c"}},
-		&fwkdl.Metrics{
+		scraped(fwkdl.Metrics{
 			WaitingQueueSize: 15,
-		},
+		}),
 		nil,
 	)
 
@@ -84,5 +94,46 @@ func TestLoadBasedScorer(t *testing.T) {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 		})
+	}
+}
+
+func TestNewLoadAwareLogsInvalidThreshold(t *testing.T) {
+	var lines []string
+	logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: logutil.DEFAULT})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	loadaware.NewLoadAware(ctx, -5)
+
+	if len(lines) != 1 || !strings.Contains(lines[0], "queueThreshold -5 should be positive") {
+		t.Errorf("expected one log line reporting the configured threshold -5, got %q", lines)
+	}
+}
+
+func TestLoadBasedScorerOmitsNeverScraped(t *testing.T) {
+	busy := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-busy"}},
+		scraped(fwkdl.Metrics{WaitingQueueSize: 2}),
+		nil,
+	)
+	idle := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-idle"}},
+		scraped(fwkdl.Metrics{WaitingQueueSize: 0}),
+		nil,
+	)
+	neverScraped := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-never-scraped"}},
+		&fwkdl.Metrics{},
+		nil,
+	)
+
+	scorer := loadaware.NewLoadAware(utils.NewTestContext(t), 10)
+	got := scorer.Score(context.Background(), nil, []scheduling.Endpoint{busy, idle, neverScraped})
+
+	want := map[scheduling.Endpoint]float64{
+		busy: 0.4,
+		idle: 0.5,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Unexpected output (-want +got): %v", diff)
 	}
 }

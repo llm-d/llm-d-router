@@ -93,7 +93,7 @@ Run [context-length-aware](../contextlengthaware/README.md),
 [session-affinity-filter](../../filter/sessionaffinity/README.md) in that order,
 then score and pick. For length filtering alone, set `enableFiltering: true` and
 profile weight `0`; missing range labels pass. Use the model's tokenizer via
-[token-producer](../../../requestcontrol/dataproducer/tokenizer/README.md).
+[token-producer](../../../requesthandling/dataproducer/tokenizer/README.md).
 
 A replacement session binding persists after the original Pod recovers. With
 `fallbackOnEmpty: false`, load filtering can reject requests when all candidates

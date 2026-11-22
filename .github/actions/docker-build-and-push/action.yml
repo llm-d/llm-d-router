@@ -63,6 +63,11 @@ runs:
       id: build
       uses: docker/build-push-action@v6
       with:
+        # Build from the job's checkout. Without a context the action uses the
+        # Git context for github.ref, which for a pull request is the merge ref
+        # resolved again at build time, so a re-run or a late approval builds a
+        # different tree than the checked-out manifests deploy.
+        context: .
         file: ${{ inputs.docker-file }}
         push: ${{ inputs.push == 'true' }}
         # SBOM attestations turn the image into a manifest list which the

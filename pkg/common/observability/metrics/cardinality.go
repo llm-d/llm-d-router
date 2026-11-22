@@ -19,6 +19,9 @@ package metrics
 import (
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
+
+	"github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // OverflowValue is the label value emitted by BoundedLabel.Bound once the cap
@@ -26,6 +29,13 @@ import (
 // label value from the cap-overflow value should keep their own sentinel and
 // gate empty inputs at the wrapper layer.
 const OverflowValue = "other"
+
+// MaxLabelValueLength is the longest request-derived label value BoundedLabel
+// admits. Longer values fold to OverflowValue. Prometheus keeps every admitted
+// value for the process lifetime and re-serializes it on every scrape, so a
+// client that sends one multi-megabyte model name would pin that string in
+// memory and on every scrape.
+const MaxLabelValueLength = 256
 
 // BoundedLabel caps the distinct values a Prometheus label may take. Values beyond
 // the cap collapse to OverflowValue. Values passed to Pin are always admitted and
@@ -53,14 +63,27 @@ func NewBoundedLabel(limit int) *BoundedLabel {
 }
 
 // Bound returns v if it is empty, pinned, already admitted, or there is room
-// to admit it; otherwise OverflowValue. A value, once admitted, always returns
+// to admit it; otherwise OverflowValue. A value that is not valid UTF-8 or is
+// longer than MaxLabelValueLength always returns OverflowValue: Prometheus
+// panics on a label value that is not valid UTF-8, and request headers can
+// carry arbitrary bytes. A value, once admitted, always returns
 // itself, so paired calls (e.g. running-request increment and decrement) stay
 // balanced. The one exception is a value that folded to OverflowValue and is
 // later pinned: pairs in flight across that instant can leave a small bounded
 // residue on the overflow series.
 func (b *BoundedLabel) Bound(v string) string {
+	bounded, _ := b.BoundWithOverflow(v)
+	return bounded
+}
+
+// BoundWithOverflow is Bound that also reports whether the cap folded v. A
+// caller-supplied OverflowValue that fits under the cap is not an overflow.
+func (b *BoundedLabel) BoundWithOverflow(v string) (string, bool) {
 	if v == "" {
-		return v
+		return v, false
+	}
+	if len(v) > MaxLabelValueLength || !utf8.ValidString(v) {
+		return OverflowValue, true
 	}
 	b.mu.RLock()
 	_, pin := b.pinned[v]
@@ -68,22 +91,22 @@ func (b *BoundedLabel) Bound(v string) string {
 	full := len(b.seen) >= b.limit
 	b.mu.RUnlock()
 	if pin || ok {
-		return v
+		return v, false
 	}
 	if full {
-		return OverflowValue
+		return OverflowValue, true
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.seen[v]; ok {
-		return v
+		return v, false
 	}
 	if len(b.seen) >= b.limit {
-		return OverflowValue
+		return OverflowValue, true
 	}
 	b.seen[v] = struct{}{}
-	return v
+	return v, false
 }
 
 // Pin marks v as always admitted without consuming a cap slot. Pins are never
@@ -104,23 +127,35 @@ func (b *BoundedLabel) Pin(v string) {
 // per-request, flow-control, and plugin metrics; without a cap, every distinct
 // fairness ID ever observed permanently grows the time series set. The cap
 // defaults to DefaultFairnessIDLabelLimit and collapses excess values to
-// OverflowValue. A cap of 0 folds every ID onto the single overflow series.
+// OverflowValue. The fallback ID for requests without one is pinned so it stays
+// visible after the cap fills. A cap of 0 folds every ID, including the
+// fallback, onto the single overflow series.
 const DefaultFairnessIDLabelLimit = 1000
 
 var fairnessLimiter atomic.Pointer[BoundedLabel]
 
 func init() {
-	fairnessLimiter.Store(NewBoundedLabel(DefaultFairnessIDLabelLimit))
+	SetFairnessIDLabelLimit(DefaultFairnessIDLabelLimit)
 }
 
 // SetFairnessIDLabelLimit configures the cap on distinct fairness_id label
 // values from startup configuration.
 func SetFairnessIDLabelLimit(limit int) {
-	fairnessLimiter.Store(NewBoundedLabel(limit))
+	limiter := NewBoundedLabel(limit)
+	if limit > 0 {
+		limiter.Pin(request.DefaultFairnessID)
+	}
+	fairnessLimiter.Store(limiter)
 }
 
 // BoundFairnessID caps the request-derived fairness_id label. Core code and
 // plugins that emit a fairness_id label call this so they share one cap.
 func BoundFairnessID(fairnessID string) string {
 	return fairnessLimiter.Load().Bound(fairnessID)
+}
+
+// BoundFairnessIDWithOverflow is BoundFairnessID that also reports whether the
+// cap folded the ID.
+func BoundFairnessIDWithOverflow(fairnessID string) (string, bool) {
+	return fairnessLimiter.Load().BoundWithOverflow(fairnessID)
 }

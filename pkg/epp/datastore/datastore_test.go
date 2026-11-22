@@ -46,7 +46,9 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkapix "github.com/llm-d/llm-d-router/test/framework/apix"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 var endpointPoolCmpOpts = []cmp.Option{
@@ -121,7 +123,7 @@ func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 
 func TestPool(t *testing.T) {
 	pool1Selector := map[string]string{"app": "vllm_v1"}
-	pool1 := testutil.MakeInferencePool("pool1").
+	pool1 := fwkgaie.MakeInferencePool("pool1").
 		Namespace("default").
 		Selector(pool1Selector).ObjRef()
 	tests := []struct {
@@ -197,14 +199,14 @@ func TestPool(t *testing.T) {
 func TestObjective(t *testing.T) {
 	chatModel := "chat"
 	tsModel := "food-review"
-	model1ts := testutil.MakeV1InferenceObjective("model1").ObjRef()
+	model1ts := fwkapix.MakeV1InferenceObjective("model1").ObjRef()
 	// Same model name as model1ts, different object name.
-	model2ts := testutil.MakeV1InferenceObjective("model2").ObjRef()
+	model2ts := fwkapix.MakeV1InferenceObjective("model2").ObjRef()
 	// Same model name as model1ts, newer timestamp
-	model1tsCritical := testutil.MakeV1InferenceObjective("model1").
+	model1tsCritical := fwkapix.MakeV1InferenceObjective("model1").
 		Priority(2).ObjRef()
 	// Same object name as model2ts, different model name.
-	model2chat := testutil.MakeV1InferenceObjective(model2ts.Name).ObjRef()
+	model2chat := fwkapix.MakeV1InferenceObjective(model2ts.Name).ObjRef()
 
 	tests := []struct {
 		name           string
@@ -598,7 +600,7 @@ func TestTargetPortsChange(t *testing.T) {
 				ds := NewDatastore(ctx, epf)
 
 				// Set initial pool with multiple target ports
-				initialPool := testutil.MakeInferencePool("test-pool").
+				initialPool := fwkgaie.MakeInferencePool("test-pool").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).ObjRef()
 				initialPool.Spec.TargetPorts = test.initialTargetPorts
@@ -614,7 +616,7 @@ func TestTargetPortsChange(t *testing.T) {
 				}
 
 				// Update pool with different target ports
-				updatedPool := testutil.MakeInferencePool("test-pool").
+				updatedPool := fwkgaie.MakeInferencePool("test-pool").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).ObjRef()
 				updatedPool.Spec.TargetPorts = test.updatedTargetPorts
@@ -1183,7 +1185,7 @@ func TestPodUpdateOrAddIfNotExist_ConcurrentPoolSet(t *testing.T) {
 			ds := NewDatastore(ctx, epf)
 
 			pool := poolutil.InferencePoolToEndpointPool(
-				testutil.MakeInferencePool("pool1").
+				fwkgaie.MakeInferencePool("pool1").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).
 					TargetPorts(8000).ObjRef(),
@@ -1452,6 +1454,28 @@ func TestEndpointDelete_Existing(t *testing.T) {
 	assert.Empty(t, ds.PodList(AllPodsPredicate))
 }
 
+// TestPodsSnapshotCurrent_CachedBetweenMutations verifies that the pods snapshot backing
+// PodList is reused across calls that fall between mutations, and rebuilt once a mutation
+// (EndpointUpsert/EndpointDelete) changes the pods map (#3078).
+func TestPodsSnapshotCurrent_CachedBetweenMutations(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}).(*datastore)
+	id1 := types.NamespacedName{Name: "ep1", Namespace: "default"}
+	id2 := types.NamespacedName{Name: "ep2", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id1})
+
+	first := ds.podsSnapshotCurrent()
+	second := ds.podsSnapshotCurrent()
+	require.Len(t, first, 1)
+	assert.Same(t, &first[0], &second[0], "snapshot should be reused when the pods map has not changed")
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id2})
+
+	third := ds.podsSnapshotCurrent()
+	require.Len(t, third, 2, "snapshot should be rebuilt after a mutation")
+}
+
 func TestEndpointDelete_Missing(t *testing.T) {
 	ctx := context.Background()
 	ds := NewDatastore(ctx, &mockEndpointFactory{})
@@ -1486,7 +1510,7 @@ func TestPodUpdateOrAddIfNotExist_RegistrationDropReturnsError(t *testing.T) {
 // equal to the one already stored (#2060).
 func TestPoolSet_ResyncRetriedAfterDropError(t *testing.T) {
 	ctx := context.Background()
-	readyPod := testutil.FromBase(pod1).ReadyCondition().ObjRef()
+	readyPod := fwkk8s.FromBase(pod1).ReadyCondition().ObjRef()
 	fakeClient := fake.NewClientBuilder().WithObjects(readyPod).Build()
 
 	fail := true
@@ -1522,6 +1546,7 @@ func TestUpsertEndpoint_ConcurrentStoreDuringNilAppliesMetadata(t *testing.T) {
 		NewEndpointFn: func(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 			staleMeta := &fwkdl.EndpointMetadata{ID: id, Address: "10.0.0.1"}
 			ds.pods.Store(id, fwkdl.NewEndpoint(staleMeta, fwkdl.NewMetrics()))
+			ds.podsVersion.Add(1)
 			return nil
 		},
 	}

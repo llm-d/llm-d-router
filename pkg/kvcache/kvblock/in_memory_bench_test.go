@@ -86,6 +86,20 @@ func BenchmarkInMemoryIndexLookup(b *testing.B) {
 	}
 }
 
+// BenchmarkInMemoryIndexClearUnseenPod measures clearing a pod the index never
+// held, as a subscriber does before it loads a pod's first snapshot.
+func BenchmarkInMemoryIndexClearUnseenPod(b *testing.B) {
+	idx, _ := populateIndex(b, 1<<20, 8)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := idx.Clear(ctx, "10.1.0.1:8000"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkInMemoryIndexAdd measures ingesting one BlockStored event's worth
 // of keys (64 blocks) for a single pod entry, over a warm index.
 func BenchmarkInMemoryIndexAdd(b *testing.B) {

@@ -222,6 +222,25 @@ func TestErrorConstants(t *testing.T) {
 	}
 }
 
+func TestModelServerStatusCode(t *testing.T) {
+	tests := map[string]string{
+		"101": "",
+		"200": "",
+		"202": "",
+		"304": "",
+		"400": ModelServerClientError,
+		"499": ModelServerClientError,
+		"500": ModelServerError,
+		"504": ModelServerError,
+		"abc": ModelServerError,
+	}
+	for status, want := range tests {
+		if got := ModelServerStatusCode(status); got != want {
+			t.Errorf("ModelServerStatusCode(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
 func TestBuildErrResponse(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -261,6 +280,12 @@ func TestBuildErrResponse(t *testing.T) {
 			err:            Error{Code: PreconditionFailed, Msg: "revision mismatch"},
 			wantHTTPStatus: envoyTypePb.StatusCode_PreconditionFailed,
 			wantBody:       `{"error":{"message":"revision mismatch","type":"invalid_request_error","code":412}}`,
+		},
+		{
+			name:           "PayloadTooLarge returns 413",
+			err:            Error{Code: PayloadTooLarge, Msg: "request body too large"},
+			wantHTTPStatus: envoyTypePb.StatusCode_PayloadTooLarge,
+			wantBody:       `{"error":{"message":"request body too large","type":"invalid_request_error","code":413}}`,
 		},
 		{
 			name:           "ResourceExhausted returns 429",
@@ -312,6 +337,13 @@ func TestBuildErrResponse(t *testing.T) {
 			apiType:        reqcommon.APITypeMessages,
 			wantHTTPStatus: envoyTypePb.StatusCode_ServiceUnavailable,
 			wantBody:       `{"type":"error","error":{"type":"overloaded_error","message":"no endpoints"}}`,
+		},
+		{
+			name:           "Messages API PayloadTooLarge maps to request_too_large",
+			err:            Error{Code: PayloadTooLarge, Msg: "request body too large"},
+			apiType:        reqcommon.APITypeMessages,
+			wantHTTPStatus: envoyTypePb.StatusCode_PayloadTooLarge,
+			wantBody:       `{"type":"error","error":{"type":"request_too_large","message":"request body too large"}}`,
 		},
 		{
 			name:        "plain error returns gRPC error",

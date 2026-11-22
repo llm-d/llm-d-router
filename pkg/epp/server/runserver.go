@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -32,6 +33,7 @@ import (
 	_ "google.golang.org/grpc/encoding/gzip" // Register gzip compressor for gRPC.
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,7 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
@@ -68,6 +70,7 @@ type ExtProcServerRunner struct {
 	EnableCertReload                 bool
 	TLSMinVersion                    uint16
 	TLSCipherSuites                  []uint16
+	ClientCAs                        *x509.CertPool
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
@@ -76,8 +79,10 @@ type ExtProcServerRunner struct {
 	PriorityBandControlPlane         contracts.PriorityBandControlPlane
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
+	MaxRequestBodySize               int
 	EnableGRPCStreamMetrics          bool
 	EmitEndpointScores               bool
+	EnableToolCallingTelemetry       bool
 
 	// EvictChannelLookup, when set, enables the ext_proc server to terminate in-flight requests
 	// selected for eviction by flow control. See docs/flow-control-eviction.md.
@@ -86,7 +91,11 @@ type ExtProcServerRunner struct {
 	// Responders, when set, let EPP answer a request itself instead of routing it to a model
 	// server. Each is asked in turn before an endpoint is selected, and the first one to
 	// return a response ends the exchange.
-	Responders []fwkrc.Responder
+	Responders []fwkrh.Responder
+
+	// keepaliveTime and keepaliveTimeout are overridden only by tests.
+	keepaliveTime    time.Duration
+	keepaliveTimeout time.Duration
 }
 
 // NewExtProcServerRunner builds a runner from the runtime options plus the dependencies the
@@ -117,6 +126,7 @@ func NewExtProcServerRunner(
 		EnableCertReload:                 opts.EnableCertReload,
 		TLSMinVersion:                    opts.TLSMinVersionValue(),
 		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
+		ClientCAs:                        opts.ClientCAPool(),
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
@@ -125,8 +135,12 @@ func NewExtProcServerRunner(
 		PriorityBandControlPlane:         priorityBandControlPlane,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		MaxRequestBodySize:               opts.MaxRequestBodySize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
+		EnableToolCallingTelemetry:       opts.EnableToolCallingTelemetry,
+		keepaliveTime:                    grpcKeepaliveTime,
+		keepaliveTimeout:                 grpcKeepaliveTimeout,
 	}
 }
 
@@ -205,6 +219,29 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
+// Keepalive closes dead ext_proc connections so their streams end and release in-flight load.
+const (
+	grpcKeepaliveTime    = 30 * time.Second // ping the proxy after this long without activity
+	grpcKeepaliveTimeout = 20 * time.Second // close the connection if the ping is not acknowledged
+	grpcKeepaliveMinTime = 10 * time.Second // fastest client ping rate the server accepts
+)
+
+func keepaliveServerOptions(pingAfter, ackTimeout time.Duration) []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.KeepaliveParams(keepalive.ServerParameters{Time: pingAfter, Timeout: ackTimeout}),
+		KeepaliveEnforcementPolicy(),
+	}
+}
+
+// KeepaliveEnforcementPolicy accepts the proxy's HTTP/2 keepalive pings, including on idle
+// connections. The default policy drops clients that ping more often than every 5 minutes.
+func KeepaliveEnforcementPolicy() grpc.ServerOption {
+	return grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+		MinTime:             grpcKeepaliveMinTime,
+		PermitWithoutStream: true,
+	})
+}
+
 // AsRunnable returns a Runnable that can be used to start the ext-proc gRPC server.
 // The runnable implements LeaderElectionRunnable with leader election disabled.
 func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
@@ -252,7 +289,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			}
 		}
 
-		logger.Info("server TLS", "tls", r.SecureServing, "cert_path", r.CertPath)
+		logger.Info("server TLS", "tls", r.SecureServing, "cert_path", r.CertPath, "client_ca", r.ClientCAs != nil)
 
 		var grpcOpts []grpc.ServerOption
 		if creds != nil {
@@ -268,6 +305,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			metrics.RegisterGRPCStreamMetrics()
 			grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(streamMetricsInterceptor))
 		}
+		grpcOpts = append(grpcOpts, keepaliveServerOptions(r.keepaliveTime, r.keepaliveTimeout)...)
 		// Note: gzip compressor is registered via blank import above.
 
 		srv = grpc.NewServer(grpcOpts...)
@@ -278,6 +316,8 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
+		extProcServer.SetToolCallingTelemetryEnabled(r.EnableToolCallingTelemetry)
+		extProcServer.SetMaxRequestBodySize(r.MaxRequestBodySize)
 		extProcServer.SetResponders(r.Responders)
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
@@ -302,9 +342,9 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 	}))
 }
 
-// applyTLSOverrides sets MinVersion and CipherSuites on cfg. MinVersion is a
-// literal so gosec/CodeQL can resolve it statically; the configured value
-// applies only as an upgrade.
+// applyTLSOverrides sets MinVersion, CipherSuites and client certificate
+// verification on cfg. MinVersion is a literal so gosec/CodeQL can resolve it
+// statically; the configured value applies only as an upgrade.
 func (r *ExtProcServerRunner) applyTLSOverrides(cfg *tls.Config) {
 	cfg.MinVersion = tls.VersionTLS12
 	if r.TLSMinVersion > tls.VersionTLS12 {
@@ -312,5 +352,9 @@ func (r *ExtProcServerRunner) applyTLSOverrides(cfg *tls.Config) {
 	}
 	if len(r.TLSCipherSuites) > 0 {
 		cfg.CipherSuites = r.TLSCipherSuites
+	}
+	if r.ClientCAs != nil {
+		cfg.ClientCAs = r.ClientCAs
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 }

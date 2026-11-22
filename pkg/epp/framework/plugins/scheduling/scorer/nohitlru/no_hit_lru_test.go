@@ -27,6 +27,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -528,6 +529,53 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 	})
 }
 
+func TestNoHitLRURanksUsedEndpointsAmongCandidates(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	t.Run("LRU tracks endpoints that are not candidates", func(t *testing.T) {
+		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
+		endpointA := newColdNS("pod-a")
+		endpointB := newColdNS("pod-b")
+		endpointC := newColdNS("pod-c")
+		// pod-old-1 and pod-old-2 served cold requests before they left the pool.
+		seeds := []scheduling.Endpoint{newColdNS("pod-old-1"), newColdNS("pod-old-2"), endpointA, endpointB, endpointC}
+		for i, endpoint := range seeds {
+			seedCold(ctx, scorer, endpoint, fmt.Sprintf("seed-%d", i))
+		}
+
+		got := scorer.Score(ctx, &scheduling.InferenceRequest{RequestID: "cold"}, []scheduling.Endpoint{endpointA, endpointB, endpointC})
+		want := map[scheduling.Endpoint]float64{endpointA: 1.0, endpointB: 0.5, endpointC: 0.0}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Unexpected scores (-want +got): %v", diff)
+		}
+	})
+
+	t.Run("prefill and decode profiles share the LRU", func(t *testing.T) {
+		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
+		prefillA := newColdNS("prefill-a")
+		prefillB := newColdNS("prefill-b")
+		decodeA := newColdNS("decode-a")
+		decodeB := newColdNS("decode-b")
+		for i, pair := range [][]scheduling.Endpoint{{prefillA, decodeA}, {prefillB, decodeB}} {
+			req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("pd-%d", i)}
+			scorer.Score(ctx, req, pair)
+			_ = scorer.PreRequest(ctx, req, &scheduling.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*scheduling.ProfileRunResult{
+					"prefill": {TargetEndpoints: []scheduling.Endpoint{pair[0]}},
+					"decode":  {TargetEndpoints: []scheduling.Endpoint{pair[1]}},
+				},
+			})
+		}
+
+		got := scorer.Score(ctx, &scheduling.InferenceRequest{RequestID: "prefill-cold"}, []scheduling.Endpoint{prefillA, prefillB})
+		want := map[scheduling.Endpoint]float64{prefillA: 1.0, prefillB: 0.0}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Unexpected prefill scores (-want +got): %v", diff)
+		}
+	})
+}
+
 // dumpedLRUState mirrors the unexported noHitLRUState; keep the JSON tags in sync.
 type dumpedLRUState struct {
 	Endpoints      []string `json:"endpoints"`
@@ -657,4 +705,8 @@ func TestDumpStateConcurrentWithPreRequest(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func (h *fakeHandle) SchedulingProfileNames() sets.Set[string] {
+	return nil
 }

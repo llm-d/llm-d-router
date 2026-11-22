@@ -27,6 +27,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -98,6 +99,12 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
+	// Expose every outcome series at zero before the first poll, so a first
+	// error or timeout after a healthy run is a 0 -> 1 step that rate() and
+	// increase() can see, rather than a series born at 1.
+	for _, d := range dispatchers {
+		metrics.InitDataLayerPollMetrics(d.TypedName().Type)
+	}
 	go c.run(ctx, ticker, ep, dispatchers)
 	return nil
 }
@@ -120,23 +127,123 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 	}()
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().GetIPAddress())
 
+	statuses := make([]pollStatusRecorder, len(dispatchers))
+	for i, disp := range dispatchers {
+		statuses[i].key = fwkdl.PollStatusDataKey(disp.TypedName().Name)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.Channel():
-			for _, disp := range dispatchers {
+			for i, disp := range dispatchers {
 				if ctx.Err() != nil {
 					return
 				}
+				// Only polls that run are recorded, so a source with a longer
+				// interval does not report a success on the ticks it skips.
+				if interval, ok := disp.(*intervalDispatcher); ok {
+					if !interval.due() {
+						continue
+					}
+					// due has advanced the countdown for this tick, and the
+					// wrapper's Dispatch would advance it again.
+					disp = interval.PollingDispatcher
+				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
-				if err := disp.Dispatch(dispCtx, ep); err != nil {
-					tn := disp.TypedName()
+				deadline, _ := dispCtx.Deadline()
+				start := time.Now()
+				err := disp.Dispatch(dispCtx, ep)
+				end := time.Now()
+				cancel()
+				// Classified against the same instant the duration uses, so a
+				// deadline that passes after Dispatch returned is not charged
+				// to this poll.
+				timedOut := !end.Before(deadline)
+				// A poll cut short by Stop says nothing about the endpoint.
+				if ctx.Err() != nil {
+					return
+				}
+				tn := disp.TypedName()
+				metrics.RecordDataLayerPoll(tn.Type, pollOutcome(err, timedOut), end.Sub(start))
+				if err != nil {
 					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
 				}
-				cancel()
+				statuses[i].record(ep, err, end)
 			}
 		}
 	}
 }
+
+// pollOutcome classifies a poll the parent context did not cancel. An expired
+// deadline takes precedence over the return value, so a nil or unrelated error
+// returned after the deadline counts as a timeout. The poll error counter and
+// PollStatus keep following the returned error alone.
+func pollOutcome(err error, timedOut bool) string {
+	switch {
+	case timedOut:
+		return metrics.DataLayerPollOutcomeTimeout
+	case err != nil:
+		return metrics.DataLayerPollOutcomeError
+	default:
+		return metrics.DataLayerPollOutcomeSuccess
+	}
+}
+
+// pollStatusRecorder tracks one source's failure run for one endpoint and
+// writes it to the endpoint as a PollStatus attribute. It writes only when the
+// status changes, so a source that keeps succeeding costs nothing.
+type pollStatusRecorder struct {
+	key    fwkplugin.DataKey
+	status fwkdl.PollStatus
+}
+
+func (r *pollStatusRecorder) record(ep fwkdl.Endpoint, err error, now time.Time) {
+	if err == nil {
+		if r.status.ConsecutiveFailures == 0 {
+			return
+		}
+		r.status = fwkdl.PollStatus{}
+	} else {
+		if r.status.ConsecutiveFailures == 0 {
+			r.status.FailingSince = now
+		}
+		r.status.ConsecutiveFailures++
+	}
+	// AttributeMap does not require Put to clone, so pass a copy the next
+	// record cannot modify.
+	status := r.status
+	ep.GetAttributes().Put(r.key, &status)
+}
+
+const pollStatusProducerName = "datalayer-poll-status"
+
+// pollStatusProducer declares the PollStatus the collector records for each
+// polling source in the data layer configuration.
+type pollStatusProducer struct {
+	keys map[fwkplugin.DataKey]any
+}
+
+// NewPollStatusProducer returns a plugin that declares the PollStatus of each
+// polling source in cfg. Added to the plugin handle before data dependencies
+// are validated, it makes a consumer of a source's PollStatus fail startup
+// unless the runtime polls that source.
+func NewPollStatusProducer(cfg *Config) fwkplugin.ProducerPlugin {
+	keys := map[fwkplugin.DataKey]any{}
+	if cfg != nil {
+		for _, src := range cfg.Sources {
+			if _, ok := src.Plugin.(fwkdl.PollingDispatcher); ok {
+				keys[fwkdl.PollStatusDataKey(src.Plugin.TypedName().Name)] = &fwkdl.PollStatus{}
+			}
+		}
+	}
+	return &pollStatusProducer{keys: keys}
+}
+
+func (p *pollStatusProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: pollStatusProducerName, Name: pollStatusProducerName}
+}
+
+func (p *pollStatusProducer) Produces() map[fwkplugin.DataKey]any { return p.keys }

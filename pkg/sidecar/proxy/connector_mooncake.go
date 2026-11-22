@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Mooncake transfer fields
@@ -39,87 +40,103 @@ const requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
 
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
-	_, requestData, ok := s.readJSONBody(r, w)
+	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
-	bootstrapAddr := "http://" + net.JoinHostPort(extractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
-
-	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
+	dpRank, prefillKV, decodeKV, err := s.prepareMooncakeKVParams(r.Context(), prefillPodHostPort)
 	if err != nil {
-		s.logger.Error(err, "failed to query mooncake engine ID", "bootstrap_addr", bootstrapAddr)
-		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		logger.Error(jsonErrorForLog(err), "failed to query mooncake engine ID", "prefill", prefillPodHostPort)
+		if err := errorBadGateway(w, r); err != nil {
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	// golang map randomnize key(rankid) order to spread prefill load for multi-ranks.
-	var dpRank, engineID string
-	for dpRank, engineID = range engineMap {
-		break
-	}
-
-	transferID := "xfer-" + newUUID()
-	s.logger.V(logging.TRACE).Info("mooncake protocol info",
-		"transfer_id", transferID,
-		"bootstrap_addr", bootstrapAddr,
-		"dp_rank", dpRank,
-		"engine_id", engineID)
 
 	// Build prefill request body
 	prefillData := maps.Clone(requestData)
-	prefillData[reqcommon.FieldKVTransferParams] = map[string]any{
-		reqcommon.FieldDoRemotePrefill: false,
-		reqcommon.FieldDoRemoteDecode:  true,
-		requestFieldTransferID:         transferID,
-	}
+	prefillData[reqcommon.FieldKVTransferParams] = prefillKV
+	// The EPP may forward the rendered prompt as kv_transfer_params.prompt_token_ids;
+	// both hops replace kv_transfer_params, so carry the IDs or both pods re-tokenize.
+	promptTokenIDs := s.clientPromptTokenIDs(requestData)
+	setPromptTokenIDs(prefillKV, promptTokenIDs)
 	// update fields from original body; return asap.
 	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		if err := errorJSONInvalid(w, r, err); err != nil {
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", logging.HTTPBodyKey, string(prefillBody))
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("Prefill request", logBodyBytesKey, len(prefillBody))
 	}
 
 	// Build decode request body
 	decodeData := maps.Clone(requestData)
-	decodeData[reqcommon.FieldKVTransferParams] = map[string]any{
-		reqcommon.FieldDoRemotePrefill:  true,
-		reqcommon.FieldDoRemoteDecode:   false,
-		requestFieldTransferID:          transferID,
-		requestFieldRemoteBootstrapAddr: bootstrapAddr,
-		reqcommon.FieldRemoteEngineID:   engineID,
-	}
+	decodeData[reqcommon.FieldKVTransferParams] = decodeKV
+	setPromptTokenIDs(decodeKV, promptTokenIDs)
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		if err := errorJSONInvalid(w, r, err); err != nil {
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Decode request", logging.HTTPBodyKey, string(decodeBody))
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("Decode request", logBodyBytesKey, len(decodeBody))
 	}
 
 	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
 		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
-	})
+	}, toolFields)
+}
+
+func (s *Server) prepareMooncakeKVParams(ctx context.Context, prefillPodHostPort string) (dpRank string, prefillKV, decodeKV map[string]any, err error) {
+	bootstrapAddr := "http://" + net.JoinHostPort(extractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
+	engineMap, err := s.getMooncakeEngineMap(ctx, prefillPodHostPort, bootstrapAddr)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	// Go map iteration randomizes rank selection to spread prefill load across multi-rank pods.
+	var engineID string
+	for dpRank, engineID = range engineMap {
+		break
+	}
+	transferID := "xfer-" + newUUID()
+	log.FromContext(ctx).V(logging.TRACE).Info("mooncake protocol info",
+		"transfer_id", transferID,
+		"bootstrap_addr", bootstrapAddr,
+		"dp_rank", dpRank,
+		"engine_id", engineID)
+
+	prefillKV = map[string]any{
+		reqcommon.FieldDoRemotePrefill: false,
+		reqcommon.FieldDoRemoteDecode:  true,
+		requestFieldTransferID:         transferID,
+	}
+	decodeKV = map[string]any{
+		reqcommon.FieldDoRemotePrefill:  true,
+		reqcommon.FieldDoRemoteDecode:   false,
+		requestFieldTransferID:          transferID,
+		requestFieldRemoteBootstrapAddr: bootstrapAddr,
+		reqcommon.FieldRemoteEngineID:   engineID,
+	}
+	return dpRank, prefillKV, decodeKV, nil
 }
 
 // getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.

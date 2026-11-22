@@ -18,6 +18,7 @@ package server
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -85,4 +86,19 @@ func TestApplyTLSOverridesPreservesExistingConfig(t *testing.T) {
 	require.Equal(t, []string{"h2"}, cfg.NextProtos)
 	require.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion)
 	require.Equal(t, []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, cfg.CipherSuites)
+}
+
+// A client CA on the runner turns on client certificate verification. Without
+// one the listener keeps accepting any client, which is the default.
+func TestApplyTLSOverridesClientCA(t *testing.T) {
+	cfg := &tls.Config{}
+	(&ExtProcServerRunner{}).applyTLSOverrides(cfg)
+	require.Nil(t, cfg.ClientCAs)
+	require.Equal(t, tls.NoClientCert, cfg.ClientAuth)
+
+	pool := x509.NewCertPool()
+	cfg = &tls.Config{}
+	(&ExtProcServerRunner{ClientCAs: pool}).applyTLSOverrides(cfg)
+	require.Same(t, pool, cfg.ClientCAs)
+	require.Equal(t, tls.RequireAndVerifyClientCert, cfg.ClientAuth)
 }

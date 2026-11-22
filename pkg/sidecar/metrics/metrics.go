@@ -23,6 +23,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -31,17 +32,12 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/version"
 )
 
 // subsystem is the Prometheus subsystem for the disaggregation sidecar metrics.
 const subsystem = "llm_d_disagg_sidecar"
-
-// Stage labels for encode/prefill/decode error attribution.
-const (
-	StageEncode  = "encode"
-	StagePrefill = "prefill"
-	StageDecode  = "decode"
-)
 
 var (
 	requestsTotal = prometheus.NewCounterVec(
@@ -97,23 +93,55 @@ var (
 		},
 		[]string{"stage"},
 	)
+
+	buildInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: subsystem,
+			Name:      "info",
+			Help:      metricsutil.HelpMsgWithStability("General information of the current build of the disaggregation sidecar.", compbasemetrics.ALPHA),
+		},
+		[]string{metricsutil.BuildInfoLabelCommit, metricsutil.BuildInfoLabelBuildRef},
+	)
+
+	toolCallingFieldStatusTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: subsystem,
+			Name:      "tool_calling_field_status_total",
+			Help:      metricsutil.HelpMsgWithStability("Tool-calling request field outcomes by component, direction, field, and status.", compbasemetrics.ALPHA),
+		},
+		[]string{
+			toolcalling.MetricLabelComponent,
+			toolcalling.MetricLabelDirection,
+			toolcalling.MetricLabelField,
+			toolcalling.MetricLabelStatus,
+		},
+	)
 )
 
 var registerOnce sync.Once
 
 // Register registers the sidecar metrics with controller-runtime's registry,
-// which the /metrics endpoint serves. Safe to call more than once.
+// which the /metrics endpoint serves, and records the build info. Safe to call
+// more than once.
 func Register() {
 	registerOnce.Do(func() {
 		ctrlmetrics.Registry.MustRegister(
+			buildInfo,
 			requestsTotal,
 			disaggRequestsTotal,
 			encodeDuration,
 			prefillDuration,
 			decodeDuration,
 			errorsTotal,
+			toolCallingFieldStatusTotal,
 		)
+		RecordBuildInfo(version.CommitSHA, version.BuildRef)
 	})
+}
+
+// RecordBuildInfo sets the build info gauge for the given commit and build ref.
+func RecordBuildInfo(commit, buildRef string) {
+	buildInfo.WithLabelValues(commit, buildRef).Set(1)
 }
 
 // RecordRequest counts a request on an intercepted inference API path for the
@@ -129,22 +157,52 @@ func RecordDisagg(disaggType string) {
 	disaggRequestsTotal.WithLabelValues(disaggType).Inc()
 }
 
-// RecordEncodeDuration records encode stage latency.
-func RecordEncodeDuration(d time.Duration) {
-	encodeDuration.Observe(d.Seconds())
+// RecordEncodeDuration records encode stage latency and attaches the request's
+// trace as an exemplar, so a point on the latency graph links to its trace.
+func RecordEncodeDuration(ctx context.Context, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, encodeDuration, d.Seconds())
 }
 
-// RecordPrefillDuration records prefill stage latency.
-func RecordPrefillDuration(d time.Duration) {
-	prefillDuration.Observe(d.Seconds())
+// RecordPrefillDuration records prefill stage latency and attaches the
+// request's trace as an exemplar.
+func RecordPrefillDuration(ctx context.Context, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, prefillDuration, d.Seconds())
 }
 
-// RecordDecodeDuration records decode stage latency.
-func RecordDecodeDuration(d time.Duration) {
-	decodeDuration.Observe(d.Seconds())
+// RecordDecodeDuration records decode stage latency and attaches the request's
+// trace as an exemplar.
+func RecordDecodeDuration(ctx context.Context, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, decodeDuration, d.Seconds())
 }
 
 // RecordError counts a stage error (StageEncode, StagePrefill, or StageDecode).
 func RecordError(stage string) {
 	errorsTotal.WithLabelValues(stage).Inc()
+}
+
+const toolCallingComponent = "routing_sidecar"
+
+// RecordToolCallingFieldStatuses counts observed outcomes with bounded labels.
+func RecordToolCallingFieldStatuses(statuses []toolcalling.FieldStatus) {
+	for _, result := range statuses {
+		if !result.Observed {
+			continue
+		}
+		switch result.Field {
+		case toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat:
+		default:
+			continue
+		}
+		switch result.Status {
+		case toolcalling.FieldStatusPreserved, toolcalling.FieldStatusChanged, toolcalling.FieldStatusDropped, toolcalling.FieldStatusRejected:
+		default:
+			continue
+		}
+		toolCallingFieldStatusTotal.WithLabelValues(
+			toolCallingComponent,
+			toolcalling.DirectionRequest,
+			string(result.Field),
+			string(result.Status),
+		).Inc()
+	}
 }

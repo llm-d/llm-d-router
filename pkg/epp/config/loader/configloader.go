@@ -20,7 +20,9 @@ package loader
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -166,6 +168,11 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
 
+	dataProducerPhases, err := buildDataProducerPhases(rawConfig.RequestHandler.DataProducers, handle)
+	if err != nil {
+		return nil, fmt.Errorf("data producer phases build failed: %w", err)
+	}
+
 	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
 	if !ok {
 		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.FlowControl.SaturationDetector.PluginRef)
@@ -182,6 +189,8 @@ func InstantiateAndConfigure(
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
 		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
+		ComposeFairnessIDs: rawConfig.RequestHandler.ComposeFairnessIDs,
+		DataProducerPhases: dataProducerPhases,
 	}, nil
 }
 
@@ -333,7 +342,7 @@ func buildSchedulerConfig(
 	profiles := make(map[string]fwksched.SchedulerProfile)
 
 	for _, cfgProfile := range configProfiles {
-		fwProfile := scheduling.NewSchedulerProfile()
+		fwProfile := scheduling.NewSchedulerProfile().WithName(cfgProfile.Name)
 
 		for _, pluginRef := range cfgProfile.Plugins {
 			plugin := handle.Plugin(pluginRef.PluginRef)
@@ -403,6 +412,25 @@ func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) 
 	return config, nil
 }
 
+// buildDataProducerPhases places each DataProducer listed in
+// requestHandler.dataProducers in fwkrh.DataProducerPhaseRequestHandling,
+// keyed by plugin name. datalayer.ResolveDataProducerPhases places the rest.
+func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle fwkplugin.Handle) (map[string]fwkrh.DataProducerPhase, error) {
+	phases := make(map[string]fwkrh.DataProducerPhase, len(rawConfigs))
+	allPlugins := handle.GetAllPluginsWithNames()
+	for _, dp := range rawConfigs {
+		plugin, ok := allPlugins[dp.PluginRef]
+		if !ok {
+			return nil, fmt.Errorf("the configured data producer %q is not loaded", dp.PluginRef)
+		}
+		if _, ok := plugin.(fwkrh.DataProducer); !ok {
+			return nil, fmt.Errorf("the plugin %q is not a data producer plugin", dp.PluginRef)
+		}
+		phases[dp.PluginRef] = fwkrh.DataProducerPhaseRequestHandling
+	}
+	return phases, nil
+}
+
 func buildParserRegistry(rawParserConfigs []configapiv1.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
 	if len(rawParserConfigs) == 0 {
 		return nil, errors.New("no parsers configured")
@@ -469,6 +497,31 @@ func buildDataLayerConfig(rawDataConfig *configapiv1.DataLayerConfig, handle fwk
 			return nil, fmt.Errorf("the plugin %s is not a fwkdl.DataSource", source.PluginRef)
 		}
 	}
+	if err := checkCoordination(cfg.Syncer, handle); err != nil {
+		return nil, err
+	}
 	handle.SetCrossReplicaSyncer(cfg.Syncer)
 	return &cfg, nil
+}
+
+// checkCoordination rejects a syncer that cannot serve GetOrSet when a
+// configured plugin requires it, so the mismatch fails startup instead of
+// every coordinated request.
+func checkCoordination(syncer fwkdl.CrossReplicaSyncer, handle fwkplugin.Handle) error {
+	checker, ok := syncer.(fwkdl.CoordinationChecker)
+	if !ok {
+		return nil
+	}
+	unsupported := checker.CheckCoordination()
+	if unsupported == nil {
+		return nil
+	}
+	plugins := handle.GetAllPluginsWithNames()
+	for _, name := range slices.Sorted(maps.Keys(plugins)) {
+		if consumer, ok := plugins[name].(fwkdl.CoordinationConsumer); ok && consumer.RequiresCoordination() {
+			return fmt.Errorf("plugin %s requires request-level coordination, which cross-replica syncer %s does not provide: %w",
+				name, syncer.TypedName().Name, unsupported)
+		}
+	}
+	return nil
 }

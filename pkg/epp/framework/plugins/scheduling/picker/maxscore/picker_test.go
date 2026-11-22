@@ -103,6 +103,37 @@ func TestEqualScoreDistribution_WithLowerScoredCandidates(t *testing.T) {
 	}
 }
 
+func TestEqualScoreDistribution_PoolsSharingPicker(t *testing.T) {
+	// Decode and prefill share one picker in P/D; each pool must still alternate.
+	newPool := func(prefix string) []fwksched.Endpoint {
+		return []fwksched.Endpoint{
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: prefix + "-0"}}, nil, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: prefix + "-1"}}, nil, nil),
+		}
+	}
+	decode, prefill := newPool("decode"), newPool("prefill")
+	picker := NewMaxScorePicker(1)
+	picks := make(map[string]int)
+
+	pick := func(pool []fwksched.Endpoint, reversed bool) {
+		scored := []*fwksched.ScoredEndpoint{{Endpoint: pool[0], Score: 50}, {Endpoint: pool[1], Score: 50}}
+		if reversed {
+			scored[0], scored[1] = scored[1], scored[0]
+		}
+		picks[picker.Pick(context.Background(), scored).TargetEndpoints[0].GetMetadata().ID.Name]++
+	}
+	for i := range 100 {
+		pick(decode, i%3 == 0)
+		pick(prefill, i%5 == 0)
+	}
+
+	for _, name := range []string{"decode-0", "decode-1", "prefill-0", "prefill-1"} {
+		if picks[name] != 50 {
+			t.Errorf("%s got %d of 100 requests, want 50; picks=%v", name, picks[name], picks)
+		}
+	}
+}
+
 func TestEqualScoreDistribution_MultiEndpointsTieStraddlingCutoff(t *testing.T) {
 	// Verifies that when maxNumOfEndpoints > 1 and a tie group straddles the cutoff boundary,
 	// the tied candidates are rotated evenly across requests to fill the remaining slots.

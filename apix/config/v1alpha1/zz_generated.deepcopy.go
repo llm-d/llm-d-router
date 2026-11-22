@@ -324,6 +324,16 @@ func (in *PriorityBandConfig) DeepCopyInto(out *PriorityBandConfig) {
 		x := (*in).DeepCopy()
 		*out = &x
 	}
+	if in.MaxBytesPerFlow != nil {
+		in, out := &in.MaxBytesPerFlow, &out.MaxBytesPerFlow
+		x := (*in).DeepCopy()
+		*out = &x
+	}
+	if in.MaxRequestsPerFlow != nil {
+		in, out := &in.MaxRequestsPerFlow, &out.MaxRequestsPerFlow
+		x := (*in).DeepCopy()
+		*out = &x
+	}
 	if in.DefaultRequestTTL != nil {
 		in, out := &in.DefaultRequestTTL, &out.DefaultRequestTTL
 		*out = new(v1.Duration)
