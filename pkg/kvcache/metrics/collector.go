@@ -220,13 +220,18 @@ func Register() {
 }
 
 // StartMetricsLogging spawns a goroutine that logs current metric values every
-// interval.
+// interval until ctx ends.
 func StartMetricsLogging(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			logMetrics(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				logMetrics(ctx)
+			}
 		}
 	}()
 }
