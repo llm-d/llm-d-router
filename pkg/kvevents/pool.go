@@ -112,7 +112,7 @@ func coveredEngineKeys(ev *BlockStoredEvent, engineKeys []kvblock.BlockHash,
 	return engineKeys[:min(covered, len(engineKeys))]
 }
 
-func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (bool, string) {
+func blockStoredEventDigestible(ev *BlockStoredEvent, specKind KVCacheSpecKind, canonicalBlockSize int) (bool, string) {
 	if ev.LookaheadToken != nil {
 		if ev.BlockSize <= 0 {
 			return false, "invalid_block_size"
@@ -132,7 +132,7 @@ func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (b
 			return false, "non_dense_block_span"
 		}
 	}
-	if !isPrefixIndexableSpecKind(ev.KVCacheSpecKind) {
+	if !isPrefixIndexableSpecKind(specKind) {
 		return false, "unsupported_cache_kind"
 	}
 	if len(ev.Tokens) > 0 && len(ev.Tokens) < canonicalBlockSize {
@@ -257,6 +257,7 @@ type Pool struct {
 	index          kvblock.Index
 	tokenProcessor kvblock.TokenProcessor
 	adapter        EngineAdapter
+	consumer       EventConsumer
 	groupCatalog   *kvblock.GroupCatalog
 	cacheFormats   *kvblock.CacheFormatCatalog
 	// dedup lives in the Pool, not as an Index decorator, because its scope is
@@ -459,6 +460,16 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		if podID == "" {
 			podID = p.adapter.ShardingKey(msg)
 		}
+		if p.consumer != nil {
+			source := EventSource{
+				Endpoint: podID, Sequence: msg.Sequence, Retired: msg.retire,
+				Resync: msg.resync, ResyncAborted: msg.resyncAbort,
+			}
+			if err := p.consumer.Reset(ctx, source); err != nil {
+				logger.Error(err, "Failed to reset KV event consumer", "endpoint", podID)
+			}
+			return
+		}
 		p.clearPod(ctx, podID, msg.retire)
 		return
 	}
@@ -503,6 +514,14 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		)
 	}
 
+	if p.consumer != nil {
+		source := EventSource{Endpoint: podID, ModelName: modelName, Sequence: msg.Sequence, Resync: msg.resync}
+		if err := p.consumer.ProcessEvents(ctx, source, batch); err != nil {
+			logger.Error(err, "Failed to consume KV events", "endpoint", podID)
+			p.clearPod(ctx, podID, false)
+		}
+		return
+	}
 	p.processEventBatch(ctx, &batch, podID, modelName)
 }
 
@@ -529,6 +548,12 @@ func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, Eve
 }
 
 func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) {
+	if p.consumer != nil {
+		if err := p.consumer.Reset(ctx, EventSource{Endpoint: podIdentifier, Retired: retire}); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to reset KV event consumer", "endpoint", podIdentifier)
+		}
+		return
+	}
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
@@ -545,8 +570,11 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 // granularity so that len(result) matches the canonical chunk count expected by
 // TokensToKVBlockKeys.
 //
-// For 1:many (engine BS > canonical BS): each engine block's features are replicated
-// to all its constituent canonical sub-blocks.
+// For 1:many (engine BS > canonical BS): each canonical sub-block takes the MM items
+// that overlap it, located by the event offsets, and the cache salt stays on the
+// first sub-block of the engine block that carries it (vLLM salts only token 0's block).
+// Without usable offsets, or when the canonical BS does not divide the engine BS,
+// each engine block's features are replicated to its sub-blocks.
 // For many:1 (engine BS < canonical BS): features from the engine blocks whose tokens
 // fall in a canonical block are merged into it, and engine blocks past the last full
 // canonical block are dropped. The cache salt goes to the canonical block holding
@@ -567,10 +595,16 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 	canonical := make([]*kvblock.BlockExtraFeatures, canonicalBlockCount)
 
 	if engineBlockCount < canonicalBlockCount {
-		// 1:many -> replicate each engine feature to its canonical sub-blocks
+		// 1:many -> give each canonical sub-block the part of its engine block's features it overlaps
+		engineBlockSize := numTokens / engineBlockCount
+		divides := numTokens%engineBlockCount == 0 && engineBlockSize%canonicalBlockSize == 0
 		for i := range canonicalBlockCount {
 			engineIdx := i * engineBlockCount / canonicalBlockCount
 			canonical[i] = engineFeatures[engineIdx]
+			if divides {
+				start := i*canonicalBlockSize - engineIdx*engineBlockSize
+				canonical[i] = subBlockFeatures(canonical[i], start, canonicalBlockSize, engineBlockSize)
+			}
 		}
 	} else {
 		// many:1 -> merge each engine block into the canonical block holding its tokens.
@@ -610,6 +644,65 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 	}
 
 	return canonical
+}
+
+// dropOffsetsUnlessDense clears the MM offsets unless ev declares its block size and has one entry per page.
+// vLLM skips null pages in extra_keys but not in token_ids, so a sparse event's entries are not pages.
+func dropOffsetsUnlessDense(ev *BlockStoredEvent, features []*kvblock.BlockExtraFeatures) {
+	if ev.BlockSize > 0 && len(features)*ev.BlockSize == len(ev.Tokens) {
+		return
+	}
+	for _, f := range features {
+		if f != nil {
+			f.MMOffsets = nil
+		}
+	}
+}
+
+// subBlockFeatures returns the features of engine block ef that apply to its tokens [start, start+size).
+// Without usable event offsets every item is kept, since the block doesn't say where an item lies.
+func subBlockFeatures(ef *kvblock.BlockExtraFeatures, start, size, engineBlockSize int) *kvblock.BlockExtraFeatures {
+	if ef == nil || !offsetsUsable(ef, engineBlockSize) {
+		return ef
+	}
+	sub := &kvblock.BlockExtraFeatures{}
+	for k, hash := range ef.MMHashes {
+		itemStart, itemEnd := itemSpan(ef.MMOffsets, k, engineBlockSize)
+		if itemStart < start+size && itemEnd > start {
+			sub.MMHashes = append(sub.MMHashes, hash)
+		}
+	}
+	if start == 0 {
+		sub.CacheSalt = ef.CacheSalt
+	}
+	if len(sub.MMHashes) == 0 && sub.CacheSalt == "" {
+		return nil
+	}
+	return sub
+}
+
+// offsetsUsable reports whether ef has one offset per item, in increasing order, all inside the block,
+// with only the first allowed to be negative (an item continuing from the previous block).
+func offsetsUsable(ef *kvblock.BlockExtraFeatures, engineBlockSize int) bool {
+	if len(ef.MMOffsets) != len(ef.MMHashes) {
+		return false
+	}
+	for k, offset := range ef.MMOffsets {
+		if offset >= engineBlockSize || (k > 0 && offset <= max(ef.MMOffsets[k-1], -1)) {
+			return false
+		}
+	}
+	return true
+}
+
+// itemSpan bounds item k of an engine block: from its offset to the next item's offset or the block end.
+// vLLM sends no length, so an item followed by text is taken to run to that bound, over-tagging the text.
+func itemSpan(offsets []int, k, engineBlockSize int) (int, int) {
+	end := engineBlockSize
+	if k+1 < len(offsets) {
+		end = offsets[k+1]
+	}
+	return max(offsets[k], 0), end
 }
 
 // handleDeviceTierUpdate handles offloading/location-only events (e.g., DeviceTier=CPU
@@ -671,6 +764,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 	for _, genericEvent := range batch.Events {
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
+			// The batch is shared with other consumers, so the inferred kind stays local.
+			specKind := ev.KVCacheSpecKind
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
 			// Scope for reference-counting this store against duplicate removes.
@@ -691,41 +786,41 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Create PodEntry for this specific event's device tier.
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
-			hasExplicitKind := ev.KVCacheSpecKind != ""
+			hasExplicitKind := specKind != ""
 			if ev.GroupIdx != nil {
 				g := kvblock.GroupID(*ev.GroupIdx)
-				if ev.KVCacheSpecKind == "" {
+				if specKind == "" {
 					if meta, found := p.groupCatalog.Get(podIdentifier, g); found {
-						ev.KVCacheSpecKind = KVCacheSpecKind(meta.Kind)
+						specKind = KVCacheSpecKind(meta.Kind)
 					}
 				}
 				podEntries[0].HasGroup = true
 				podEntries[0].GroupIdx = g
 			}
 
-			digestible, reason := blockStoredEventDigestible(ev, p.tokenProcessor.BlockSize())
-			if ev.GroupIdx != nil && len(ev.Tokens) > 0 && ev.KVCacheSpecKind != "" &&
+			digestible, reason := blockStoredEventDigestible(ev, specKind, p.tokenProcessor.BlockSize())
+			if ev.GroupIdx != nil && len(ev.Tokens) > 0 && specKind != "" &&
 				(digestible || reason == "unsupported_cache_kind") {
 				g := kvblock.GroupID(*ev.GroupIdx)
 				// A dense engine stream can use a different block size than the
 				// router. Prefer its larger geometry over auxiliary streams.
 				if meta, found := p.groupCatalog.Get(podIdentifier, g); found &&
-					meta.Kind == string(ev.KVCacheSpecKind) && meta.BlockSize > ev.BlockSize {
+					meta.Kind == string(specKind) && meta.BlockSize > ev.BlockSize {
 					digestible, reason = false, "conflicting_block_size"
 				} else if hasExplicitKind {
 					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
-						Kind:              string(ev.KVCacheSpecKind),
+						Kind:              string(specKind),
 						BlockSize:         ev.BlockSize,
 						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
 					})
 				}
 			}
 			if !digestible {
-				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(specKind), reason).Inc()
 				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
 					"podIdentifier", podIdentifier,
 					"groupIdx", ev.GroupIdx,
-					"cacheKind", ev.KVCacheSpecKind,
+					"cacheKind", specKind,
 					"reason", reason,
 					"numTokens", len(ev.Tokens),
 					"numBlockHashes", len(ev.BlockHashes),
@@ -735,11 +830,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			if ev.LoraID != nil && (ev.LoraName == nil || *ev.LoraName == "") {
 				const reason = "unresolved_lora_adapter"
-				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(specKind), reason).Inc()
 				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
 					"podIdentifier", podIdentifier,
 					"groupIdx", ev.GroupIdx,
-					"cacheKind", ev.KVCacheSpecKind,
+					"cacheKind", specKind,
 					"loraID", *ev.LoraID,
 					"reason", reason,
 					"numTokens", len(ev.Tokens),
@@ -763,11 +858,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					// unmapped and a child naming one as parent cannot resolve it.
 					if subCanonicalStore(ev, p.tokenProcessor.BlockSize()) {
 						const reason = "unresolved_sub_canonical_parent"
-						metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+						metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(specKind), reason).Inc()
 						log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
 							"podIdentifier", podIdentifier,
 							"groupIdx", ev.GroupIdx,
-							"cacheKind", ev.KVCacheSpecKind,
+							"cacheKind", specKind,
 							"reason", reason,
 							"parentHash", ev.ParentHash,
 							"parentEngineKey", parentEngineKey,
@@ -781,7 +876,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"parentEngineKey", parentEngineKey,
 						"effectiveModelName", effectiveModelName,
 						"groupIdx", ev.GroupIdx,
-						"cacheKind", ev.KVCacheSpecKind,
+						"cacheKind", specKind,
 						"numTokens", len(ev.Tokens),
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)
@@ -803,6 +898,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"podIdentifier", podIdentifier)
 					continue
 				}
+				dropOffsetsUnlessDense(ev, extraFeatures)
 			}
 
 			// Realign extraFeatures from engine-block granularity to canonical-block

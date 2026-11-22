@@ -17,23 +17,28 @@ spec:
     # over during EPP rollout.
     timeoutSec: 2
     checkIntervalSec: 2
-    {{- $port := .Values.router.modelServers.targetPortNumber }}
-    {{- if .Values.router.modelServers.targetPorts }}
-      {{- $port = (index .Values.router.modelServers.targetPorts 0).number }}
+    {{- $modelServers := .Values.router.modelServers | default dict }}
+    {{- $modelServerProtocol := lower ($modelServers.protocol | default "http") }}
+    {{- $modelServerType := lower ($modelServers.type | default "vllm") }}
+    {{- $port := $modelServers.targetPortNumber }}
+    {{- if $modelServers.targetPorts }}
+      {{- $port = (index $modelServers.targetPorts 0).number }}
     {{- end }}
-    {{- if eq .Values.router.modelServers.protocol "http" }}
+    {{- if eq $modelServerProtocol "http" }}
     config:
       type: HTTP
       httpHealthCheck:
         requestPath: /health
         port: {{ $port }}
-    {{- else if and (eq (lower .Values.router.modelServers.type) "vllm") (eq .Values.router.modelServers.protocol "grpc") }}
+    {{- else if and (eq $modelServerType "vllm") (eq $modelServerProtocol "grpc") }}
     config:
       type: GRPC
       grpcHealthCheck:
         portSpecification: "USE_FIXED_PORT"
         port: {{ $port }}
-        grpcServiceName: "/vllm.grpc.engine.VllmEngine/HealthCheck"
+        {{- if $modelServers.grpcServiceName }}
+        grpcServiceName: {{ $modelServers.grpcServiceName | quote }}
+        {{- end }}
     {{- end }}
 {{- $eppHealthPort := int (.Values.router.epp.grpcHealthPort | default 9003) }}
 {{- /* The GKE gateway controller health-checks the EPP backend on gRPC port
@@ -109,7 +114,7 @@ spec:
     kind: InferencePool
     name: {{ .Release.Name }}
   default:
-    timeoutSec: 300    # 5-minute timeout (adjust as needed)
+    timeoutSec: {{ .Values.provider.gke.backendTimeoutSec }}
     logging:
       enabled: true    # log all requests by default
 ---
@@ -146,7 +151,7 @@ spec:
     kind: Service
     name: {{ $serviceName }}
   default:
-    timeoutSec: 300
+    timeoutSec: {{ $.Values.provider.gke.backendTimeoutSec }}
     backendPreference: {{ $pref }}
     {{- if $gkePB.balancingMode }}
     balancingMode: {{ $gkePB.balancingMode }}

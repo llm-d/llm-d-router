@@ -759,6 +759,86 @@ func TestGenerateRequestHeaderResponse_RemovesClientControlHeaders(t *testing.T)
 	assert.NotContains(t, mutation.GetRemoveHeaders(), metadata.DestinationEndpointKey)
 }
 
+// Envoy forwards a client header unless remove_headers lists it, so a header a
+// plugin deletes from the request must be listed there.
+func TestGenerateRequestHeaderResponse_RemovesDeletedClientHeaders(t *testing.T) {
+	t.Parallel()
+
+	// The context is unsampled and no plugin set a routing header.
+	baseRemoved := sets.List(eppOwnedHeaders.Difference(sets.New(metadata.DestinationEndpointKey)))
+
+	tests := []struct {
+		name        string
+		deleted     []string
+		wantRemoved []string
+	}{
+		{
+			name:        "no header deleted",
+			wantRemoved: baseRemoved,
+		},
+		{
+			name:        "a deleted client header is removed",
+			deleted:     []string{"x-llm-d-lane"},
+			wantRemoved: slices.Concat(baseRemoved, []string{"x-llm-d-lane"}),
+		},
+		{
+			// EPP sets the destination; only the system-owned guard keeps
+			// content-length out.
+			name:        "deleted system-owned headers are not added to remove_headers",
+			deleted:     []string{metadata.DestinationEndpointKey, "content-length"},
+			wantRemoved: baseRemoved,
+		},
+		{
+			name:        "a deleted pseudo-header or host is not removed",
+			deleted:     []string{":authority", "host"},
+			wantRemoved: baseRemoved,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			reqCtx := &RequestContext{
+				Request:  &Request{Headers: make(map[string]string)},
+				Response: &Response{},
+			}
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+						{Key: "X-LLM-D-Lane", Value: "client-chosen-lane"},
+						{Key: "x-keep", Value: "kept"},
+						{Key: metadata.DestinationEndpointKey, Value: "9.9.9.9:1"},
+						{Key: "content-length", Value: "42"},
+						{Key: ":authority", Value: "gw.example.com"},
+						{Key: "host", Value: "gw.example.com"},
+					}},
+				},
+			}
+			require.NoError(t, server.HandleRequestHeaders(context.Background(), reqCtx, req))
+			for _, h := range tc.deleted {
+				delete(reqCtx.Request.Headers, h)
+			}
+			reqCtx.TargetEndpoint = "1.2.3.4:8080"
+
+			mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[h.Header.Key] = string(h.Header.RawValue)
+			}
+			assert.Equal(t, "kept", gotSet["x-keep"])
+			assert.Equal(t, "1.2.3.4:8080", gotSet[metadata.DestinationEndpointKey])
+			for _, h := range tc.deleted {
+				if h != metadata.DestinationEndpointKey {
+					assert.NotContains(t, gotSet, h)
+				}
+			}
+			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
+		})
+	}
+}
+
 func TestFallbackToRandomEndpoint(t *testing.T) {
 	t.Parallel()
 
