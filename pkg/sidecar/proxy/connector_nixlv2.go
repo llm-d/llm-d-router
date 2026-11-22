@@ -855,6 +855,10 @@ func (s *Server) executeNIXLV2WriteParallel(
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
+	// Flush buffered trailers before finalizeDecodeWriter so the gRPC cached-token
+	// finish path sees any decode error trailer instead of writing Unavailable
+	// alongside it.
+	dcw.flushTrailers()
 	var finalizeErr error
 	if finalizeDecodeWriter != nil && !decodeAborted.Load() {
 		if finalizeErr = finalizeDecodeWriter(); finalizeErr != nil {
