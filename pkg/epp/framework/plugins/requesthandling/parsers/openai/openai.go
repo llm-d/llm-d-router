@@ -758,7 +758,7 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 			}
 			images.NumInferenceSteps = &steps
 		case "stream":
-			stream, err := strconv.ParseBool(string(value))
+			stream, err := parseFormBool(value)
 			if err != nil {
 				return fmt.Errorf("invalid images edits stream field: %w", err)
 			}
@@ -867,7 +867,7 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 		case "prompt":
 			transcriptions.Prompt = string(value)
 		case "stream":
-			stream, err := strconv.ParseBool(string(value))
+			stream, err := parseFormBool(value)
 			if err != nil {
 				return fmt.Errorf("invalid %s stream field: %w", apiType, err)
 			}
@@ -1144,4 +1144,16 @@ func extractRawUsage(raw json.RawMessage) *request.Usage {
 		return nil
 	}
 	return usage
+}
+
+// parseFormBool parses a boolean form field with the values the model servers'
+// form parsing (pydantic) accepts, in any letter case.
+func parseFormBool(value []byte) (bool, error) {
+	switch strings.ToLower(string(value)) {
+	case "1", "on", "t", "true", "y", "yes":
+		return true, nil
+	case "0", "off", "f", "false", "n", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("invalid boolean %q", value)
 }
