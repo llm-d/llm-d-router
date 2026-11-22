@@ -75,16 +75,6 @@ func startFakeServerInfoPort(t *testing.T, resp *apiv1.GetServerInfoResponse) in
 	return addrPort(t, ln.Addr())
 }
 
-// closedPort returns a local port with nothing listening, for the
-// GetServerInfo failure path.
-func closedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer func() { _ = ln.Close() }()
-	return addrPort(t, ln.Addr())
-}
-
 func addrPort(t *testing.T, addr net.Addr) int {
 	t.Helper()
 	_, portStr, err := net.SplitHostPort(addr.String())

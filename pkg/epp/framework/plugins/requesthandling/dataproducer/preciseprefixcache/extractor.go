@@ -72,7 +72,10 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 	case event.Type == fwkdl.EventAddOrUpdate && matchesSelector:
 		return p.ensureSubscriber(ctx, meta)
 	case event.Type == fwkdl.EventAddOrUpdate || event.Type == fwkdl.EventDelete:
+		p.rankMu.Lock()
+		p.cancelRankLookupLocked(endpointKey)
 		removed := p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
+		p.rankMu.Unlock()
 		if !removed && event.Type == fwkdl.EventAddOrUpdate {
 			return nil
 		}
@@ -94,21 +97,14 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	}
 	endpointKey := meta.ID.String()
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	zmqEndpoint, replayEndpoint, snapshotEndpoint := p.subscriberEndpoints(meta)
 	if meta.ZMQPort == 0 && p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort > 0 {
-		dpRank, publishes, err := p.queryRankServer(ctx, meta)
-		switch {
-		case err != nil:
-			logger.Error(err, "GetServerInfo failed, using rank-index port", "endpoint", endpointKey)
-		case !publishes:
-			logger.V(logging.DEBUG).Info("Rank publishes no KV events, skipping subscriber",
-				"endpoint", endpointKey, "dpRank", dpRank)
-			return nil
-		default:
-			zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address,
-				strconv.Itoa(p.kvEventsConfig.PodDiscoveryConfig.SocketPort+int(dpRank)))
-		}
+		return p.ensureGRPCSubscriber(ctx, meta)
 	}
+	p.rankMu.Lock()
+	defer p.rankMu.Unlock()
+	p.cancelRankLookupLocked(endpointKey)
+
+	zmqEndpoint, replayEndpoint, snapshotEndpoint := p.subscriberEndpoints(meta)
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
