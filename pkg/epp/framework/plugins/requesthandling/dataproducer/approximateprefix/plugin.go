@@ -757,6 +757,11 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 			return nil
 		}
 		p.registeredEndpoints.Delete(endpointID)
+		// An endpoint that returns under the same name may have restarted with an
+		// empty KV cache, so its entries must not survive until the next cleanup tick.
+		if p.indexerInst != nil {
+			p.indexerInst.RemovePod(ServerID(event.Endpoint.GetMetadata().ID))
+		}
 		if p.recent != nil {
 			p.recent.forget(endpointID)
 		}
