@@ -594,6 +594,16 @@ updated once per inference request it screens.
 |---|---|---|---|
 | `llm_d_epp_models_responder_screen_decisions_total` | Counter | `plugin_name`, `model_name`, `outcome` | Requests screened, by target model and by which endpoints were kept. The outcomes are described in the [plugin README](../pkg/epp/framework/plugins/requesthandling/responder/models/README.md#metrics). |
 
+### Multi-cluster rendezvous
+
+These metrics belong to `multicluster-rendezvous-filter`. They are registered when the plugin is configured on a
+multi-cluster hub and updated once per request it routes; `cluster` is the cluster endpoint's name.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_multicluster_rendezvous_decisions_total` | Counter | `plugin_name`, `cluster`, `decision` | Requests routed, by decision: `home` (hashed cluster), `pin` (tenant's pinned cluster), `kept` (stays on its spill cluster), `spill` (home full or down, the scorers picked this cluster), `failover` (home down or without ready pods, and no cluster had room). |
+| `llm_d_epp_multicluster_rendezvous_moved_entries` | Gauge | `plugin_name` | Conversations kept on a cluster other than their home. |
+
 ### Prefix cache indexer (approximate)
 
 These metrics belong to the `approx-prefix-cache-producer`. They describe its approximate prefix

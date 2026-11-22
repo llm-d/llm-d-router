@@ -174,3 +174,6 @@ Debug logging at `--v 4` emits one `latency-observation score` line per candidat
 
 See the [observer README](../../../requesthandling/dataproducer/latencyobserver/README.md) for how the
 three anchors are measured.
+
+With [`multicluster-rendezvous-filter`](../../filter/rendezvous/README.md), this scorer (with
+`multicluster-kv-cache-utilization-scorer`) picks the cluster for spilled conversations.

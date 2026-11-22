@@ -35,6 +35,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/rendezvous"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
@@ -181,24 +182,8 @@ func (c *Screener) Consumes() fwkplugin.DataDependencies {
 	}
 	// The overflow guard runs inside Screen, on the endpoints scoped to this
 	// declaration, so it reads through what the Screener declares.
-	if guard, ok := c.overflowGuard.(fwkplugin.ConsumerPlugin); ok {
-		guardDeps := guard.Consumes()
-		for key, witness := range guardDeps.Required {
-			if deps.Required == nil {
-				deps.Required = map[fwkplugin.DataKey]any{}
-			}
-			deps.Required[key] = witness
-			delete(deps.Optional, key)
-		}
-		for key, witness := range guardDeps.Optional {
-			if _, required := deps.Required[key]; required {
-				continue
-			}
-			if deps.Optional == nil {
-				deps.Optional = map[fwkplugin.DataKey]any{}
-			}
-			deps.Optional[key] = witness
-		}
+	if c.overflowGuard != nil {
+		deps = rendezvous.MergeGuardConsumes(deps, c.overflowGuard)
 	}
 	return deps
 }
