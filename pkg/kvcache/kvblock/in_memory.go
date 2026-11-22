@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/collections"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
 const (
@@ -75,23 +78,23 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		podCacheSize = defaultPodsPerKey
 	}
 
-	cache, err := newLRUStore(cfg.Size)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
-	}
-
 	engineToRequestKeys, err := lru.New[BlockHash, []BlockHash](cfg.Size)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize in-memory engine key map: %w", err)
 	}
 
-	return &InMemoryIndex{
-		data:                cache,
+	m := &InMemoryIndex{
 		engineToRequestKeys: engineToRequestKeys,
 		podCacheSize:        podCacheSize,
 		pods:                newInterner(maxInternedPods),
 		tiers:               newInterner(maxInternedTiers),
-	}, nil
+	}
+	cache, err := newLRUStore(cfg.Size, m.onKeyEvicted)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
+	}
+	m.data = cache
+	return m, nil
 }
 
 // cancellationCheckMask paces context-cancellation checks in loops over
@@ -128,6 +131,26 @@ type InMemoryIndex struct {
 	// a cap fails rather than admitting an entry that cannot be matched.
 	pods  *interner
 	tiers *interner
+	// entries is the live entry count across every resident key, and
+	// truncated the cumulative per-key pod-cap drops. Both feed the
+	// residency gauges and Stats.
+	entries   atomic.Int64
+	truncated atomic.Int64
+}
+
+var _ StatsProvider = &InMemoryIndex{}
+
+// onKeyEvicted accounts a main-store LRU eviction. Remove fires the same
+// callback for keys the backend removes deliberately, but those are emptied
+// first, so a non-empty cache here is a capacity eviction.
+func (m *InMemoryIndex) onKeyEvicted(pc *PodCache) {
+	if pc == nil {
+		return
+	}
+	m.entries.Add(-int64(pc.size()))
+	if pc.size() > 0 {
+		metrics.IndexEvictions.WithLabelValues("capacity").Add(1)
+	}
 }
 
 var _ Index = &InMemoryIndex{}
@@ -148,7 +171,9 @@ type PodCache struct {
 
 // addAll inserts records with LRU semantics: an existing entry refreshes its
 // recency, a new entry appends, and overflow evicts the least recent entry.
-func (pc *PodCache) addAll(recs []EntryRef) {
+// It returns the entry-count change and the count of pods dropped by the
+// capacity bound.
+func (pc *PodCache) addAll(recs []EntryRef) (delta, truncated int) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	for _, rec := range recs {
@@ -167,26 +192,30 @@ func (pc *PodCache) addAll(recs []EntryRef) {
 		if pc.capacity > 0 && len(pc.entries) >= pc.capacity {
 			copy(pc.entries, pc.entries[1:])
 			pc.entries[len(pc.entries)-1] = rec
+			truncated++
 			continue
 		}
 		pc.entries = append(pc.entries, rec)
+		delta++
 	}
+	return delta, truncated
 }
 
-// removeAll deletes the given entries and reports whether the cache is empty
-// afterwards.
-func (pc *PodCache) removeAll(entries []PodEntry) (empty bool) {
+// removeAll deletes the given entries and reports how many it removed and
+// whether the cache is empty afterwards.
+func (pc *PodCache) removeAll(entries []PodEntry) (removed int, empty bool) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	for _, entry := range entries {
 		for i := range pc.entries {
 			if pc.entries[i].PodEntry == entry {
 				pc.entries = append(pc.entries[:i], pc.entries[i+1:]...)
+				removed++
 				break
 			}
 		}
 	}
-	return len(pc.entries) == 0
+	return removed, len(pc.entries) == 0
 }
 
 // size returns the number of entries.
@@ -395,13 +424,19 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 			}
 		}
 
-		podCache.addAll(records)
+		delta, truncated := podCache.addAll(records)
+		m.entries.Add(int64(delta))
+		if truncated > 0 {
+			m.truncated.Add(int64(truncated))
+			metrics.IndexTruncatedEntries.Add(float64(truncated))
+		}
 
 		if traceLogger.Enabled() {
 			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
 		}
 	}
 
+	m.reportResidency()
 	return nil
 }
 
@@ -453,11 +488,13 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 			}
 		}
 		m.mu.Unlock()
+		m.reportResidency()
 		return nil
 	case RequestKey:
 		for _, key := range keys {
 			m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
 		}
+		m.reportResidency()
 		return nil
 	default:
 		return fmt.Errorf("unknown key type: %d", keyType)
@@ -473,7 +510,8 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 		return
 	}
 
-	isEmpty := podCache.removeAll(entries)
+	removedEntries, isEmpty := podCache.removeAll(entries)
+	m.entries.Add(-int64(removedEntries))
 
 	traceLogger.Info("evicted pods from key", "requestKey", requestKey, "engineKey", engineKey, "pods", entries)
 
@@ -482,7 +520,7 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 	}
 
 	m.mu.Lock()
-	removed := m.removeIfEmptyLocked(requestKey)
+	removed := m.removeIfEmptyLocked(requestKey, "empty")
 	m.mu.Unlock()
 	if removed && traceLogger.Enabled() {
 		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
@@ -490,20 +528,27 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 }
 
 // removeIfEmptyLocked removes requestKey from the index if its cache holds no
-// entries, and reports whether it did. The caller holds m.mu, so an Add that
-// already fetched this cache has finished its write before the check.
-func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash) bool {
+// entries, and reports whether it did, counting the removal under cause. The
+// caller holds m.mu, so an Add that already fetched this cache has finished
+// its write before the check.
+func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash, cause string) bool {
 	podCache, found := m.data.Peek(requestKey)
 	if !found || podCache == nil {
 		return false
 	}
 
 	podCache.mu.Lock()
-	defer podCache.mu.Unlock()
-	if len(podCache.entries) != 0 {
+	empty := len(podCache.entries) == 0
+	podCache.mu.Unlock()
+	if !empty {
 		return false
 	}
+	// podCache.mu is released before the removal because data.Remove fires
+	// the eviction callback, which reads the cache's size under that lock.
+	// The cache cannot gain entries in between: Add holds m.mu across its
+	// inserts, and the caller holds m.mu here.
 	m.data.Remove(requestKey)
+	metrics.IndexEvictions.WithLabelValues(cause).Add(1)
 	return true
 }
 
@@ -522,6 +567,8 @@ func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash) bool {
 func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Clear")
 
+	start := time.Now()
+
 	// A pod is interned by its first Add and never released.
 	m.pods.mu.Lock()
 	_, interned := m.pods.ids[podIdentifier]
@@ -538,7 +585,13 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 			continue
 		}
 
-		if matched := podCache.matching(podIdentifier); len(matched) > 0 && podCache.removeAll(matched) {
+		matched := podCache.matching(podIdentifier)
+		if len(matched) == 0 {
+			continue
+		}
+		removed, empty := podCache.removeAll(matched)
+		m.entries.Add(-int64(removed))
+		if empty {
 			emptied = append(emptied, requestKey)
 		}
 	}
@@ -548,11 +601,13 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	for chunk := range slices.Chunk(emptied, clearChunkSize) {
 		m.mu.Lock()
 		for _, requestKey := range chunk {
-			m.removeIfEmptyLocked(requestKey)
+			m.removeIfEmptyLocked(requestKey, "clear")
 		}
 		m.mu.Unlock()
 	}
 
+	metrics.IndexClearDuration.Observe(time.Since(start).Seconds())
+	m.reportResidency()
 	traceLogger.Info("cleared pod from index", "pod", podIdentifier)
 	return nil
 }
