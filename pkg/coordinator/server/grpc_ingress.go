@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -135,28 +134,14 @@ func (s *Server) serveGRPC(w http.ResponseWriter, r *http.Request, scan grpcScan
 		}
 	}()
 
-	if enc := strings.TrimSpace(r.Header.Get("grpc-encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
-		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		grpcframe.WriteError(cw, codes.Unimplemented, grpcframe.ErrCompressed.Error())
-		return
-	}
-
-	// ReadMessage sizes the body from the gRPC length prefix, so a large
-	// request is read into one exact-size buffer.
+	// ReadUnaryRequest checks grpc-encoding and sizes the body from the gRPC
+	// length prefix, so a large request is read into one exact-size buffer.
+	var code codes.Code
 	var err error
-	body, err = grpcframe.ReadMessage(r.Body, s.maxRequestBodySize*config.BytesPerMB)
+	body, code, err = grpcframe.ReadUnaryRequest(r, s.maxRequestBodySize*config.BytesPerMB)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		switch {
-		case errors.Is(err, grpcframe.ErrTooLarge):
-			grpcframe.WriteError(cw, codes.ResourceExhausted, "request body too large")
-		case errors.Is(err, grpcframe.ErrCompressed):
-			grpcframe.WriteError(cw, codes.Unimplemented, grpcframe.ErrCompressed.Error())
-		case errors.Is(err, grpcframe.ErrMalformed):
-			grpcframe.WriteError(cw, codes.InvalidArgument, "invalid gRPC frame")
-		default:
-			grpcframe.WriteError(cw, codes.InvalidArgument, "failed to read request body")
-		}
+		grpcframe.WriteError(cw, code, grpcframe.ReadErrorMessage(err))
 		return
 	}
 
@@ -247,10 +232,10 @@ func classifyGRPCPipelineError(err error, requestID string) (codes.Code, string)
 	var upstream *pipeline.UpstreamError
 	if errors.As(err, &upstream) && upstream.StatusCode > 0 {
 		if upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError {
-			return pipeline.HTTPStatusToGRPCCode(upstream.StatusCode),
+			return grpcframe.UpstreamHTTPStatusToCode(upstream.StatusCode),
 				fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 		}
-		return pipeline.HTTPStatusToGRPCCode(upstream.StatusCode),
+		return grpcframe.UpstreamHTTPStatusToCode(upstream.StatusCode),
 			reqcommon.InternalErrorMessage(requestID)
 	}
 	if errors.As(err, &upstream) {

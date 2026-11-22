@@ -79,7 +79,7 @@ func TestGRPCAndHTTPStatusMappings(t *testing.T) {
 		{httpStatus: http.StatusServiceUnavailable, wantGRPC: codes.Unavailable},
 	}
 	for _, tc := range httpToGRPC {
-		require.Equal(t, tc.wantGRPC, pipeline.HTTPStatusToGRPCCode(tc.httpStatus), "httpStatus=%d", tc.httpStatus)
+		require.Equal(t, tc.wantGRPC, grpcframe.UpstreamHTTPStatusToCode(tc.httpStatus), "httpStatus=%d", tc.httpStatus)
 	}
 
 	errBodyToGRPC := []struct {

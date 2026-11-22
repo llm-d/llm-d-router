@@ -58,7 +58,7 @@ func (s *Server) readVLLMGRPCRequest(r *http.Request, w http.ResponseWriter) (*v
 	frame, code, err := grpcframe.ReadUnaryRequest(r, grpcframe.MaxPayloadLen)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid gRPC request frame", "error", err)
-		grpcframe.WriteError(w, code, err.Error())
+		grpcframe.WriteError(w, code, grpcframe.ReadErrorMessage(err))
 		return nil, false
 	}
 
@@ -745,7 +745,7 @@ func (s *Server) handleP2PVLLMGRPC(w http.ResponseWriter, r *http.Request, prefi
 	logger := log.FromContext(r.Context())
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
-		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
+		logger.Error(err, "cannot build the decode request", "prefill_host", routing.ExtractHost(prefillPodHostPort))
 		_ = errorInternalServerError(w, r, err)
 		return
 	}
@@ -909,17 +909,13 @@ func prepareVLLMEncoderPlan(scanned *vllmwire.Request, uuidOverrides []string) (
 	}
 
 	plan.subTokenIDs = make([][]uint32, len(items))
-	bosToken := promptTokenIDs[0]
-	promptLen := uint64(len(promptTokenIDs))
 	for i, item := range items {
 		// EncoderSubFrame places the item at FeaturesOffset=1 after bosToken, so
 		// placeholder spans must have positive length.
-		if item.Length == 0 || item.Offset > promptLen || item.Length > promptLen-item.Offset {
-			return vllmEncoderPlan{}, fmt.Errorf("media[%d] features range [%d, +%d) exceeds prompt length %d", i, item.Offset, item.Length, promptLen)
+		ids, err := item.EncoderTokenIDs(promptTokenIDs)
+		if err != nil {
+			return vllmEncoderPlan{}, fmt.Errorf("media[%d]: %w", i, err)
 		}
-		ids := make([]uint32, 1+item.Length)
-		ids[0] = bosToken
-		copy(ids[1:], promptTokenIDs[item.Offset:item.Offset+item.Length])
 		plan.subTokenIDs[i] = ids
 	}
 	return plan, nil

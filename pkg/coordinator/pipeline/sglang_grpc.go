@@ -18,11 +18,8 @@ package pipeline
 
 import (
 	"context"
-	"net/http"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc/codes"
 )
 
 // SGLangPrefillStream coordinates a concurrent SGLang gRPC prefill stream with
@@ -207,24 +204,4 @@ func (s *SGLangPrefillStream) Close() {
 			s.cancel()
 		}
 	})
-}
-
-// HTTPStatusToGRPCCode maps an upstream HTTP status code to a gRPC status code.
-func HTTPStatusToGRPCCode(status int) codes.Code {
-	switch status {
-	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		return codes.InvalidArgument
-	case http.StatusUnauthorized:
-		return codes.Unauthenticated
-	case http.StatusForbidden:
-		return codes.PermissionDenied
-	case http.StatusNotFound, http.StatusMethodNotAllowed:
-		return codes.Unimplemented
-	case http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
-		return codes.ResourceExhausted
-	case http.StatusGatewayTimeout:
-		return codes.DeadlineExceeded
-	default:
-		return codes.Unavailable
-	}
 }

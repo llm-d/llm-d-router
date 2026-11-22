@@ -505,25 +505,7 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 		}
 		return otelhttp.NewTransport(t)
 	}
-	h2c := t.Clone()
-	h2cProtocols := new(http.Protocols)
-	h2cProtocols.SetUnencryptedHTTP2(true)
-	h2c.Protocols = h2cProtocols
-	return otelhttp.NewTransport(&h2cAwareTransport{http1: t, h2c: h2c})
-}
-
-// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
-// while keeping HTTP/1.1 for standard HTTP backends.
-type h2cAwareTransport struct {
-	http1 http.RoundTripper
-	h2c   http.RoundTripper
-}
-
-func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
-		return rt.h2c.RoundTrip(req)
-	}
-	return rt.http1.RoundTrip(req)
+	return otelhttp.NewTransport(grpcframe.NewH2CAwareTransport(t))
 }
 
 func (s *Server) setKVConnector() {
