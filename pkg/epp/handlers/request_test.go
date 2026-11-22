@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -55,6 +56,7 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
@@ -428,6 +430,69 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 	assert.Equal(t, "1.2.3.4:8080", gotHeaders[metadata.DestinationEndpointKey])
 	assert.Equal(t, "123", gotHeaders["Content-Length"])
 	assert.NotContains(t, gotHeaders, "traceparent")
+}
+
+// A multi-cluster hub forwards the client's input-control headers: its endpoint
+// is a cluster EPP that applies the objective and fairness ID. Every other
+// EPP-owned header is still set or stripped by EPP.
+func TestGenerateRequestHeaderResponse_HubForwardsInputControlHeaders(t *testing.T) {
+	client := map[string]string{
+		"x-user-data":                         "important",
+		metadata.ObjectiveKey:                 "premium",
+		metadata.FlowFairnessIDKey:            "tenant-a",
+		metadata.InferenceTTLHeaderKey:        "30s",
+		reqcommon.RevisionDecisionIDHeaderKey: "rev-7",
+		metadata.DestinationEndpointKey:       "1.1.1.1:666",
+	}
+	inputControl := []string{metadata.ObjectiveKey, metadata.FlowFairnessIDKey,
+		metadata.InferenceTTLHeaderKey, reqcommon.RevisionDecisionIDHeaderKey}
+	mutate := func(forward bool, resolvedTenant string) (map[string]string, []string) {
+		server := &StreamingServer{}
+		server.SetForwardInputControlHeaders(forward)
+		reqCtx := &RequestContext{
+			TargetEndpoint:    "1.2.3.4:8080",
+			Request:           &Request{Headers: maps.Clone(client)},
+			Response:          &Response{},
+			SchedulingRequest: &fwksched.InferenceRequest{FairnessID: resolvedTenant},
+		}
+		mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
+			GetRequestHeaders().GetResponse().GetHeaderMutation()
+		set := map[string]string{}
+		for _, h := range mutation.GetSetHeaders() {
+			key := strings.ToLower(h.Header.Key)
+			_, dup := set[key]
+			assert.False(t, dup, "%s set twice", key)
+			set[key] = string(h.Header.RawValue)
+		}
+		return set, mutation.GetRemoveHeaders()
+	}
+
+	t.Run("model-server EPP strips input-control headers", func(t *testing.T) {
+		set, removed := mutate(false, "tenant-a")
+		assert.Equal(t, "important", set["x-user-data"])
+		assert.Equal(t, "1.2.3.4:8080", set[metadata.DestinationEndpointKey])
+		for _, key := range inputControl {
+			assert.NotContains(t, set, key)
+			assert.Contains(t, removed, key)
+		}
+	})
+	t.Run("hub forwards every input-control header", func(t *testing.T) {
+		set, removed := mutate(true, "tenant-a")
+		assert.Equal(t, "important", set["x-user-data"])
+		assert.Equal(t, "1.2.3.4:8080", set[metadata.DestinationEndpointKey], "EPP still owns the destination")
+		for _, key := range inputControl {
+			assert.Equal(t, client[key], set[key], "hub forwards %s", key)
+			assert.NotContains(t, removed, key)
+		}
+	})
+	t.Run("hub forwards the tenant it resolved", func(t *testing.T) {
+		set, _ := mutate(true, "tenant-a/agent-42")
+		assert.Equal(t, "tenant-a/agent-42", set[metadata.FlowFairnessIDKey])
+	})
+	t.Run("hub keeps the client tenant when it resolved only the default", func(t *testing.T) {
+		set, _ := mutate(true, reqcommon.DefaultFairnessID)
+		assert.Equal(t, "tenant-a", set[metadata.FlowFairnessIDKey])
+	})
 }
 
 // EPP hands the sidecar the fairness identity it resolved, replacing any client

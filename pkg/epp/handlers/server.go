@@ -156,6 +156,17 @@ type StreamingServer struct {
 	maxRequestBodySize int
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
 	responders []fwkrh.Responder
+	// forwardInputControlHeaders passes the client's input-control headers
+	// (objective, fairness ID, ...) to the chosen endpoint instead of stripping
+	// them. Set on a multi-cluster hub, whose endpoints are other EPPs that read
+	// them. Off by default: a model server has no use for them.
+	forwardInputControlHeaders bool
+}
+
+// SetForwardInputControlHeaders makes the server forward the client's
+// input-control headers to the chosen endpoint.
+func (s *StreamingServer) SetForwardInputControlHeaders(forward bool) {
+	s.forwardInputControlHeaders = forward
 }
 
 // RequestContext stores context information during the life time of an HTTP request.

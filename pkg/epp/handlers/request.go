@@ -22,6 +22,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -225,10 +227,29 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		)
 	}
 
+	// A hub forwards the tenant it resolved, which may come from agent identity
+	// rather than the client's header, so hub and cluster agree on it.
+	resolvedTenant := ""
+	if s.forwardInputControlHeaders && reqCtx.SchedulingRequest != nil &&
+		reqCtx.SchedulingRequest.FairnessID != "" && reqCtx.SchedulingRequest.FairnessID != reqcommon.DefaultFairnessID {
+		resolvedTenant = reqCtx.SchedulingRequest.FairnessID
+		headers = append(headers, &configPb.HeaderValueOption{
+			Header: &configPb.HeaderValue{Key: metadata.FlowFairnessIDKey, RawValue: []byte(resolvedTenant)},
+		})
+	}
+
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Request.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		// A hub forwards the client's input-control headers to the cluster EPP that
+		// reads them: all of them, not only objective and fairness ID. The TTL is
+		// forwarded unchanged; a hub normally runs without flow control, so the
+		// request has not waited at the hub.
+		forwarded := s.forwardInputControlHeaders && request.InputControlHeaders.Has(key)
+		if request.IsSystemOwnedHeader(key) && !forwarded {
 			continue
+		}
+		if resolvedTenant != "" && slices.Contains(metadata.HeaderNames(metadata.FlowFairnessIDKey), key) {
+			continue // already set to the resolved tenant
 		}
 		headers = append(headers, &configPb.HeaderValueOption{
 			Header: &configPb.HeaderValue{
