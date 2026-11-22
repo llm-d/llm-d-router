@@ -676,7 +676,7 @@ func TestExecute_InputTokensRecordedOnlyWhenPopulated(t *testing.T) {
 	reg := newMetricsRegistry(t)
 	steps := []Step{
 		&mockStep{name: "render", fn: func(_ context.Context, rc *RequestContext) error {
-			rc.TokenIDs = []int{1, 2, 3, 4}
+			rc.TokenIDs = []uint32{1, 2, 3, 4}
 			return nil
 		}},
 		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
@@ -702,7 +702,7 @@ func TestExecute_InputTokensRecordedOnlyWhenPopulated(t *testing.T) {
 	reg3 := newMetricsRegistry(t)
 	steps3 := []Step{
 		&mockStep{name: "render", fn: func(_ context.Context, rc *RequestContext) error {
-			rc.TokenIDs = []int{}
+			rc.TokenIDs = []uint32{}
 			return nil
 		}},
 	}

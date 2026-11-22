@@ -91,7 +91,7 @@ func parityServer(t *testing.T, promptTokens int) *httptest.Server {
 	}))
 }
 
-func parityRequest(server *httptest.Server, params map[string]any, tokenIDs []int, stream bool) (*DecodeStep, *pipeline.RequestContext, *httptest.ResponseRecorder, error) {
+func parityRequest(server *httptest.Server, params map[string]any, tokenIDs []uint32, stream bool) (*DecodeStep, *pipeline.RequestContext, *httptest.ResponseRecorder, error) {
 	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), params)
 	if err != nil {
 		return nil, nil, nil, err
@@ -115,7 +115,7 @@ func TestDecodeStep_PromptTokenParity_MismatchCountsAndKeepsResponse(t *testing.
 	server := parityServer(t, 7)
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3, 4, 5}, false)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3, 4, 5}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestDecodeStep_PromptTokenParity_ForwardedChatIDsLabel(t *testing.T) {
 	server := parityServer(t, 7)
 	defer server.Close()
 
-	step, reqCtx, _, err := parityRequest(server, map[string]any{ParamForwardPromptTokenIDs: true}, []int{1, 2, 3, 4, 5}, false)
+	step, reqCtx, _, err := parityRequest(server, map[string]any{ParamForwardPromptTokenIDs: true}, []uint32{1, 2, 3, 4, 5}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestDecodeStep_PromptTokenParity_MatchIsSilent(t *testing.T) {
 	server := parityServer(t, 5)
 	defer server.Close()
 
-	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []int{1, 2, 3, 4, 5}, false)
+	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3, 4, 5}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestDecodeStep_PromptTokenParity_ErrorModeRecordsStepError(t *testing.T) {
 	server := parityServer(t, 7)
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{ParamPromptTokenParity: "error"}, []int{1, 2, 3, 4, 5}, false)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{ParamPromptTokenParity: "error"}, []uint32{1, 2, 3, 4, 5}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,9 +197,9 @@ func TestDecodeStep_PromptTokenParity_OffAndNoTokensSkip(t *testing.T) {
 
 	for name, tc := range map[string]struct {
 		params   map[string]any
-		tokenIDs []int
+		tokenIDs []uint32
 	}{
-		"off":          {params: map[string]any{ParamPromptTokenParity: "off"}, tokenIDs: []int{1, 2, 3}},
+		"off":          {params: map[string]any{ParamPromptTokenParity: "off"}, tokenIDs: []uint32{1, 2, 3}},
 		"not rendered": {params: map[string]any{}, tokenIDs: nil},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -247,7 +247,7 @@ func TestDecodeStep_PromptTokenParity_StreamingInjectsAndDropsUsageFrame(t *test
 	}))
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, true)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestDecodeStep_PromptTokenParity_StreamingKeepsClientRequestedUsage(t *test
 			}))
 			defer server.Close()
 
-			step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, true)
+			step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -317,7 +317,7 @@ func TestDecodeStep_PromptTokenParity_MessagesCacheSplitMatches(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []int{1, 2, 3, 4, 5}, false)
+	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3, 4, 5}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestDecodeStep_PromptTokenParity_SkipsInjectionForContinuousUsageStats(t *t
 	}))
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, true)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestDecodeStep_PromptTokenParity_MissingUsageIsNoop(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, false)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestDecodeStep_PromptTokenParity_CompletionsLabels(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, false)
+	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +436,7 @@ func TestDecodeStep_PromptTokenParity_MalformedStreamOptionsSkips(t *testing.T) 
 	}))
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, true)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestDecodeStep_PromptTokenParity_ObserveOnlyKeepsContentLength(t *testing.T
 	}))
 	defer server.Close()
 
-	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, false)
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []uint32{1, 2, 3}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

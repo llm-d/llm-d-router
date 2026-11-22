@@ -282,7 +282,7 @@ func TestEncodeStep_ContentPartsRejectsNonUniformSpan(t *testing.T) {
 		Body: map[string]any{"model": "m", "messages": []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testImageURL}},
 		}}}},
-		TokenIDs:  []int{1, 9, 8, 9, 2},
+		TokenIDs:  []uint32{1, 9, 8, 9, 2},
 		MMPayload: mmPayloadNone,
 		MultimodalEntries: []pipeline.MultimodalEntry{{
 			Modality: reqcommon.ModalityImage, Hash: "h-img",
@@ -300,13 +300,13 @@ func TestCollapsePlaceholders(t *testing.T) {
 		{Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 2}},
 		{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 	}
-	got, err := collapsePlaceholders([]int{1, 9, 9, 9, 7, 8, 8, 2}, entries)
+	got, err := collapsePlaceholders([]uint32{1, 9, 9, 9, 7, 8, 8, 2}, entries)
 	require.NoError(t, err)
-	require.Equal(t, []int{1, 9, 7, 8, 2}, got)
+	require.Equal(t, []uint32{1, 9, 7, 8, 2}, got)
 
-	_, err = collapsePlaceholders([]int{1, 9, 9}, []pipeline.MultimodalEntry{{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 5}}})
+	_, err = collapsePlaceholders([]uint32{1, 9, 9}, []pipeline.MultimodalEntry{{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 5}}})
 	require.Error(t, err)
-	_, err = collapsePlaceholders([]int{1, 9, 9, 9}, []pipeline.MultimodalEntry{
+	_, err = collapsePlaceholders([]uint32{1, 9, 9, 9}, []pipeline.MultimodalEntry{
 		{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 		{Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 2}},
 	})
@@ -314,7 +314,7 @@ func TestCollapsePlaceholders(t *testing.T) {
 
 	// A span that mixes tokens cannot be collapsed to its first token: the
 	// worker would expand a different prompt than render produced.
-	_, err = collapsePlaceholders([]int{1, 9, 8, 9}, []pipeline.MultimodalEntry{{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}}})
+	_, err = collapsePlaceholders([]uint32{1, 9, 8, 9}, []pipeline.MultimodalEntry{{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}}})
 	require.Error(t, err)
 }
 
@@ -477,7 +477,7 @@ func TestPrefillStep_OpenAIFormatIgnoresMMPayload(t *testing.T) {
 		OriginalPath:      reqcommon.PathChatCompletions,
 		Model:             "m",
 		Body:              mmKwargsChatBody(),
-		TokenIDs:          []int{1, 9, 9, 9, 2},
+		TokenIDs:          []uint32{1, 9, 9, 9, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: "h", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}}},
 		MMPayload:         mmPayloadNone,
 	}
@@ -501,7 +501,7 @@ func TestPrefillStep_TextOnlyGenerateOmitsFeatures(t *testing.T) {
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "m",
 		Body:         map[string]any{"model": "m", "messages": []any{}},
-		TokenIDs:     []int{1, 2},
+		TokenIDs:     []uint32{1, 2},
 	}
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 	require.NotContains(t, prefillBody, "features")

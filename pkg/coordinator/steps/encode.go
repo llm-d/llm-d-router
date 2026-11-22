@@ -219,8 +219,8 @@ func (s *EncodeStep) executeOne(
 // buildEncodeTokenIDs builds the encode sub-request prompt: BOS plus the
 // entry's placeholder span as it sits in the full prompt, so the encoder
 // preprocesses the same token sequence the prefiller expands.
-func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) ([]int, error) {
-	bos := 1
+func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []uint32, entry pipeline.MultimodalEntry) ([]uint32, error) {
+	bos := uint32(1)
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
 	}
@@ -231,7 +231,7 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 		return nil, fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
 			span.Offset, span.Length, len(fullTokenIDs))
 	}
-	tokenIDs := make([]int, 0, 1+span.Length)
+	tokenIDs := make([]uint32, 0, 1+span.Length)
 	tokenIDs = append(tokenIDs, bos)
 	return append(tokenIDs, fullTokenIDs[span.Offset:span.Offset+span.Length]...), nil
 }

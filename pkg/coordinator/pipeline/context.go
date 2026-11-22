@@ -191,7 +191,7 @@ type RequestContext struct {
 	// run, was skipped, or found no multimodal entries.
 	EncodeFanout int
 
-	TokenIDs          []int
+	TokenIDs          []uint32
 	MultimodalEntries []MultimodalEntry
 	// MMPayload is the render step's mm_payload when render returned no
 	// kwargs_data for the entries: "none". Empty when the entries

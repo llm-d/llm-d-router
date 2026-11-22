@@ -114,7 +114,7 @@ func idsForwardedIn(body map[string]any, apiType reqcommon.APIType) bool {
 	case reqcommon.APITypeVLLMGenerate:
 		return true
 	case reqcommon.APITypeCompletions:
-		_, ok := body[reqcommon.FieldPrompt].([]int)
+		_, ok := body[reqcommon.FieldPrompt].([]uint32)
 		return ok
 	}
 	kv, ok := body[reqcommon.FieldKVTransferParams].(map[string]any)

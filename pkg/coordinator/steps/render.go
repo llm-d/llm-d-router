@@ -289,24 +289,24 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 		// OpenAI /v1/completions accepts four prompt shapes: string, []string,
 		// []int (token IDs), [][]int (batched token IDs). The first three are
 		// covered here; only single-sequence variants are supported downstream
-		// because RequestContext.TokenIDs is []int.
+		// because RequestContext.TokenIDs holds one sequence.
 		if len(p) == 0 {
-			reqCtx.TokenIDs = []int{}
+			reqCtx.TokenIDs = []uint32{}
 			logger.V(logutil.DEFAULT).Info("prompt is empty array, skipping render", "token_ids_len", 0)
 			return nil
 		}
 		switch p[0].(type) {
 		case float64, json.Number:
-			// Reject oversized arrays before iterating: toIntSlice does an
+			// Reject oversized arrays before iterating: parseTokenIDs does an
 			// O(n) type-assert per element, so for a runaway prompt the
 			// length check saves real work.
 			if err := s.checkTokenLimit(len(p)); err != nil {
 				return err
 			}
-			// Convert to []int for downstream steps and validate every element
-			// is numeric; a heterogeneous array fails fast here rather than
-			// reaching vLLM as garbage tokens.
-			tokenIDs, err := toIntSlice(p)
+			// Convert to token IDs for downstream steps and validate every
+			// element is numeric; a heterogeneous array fails fast here rather
+			// than reaching vLLM as garbage tokens.
+			tokenIDs, err := parseTokenIDs(p)
 			if err != nil {
 				return fmt.Errorf("render: %w", err)
 			}
@@ -555,7 +555,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 }
 
 type renderResponse struct {
-	TokenIDs []int          `json:"token_ids"`
+	TokenIDs []uint32       `json:"token_ids"`
 	Features renderFeatures `json:"features"`
 }
 
@@ -570,7 +570,7 @@ type renderFeatures struct {
 // by /v1/completions/render. Only token_ids is consumed; other fields
 // (request_id, sampling_params, model, etc.) are ignored.
 type completionsRenderResponse struct {
-	TokenIDs []int `json:"token_ids"`
+	TokenIDs []uint32 `json:"token_ids"`
 }
 
 func (s *RenderStep) checkTokenLimit(tokenCount int) error {

@@ -120,7 +120,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "encode-prefill-flow",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "img-hash-1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "img-hash-2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -235,7 +235,7 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "partial-ec-flow",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "img-hash-1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "img-hash-2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -312,7 +312,7 @@ func TestEncodeToPrefill_MixedModalityECFlow(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "mixed-modality-flow",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 51000, 51000, 71000, 71000, 71000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 51000, 51000, 71000, 71000, 71000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "img-hash", KwargsData: "aW1n", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityAudio, Hash: "aud-hash", KwargsData: "YXVk", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},

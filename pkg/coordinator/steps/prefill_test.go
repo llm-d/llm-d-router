@@ -77,7 +77,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: testKwargsB, Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -206,7 +206,7 @@ func TestPrefillStep_GenerateUsesMMMetadataWhenECPresent(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-meta",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 		},
@@ -274,7 +274,7 @@ func TestPrefillStep_GenerateFallsBackToKwargsWhenNoEC(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-no-ec",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 		},
@@ -340,7 +340,7 @@ func TestPrefillStep_GeneratePartialECCoverage_SplitsPerEntry(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-partial",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: testKwargsB, MMMetadata: testMetadataB, Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -412,7 +412,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 		RequestID:         "req-compl",
 		OriginalPath:      reqcommon.PathCompletions,
 		Model:             "test-model",
-		TokenIDs:          []int{1, 2345, 6789},
+		TokenIDs:          []uint32{1, 2345, 6789},
 		MultimodalEntries: nil,
 		KVTransferParams:  make(map[string]any),
 	}
@@ -550,7 +550,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		RequestID:    "req-chat",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":  "test-model",
 			"stream": false,
@@ -634,7 +634,7 @@ func TestPrefillStep_ResponsesFormat(t *testing.T) {
 		RequestID:    "req-responses",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        "test-model",
-		TokenIDs:     []int{1, 2345},
+		TokenIDs:     []uint32{1, 2345},
 		Body: map[string]any{
 			"model":             "test-model",
 			"input":             "hello",
@@ -952,7 +952,7 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 				RequestID:        "req",
 				OriginalPath:     tc.originalPath,
 				Model:            "m",
-				TokenIDs:         []int{1, 2, 3},
+				TokenIDs:         []uint32{1, 2, 3},
 				Body:             tc.body,
 				KVTransferParams: make(map[string]any),
 			}
@@ -996,7 +996,7 @@ func TestPrefillStep_ConflictingECParams_RejectsRequest(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-conflict",
 		Model:     "test-model",
-		TokenIDs:  []int{1, 2345},
+		TokenIDs:  []uint32{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
@@ -1036,7 +1036,7 @@ func TestPrefillStep_CapturesPeerTopologyHeader(t *testing.T) {
 		RequestID:        "req-1",
 		Model:            "test",
 		OriginalPath:     reqcommon.PathVLLMGenerate,
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: make(map[string]any),
 	}
 
@@ -1074,7 +1074,7 @@ func runPrefillWithP2PAddress(t *testing.T, connector, p2pAddress string) (*pipe
 		RequestID:        "req-1",
 		Model:            "test",
 		OriginalPath:     reqcommon.PathVLLMGenerate,
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: make(map[string]any),
 	}
 	return reqCtx, step.Execute(context.Background(), reqCtx)
@@ -1122,7 +1122,7 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 		RequestID:    "req-1",
 		Model:        "test",
 		OriginalPath: reqcommon.PathVLLMGenerate,
-		TokenIDs:     []int{1, 2345},
+		TokenIDs:     []uint32{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
@@ -1208,7 +1208,7 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-1",
 				Model:            "test-model",
-				TokenIDs:         []int{1, 2345},
+				TokenIDs:         []uint32{1, 2345},
 				KVTransferParams: make(map[string]any),
 			}
 
@@ -1248,7 +1248,7 @@ func TestPrefillStep_DebugRequestRecord(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-1",
 		Model:            "test-model",
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: make(map[string]any),
 		OriginalHeaders:  http.Header{"Authorization": {"Bearer secret"}},
 	}
@@ -1306,7 +1306,7 @@ func TestPrefillStep_FreshBodyForwardsCacheSaltAndPriority(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-salt",
 				Model:            "test",
-				TokenIDs:         []int{1, 2},
+				TokenIDs:         []uint32{1, 2},
 				Body:             tc.body,
 				KVTransferParams: make(map[string]any),
 			}

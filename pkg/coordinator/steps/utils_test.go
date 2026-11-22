@@ -99,19 +99,20 @@ func TestExtractTokenIDs(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   any
-		want    []int
+		want    []uint32
 		wantErr bool
 	}{
-		{name: "valid", input: []any{float64(1), float64(2345), float64(6789)}, want: []int{1, 2345, 6789}},
+		{name: "valid", input: []any{float64(1), float64(2345), float64(6789)}, want: []uint32{1, 2345, 6789}},
 		{name: "nil", input: nil, wantErr: true},
 		{name: "not_array", input: "hello", wantErr: true},
 		{name: "empty_array", input: []any{}, wantErr: true},
 		{name: "negative_token", input: []any{float64(-1)}, wantErr: true},
 		{name: "non_integer_token", input: []any{float64(1.5)}, wantErr: true},
 		{name: "overflow_float_token", input: []any{float64(1e19)}, wantErr: true},
+		{name: "token_above_uint32", input: []any{float64(5000000000)}, wantErr: true},
 		{name: "string_element", input: []any{"abc"}, wantErr: true},
 		{name: "bool_element", input: []any{true}, wantErr: true},
-		{name: "json_number", input: []any{json.Number("1"), json.Number("2345")}, want: []int{1, 2345}},
+		{name: "json_number", input: []any{json.Number("1"), json.Number("2345")}, want: []uint32{1, 2345}},
 		{name: "json_number_non_integer", input: []any{json.Number("1.5")}, wantErr: true},
 		{name: "json_number_overflow", input: []any{json.Number("9223372036854775808")}, wantErr: true},
 		{name: "float_at_2_pow_63", input: []any{float64(1 << 63)}, wantErr: true},
@@ -122,6 +123,9 @@ func TestExtractTokenIDs(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
+				}
+				if !errors.Is(err, pipeline.ErrBadRequest) {
+					t.Fatalf("expected ErrBadRequest, got %v", err)
 				}
 				return
 			}

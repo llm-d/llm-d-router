@@ -1703,7 +1703,7 @@ func TestForceStream_SpentHandoff_KeepsPromptTokenIDs(t *testing.T) {
 		RequestID:    "req-spent-handoff-ids",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "llama-3",
-		TokenIDs:     []int{1, 2, 3},
+		TokenIDs:     []uint32{1, 2, 3},
 		KVTransferParams: map[string]any{
 			reqcommon.FieldRemoteBlockIDs: []any{1, 2},
 			reqcommon.FieldRemoteEngineID: "prefill-pod-a",
@@ -3100,7 +3100,7 @@ func TestForceStream_PromptTokenParity(t *testing.T) {
 		OriginalPath:     reqcommon.PathChatCompletions,
 		Model:            "m",
 		Stream:           false,
-		TokenIDs:         []int{1, 2, 3},
+		TokenIDs:         []uint32{1, 2, 3},
 		KVTransferParams: map[string]any{},
 		Body: map[string]any{
 			"model": "m", "stream": false, "max_tokens": 16,
