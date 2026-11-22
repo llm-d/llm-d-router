@@ -182,7 +182,7 @@ EPP contract does not establish parity for them.
 | `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
 | `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
 | `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
-| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm; `round-robin` is the only built-in algorithm. |
+| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm: `round-robin` or `session-affinity`. |
 | `vllm.endpointDiscovery.attemptTimeout` | unset         | Optional positive duration limiting each render attempt, e.g. `1s`. |
 | `vllm.endpointDiscovery.discoverModelLimits` | `false` | Probe model context capacity; see [Context limits](#context-limits). |
 | `vllm.endpointDiscovery.minModelLen` | `0` | Minimum eligible renderer context capacity. |
@@ -403,6 +403,15 @@ Set `vllm.endpointDiscovery: {}` to use discovered inference addresses and
 ports with round-robin balancing. Omitted or empty `portRules` keeps each
 endpoint's inference port. Use this when `/v1/*/render` is served on the same
 listener as inference.
+
+Set `vllm.endpointDiscovery.loadBalancer.type: session-affinity` to keep
+requests with the same target model and `x-session-id` on the same render
+endpoint. Renderers with a tokenizer segment cache can reuse entries across turns.
+The picker uses rendezvous hashing over eligible render URLs, so EPP replicas
+with the same endpoints agree without sharing session state. A retry selects
+the next highest-ranked eligible URL. Requests with a missing or blank
+`x-session-id` use round-robin. A hot session can concentrate work on one
+renderer.
 
 When render uses a different listener, configure ordered `portRules`. The
 first matching Kubernetes label selector resolves the port as

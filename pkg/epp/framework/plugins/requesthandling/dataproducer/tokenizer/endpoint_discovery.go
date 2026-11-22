@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
@@ -34,7 +35,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
-const roundRobinLoadBalancerType = "round-robin"
+const (
+	roundRobinLoadBalancerType      = "round-robin"
+	sessionAffinityLoadBalancerType = "session-affinity"
+)
+
+type renderAffinityKeyCtxKey struct{}
 
 // errNoRenderEndpoints indicates that discovery has no selectable render URL.
 var errNoRenderEndpoints = errors.New("no vLLM render endpoints discovered")
@@ -71,33 +77,34 @@ func (c *endpointDiscoveryConfig) loadBalancerType() string {
 
 // renderEndpointPicker resolves the base URL for one render request.
 type renderEndpointPicker interface {
-	Pick() (string, error)
+	Pick(affinityKey string) (string, error)
 }
 
 // retryingRenderEndpointPicker can avoid endpoints already attempted by a request.
 type retryingRenderEndpointPicker interface {
 	renderEndpointPicker
-	PickExcluding(excluded map[string]struct{}) (string, error)
+	PickExcluding(affinityKey string, excluded map[string]struct{}) (string, error)
 }
 
 // fixedEndpointPicker always returns the statically configured render URL.
 type fixedEndpointPicker string
 
 // Pick returns the static render URL.
-func (p fixedEndpointPicker) Pick() (string, error) {
+func (p fixedEndpointPicker) Pick(_ string) (string, error) {
 	return string(p), nil
 }
 
 // endpointLoadBalancer selects a non-excluded URL from the full endpoint snapshot.
 type endpointLoadBalancer interface {
-	Pick(endpoints []string, excluded map[string]struct{}) (string, error)
+	Pick(affinityKey string, endpoints []string, excluded map[string]struct{}) (string, error)
 }
 
 type endpointLoadBalancerFactory func() endpointLoadBalancer
 
 // endpointLoadBalancerFactories maps configuration names to algorithm constructors.
 var endpointLoadBalancerFactories = map[string]endpointLoadBalancerFactory{
-	roundRobinLoadBalancerType: func() endpointLoadBalancer { return &roundRobinLoadBalancer{} },
+	roundRobinLoadBalancerType:      func() endpointLoadBalancer { return &roundRobinLoadBalancer{} },
+	sessionAffinityLoadBalancerType: func() endpointLoadBalancer { return &sessionAffinityLoadBalancer{} },
 }
 
 // newEndpointLoadBalancer constructs the configured selection algorithm.
@@ -116,7 +123,7 @@ type roundRobinLoadBalancer struct {
 }
 
 // Pick returns the next endpoint and advances the concurrency-safe cursor.
-func (b *roundRobinLoadBalancer) Pick(endpoints []string, excluded map[string]struct{}) (string, error) {
+func (b *roundRobinLoadBalancer) Pick(_ string, endpoints []string, excluded map[string]struct{}) (string, error) {
 	if len(endpoints) == 0 {
 		return "", errNoRenderEndpoints
 	}
@@ -135,6 +142,38 @@ func (b *roundRobinLoadBalancer) Pick(endpoints []string, excluded map[string]st
 		}
 	}
 	return "", errNoRenderEndpoints
+}
+
+type sessionAffinityLoadBalancer struct {
+	fallback roundRobinLoadBalancer
+}
+
+func (b *sessionAffinityLoadBalancer) Pick(key string, endpoints []string, excluded map[string]struct{}) (string, error) {
+	if key == "" {
+		return b.fallback.Pick("", endpoints, excluded)
+	}
+
+	// Hash the common prefix once, including for large session IDs.
+	prefix := xxhash.New()
+	_, _ = prefix.WriteString(key)
+	_, _ = prefix.WriteString("\x00")
+	var best string
+	var highest uint64
+	for _, url := range endpoints {
+		if _, skip := excluded[url]; skip {
+			continue
+		}
+		digest := *prefix
+		_, _ = digest.WriteString(url)
+		score := digest.Sum64()
+		if best == "" || score > highest || (score == highest && url < best) {
+			best, highest = url, score
+		}
+	}
+	if best == "" {
+		return "", errNoRenderEndpoints
+	}
+	return best, nil
 }
 
 // compiledEndpointPortRule holds a validated selector and base port.
@@ -183,12 +222,12 @@ func newDiscoveredEndpointPicker(config *endpointDiscoveryConfig) (*discoveredEn
 }
 
 // Pick selects a render URL from a stable endpoint snapshot.
-func (p *discoveredEndpointPicker) Pick() (string, error) {
-	return p.PickExcluding(nil)
+func (p *discoveredEndpointPicker) Pick(affinityKey string) (string, error) {
+	return p.PickExcluding(affinityKey, nil)
 }
 
 // PickExcluding selects a render URL that has not been attempted by the request.
-func (p *discoveredEndpointPicker) PickExcluding(excluded map[string]struct{}) (string, error) {
+func (p *discoveredEndpointPicker) PickExcluding(affinityKey string, excluded map[string]struct{}) (string, error) {
 	p.mu.RLock()
 	eligible := make(map[string]bool, len(p.capabilities))
 	now := time.Now()
@@ -208,7 +247,7 @@ func (p *discoveredEndpointPicker) PickExcluding(excluded map[string]struct{}) (
 	if len(endpoints) == 0 {
 		return "", errNoRenderEndpoints
 	}
-	return p.loadBalancer.Pick(endpoints, excluded)
+	return p.loadBalancer.Pick(affinityKey, endpoints, excluded)
 }
 
 // Upsert validates endpoint metadata and stores its HTTP render URL by identity.

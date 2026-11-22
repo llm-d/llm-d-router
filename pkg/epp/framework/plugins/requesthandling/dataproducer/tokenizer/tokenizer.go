@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -47,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	rhplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -475,6 +477,11 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		log.FromContext(ctx).V(logging.DEBUG).Info("ignoring client-supplied prompt token IDs, rendering", "reason", ignored)
 	}
 
+	if p.endpointDiscovery != nil && p.endpointDiscovery.picker.config.loadBalancerType() == sessionAffinityLoadBalancerType {
+		if session := strings.TrimSpace(request.Headers[sessionaffinity.DefaultSessionIDHeader]); session != "" {
+			ctx = context.WithValue(ctx, renderAffinityKeyCtxKey{}, request.TargetModel+"\x00"+session)
+		}
+	}
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
 	if auth, ok := metadata.GetLowerCaseHeaderValue(request.Headers, "authorization"); ok {
 		ctx = withAuthHeader(ctx, auth)
