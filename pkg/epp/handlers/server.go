@@ -26,11 +26,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -86,6 +89,17 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetTraceBaggageKeys sets the W3C Baggage keys whose entries are recorded as
+// attributes on the request span. Empty by default, which records none.
+func (s *StreamingServer) SetTraceBaggageKeys(keys []string) {
+	s.traceBaggageKeys = nil
+	for _, key := range keys {
+		if key = strings.TrimSpace(key); key != "" {
+			s.traceBaggageKeys = append(s.traceBaggageKeys, key)
+		}
+	}
+}
+
 // SetEmitEndpointScores controls whether the per-endpoint scheduler scores are emitted in the
 // request-path dynamic metadata under metadata.DestinationEndpointScoresKey. Off by default.
 func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
@@ -135,6 +149,9 @@ type StreamingServer struct {
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores          bool
 	toolCallingTelemetryEnabled bool
+	// traceBaggageKeys allowlists the W3C Baggage entries recorded on the request
+	// span. Empty unless set via SetTraceBaggageKeys.
+	traceBaggageKeys []string
 	// maxRequestBodySize caps the buffered request body in bytes; 0 disables the cap.
 	maxRequestBodySize int
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
@@ -384,6 +401,37 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
 	id, _ := metadata.GetLowerCaseHeaderValue(carrier, metadata.FlowFairnessIDKey)
 	return tracing.BeginRequestAttribution(ctx, id)
+}
+
+// maxBaggageAttributeValueLen caps a recorded baggage value in bytes. Baggage is
+// client-controlled, and the W3C limit applies to the whole header, not one entry.
+const maxBaggageAttributeValueLen = 256
+
+// baggageAttributes returns the baggage entries in ctx whose key is in keys as
+// span attributes named after the key.
+func baggageAttributes(ctx context.Context, keys []string) []attribute.KeyValue {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	bag := baggage.FromContext(ctx)
+	var attrs []attribute.KeyValue
+	for _, key := range keys {
+		member := bag.Member(key)
+		if member.Key() == "" {
+			continue
+		}
+		value := member.Value()
+		if len(value) > maxBaggageAttributeValueLen {
+			end := maxBaggageAttributeValueLen
+			for end > 0 && !utf8.RuneStart(value[end]) {
+				end--
+			}
+			value = value[:end]
+		}
+		attrs = append(attrs, attribute.String(key, value))
+	}
+	return attrs
 }
 
 // terminationCause classifies a stream that ended without completing. ctxErr is the request
@@ -681,8 +729,11 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// headers, then start it. The headers are only available here, so the span
 			// cannot be started at the top of Process without orphaning the trace.
 			ctx = extractTraceContext(ctx, v)
+			// Baggage attributes go first: a later duplicate key wins, so a client
+			// cannot replace an attribute the EPP sets.
 			ctx, span = tracer.Start(ctx, "request",
 				trace.WithSpanKind(trace.SpanKindServer),
+				trace.WithAttributes(baggageAttributes(ctx, s.traceBaggageKeys)...),
 				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String())),
 			)
 

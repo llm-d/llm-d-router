@@ -384,6 +384,14 @@ Forwarded observations confirm successful ext-proc sends to Envoy; application r
 preservation of tool calls remain unverified. These attributes contain no response bodies,
 tool names, or tool arguments, and do not measure model-server tool-parser quality.
 
+### Baggage trace attributes
+
+`--trace-baggage-keys` takes a comma-separated list of W3C Baggage keys. EPP records each listed
+key found in the request's `baggage` header as an attribute on the request span, named after the
+key. The list is empty by default, which records none. Values longer than 256 bytes are cut to
+that length. An attribute EPP sets itself keeps its value when a baggage key has the same name.
+Baggage is set by the client, so list only keys that are safe to export to the tracing backend.
+
 ### Inference pool
 
 These metrics are owned by EPP pool aggregation. They summarize model-server endpoint metrics for
