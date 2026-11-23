@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
@@ -132,6 +133,12 @@ func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *Reques
 			Msg:     "no pods available in datastore",
 			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
+	}
+	if endpoint.RanksPerPort > 1 {
+		if reqCtx.Request.Headers == nil {
+			reqCtx.Request.Headers = map[string]string{}
+		}
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(endpoint.DataParallelRank)
 	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
