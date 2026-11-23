@@ -147,6 +147,20 @@ var defaultEngineConfigs = []engineConfigParams{
 			{AttributeKey: attrmetrics.NixlKVExpiredRequestsKey, MetricSpec: "vllm:nixl_num_kv_expired_reqs_total", Optional: true},
 		},
 	},
+	{
+		Name:                "vllm-omni",
+		QueuedRequestsSpec:  "vllm_omni:num_requests_waiting",
+		RunningRequestsSpec: "vllm_omni:num_requests_running",
+		// vLLM-Omni's diffusion stages have no KV cache, and this mapping serves
+		// both its audio and image pools. The per-stage vllm:* families exist
+		// only on autoregressive stages.
+		KVUsageSpec:   "",
+		LoRASpec:      "",
+		CacheInfoSpec: "",
+		CustomMetrics: []customMetricConfigParams{
+			{AttributeKey: attrmetrics.VLLMOmniStageWaitingRequestsKey, MetricSpec: "vllm_omni:stage_waiting_requests", Aggregation: metricAggregationSum, Optional: true},
+		},
+	},
 	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
 		Name:                "sglang",
 		QueuedRequestsSpec:  "sglang:num_queue_reqs",
