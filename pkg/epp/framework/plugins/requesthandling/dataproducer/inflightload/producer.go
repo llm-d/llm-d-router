@@ -56,15 +56,17 @@ const (
 
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
-	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
-	// the in-flight token counter. Defaults to false. The per-request output
-	// estimate comes from the output-length bucket published by the outlen-bucket plugin; enable
-	// that plugin (ordered before this producer) so requests are classified rather
-	// than all estimated as UNKNOWN.
+	// AddEstimatedOutputTokens controls whether estimated output work is added to
+	// the in-flight token counter. Defaults to false. For text requests the
+	// per-request estimate comes from the output-length bucket published by the
+	// outlen-bucket plugin; enable that plugin (ordered before this producer) so
+	// requests are classified rather than all estimated as UNKNOWN. Image requests
+	// use diffusion work instead.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
-	// MaxEstimatedOutputTokens optionally caps the estimated output tokens added per
+	// MaxEstimatedOutputTokens optionally caps the text output estimate added per
 	// request when AddEstimatedOutputTokens is true, regardless of input length or
-	// the client-requested output cap. Must be non-negative. Unset means no cap.
+	// the client-requested output cap. Image diffusion work is not capped. Must be
+	// non-negative. Unset means no cap.
 	MaxEstimatedOutputTokens *int64 `json:"maxEstimatedOutputTokens,omitempty"`
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's
 	// PrefixCacheMatchInfo to read for the cached-prefix discount. Empty defaults
@@ -649,9 +651,9 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
-		// TTS completion tokens are codec frames, not text output-length
-		// samples; they must not train the text UNKNOWN average.
-		if request.Body != nil && !isTextToSpeech(request) &&
+		// TTS and image completion counts are not text output-length samples;
+		// they must not train the text UNKNOWN average.
+		if request.Body != nil && !isTextToSpeech(request) && request.Body.Images == nil &&
 			resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
 			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))

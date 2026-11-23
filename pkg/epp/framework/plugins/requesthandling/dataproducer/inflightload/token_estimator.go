@@ -19,8 +19,6 @@ package inflightload
 
 import (
 	"math"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -33,10 +31,7 @@ import (
 type TokenEstimator interface {
 	// EstimateInput returns the estimated input token count for the request.
 	EstimateInput(request *fwksched.InferenceRequest) int64
-	// EstimateOutputFromRequest returns the estimated output work for a
-	// request: diffusion work for images, otherwise the output-length bucket
-	// published by the outlen-bucket plugin, bounded by the client-requested
-	// cap and the estimator's operator cap.
+	// EstimateOutputFromRequest returns the estimated output work for a request.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 	// ObserveOutput records the completion tokens a finished request produced.
 	ObserveOutput(bucket outlenbucket.Bucket, completionTokens int64)
@@ -66,11 +61,11 @@ const (
 	ttsFramesPerSpokenByte = 1.0
 	ttsMaxFrames           = 4096
 
-	// Image output is diffusion work: steps x output pixels x images, in
-	// megapixel-steps. The defaults match the common Qwen-Image deployment.
-	// A deployment whose model defaults differ (for example a 4-step
-	// FLUX-schnell) must set size, num_inference_steps, and n explicitly until
-	// these defaults are configurable per pool.
+	// Image output is diffusion work: steps x output pixels x images, scaled
+	// to token-equivalent work. The defaults match the common Qwen-Image
+	// deployment. A request that omits size, num_inference_steps, or n is
+	// estimated with these defaults even when the serving model's own defaults
+	// differ (for example a 4-step FLUX-schnell).
 	imageDefaultInferenceSteps int64 = 50
 	imageDefaultPixels         int64 = 1024 * 1024
 	imageMaxInferenceSteps     int64 = 200
@@ -78,17 +73,20 @@ const (
 	// imageMaxPixels bounds oversized requests and keeps the pixel product
 	// inside int64. Raise it if a deployment serves larger outputs.
 	imageMaxPixels int64 = 4096 * 4096
-	// imageWorkScale is one work unit: 1e6 pixel-steps.
-	imageWorkScale = 1_000_000.0
+	// imageWorkScale converts pixel-steps to token-equivalent work: 10,000
+	// pixel-steps per unit, so a 1024x1024, 50-step image is about the size of
+	// a LONG text request.
+	imageWorkScale = 10_000.0
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
 // output-length bucket published by the outlen-bucket plugin, or the request's
-// diffusion work for images, to an output estimate, bounded by the client-requested
-// cap and an optional operator cap.
+// diffusion work for images, to an output estimate. Text estimates are bounded
+// by the client-requested cap and an optional operator cap; image work is not.
 type SimpleTokenEstimator struct {
-	// MaxEstimatedOutputTokens optionally caps the estimated output tokens
-	// regardless of the client-requested cap. nil means no cap.
+	// MaxEstimatedOutputTokens optionally caps the text output estimate
+	// regardless of the client-requested cap. nil means no cap. Image work is
+	// not capped.
 	MaxEstimatedOutputTokens *int64
 
 	mu         sync.Mutex // guards unknownAvg and unknownN
@@ -100,7 +98,7 @@ type SimpleTokenEstimator struct {
 }
 
 // NewSimpleTokenEstimator returns a SimpleTokenEstimator with an optional operator
-// cap (maxOutput, nil for no cap) on the estimated output tokens.
+// cap (maxOutput, nil for no cap) on the text output estimate.
 func NewSimpleTokenEstimator(maxOutput *int64) TokenEstimator {
 	return &SimpleTokenEstimator{MaxEstimatedOutputTokens: maxOutput}
 }
@@ -114,12 +112,14 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 	return int64(request.Body.TokenizedRequest.TokenCount())
 }
 
-// EstimateOutputFromRequest returns the estimated output token count for a request
-// from the output-length bucket published by the outlen-bucket plugin: LONG (reasoning) maps to
-// a flat 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to the running average
-// of observed UNKNOWN completion tokens (1000 before the first one), kept within
-// [SHORT, LONG] to preserve the ranking SHORT <= UNKNOWN <= LONG. The estimate is bounded
-// by the client-requested cap and the estimator's operator cap.
+// EstimateOutputFromRequest returns the estimated output work for a request:
+// diffusion work for images, otherwise a text estimate from the output-length
+// bucket published by the outlen-bucket plugin. The text estimate maps LONG
+// (reasoning) to a flat 4096-token estimate, SHORT (tool-call) to 100, and
+// UNKNOWN to the running average of observed UNKNOWN completion tokens (1000
+// before the first one), kept within [SHORT, LONG] to preserve the ranking
+// SHORT <= UNKNOWN <= LONG. Text estimates are bounded by the client-requested
+// cap and the estimator's operator cap; image work is not.
 //
 // Ordering dependency: the bucket comes from an attribute that the outlen-bucket
 // plugin publishes in its RequestHeader hook, which this method reads. The read is
@@ -141,8 +141,8 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 		return e.clampOutput(ttsOutputFrames(tts, request.Body.MaxOutputTokens), request.Body.MaxOutputTokens)
 	}
 
-	// Image output is diffusion work, not a text output length. Its unit is
-	// megapixel-steps, so the text-token operator cap does not apply.
+	// Image output is diffusion work expressed in token-equivalent units, not a
+	// text output length, so the text-token client and operator caps do not apply.
 	if images := request.Body.Images; images != nil {
 		return imageOutputWork(images)
 	}
@@ -194,8 +194,8 @@ func ttsOutputFrames(tts *fwkrequest.TextToSpeechRequest, clientCap *int64) int6
 }
 
 // imageOutputWork estimates the diffusion work an image request will perform:
-// num_inference_steps x output pixels x image count. One work unit is one
-// megapixel-step, so a 1024x1024, 50-step, single-image request is about 53.
+// num_inference_steps x output pixels x image count. One work unit is 10,000
+// pixel-steps, so a 1024x1024, 50-step, single-image request is about 5,243.
 func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 	steps := imageDefaultInferenceSteps
 	if images.NumInferenceSteps != nil && *images.NumInferenceSteps > 0 {
@@ -206,8 +206,7 @@ func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 		n = min(*images.N, imageMaxImages)
 	}
 	pixels := imageDefaultPixels
-	if width, height := parseImageSize(images.Size); width > 0 && height > 0 {
-		w, h := int64(width), int64(height)
+	if w, h := fwkrequest.ParseResolution(images.Size); w > 0 && h > 0 {
 		// Divide before multiplying so an oversized dimension cannot overflow.
 		if w > imageMaxPixels/h {
 			pixels = imageMaxPixels
@@ -217,24 +216,6 @@ func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 	}
 	work := int64(math.Ceil(float64(steps*n*pixels) / imageWorkScale))
 	return max(work, 1)
-}
-
-// parseImageSize splits a "WIDTHxHEIGHT" size, returning zeros when it is empty
-// or malformed so the caller falls back to the default.
-func parseImageSize(size string) (int, int) {
-	width, height, ok := strings.Cut(strings.ToLower(strings.TrimSpace(size)), "x")
-	if !ok {
-		return 0, 0
-	}
-	w, err := strconv.Atoi(strings.TrimSpace(width))
-	if err != nil || w <= 0 {
-		return 0, 0
-	}
-	h, err := strconv.Atoi(strings.TrimSpace(height))
-	if err != nil || h <= 0 {
-		return 0, 0
-	}
-	return w, h
 }
 
 // clampOutput bounds est by the client-requested cap and the operator cap.

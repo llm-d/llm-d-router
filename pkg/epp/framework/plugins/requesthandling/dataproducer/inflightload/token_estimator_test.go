@@ -122,38 +122,6 @@ func TestSimpleTokenEstimator_EstimateInput(t *testing.T) {
 
 // TestEstimateOutputFromRequest_Buckets verifies bucket-to-estimate mapping and client-cap clamping,
 // including that max_output_tokens=0 is treated as "not set" (no cap), not a clamp to 0.
-func TestEstimateOutputFromRequest_Images(t *testing.T) {
-	e := NewSimpleTokenEstimator(nil)
-
-	tests := []struct {
-		name  string
-		size  string
-		steps *int64
-		n     *int64
-		want  int64
-	}{
-		{name: "default size and steps", size: "", want: 53},
-		{name: "512 square twenty steps", size: "512x512", steps: ptr.To(int64(20)), want: 6},
-		{name: "1024 square fifty steps", size: "1024x1024", steps: ptr.To(int64(50)), want: 53},
-		{name: "two images", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(2)), want: 105},
-		{name: "malformed size falls back", size: "1024", steps: ptr.To(int64(50)), want: 53},
-		{name: "steps are capped", size: "1024x1024", steps: ptr.To(int64(1000)), want: 210},
-		{name: "images are capped", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(100)), want: 525},
-		{name: "pixels are capped", size: "8192x8192", steps: ptr.To(int64(50)), want: 839},
-		// A dimension far beyond imageMaxPixels exercises the divide-before-
-		// multiply guard without relying on 64-bit int parsing, so the case is
-		// portable to 32-bit builds.
-		{name: "oversized dimension does not overflow", size: "2000000000x2", steps: ptr.To(int64(50)), want: 839},
-		{name: "uppercase and whitespace size", size: " 1024X1024 ", steps: ptr.To(int64(50)), want: 53},
-		{name: "zero steps and images use defaults", size: "1024x1024", steps: ptr.To(int64(0)), n: ptr.To(int64(0)), want: 53},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, e.EstimateOutputFromRequest(imagesRequest(tt.size, tt.steps, tt.n)))
-		})
-	}
-}
-
 func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	e := NewSimpleTokenEstimator(nil)
 
@@ -208,6 +176,40 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 		req := &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}}
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
+}
+
+func TestEstimateOutputFromRequest_Images(t *testing.T) {
+	e := NewSimpleTokenEstimator(nil)
+
+	tests := []struct {
+		name  string
+		size  string
+		steps *int64
+		n     *int64
+		want  int64
+	}{
+		{name: "default size and steps", size: "", want: 5243},
+		{name: "512 square twenty steps", size: "512x512", steps: ptr.To(int64(20)), want: 525},
+		{name: "1024 square fifty steps", size: "1024x1024", steps: ptr.To(int64(50)), want: 5243},
+		{name: "two images", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(2)), want: 10486},
+		{name: "malformed size falls back", size: "1024", steps: ptr.To(int64(50)), want: 5243},
+		{name: "steps are capped", size: "1024x1024", steps: ptr.To(int64(1000)), want: 20972},
+		{name: "images are capped", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(100)), want: 52429},
+		{name: "pixels are capped", size: "8192x8192", steps: ptr.To(int64(50)), want: 83887},
+		{name: "oversized dimension does not overflow", size: "2000000000x2", steps: ptr.To(int64(50)), want: 83887},
+		{name: "uppercase and whitespace size", size: " 1024X1024 ", steps: ptr.To(int64(50)), want: 5243},
+		{name: "zero steps and images use defaults", size: "1024x1024", steps: ptr.To(int64(0)), n: ptr.To(int64(0)), want: 5243},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, e.EstimateOutputFromRequest(imagesRequest(tt.size, tt.steps, tt.n)))
+		})
+	}
+}
+
+func TestEstimateOutputFromRequest_ImagesSkipOperatorCap(t *testing.T) {
+	e := NewSimpleTokenEstimator(ptr.To(int64(10)))
+	require.Equal(t, int64(5243), e.EstimateOutputFromRequest(imagesRequest("", nil, nil)))
 }
 
 func TestEstimateOutputFromRequest_OperatorCap(t *testing.T) {

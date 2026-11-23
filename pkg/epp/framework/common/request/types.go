@@ -696,6 +696,24 @@ func (i *ImagesGenerationsRequest) String() string {
 		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, len(i.NegativePrompt))
 }
 
+// ParseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
+// zeros when the value is empty or malformed.
+func ParseResolution(s string) (width, height int64) {
+	i := strings.IndexAny(s, "xX")
+	if i <= 0 {
+		return 0, 0
+	}
+	w, err := strconv.ParseInt(strings.TrimSpace(s[:i]), 10, 64)
+	if err != nil || w <= 0 {
+		return 0, 0
+	}
+	h, err := strconv.ParseInt(strings.TrimSpace(s[i+1:]), 10, 64)
+	if err != nil || h <= 0 {
+		return 0, 0
+	}
+	return w, h
+}
+
 // derefInt formats an optional integer pointer for logging without
 // dereferencing a nil, so String stays safe on a partially populated request.
 func derefInt(v *int64) string {

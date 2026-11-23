@@ -145,7 +145,8 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 		}
 	}
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoResolutionHeaderKey); ok {
-		meta.width, meta.height = parseResolution(s)
+		w, h := fwkrequest.ParseResolution(s)
+		meta.width, meta.height = int(w), int(h)
 	}
 	return meta
 }
@@ -167,24 +168,6 @@ func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
 		}
 	}
 	return meta
-}
-
-// parseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
-// zeros when the value is empty or malformed.
-func parseResolution(s string) (width, height int) {
-	i := strings.IndexAny(s, "xX")
-	if i <= 0 {
-		return 0, 0
-	}
-	w, err := strconv.Atoi(strings.TrimSpace(s[:i]))
-	if err != nil || w <= 0 {
-		return 0, 0
-	}
-	h, err := strconv.Atoi(strings.TrimSpace(s[i+1:]))
-	if err != nil || h <= 0 {
-		return 0, 0
-	}
-	return w, h
 }
 
 func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.InferenceRequestBody) (*fwkrequest.TokenizedRequest, error) {
