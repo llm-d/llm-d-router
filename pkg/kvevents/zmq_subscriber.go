@@ -325,7 +325,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			}
 		}
 
-		debugLogger.V(logging.TRACE).Info("Received message from zmq subscriber",
+		logger.V(logging.TRACE).Info("Received message from zmq subscriber",
 			"topic", topic, "seq", seq, "payloadSize", len(payload))
 		z.addTask(ctx, topic, seq, payload)
 		z.lastSeq = seq
