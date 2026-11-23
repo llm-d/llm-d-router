@@ -197,22 +197,7 @@ func ensureSchedulingLayer(
 		}
 	}
 
-	// Find or Create a default MaxScorePicker to reuse across profiles.
-	var maxScorePickerName string
-	for name, p := range allPlugins {
-		if _, ok := p.(fwksched.Picker); ok {
-			maxScorePickerName = name
-			break
-		}
-	}
-
-	if maxScorePickerName == "" {
-		if err := registerDefaultPlugin(cfg, handle, maxscore.MaxScorePickerType); err != nil {
-			return err
-		}
-		maxScorePickerName = maxscore.MaxScorePickerType
-	}
-
+	var defaultPicker string
 	for i, prof := range cfg.SchedulingProfiles {
 		hasPicker := false
 		for j, pluginRef := range prof.Plugins {
@@ -228,14 +213,46 @@ func ensureSchedulingLayer(
 		}
 
 		if !hasPicker {
+			if defaultPicker == "" {
+				name, err := defaultPickerName(cfg, handle, allPlugins)
+				if err != nil {
+					return err
+				}
+				defaultPicker = name
+			}
 			cfg.SchedulingProfiles[i].Plugins = append(
 				cfg.SchedulingProfiles[i].Plugins,
-				configapiv1.SchedulingPlugin{PluginRef: maxScorePickerName},
+				configapiv1.SchedulingPlugin{PluginRef: defaultPicker},
 			)
 		}
 	}
 
 	return nil
+}
+
+// defaultPickerName returns the picker appended to profiles that list none:
+// the first max-score-picker in configuration order, else the first picker in
+// configuration order, else a max-score-picker registered with default parameters.
+func defaultPickerName(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) (string, error) {
+	firstPicker := ""
+	for _, spec := range cfg.Plugins {
+		if _, ok := allPlugins[spec.Name].(fwksched.Picker); !ok {
+			continue
+		}
+		if spec.Type == maxscore.MaxScorePickerType {
+			return spec.Name, nil
+		}
+		if firstPicker == "" {
+			firstPicker = spec.Name
+		}
+	}
+	if firstPicker != "" {
+		return firstPicker, nil
+	}
+	if err := registerDefaultPlugin(cfg, handle, maxscore.MaxScorePickerType); err != nil {
+		return "", err
+	}
+	return maxscore.MaxScorePickerType, nil
 }
 
 // ensureFlowControlLayer guarantees that the flow control subsystem is structurally complete.

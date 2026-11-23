@@ -298,7 +298,8 @@ Scheduling:
 - When `schedulingProfiles` is omitted, a single `default` profile is created and populated with the
   listed plugins that are filters, scorers, or pickers.
 - When there is exactly one profile (including the auto-created `default`) and no handler is configured, `single-profile-handler` is added.
-- `max-score-picker` is added when no picker is configured, and appended to any profile that lacks one.
+- A profile that lacks a picker gets the first `max-score-picker` in `plugins`, or the first picker in
+  `plugins` when none is a `max-score-picker`. When no picker is configured, `max-score-picker` is added.
 - A scorer's `weight` defaults to `1.0` when omitted.
 
 RequestHandler:
