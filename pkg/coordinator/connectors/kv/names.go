@@ -21,4 +21,5 @@ const (
 	SharedStorage = "kv-shared-storage"
 	SGLang        = "kv-sglang"
 	Offloading    = "kv-offloading"
+	Mooncake      = "kv-mooncake"
 )

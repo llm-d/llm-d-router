@@ -35,9 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Mooncake transfer fields
-const requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
-
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
 
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
@@ -128,14 +125,14 @@ func (s *Server) prepareMooncakeKVParams(ctx context.Context, prefillPodHostPort
 	prefillKV = map[string]any{
 		reqcommon.FieldDoRemotePrefill: false,
 		reqcommon.FieldDoRemoteDecode:  true,
-		requestFieldTransferID:         transferID,
+		reqcommon.FieldTransferID:      transferID,
 	}
 	decodeKV = map[string]any{
-		reqcommon.FieldDoRemotePrefill:  true,
-		reqcommon.FieldDoRemoteDecode:   false,
-		requestFieldTransferID:          transferID,
-		requestFieldRemoteBootstrapAddr: bootstrapAddr,
-		reqcommon.FieldRemoteEngineID:   engineID,
+		reqcommon.FieldDoRemotePrefill:     true,
+		reqcommon.FieldDoRemoteDecode:      false,
+		reqcommon.FieldTransferID:          transferID,
+		reqcommon.FieldRemoteBootstrapAddr: bootstrapAddr,
+		reqcommon.FieldRemoteEngineID:      engineID,
 	}
 	return dpRank, prefillKV, decodeKV, nil
 }

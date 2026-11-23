@@ -52,6 +52,7 @@ var internalForwardingHeaders = map[string]bool{
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
 	routing.KVCachePrefillHeader:          true,
+	routing.MooncakePrefillHandoffHeader:  true,
 	routing.PrefillEndpointHeader:         true,
 	routing.LegacyPrefillEndpointHeader:   true,
 }
@@ -158,6 +159,14 @@ type P2PPeer struct {
 	Port int
 }
 
+// MooncakeHandoff carries the request-scoped transfer ID and the selected
+// prefiller's metadata. The connector consumes it when preparing decode.
+type MooncakeHandoff struct {
+	TransferID       string
+	EngineID         string
+	BootstrapAddress string
+}
+
 // RequestContext carries all state for a single request through the pipeline.
 //
 // OriginalBody is never re-marshalled from Body, so a step reading it after
@@ -240,6 +249,8 @@ type RequestContext struct {
 	// kv-offloading connector's ReadPrefillResponse; nil before the prefill
 	// response and with any other connector.
 	PrefillPeer *P2PPeer
+	// MooncakeHandoff is allocated by kv-mooncake on prefill and consumed on decode.
+	MooncakeHandoff *MooncakeHandoff
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string

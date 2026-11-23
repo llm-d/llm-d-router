@@ -78,6 +78,9 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
+	if kvConn.Name() == kv.Mooncake && (forceStream || forwardTokenIDs) {
+		return nil, fmt.Errorf("decode: %s does not support force_stream or forward_prompt_token_ids", kv.Mooncake)
+	}
 	step := &DecodeStep{gwClient: gwClient, kv: kvConn, ec: ecConn, promptTokenParity: parity, forceStream: forceStream, forwardTokenIDs: forwardTokenIDs}
 	if forceStream {
 		budget, err := parseForceStreamBudget(params)
@@ -92,6 +95,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if s.kv.Name() == kv.Mooncake {
+		if err := validateMooncakeRequest(reqCtx); err != nil {
+			return err
+		}
+	}
 	switch g := reqCtx.GRPC.(type) {
 	case *pipeline.SGLangGRPCRequest:
 		return s.executeSGLangGRPC(ctx, reqCtx, g)
@@ -233,6 +241,9 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
+	if s.kv.Name() == kv.Mooncake && len(kvParams) == 0 {
+		return fmt.Errorf("decode: %s requires an unconsumed prefill handoff", kv.Mooncake)
+	}
 	s.injectUUIDs(reqCtx, logger)
 
 	switch format {

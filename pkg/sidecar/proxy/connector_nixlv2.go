@@ -928,7 +928,7 @@ func (s *Server) buildNIXLV2SerialPrefillKVParams(ctx context.Context, uuidStr s
 			requestFieldRemoteDPRank:         globalDPRank,
 			requestFieldRemoteDPRankOverride: true,
 			requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
-			requestFieldTransferID:           transferID,
+			reqcommon.FieldTransferID:        transferID,
 			"tp_size":                        s.config.MoRIIOTPSize,
 			"remote_dp_size":                 s.config.MoRIIODPSize,
 		}
@@ -986,8 +986,8 @@ func (s *Server) prepareNIXLV2SerialDecodeKVParams(
 		if s.config.MoRIIODPSize > 1 {
 			pkv["is_request_leader"] = true
 		}
-		if _, present := pkv[requestFieldTransferID]; !present {
-			pkv[requestFieldTransferID] = "tx" + uuidStr
+		if _, present := pkv[reqcommon.FieldTransferID]; !present {
+			pkv[reqcommon.FieldTransferID] = "tx" + uuidStr
 		}
 		if _, present := pkv[requestFieldRemoteNotifyPort]; !present {
 			pkv[requestFieldRemoteNotifyPort] = s.config.MoRIIODecodeNotifyPort
@@ -1056,7 +1056,7 @@ func (s *Server) buildNIXLV2ParallelKVParams(
 		requestFieldRemoteDPRank:         dpRank,
 		requestFieldRemoteDPRankOverride: true,
 		requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
-		requestFieldTransferID:           transferID,
+		reqcommon.FieldTransferID:        transferID,
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
@@ -1086,7 +1086,7 @@ func (s *Server) buildNIXLV2ParallelKVParams(
 		requestFieldRemoteDPRank:         dpRank,
 		requestFieldRemoteDPRankOverride: true,
 		requestFieldRemoteHandshakePort:  s.config.MoRIIOPrefillHandshakePort,
-		requestFieldTransferID:           transferID,
+		reqcommon.FieldTransferID:        transferID,
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 dpLocal,
 		"is_request_leader":              true,

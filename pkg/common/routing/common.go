@@ -47,6 +47,11 @@ const (
 	// has no pre-convention alias.
 	KVCachePrefillHeader = "x-llm-d-kv-cache-prefill-p2p-host-port"
 
+	// MooncakePrefillHandoffHeader carries operator-provided selected-endpoint
+	// metadata to the coordinator: serving endpoint, engine ID and bootstrap port.
+	// It is stamped and copied by explicitly configured prefill EPP plugins.
+	MooncakePrefillHandoffHeader = "x-llm-d-mooncake-prefill-handoff"
+
 	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port>
 	// holding the most cached prefix KV blocks for the request, with its
 	// OffloadingConnector P2P tier port. The same peer travels in the body as

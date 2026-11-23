@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
@@ -38,6 +39,9 @@ import (
 // pipeline.
 func validatePipeline(p config.PipelineConfig) error {
 	if err := config.ValidateWorkerProtocol(p.WorkerProtocol); err != nil {
+		return err
+	}
+	if err := validateMooncakePipeline(p); err != nil {
 		return err
 	}
 	hasRender := false
@@ -58,6 +62,34 @@ func validatePipeline(p config.PipelineConfig) error {
 	for _, s := range p.Steps {
 		if forward, _ := s.Params[steps.ParamForwardPromptTokenIDs].(bool); forward {
 			return fmt.Errorf("%s on the %q step requires a %q step (it sends token IDs that render produces)", steps.ParamForwardPromptTokenIDs, s.Type, steps.RenderStepName)
+		}
+	}
+	return nil
+}
+
+// Mooncake handoffs are single-use and this connector implements the HTTP
+// prefill/decode pair only.
+func validateMooncakePipeline(p config.PipelineConfig) error {
+	usesMooncake := p.KVConnector == kv.Mooncake
+	for _, step := range p.Steps {
+		usesMooncake = usesMooncake || mergePipelineDefaults(step.Params, p)[steps.ParamKVConnector] == kv.Mooncake
+	}
+	if !usesMooncake {
+		return nil
+	}
+	if p.WorkerProtocol == config.WorkerProtocolGRPC || !p.UseOpenAIFormat {
+		return fmt.Errorf("%s requires HTTP workers and use_openai_format=true", kv.Mooncake)
+	}
+	if len(p.Steps) != 2 || p.Steps[0].Type != steps.PrefillStepName || p.Steps[1].Type != steps.DecodeStepName {
+		return fmt.Errorf("%s requires pipeline steps prefill, decode in order", kv.Mooncake)
+	}
+	for _, step := range p.Steps {
+		params := mergePipelineDefaults(step.Params, p)
+		if params[steps.ParamKVConnector] != kv.Mooncake {
+			return fmt.Errorf("%s requires the same connector on prefill and decode", kv.Mooncake)
+		}
+		if params[steps.ParamForceStream] == true || params[steps.ParamForwardPromptTokenIDs] == true {
+			return fmt.Errorf("%s does not support force_stream or forward_prompt_token_ids", kv.Mooncake)
 		}
 	}
 	return nil
