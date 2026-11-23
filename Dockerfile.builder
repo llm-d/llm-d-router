@@ -6,13 +6,13 @@ WORKDIR /app
 ARG TYPOS_VERSION=v1.34.0
 ARG KIND_VERSION=v0.33.0
 ARG GOLANGCI_LINT_VERSION=v2.14.0
-ARG KUBECTL_VERSION=v1.35.9
-ARG KUSTOMIZE_VERSION=v5.8.1
-ARG DOCKER_VERSION=29.8.1
-ARG DOCKER_BUILDX_VERSION=v0.37.1
+ARG KUBECTL_VERSION=v1.35.10
+ARG KUSTOMIZE_VERSION=v5.8.3
+ARG DOCKER_VERSION=29.10.0
+ARG DOCKER_BUILDX_VERSION=v0.39.1
 ARG ENVTEST_VERSION=release-0.25
 ARG ENVTEST_K8S_VERSION=1.36.2
-ARG GOVULNCHECK_VERSION=v1.8.0
+ARG GOVULNCHECK_VERSION=v1.10.0
 
 RUN apt-get update && apt-get install -y podman && apt-get clean all
 
@@ -69,7 +69,7 @@ RUN GOBIN=/usr/local/bin go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCH
 RUN GOBIN=/usr/local/bin go install github.com/onsi/ginkgo/v2/ginkgo@v2.33.0
 
 # Install Helm for rendering the E2E standalone chart.
-ARG HELM_VERSION=v4.3.0
+ARG HELM_VERSION=v4.3.2
 RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
     cd /tmp && \
     curl -sSfLO "https://get.helm.sh/helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz" && \
