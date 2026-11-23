@@ -135,6 +135,44 @@ func HasErrorStatus(h http.Header) bool {
 	return ok && code != StatusOK
 }
 
+// httpStatuses maps each gRPC status code to the HTTP status a gRPC-to-HTTP
+// gateway answers it with, per the mapping the gRPC HTTP/2 specification
+// defines (grpc/grpc PROTOCOL-HTTP2.md, "HTTP to gRPC Status Code Mapping",
+// read in reverse). The EPP uses it to classify a gRPC model server response
+// by the HTTP status its grpc-status corresponds to.
+var httpStatuses = [...]int{
+	codes.OK:                 http.StatusOK,
+	codes.Canceled:           499, // StatusClientClosedRequestName in Envoy; no Go constant
+	codes.Unknown:            http.StatusInternalServerError,
+	codes.InvalidArgument:    http.StatusBadRequest,
+	codes.DeadlineExceeded:   http.StatusGatewayTimeout,
+	codes.NotFound:           http.StatusNotFound,
+	codes.AlreadyExists:      http.StatusConflict,
+	codes.PermissionDenied:   http.StatusForbidden,
+	codes.ResourceExhausted:  http.StatusTooManyRequests,
+	codes.FailedPrecondition: http.StatusBadRequest,
+	codes.Aborted:            http.StatusConflict,
+	codes.OutOfRange:         http.StatusBadRequest,
+	codes.Unimplemented:      http.StatusNotImplemented,
+	codes.Internal:           http.StatusInternalServerError,
+	codes.Unavailable:        http.StatusServiceUnavailable,
+	codes.DataLoss:           http.StatusInternalServerError,
+	codes.Unauthenticated:    http.StatusUnauthorized,
+}
+
+// HTTPStatus returns the HTTP status the grpc-status value corresponds to.
+// A value that does not name a code maps to 500, the status of INTERNAL and
+// UNKNOWN, so an unreadable status is still classified as a server error.
+func HTTPStatus(status string) int {
+	code, err := strconv.ParseUint(status, 10, 32)
+	// The bound is checked on the parsed value: converting to int first could
+	// wrap a value above math.MaxInt32 on a 32-bit platform.
+	if err != nil || code >= uint64(len(httpStatuses)) || httpStatuses[code] == 0 {
+		return http.StatusInternalServerError
+	}
+	return httpStatuses[code]
+}
+
 // CopyTrailers copies gRPC status trailers from src onto dst using
 // http.TrailerPrefix so net/http emits them as HTTP/2 trailers after body writes.
 func CopyTrailers(dst, src http.Header) {

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -695,6 +696,36 @@ func TestHTTPStatusToCodeMappings(t *testing.T) {
 	require.Equal(t, codes.Unavailable, LocalHTTPStatusToCode(http.StatusServiceUnavailable))
 	require.Equal(t, codes.DeadlineExceeded, LocalHTTPStatusToCode(http.StatusGatewayTimeout))
 	require.Equal(t, codes.Internal, LocalHTTPStatusToCode(http.StatusInternalServerError))
+}
+
+func TestHTTPStatus(t *testing.T) {
+	for code, want := range map[codes.Code]int{
+		codes.OK:                 http.StatusOK,
+		codes.Canceled:           499,
+		codes.Unknown:            http.StatusInternalServerError,
+		codes.InvalidArgument:    http.StatusBadRequest,
+		codes.DeadlineExceeded:   http.StatusGatewayTimeout,
+		codes.NotFound:           http.StatusNotFound,
+		codes.AlreadyExists:      http.StatusConflict,
+		codes.PermissionDenied:   http.StatusForbidden,
+		codes.ResourceExhausted:  http.StatusTooManyRequests,
+		codes.FailedPrecondition: http.StatusBadRequest,
+		codes.Aborted:            http.StatusConflict,
+		codes.OutOfRange:         http.StatusBadRequest,
+		codes.Unimplemented:      http.StatusNotImplemented,
+		codes.Internal:           http.StatusInternalServerError,
+		codes.Unavailable:        http.StatusServiceUnavailable,
+		codes.DataLoss:           http.StatusInternalServerError,
+		codes.Unauthenticated:    http.StatusUnauthorized,
+	} {
+		require.Equal(t, want, HTTPStatus(strconv.FormatUint(uint64(code), 10)), "code %d", code)
+	}
+
+	// A value that does not name a code is a server error, not a success.
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus(""))
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus("not a number"))
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus("-1"))
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus("99"))
 }
 
 func TestNewH2CAwareTransport(t *testing.T) {

@@ -173,27 +173,22 @@ func TestTerminationCause(t *testing.T) {
 	}
 }
 
-func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
+func TestGRPCStatusFromTrailers(t *testing.T) {
 	tests := []struct {
 		name     string
 		status   string
 		useValue bool
-		want     fwkrh.TerminationCause
+		want     string
 	}{
 		{
 			name:   "OK",
 			status: grpcframe.StatusOK,
-			want:   "",
+			want:   grpcframe.StatusOK,
 		},
 		{
 			name:   "internal error",
 			status: "13",
-			want:   fwkrh.TerminationCauseError,
-		},
-		{
-			name:   "cancelled",
-			status: "1",
-			want:   fwkrh.TerminationCauseError,
+			want:   "13",
 		},
 		{
 			name: "missing grpc status",
@@ -203,7 +198,7 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 			name:     "internal error from value",
 			status:   "13",
 			useValue: true,
-			want:     fwkrh.TerminationCauseError,
+			want:     "13",
 		},
 	}
 
@@ -229,8 +224,90 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 			assert.Equal(
 				t,
 				tt.want,
-				terminationCauseFromGRPCTrailers(trailers),
+				grpcStatusFromTrailers(trailers),
 			)
+		})
+	}
+}
+
+func TestGRPCStatusFromHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   string
+	}{
+		{
+			name:   "trailers-only unavailable",
+			status: "14",
+			want:   "14",
+		},
+		{
+			name:   "trailers-only OK",
+			status: grpcframe.StatusOK,
+			want:   grpcframe.StatusOK,
+		},
+		{
+			name: "no grpc status",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := &extProcPb.HttpHeaders{
+				Headers: &corev3.HeaderMap{},
+			}
+			if tt.status != "" {
+				headers.Headers.Headers = []*corev3.HeaderValue{{
+					Key:      grpcframe.HeaderStatus,
+					RawValue: []byte(tt.status),
+				}}
+			}
+
+			assert.Equal(t, tt.want, grpcStatusFromHeaders(headers))
+			assert.Equal(t, "", grpcStatusFromHeaders(nil))
+		})
+	}
+}
+
+// TestSetGRPCStatusError covers the classification of a non-OK grpc-status:
+// the mapped HTTP status sets the request's error code the way an HTTP error
+// status does, and the stream's termination is an error.
+func TestSetGRPCStatusError(t *testing.T) {
+	tests := []struct {
+		name       string
+		grpcStatus string
+		presetCode string
+		wantCode   string
+		wantCause  fwkrh.TerminationCause
+	}{
+		{
+			name:       "unavailable maps to a model server error",
+			grpcStatus: "14",
+			wantCode:   errcommon.ModelServerError,
+			wantCause:  fwkrh.TerminationCauseError,
+		},
+		{
+			name:       "invalid argument maps to a model server client error",
+			grpcStatus: "3",
+			wantCode:   errcommon.ModelServerClientError,
+			wantCause:  fwkrh.TerminationCauseError,
+		},
+		{
+			name:       "an already-set code is kept",
+			grpcStatus: "14",
+			presetCode: errcommon.ModelServerClientError,
+			wantCode:   errcommon.ModelServerClientError,
+			wantCause:  fwkrh.TerminationCauseError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqCtx := &RequestContext{responseStatusCode: tt.presetCode}
+			setGRPCStatusError(reqCtx, tt.grpcStatus)
+			assert.Equal(t, tt.wantCode, reqCtx.responseStatusCode)
+			assert.Equal(t, tt.wantCause, reqCtx.TerminationCause)
 		})
 	}
 }

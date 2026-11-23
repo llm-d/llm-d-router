@@ -29,6 +29,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -194,6 +195,7 @@ func (p *parameters) toConfig() (config, error) {
 // compile-time type assertions
 var _ fwksched.Filter = &EndpointHealthFilter{}
 var _ fwkrh.ResponseHeaderProcessor = &EndpointHealthFilter{}
+var _ fwkrh.ResponseBodyProcessor = &EndpointHealthFilter{}
 var _ fwkplugin.ConsumerPlugin = &EndpointHealthFilter{}
 
 // Factory defines the factory function for EndpointHealthFilter.
@@ -291,23 +293,61 @@ func (f *EndpointHealthFilter) Filter(ctx context.Context, _ *fwksched.Inference
 }
 
 // ResponseHeader counts the response status toward the serving endpoint's
-// response health. A response for a request that ran disaggregated prefill is
-// the decode endpoint's relay of every stage's outcome, so a failure is charged
-// to the endpoint that ran the failed stage, named on the failed-stage header,
-// and to no endpoint when the stage is not marked.
+// response health. A gRPC response's status is not final when its headers
+// arrive: it is carried by the trailers, or by the headers of a trailers-only
+// response, so gRPC responses are counted at the end of the stream in
+// ResponseBody instead. Counting the header-time :status 200 as a success
+// would reset the endpoint's failure run between two failures that only the
+// trailers report.
 func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest,
 	response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
-	if f.tracker.cfg.responseFailureThreshold == 0 || response == nil || targetEndpoint == nil {
+	if response == nil || grpcResponse(response.Headers) {
+		return
+	}
+	code, ok := responseStatus(response.Headers)
+	if !ok {
+		return
+	}
+	f.observeResponseStatus(ctx, request, response, targetEndpoint, code)
+}
+
+// ResponseBody counts a gRPC response's status toward the serving endpoint's
+// response health once the stream ended. The status is the grpc-status the
+// headers or the trailers carried, mapped to the HTTP status it corresponds
+// to. A stream that ended without a status the EPP could see, such as a
+// disconnect before the trailers arrived, counts nothing.
+func (f *EndpointHealthFilter) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest,
+	response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+	if response == nil || !response.EndOfStream || !grpcResponse(response.Headers) {
+		return
+	}
+	grpcStatus := response.Headers[grpcframe.HeaderStatus]
+	if grpcStatus == "" {
+		return
+	}
+	f.observeResponseStatus(ctx, request, response, targetEndpoint, grpcframe.HTTPStatus(grpcStatus))
+}
+
+// grpcResponse reports whether the response headers describe a gRPC stream.
+func grpcResponse(headers map[string]string) bool {
+	return grpcframe.IsContentType(headers[reqcommon.HeaderContentType])
+}
+
+// observeResponseStatus charges code, the response status of the endpoint that
+// served the request, to the endpoint's response health. A response for a
+// request that ran disaggregated prefill is the decode endpoint's relay of
+// every stage's outcome, so a failure is charged to the endpoint that ran the
+// failed stage, named on the failed-stage header, and to no endpoint when the
+// stage is not marked.
+func (f *EndpointHealthFilter) observeResponseStatus(ctx context.Context, request *fwksched.InferenceRequest,
+	response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata, code int) {
+	if f.tracker.cfg.responseFailureThreshold == 0 || targetEndpoint == nil {
 		return
 	}
 	address := hostPort(targetEndpoint)
 	// The proxy can serve a request from a later endpoint of those picked, and
 	// that response says nothing about the target.
 	if served, ok := metadata.ServedEndpoint(response.ReqMetadata); ok && served != address {
-		return
-	}
-	code, ok := responseStatus(response.Headers)
-	if !ok {
 		return
 	}
 	_, failed := f.tracker.cfg.responseFailureCodes[code]

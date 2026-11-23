@@ -189,7 +189,13 @@ type RequestContext struct {
 	responseSize               int
 	responseComplete           bool
 	responseStatusCode         string
-	requestRunning             bool
+	// ResponseGRPCStatus is the grpc-status the response carried, in its
+	// headers for a trailers-only response or in its trailers otherwise. The
+	// director writes it onto the end-of-stream response headers, after the
+	// streaming plugins' async queue drains, so response plugins can classify
+	// a gRPC stream by its final status.
+	ResponseGRPCStatus string
+	requestRunning     bool
 	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
 	bodyReceived bool
 
@@ -401,20 +407,47 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCau
 	}
 }
 
-func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.TerminationCause {
+// grpcStatusFromTrailers returns the grpc-status value the response trailers
+// carry, or "" when they carry none.
+func grpcStatusFromTrailers(trailers *extProcPb.HttpTrailers) string {
 	if trailers == nil || trailers.GetTrailers() == nil {
 		return ""
 	}
 
 	for _, header := range trailers.GetTrailers().GetHeaders() {
 		if header.Key == grpcframe.HeaderStatus {
-			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != grpcframe.StatusOK {
-				return fwkrh.TerminationCauseError
-			}
-			return ""
+			return envoy.GetHeaderValue(header)
 		}
 	}
 	return ""
+}
+
+// grpcStatusFromHeaders returns the grpc-status value the response headers
+// carry, or "" when they carry none. A response that fails before streaming
+// any frame carries its status in the only HEADERS frame it has, so the value
+// arrives here rather than in trailers.
+func grpcStatusFromHeaders(headers *extProcPb.HttpHeaders) string {
+	if headers == nil || headers.GetHeaders() == nil {
+		return ""
+	}
+
+	for _, header := range headers.GetHeaders().GetHeaders() {
+		if header.Key == grpcframe.HeaderStatus {
+			return envoy.GetHeaderValue(header)
+		}
+	}
+	return ""
+}
+
+// setGRPCStatusError records a non-OK grpc-status the way an HTTP error status
+// is recorded: the mapped HTTP status classifies the request's error code, and
+// the stream's termination is an error rather than a natural end.
+func setGRPCStatusError(reqCtx *RequestContext, grpcStatus string) {
+	if reqCtx.responseStatusCode == "" {
+		reqCtx.responseStatusCode = errcommon.ModelServerStatusCode(
+			strconv.Itoa(grpcframe.HTTPStatus(grpcStatus)))
+	}
+	reqCtx.TerminationCause = fwkrh.TerminationCauseError
 }
 
 // Values of the outcome label on llm_d_epp_request_outcome_total.
@@ -876,6 +909,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					}
 				}
 			}
+			// A gRPC response that fails before streaming a frame is
+			// trailers-only: its grpc-status arrives in the headers, and no
+			// trailers message follows. Classify it here so the request is
+			// counted like the HTTP status the code maps to.
+			if grpcStatus := grpcStatusFromHeaders(v.ResponseHeaders); grpcStatus != "" {
+				reqCtx.ResponseGRPCStatus = grpcStatus
+				if grpcStatus != grpcframe.StatusOK {
+					setGRPCStatusError(reqCtx, grpcStatus)
+				}
+			}
 			reqCtx.requestState = responseReceived
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
 			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
@@ -907,12 +950,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
-			// A non-zero grpc-status indicates a gRPC error. Record the error cause before
-			// finishResponse marks the response complete so the end-of-stream record is not
-			// reported as a natural termination.
+			// A non-zero grpc-status indicates a gRPC error. Record the error cause and
+			// the mapped HTTP status before finishResponse marks the response complete,
+			// so the end-of-stream record is not reported as a natural termination and
+			// the request is counted like the HTTP status the code maps to.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
-			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
-				reqCtx.TerminationCause = cause
+			if grpcStatus := grpcStatusFromTrailers(v.ResponseTrailers); grpcStatus != "" {
+				reqCtx.ResponseGRPCStatus = grpcStatus
+				if grpcStatus != grpcframe.StatusOK {
+					setGRPCStatusError(reqCtx, grpcStatus)
+				}
 			}
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{

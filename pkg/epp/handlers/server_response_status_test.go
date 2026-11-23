@@ -32,6 +32,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -224,6 +225,75 @@ func TestProcessClassifiesModelServerStatus(t *testing.T) {
 			}
 			require.Len(t, requestSpans, 1)
 			require.Equal(t, wantSpanStatus, requestSpans[0].Status().Code)
+		})
+	}
+}
+
+// A gRPC failure is counted like the HTTP status its grpc-status maps to,
+// both when the status arrives in the trailers of a streamed response and
+// when a trailers-only response carries it in its headers.
+func TestProcessClassifiesGRPCStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		reqs        []*extProcPb.ProcessingRequest
+		wantCode    string
+		wantOutcome string
+	}{
+		{
+			name:        "unavailable in trailers",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse("14")...),
+			wantCode:    errcommon.ModelServerError,
+			wantOutcome: "failed",
+		},
+		{
+			name:        "unavailable in a trailers-only response",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCTrailersOnlyResponse("14")...),
+			wantCode:    errcommon.ModelServerError,
+			wantOutcome: "failed",
+		},
+		{
+			name:        "invalid argument in a trailers-only response",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCTrailersOnlyResponse("3")...),
+			wantCode:    errcommon.ModelServerClientError,
+			wantOutcome: "failed",
+		},
+		{
+			name:        "OK in trailers",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse(grpcframe.StatusOK)...),
+			wantOutcome: "completed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eppmetrics.Register()
+			eppmetrics.Reset()
+			t.Cleanup(eppmetrics.Reset)
+			recorder := tracetest.NewSpanRecorder()
+			useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+			srv := &replayProcessServer{ctx: logutil.NewTestLoggerIntoContext(context.Background()), reqs: tt.reqs}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+
+			require.NoError(t, NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv))
+
+			require.Equal(t, map[[2]string]float64{{tt.wantOutcome, tt.wantCode}: 1}, requestOutcomes(t))
+			for _, code := range []string{errcommon.ModelServerError, errcommon.ModelServerClientError} {
+				want := 0.0
+				if code == tt.wantCode {
+					want = 1
+				}
+				require.Equal(t, want, requestErrorCount(t, code), code)
+			}
+			wantSpanStatus := otelcodes.Unset
+			if tt.wantCode != "" {
+				wantSpanStatus = otelcodes.Error
+			}
+			for _, span := range recorder.Ended() {
+				if span.Name() == "request" {
+					require.Equal(t, wantSpanStatus, span.Status().Code)
+				}
+			}
 		})
 	}
 }
