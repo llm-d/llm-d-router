@@ -149,7 +149,20 @@ func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, 
 			KVCacheUsagePercent: kvCacheUsage,
 			RunningRequestsSize: runningRequestsSize,
 			WaitingQueueSize:    waitingQueueSize,
+			UpdateTime:          time.Now(),
 		},
+		nil,
+	)
+}
+
+// createNeverScrapedTestEndpoint returns an endpoint whose metrics were never scraped.
+func createNeverScrapedTestEndpoint(name string) fwksched.Endpoint {
+	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{
+			Name:      name,
+			Namespace: "default",
+		}},
+		fwkdl.NewMetrics(),
 		nil,
 	)
 }

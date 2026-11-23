@@ -125,6 +125,14 @@ var httpCodes = map[string]envoyTypePb.StatusCode{
 	ServiceUnavailable: envoyTypePb.StatusCode_ServiceUnavailable,
 }
 
+// grpcCodes maps a canonical code to the gRPC status of the answer to a gRPC
+// request. For a code with no entry, Envoy derives the status from the HTTP status.
+// Envoy derives UNKNOWN from 412, and the coordinator reads a conditional-decode
+// cache miss from FAILED_PRECONDITION.
+var grpcCodes = map[string]codes.Code{
+	PreconditionFailed: codes.FailedPrecondition,
+}
+
 // errorBody serializes the error in the envelope of the API the request was sent to.
 // Messages quote request fragments, so HTML characters are written verbatim.
 func errorBody(apiType reqcommon.APIType, e Error, httpCode envoyTypePb.StatusCode) ([]byte, error) {
@@ -157,12 +165,19 @@ func BuildErrResponse(err error, apiType reqcommon.APIType) (*extProcPb.Processi
 	}
 	setHeaders := append([]*configPb.HeaderValueOption{contentType}, envoy.GenerateHeadersMutation(e.Headers)...)
 
+	// Envoy applies the gRPC status only to a gRPC request.
+	var grpcStatus *extProcPb.GrpcStatus
+	if grpcCode, ok := grpcCodes[e.Code]; ok {
+		grpcStatus = &extProcPb.GrpcStatus{Status: uint32(grpcCode)}
+	}
+
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status:  &envoyTypePb.HttpStatus{Code: httpCode},
-				Body:    body,
-				Headers: &extProcPb.HeaderMutation{SetHeaders: setHeaders},
+				Status:     &envoyTypePb.HttpStatus{Code: httpCode},
+				Body:       body,
+				Headers:    &extProcPb.HeaderMutation{SetHeaders: setHeaders},
+				GrpcStatus: grpcStatus,
 			},
 		},
 	}, nil

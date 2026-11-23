@@ -88,7 +88,7 @@ func (it *ecMooncakeItem) transferItem() map[string]any {
 func (s *Server) ecMooncakeConsumerZMQ(prefillEndPoint string) (string, error) {
 	host := s.config.ECMooncakePodIP
 	if prefillEndPoint != "" {
-		host = extractHost(prefillEndPoint)
+		host = routing.ExtractHost(prefillEndPoint)
 	}
 	if host == "" {
 		return "", errors.New("no ec-mooncake consumer address: request has no prefiller and --ec-mooncake-pod-ip is unset")

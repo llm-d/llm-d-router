@@ -181,11 +181,11 @@ var _ = Describe("P2P KV cache source in the request body", func() {
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
 		source := map[string]any{
 			reqcommon.FieldKVRequestID: sourceKVRequestID,
-			reqcommon.FieldRemoteHost:  extractHost(prefillHostPort),
+			reqcommon.FieldRemoteHost:  routing.ExtractHost(prefillHostPort),
 			reqcommon.FieldRemotePort:  port,
 		}
 		postChatCompletions(proxyBaseAddr, sourceBody(source, nil), map[string]string{
-			routing.KVCacheSourceHeader:   net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port)),
+			routing.KVCacheSourceHeader:   net.JoinHostPort(routing.ExtractHost(prefillHostPort), strconv.Itoa(port)),
 			routing.PrefillEndpointHeader: prefillHostPort,
 			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
 		})
