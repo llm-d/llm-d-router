@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 
@@ -146,6 +147,12 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 	}
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoResolutionHeaderKey); ok {
 		w, h := fwkrequest.ParseResolution(s)
+		if w > int64(math.MaxInt) {
+			w = 0
+		}
+		if h > int64(math.MaxInt) {
+			h = 0
+		}
 		meta.width, meta.height = int(w), int(h)
 	}
 	return meta
