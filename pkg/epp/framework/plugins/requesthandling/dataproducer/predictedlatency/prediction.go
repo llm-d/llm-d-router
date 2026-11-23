@@ -151,6 +151,19 @@ func (pl *PredictedLatency) updateRequestContextWithPredictions(predictedLatency
 	predictedLatencyCtx.predictionsForScheduling = predMap
 }
 
+// scrapedEndpointsOnly returns the endpoints whose metrics have been scraped.
+// A prediction for a never-scraped endpoint would be computed from zero-value
+// metrics, so such endpoints are not sent to the predictor.
+func scrapedEndpointsOnly(endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+	scraped := make([]fwksched.Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.GetMetrics().Updated() {
+			scraped = append(scraped, endpoint)
+		}
+	}
+	return scraped
+}
+
 func (pl *PredictedLatency) validatePrediction(
 	pred *latencypredictor.PredictionResponse,
 	predictedLatencyCtx *predictedLatencyCtx,

@@ -30,6 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -107,7 +108,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 }
 
 func (s *Server) prepareMooncakeKVParams(ctx context.Context, prefillPodHostPort string) (dpRank string, prefillKV, decodeKV map[string]any, err error) {
-	bootstrapAddr := "http://" + net.JoinHostPort(extractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
+	bootstrapAddr := "http://" + net.JoinHostPort(routing.ExtractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
 	engineMap, err := s.getMooncakeEngineMap(ctx, prefillPodHostPort, bootstrapAddr)
 	if err != nil {
 		return "", nil, nil, err

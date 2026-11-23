@@ -62,16 +62,26 @@ func TestFactory_UnknownStrategy(t *testing.T) {
 }
 
 func TestFactory_InvalidConfig(t *testing.T) {
-	cases := map[string]string{
-		"negative ttl":       `{"evictionTtlSeconds":-1}`,
-		"zero sweep":         `{"evictionSweepSeconds":0}`,
-		"negative weight":    `{"lasWeightService":-0.1}`,
-		"negative half life": `{"lasHalfLifeSeconds":-1}`,
+	cases := map[string]struct {
+		cfg     string
+		wantErr string
+	}{
+		"negative ttl":       {cfg: `{"evictionTtlSeconds":-1}`},
+		"zero sweep":         {cfg: `{"evictionSweepSeconds":0}`},
+		"sweep under 1ns":    {cfg: `{"evictionSweepSeconds":1e-10}`, wantErr: "evictionSweepSeconds 1e-10 is too small to represent as a duration"},
+		"sweep too long":     {cfg: `{"evictionSweepSeconds":1e10}`, wantErr: "evictionSweepSeconds 1e+10 exceeds the representable duration"},
+		"ttl under 1ns":      {cfg: `{"evictionTtlSeconds":1e-10}`, wantErr: "evictionTtlSeconds 1e-10 is too small to represent as a duration"},
+		"ttl too long":       {cfg: `{"evictionTtlSeconds":1e10}`, wantErr: "evictionTtlSeconds 1e+10 exceeds the representable duration"},
+		"negative weight":    {cfg: `{"lasWeightService":-0.1}`},
+		"negative half life": {cfg: `{"lasHalfLifeSeconds":-1}`},
 	}
-	for name, cfg := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := ProgramAwarePluginFactory("test", decoder(cfg), nil)
+			_, err := ProgramAwarePluginFactory("test", decoder(tc.cfg), nil)
 			require.Error(t, err)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+			}
 		})
 	}
 }

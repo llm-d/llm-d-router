@@ -45,7 +45,7 @@ const p2pConnectorPort = 7777
 // prefillP2PHostPort returns the P2P tier address EPP sets for the prefill pod
 // at prefillHostPort: the same host on the rank-0 tier port.
 func prefillP2PHostPort(prefillHostPort string) string {
-	return net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(p2pConnectorPort))
+	return net.JoinHostPort(routing.ExtractHost(prefillHostPort), strconv.Itoa(p2pConnectorPort))
 }
 
 // addPrefillRouting routes req to prefillHostPort with the P2P tier address the
@@ -122,7 +122,7 @@ var _ = Describe("P2P Connector", func() {
 		decodePrefill, ok := decodeKVParams[reqcommon.FieldRemotePrefiller].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodePrefill[reqcommon.FieldKVRequestID]).To(Equal(prefillKVRequestID))
-		Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
+		Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(routing.ExtractHost(prefillHostPort)))
 		Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 		// Decode preserves the caller's original token limits.
@@ -168,7 +168,7 @@ var _ = Describe("P2P Connector", func() {
 			}
 
 			decodePrefill := decodeRemotePrefiller(testInfo)
-			Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
+			Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(routing.ExtractHost(prefillHostPort)))
 			Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 			testInfo.cancelFn()

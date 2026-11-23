@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -224,16 +225,14 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []uint32, entry pipeline.M
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
 	}
-	// The render response's spans reach here unvalidated, so check both
-	// signs and compare without adding, which could overflow.
+	// The render response's spans reach here unvalidated, so reject negative
+	// values before delegating bounds-safe slicing to vllmwire.SliceEncoderSpan.
 	span := entry.Placeholder
-	if span.Offset < 0 || span.Length < 0 || span.Offset > len(fullTokenIDs) || span.Length > len(fullTokenIDs)-span.Offset {
+	if span.Offset < 0 || span.Length < 0 {
 		return nil, fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
 			span.Offset, span.Length, len(fullTokenIDs))
 	}
-	tokenIDs := make([]uint32, 0, 1+span.Length)
-	tokenIDs = append(tokenIDs, bos)
-	return append(tokenIDs, fullTokenIDs[span.Offset:span.Offset+span.Length]...), nil
+	return vllmwire.SliceEncoderSpan(fullTokenIDs, bos, uint64(span.Offset), uint64(span.Length), true)
 }
 
 // buildEncodeBody builds one fanout sub-request. localIdx is the entry's

@@ -639,6 +639,56 @@ func TestServer_createRoutesDocumentedPaths(t *testing.T) {
 	}
 }
 
+// EPP schedules a prefill pod only for a path routing.HasPDRoute accepts, so
+// the sidecar must run its prefill connector for exactly those paths.
+func TestServer_createRoutesServesHasPDRoutePaths(t *testing.T) {
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := slices.Clone(routing.PDHTTPPaths)
+	for method := range routing.PDVLLMGRPCMethods {
+		paths = append(paths, method)
+	}
+	paths = append(paths,
+		sglangapiv1.SglangService_Generate_FullMethodName,
+		sglangapiv1.SglangService_HealthCheck_FullMethodName,
+		vllmpb.Control_GetServerInfo_FullMethodName,
+		reqcommon.PathEmbeddings,
+		reqcommon.PathAudioSpeech,
+		reqcommon.PathImagesGenerations,
+		reqcommon.PathMessages+"/count_tokens",
+		reqcommon.PathChatCompletions+"/render",
+	)
+	for _, target := range paths {
+		t.Run(target, func(t *testing.T) {
+			// The sidecar serves SGLang gRPC Generate only with the sglang connector.
+			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorSGLang})
+			s.allowlistValidator = &AllowlistValidator{}
+			served := false
+			s.handlePDConnector = func(w http.ResponseWriter, _ *http.Request, _ string, _ p2pRouting, _ reqcommon.APIType) {
+				served = true
+				w.WriteHeader(http.StatusNoContent)
+			}
+			req := httptest.NewRequest(http.MethodPost, target, strings.NewReader("{}"))
+			req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+			recorder := httptest.NewRecorder()
+
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if want := routing.HasPDRoute(target); served != want {
+				t.Errorf("prefill connector ran = %v, routing.HasPDRoute = %v (status %d: %s)",
+					served, want, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 // dataParallelHandler forwards straight to another rank and never reads the
 // body, so it depends entirely on the caller having refused the request.
 func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {
