@@ -160,6 +160,8 @@ type RequestContext struct {
 	RequestSize              int
 	Usage                    fwkrequest.Usage
 	StreamedEvents           int
+	// Completion is set at end of stream from a response with a 200 status.
+	Completion *fwkrh.Completion
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
 	Request             *Request
