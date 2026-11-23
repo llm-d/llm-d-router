@@ -505,32 +505,18 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 		}
 		return otelhttp.NewTransport(t)
 	}
-	h2c := t.Clone()
-	h2cProtocols := new(http.Protocols)
-	h2cProtocols.SetUnencryptedHTTP2(true)
-	h2c.Protocols = h2cProtocols
-	return otelhttp.NewTransport(&h2cAwareTransport{http1: t, h2c: h2c})
-}
-
-// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
-// while keeping HTTP/1.1 for standard HTTP backends.
-type h2cAwareTransport struct {
-	http1 http.RoundTripper
-	h2c   http.RoundTripper
-}
-
-func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
-		return rt.h2c.RoundTrip(req)
-	}
-	return rt.http1.RoundTrip(req)
+	return otelhttp.NewTransport(grpcframe.NewH2CAwareTransport(t))
 }
 
 func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
 	case constants.KVConnectorSharedStorage:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ p2pRouting, apiType reqcommon.APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleSharedStorageVLLMGRPC(w, r, host, p2p)
+				return
+			}
 			s.handleSharedStorage(w, r, host, apiType)
 		}
 	case constants.KVConnectorSGLang:
@@ -540,17 +526,29 @@ func (s *Server) setKVConnector() {
 			s.handleSGLang(w, r, host)
 		}
 	case constants.KVConnectorMooncake:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ p2pRouting, apiType reqcommon.APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleMooncakeVLLMGRPC(w, r, host, p2p)
+				return
+			}
 			s.handleMooncake(w, r, host, apiType)
 		}
 	case constants.KVConnectorOffloading:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleP2PVLLMGRPC(w, r, host, p2p)
+				return
+			}
 			s.handleP2P(w, r, host, p2p, apiType)
 		}
 	case constants.KVConnectorNIXLV2:
 		fallthrough
 	default:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleNIXLV2VLLMGRPC(w, r, host, p2p)
+				return
+			}
 			s.handleNIXLV2(w, r, host, p2p, apiType)
 		}
 	}
@@ -589,27 +587,31 @@ func (s *Server) createRoutes() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	registerInferenceRoute := func(path string, apiType reqcommon.APIType) {
+	registerInferenceRoute := func(routePath string, apiType reqcommon.APIType) {
 		handler := s.disaggregatedPrefillHandler(apiType)
-		mux.HandleFunc("POST "+path, handler)
-		mux.HandleFunc("POST "+path+"/{$}", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("POST "+routePath, handler)
+		mux.HandleFunc("POST "+routePath+"/{$}", func(w http.ResponseWriter, r *http.Request) {
 			r = r.Clone(r.Context())
-			r.URL.Path = path
+			r.URL.Path = routePath
 			r.URL.RawPath = ""
 			handler(w, r)
 		})
 	}
 	// DetectAPIType owns the HTTP path-to-API mapping; deriving it here keeps
 	// the HTTP routes from drifting away from it.
-	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
+	for _, path := range routing.PDHTTPPaths {
 		registerInferenceRoute(path, reqcommon.DetectAPIType(path))
 	}
-	// Only the sglang connector reads a protobuf body. With any other
+	grpcPaths := make([]string, 0, len(routing.PDVLLMGRPCMethods)+1)
+	for grpcMethod, apiType := range routing.PDVLLMGRPCMethods {
+		grpcPaths = append(grpcPaths, grpcMethod)
+		registerInferenceRoute(grpcMethod, apiType)
+	}
+	// Only the sglang connector reads an SGLang protobuf body. With any other
 	// connector the path stays on the decoder catch-all below, which forwards
 	// the call decode-only as before.
-	var grpcPaths []string
 	if s.config.KVConnector == constants.KVConnectorSGLang {
-		grpcPaths = []string{sglangapiv1.SglangService_Generate_FullMethodName}
+		grpcPaths = append(grpcPaths, sglangapiv1.SglangService_Generate_FullMethodName)
 		registerInferenceRoute(sglangapiv1.SglangService_Generate_FullMethodName, reqcommon.APITypeSGLangGenerate)
 	}
 
@@ -617,7 +619,7 @@ func (s *Server) createRoutes() http.Handler {
 
 	mux.Handle("/", s.decoderProxy)
 
-	return redirectEncodedInferencePath(mux, grpcPaths...)
+	return redirectEncodedInferencePath(mux, routing.PDHTTPPaths, grpcPaths)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.

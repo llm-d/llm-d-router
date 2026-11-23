@@ -20,9 +20,12 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -58,6 +61,8 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"SubscriberReconnections", SubscriberReconnections},
 		{"MessagesReceived", MessagesReceived},
 		{"ZMQErrors", ZMQErrors},
+		{"LiveOnlySubscribers", LiveOnlySubscribers},
+		{"SnapshotLoadDuration", SnapshotLoadDuration},
 		{"PoolQueueDepth", PoolQueueDepth},
 		{"PoolCapacity", PoolCapacity},
 	}
@@ -76,7 +81,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	kvevents := []prometheus.Collector{
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived,
-		ZMQErrors, PoolQueueDepth, PoolCapacity,
+		ZMQErrors, LiveOnlySubscribers, SnapshotLoadDuration, PoolQueueDepth, PoolCapacity,
 	}
 	for _, c := range kvevents {
 		reg.MustRegister(c)
@@ -87,6 +92,8 @@ func TestKVEventsMetricNames(t *testing.T) {
 	SubscriberReconnections.WithLabelValues("pod-a").Inc()
 	MessagesReceived.WithLabelValues("pod-a").Inc()
 	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
+	LiveOnlySubscribers.Set(1)
+	SnapshotLoadDuration.Observe(1)
 	KVEventStoresSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
 	KVEventRemovalsSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
 	PoolQueueDepth.Set(3)
@@ -107,6 +114,8 @@ func TestKVEventsMetricNames(t *testing.T) {
 		"llm_d_epp_kv_cache_events_subscriber_reconnections_total",
 		"llm_d_epp_kv_cache_events_messages_received_total",
 		"llm_d_epp_kv_cache_events_zmq_errors_total",
+		"llm_d_epp_kv_cache_events_live_only_subscribers",
+		"llm_d_epp_kv_cache_events_snapshot_load_duration_seconds",
 		"llm_d_epp_kv_cache_events_stores_skipped_total",
 		"llm_d_epp_kv_cache_events_removals_skipped_total",
 		"llm_d_epp_kv_cache_events_pool_queue_depth",
@@ -241,4 +250,32 @@ func TestLogMetrics(t *testing.T) {
 			t.Errorf("Expected 'max_pod_hit_count=42' in log output, but it was not found. Full output: %s", output)
 		}
 	})
+}
+
+func TestStartMetricsLoggingStopsWhenContextEnds(t *testing.T) {
+	var beats atomic.Int64
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "metrics beat") {
+			beats.Add(1)
+		}
+	}, funcr.Options{})
+	ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+
+	StartMetricsLogging(ctx, time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for beats.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no metrics beat logged")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	// A beat already in progress when the context ends may still finish.
+	time.Sleep(20 * time.Millisecond)
+	stopped := beats.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := beats.Load(); got != stopped {
+		t.Fatalf("metrics beats kept coming after the context ended: %d, then %d", stopped, got)
+	}
 }

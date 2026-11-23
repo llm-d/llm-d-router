@@ -200,43 +200,6 @@ func (b *InferenceRequestBody) ResponsePhaseView() *InferenceRequestBody {
 	}
 }
 
-// MaxOutputTokensFromPayload returns the client-requested output-token cap read
-// from a decoded JSON request body. The keys are tried in order and the first one
-// holding a valid value wins, so callers express per-API precedence (e.g. chat
-// completions: max_completion_tokens then the legacy max_tokens). JSON numbers
-// may decode as float64 or json.Number; both are accepted. A present key whose
-// value is the wrong type, negative, or non-integral is treated as absent and the
-// next key is tried. An explicit non-negative whole number (including 0) is
-// returned; if no key holds a valid value the result is nil ("no cap").
-func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		var f float64
-		switch n := v.(type) {
-		case float64:
-			f = n
-		case json.Number:
-			parsed, err := n.Float64()
-			if err != nil {
-				continue
-			}
-			f = parsed
-		default:
-			continue
-		}
-		// Skip negative or non-integral values as malformed and try the next key.
-		if f < 0 || f != math.Trunc(f) {
-			continue
-		}
-		out := int64(f)
-		return &out
-	}
-	return nil
-}
-
 // BytesPerToken is the average number of request bytes per prompt token, used
 // to estimate token counts without a tokenizer. The tokenizer's estimate
 // backend packs this many bytes into each pseudo-token, so its counts agree
@@ -409,6 +372,8 @@ func (p *Prompt) UnmarshalJSON(data []byte) error {
 	}
 
 	switch v := raw.(type) {
+	case nil:
+		return nil
 	case string:
 		p.Raw = v
 		return nil
@@ -469,6 +434,14 @@ type CompletionsRequest struct {
 	Prompt Prompt `json:"prompt"`
 	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	CacheSalt string `json:"cache_salt,omitempty"`
+	// Echo is kept raw so a malformed value does not fail request parsing.
+	Echo json.RawMessage `json:"echo,omitempty"`
+}
+
+// EchoDisabled reports whether the request leaves echo unset or sets it to false.
+func (r *CompletionsRequest) EchoDisabled() bool {
+	e := bytes.TrimSpace(r.Echo)
+	return len(e) == 0 || bytes.Equal(e, []byte("false")) || bytes.Equal(e, []byte("null"))
 }
 
 func (r *CompletionsRequest) String() string {
@@ -544,14 +517,44 @@ type TextToSpeechRequest struct {
 	RefText string `json:"ref_text,omitempty"`
 	// CacheSalt isolates prefix caches for security.
 	CacheSalt string `json:"cache_salt,omitempty"`
+	// Voice is the speaker to synthesize with. The engine's prefix cache
+	// holds a different prompt per conditioning, so the fingerprint salt
+	// covers it; the token estimate does not.
+	Voice string `json:"voice,omitempty"`
+	// Language is the spoken language of Input.
+	Language string `json:"language,omitempty"`
+	// TaskType is the synthesis task the engine selects conditioning by.
+	TaskType string `json:"task_type,omitempty"`
+	// RefAudio is the raw reference-audio field of a voice-cloning request,
+	// carried for fingerprinting only.
+	RefAudio json.RawMessage `json:"ref_audio,omitempty"`
+	// RefAudio2 is the raw second-speaker reference-audio field of a
+	// two-speaker request, carried for fingerprinting only.
+	RefAudio2 json.RawMessage `json:"ref_audio_2,omitempty"`
+	// References is the raw Higgs Audio v3 reference array, which the engine
+	// normalizes into ref_audio and ref_text, carried for fingerprinting only.
+	References json.RawMessage `json:"references,omitempty"`
+	// RefAudioCodes is the raw pre-computed reference-codes field (fish omni),
+	// carried for fingerprinting only.
+	RefAudioCodes json.RawMessage `json:"ref_audio_codes,omitempty"`
+	// ExtraParams is the raw extra-params object, whose entries the engine's
+	// adapters fold into their conditioning (indextts2's emotion settings and
+	// use_random among them), carried for fingerprinting only.
+	ExtraParams json.RawMessage `json:"extra_params,omitempty"`
+	// SpeakerEmbedding is the raw speaker-embedding field, carried for
+	// fingerprinting only.
+	SpeakerEmbedding json.RawMessage `json:"speaker_embedding,omitempty"`
+	// XVectorOnlyMode selects x-vector-only speaker conditioning; nil keeps
+	// the engine default. Absent and false salt differently.
+	XVectorOnlyMode *bool `json:"x_vector_only_mode,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {
 	if r == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{InputLength: %d, InstructionsLength: %d, RefTextLength: %d}",
-		len(r.Input), len(r.Instructions), len(r.RefText))
+	return fmt.Sprintf("{InputLength: %d, InstructionsLength: %d, RefTextLength: %d, Voice: %s, Language: %s, TaskType: %s}",
+		len(r.Input), len(r.Instructions), len(r.RefText), r.Voice, r.Language, r.TaskType)
 }
 
 // AudioGenerateRequest represents the fields parsed from a vLLM Omni
@@ -679,10 +682,10 @@ type ImagesGenerationsRequest struct {
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`
-	// Image is the uploaded file part of an images-edits request, the
-	// image-to-image conditioning input. Its zero value means the request
+	// InputImages are the uploaded image parts of an images-edits request, the
+	// image-to-image conditioning inputs, in form order. Empty means the request
 	// carried no image part (images-generations requests never do).
-	Image UploadedMedia `json:"-"`
+	InputImages []UploadedMedia `json:"-"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {

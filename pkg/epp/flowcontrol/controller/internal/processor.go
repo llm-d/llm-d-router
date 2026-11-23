@@ -295,14 +295,14 @@ func (p *Processor) enqueue(item *FlowItem) {
 	priorityStr := strconv.Itoa(key.Priority)
 	outcome := item.FinalState()
 
-	startTime := time.Now()
+	startTime := p.clock.Now()
 
 	defer func() {
 		outcomeStr := "NotYetFinalized"
 		if fs := item.FinalState(); fs != nil {
 			outcomeStr = fs.Outcome.String()
 		}
-		metrics.RecordFlowControlRequestEnqueueDuration(key.ID, priorityStr, outcomeStr, time.Since(startTime))
+		metrics.RecordFlowControlRequestEnqueueDuration(key.ID, priorityStr, outcomeStr, p.clock.Since(startTime))
 	}()
 
 	// --- Optimistic External Finalization Check ---
@@ -482,9 +482,9 @@ func (p *Processor) recordCapacityUtilization() {
 // priority, so gated bands form a contiguous tail and a skip under strict order only ever reaches further
 // gated bands.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
-	dispatchCycleStart := time.Now()
+	dispatchCycleStart := p.clock.Now()
 	defer func() {
-		metrics.RecordFlowControlDispatchCycleDuration(time.Since(dispatchCycleStart))
+		metrics.RecordFlowControlDispatchCycleDuration(p.clock.Since(dispatchCycleStart))
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)

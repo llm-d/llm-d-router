@@ -32,7 +32,6 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strings"
 	"syscall"
 	"time"
 
@@ -189,6 +188,10 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			if isVLLMGRPCRequest(r) {
+				s.relayVLLMPrefillFailure(res, r, prefillErr.response, vllmPrefillOutcome{relayError: true})
+				break
+			}
 			// A key with http.TrailerPrefix is sent as a trailer whether it is
 			// set before or after WriteHeader, so a buffered gRPC status relays
 			// as the HTTP/2 trailer the backend sent.
@@ -316,19 +319,6 @@ func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *ht
 	return cloned
 }
 
-// extractHost returns the host part of a host:port string. A `http://`
-// prefix is trimmed first, matching createProxyHandler's tolerance for
-// routed endpoint values. If parsing fails (e.g. no port), the input is
-// returned as-is.
-func extractHost(hostWithPort string) string {
-	hostWithPort, _ = strings.CutPrefix(hostWithPort, "http://")
-	host, _, err := net.SplitHostPort(hostWithPort)
-	if err != nil {
-		return hostWithPort
-	}
-	return host
-}
-
 func newUUID() string {
 	return uuid.New().String()
 }
@@ -360,12 +350,13 @@ func WriteAll(w io.Writer, b []byte) {
 // segment, so the two can classify such a request differently. The redirect
 // brings the client back through EPP with the clean path, as ServeMux does for
 // repeated slashes and dot segments. Only POST is served on these paths, so
-// other methods pass through. grpcPaths lists the gRPC method paths that the
-// sidecar serves as inference routes.
-func redirectEncodedInferencePath(next http.Handler, grpcPaths ...string) http.Handler {
+// other methods pass through. httpPaths and grpcPaths list the paths the
+// sidecar serves as inference routes; a path it forwards to the decoder
+// catch-all is not redirected.
+func redirectEncodedInferencePath(next http.Handler, httpPaths, grpcPaths []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.RawPath != "" {
-			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c || slices.Contains(grpcPaths, c) {
+			if c := path.Clean(r.URL.Path); slices.Contains(httpPaths, c) || slices.Contains(grpcPaths, c) {
 				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
 				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 				return

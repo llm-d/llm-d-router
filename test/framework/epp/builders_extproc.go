@@ -441,12 +441,13 @@ func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers
 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
 // unsetRoutingHeaders lists the EPP-owned headers Envoy is told to remove on a
-// request with no plugin-set routing headers and an unsampled trace: every name
+// request with no plugin-set routing headers and no trace context: every name
 // except the destination endpoint, which EPP always sets.
 var unsetRoutingHeaders = sets.List(request.InputControlHeaders.
 	Union(request.ScreeningHeaders).
 	Union(request.OutputInjectionHeaders).
 	Union(request.InternalRoutingHeaders).
+	Union(request.TracePropagationHeaders).
 	Difference(sets.New(metadata.DestinationEndpointKey)))
 
 func makeDestinationMetadata(endpoint string) *structpb.Struct {

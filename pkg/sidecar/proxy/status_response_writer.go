@@ -20,11 +20,13 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 
 	"github.com/felixge/httpsnoop"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -65,6 +67,7 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 // streamed response (SSE included) can be observed for error metrics without
 // buffering its body.
 type responseStatus struct {
+	header      http.Header
 	statusCode  int
 	writeFailed bool
 }
@@ -74,7 +77,7 @@ type responseStatus struct {
 // optional interfaces as w (http.Flusher, http.Hijacker, io.ReaderFrom), so
 // wrappers stacked on top of it keep their own hooks for those interfaces.
 func captureResponseStatus(w http.ResponseWriter) (http.ResponseWriter, *responseStatus) {
-	s := &responseStatus{}
+	s := &responseStatus{header: w.Header()}
 	writer := httpsnoop.Wrap(w, httpsnoop.Hooks{
 		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
 			return func(statusCode int) {
@@ -160,7 +163,7 @@ func stampFailedStage(w http.ResponseWriter, summary *requestSummary) http.Respo
 // as failed: the stage produced nothing, and net/http would send the client an
 // empty 200.
 func (s *responseStatus) failed() bool {
-	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed
+	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed || grpcframe.HasErrorStatus(s.header)
 }
 
 // deferredCommitWriter holds all writes until the caller decides the outcome
@@ -175,9 +178,11 @@ func (s *responseStatus) failed() bool {
 //   - abort():  discard the buffered output and drop every subsequent write, so
 //     a failed prefill can never let decode emit a (possibly 200) response; the
 //     caller then writes the prefill error to the client directly.
+//   - flushTrailers(): copy post-WriteHeader trailers buffered before commit
+//     to dst. Call once after the decode goroutine exits.
 //
-// It is safe for concurrent use by the decode goroutine (Write/WriteHeader/
-// Flush) and the coordinating goroutine (commit/abort).
+// It is safe for concurrent use by the decode goroutine (Header/Write/
+// WriteHeader/Flush) and the coordinating goroutine (commit/abort).
 type deferredCommitWriter struct {
 	dst http.ResponseWriter
 
@@ -195,7 +200,12 @@ type deferredCommitWriter struct {
 	writeFailed bool
 	statusCode  int
 	header      http.Header
-	buffer      bytes.Buffer
+	// trailers stores headers written after WriteHeader or Write while buffering,
+	// such as HTTP/2 trailers copied by httputil.ReverseProxy. Keeping them out
+	// of header lets flushCommitLocked read header without racing with
+	// ReverseProxy trailer writes.
+	trailers http.Header
+	buffer   bytes.Buffer
 }
 
 func newDeferredCommitWriter() *deferredCommitWriter {
@@ -208,10 +218,17 @@ func (w *deferredCommitWriter) Header() http.Header {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// Once decode's headers have been relayed, hand back the real writer's
-	// header map. Until then (buffering, or committed but decode hasn't emitted
-	// its header yet) collect into our own map so we can relay it verbatim.
+	// header map. After WriteHeader or Write freezes initial headers, route
+	// later writes (trailers) to trailers so header stays immutable for
+	// flushCommitLocked.
 	if w.headerFlushed {
 		return w.dst.Header()
+	}
+	if w.wroteHeader {
+		if w.trailers == nil {
+			w.trailers = make(http.Header)
+		}
+		return w.trailers
 	}
 	return w.header
 }
@@ -220,6 +237,11 @@ func (w *deferredCommitWriter) WriteHeader(statusCode int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.aborted {
+		return
+	}
+	// Informational 1xx statuses precede the final status. Recording them would
+	// freeze initial headers early and mark the response failed via isHTTPError.
+	if statusCode >= http.StatusContinue && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols {
 		return
 	}
 	if !w.wroteHeader {
@@ -264,11 +286,12 @@ func (w *deferredCommitWriter) Write(b []byte) (int, error) {
 func (w *deferredCommitWriter) Flush() {
 	w.mu.Lock()
 	streaming := w.headerFlushed && !w.aborted
+	dst := w.dst
 	w.mu.Unlock()
 	if !streaming {
 		return
 	}
-	if f, ok := w.dst.(http.Flusher); ok {
+	if f, ok := dst.(http.Flusher); ok {
 		f.Flush()
 	}
 }
@@ -282,7 +305,7 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	}
 	dstHeader := w.dst.Header()
 	for key, values := range w.header {
-		dstHeader[key] = values
+		dstHeader[key] = slices.Clone(values)
 	}
 	status := w.statusCode
 	if status == 0 {
@@ -299,6 +322,22 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	if f, ok := w.dst.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// flushTrailers copies post-WriteHeader headers (such as HTTP/2 trailers) that
+// were buffered before commit into dst. Call only after the decode goroutine
+// exits so no concurrent Header() writes remain in flight.
+func (w *deferredCommitWriter) flushTrailers() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.headerFlushed || len(w.trailers) == 0 {
+		return
+	}
+	dstHeader := w.dst.Header()
+	for key, values := range w.trailers {
+		dstHeader[key] = append(slices.Clone(values), dstHeader[key]...)
+	}
+	clear(w.trailers)
 }
 
 // commit allows decode's response to reach dst, preserving decode's own
@@ -342,10 +381,15 @@ func (w *deferredCommitWriter) abort() {
 // failed reports whether decode's response carried an error status or could
 // not be relayed to the client. A status of 0 means decode wrote nothing, or
 // the writer was aborted before decode emitted a header; both count as failed.
+// Call only after the decode goroutine exits because this reads header maps
+// that decode mutates through Header() without holding w.mu.
 func (w *deferredCommitWriter) failed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return isHTTPError(w.statusCode) || w.writeFailed
+	if isHTTPError(w.statusCode) || w.writeFailed || grpcframe.HasErrorStatus(w.header) || grpcframe.HasErrorStatus(w.trailers) {
+		return true
+	}
+	return w.headerFlushed && grpcframe.HasErrorStatus(w.dst.Header())
 }
 
 // responseStarted reports whether decode's status/headers have reached the

@@ -30,6 +30,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -206,12 +207,12 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 
 // outcome classifies a dispatched request with the values and precedence of
 // llm_d_epp_request_outcome_total: an eviction wins over the error that ends the stream, and a
-// non-200 status wins over a cancel. It sees only the response status and termination cause.
+// 4xx or 5xx status wins over a cancel. It sees only the response status and termination cause.
 func outcome(status string, cause requesthandling.TerminationCause) string {
 	switch {
 	case cause == requesthandling.TerminationCauseEvicted:
 		return outcomeEvicted
-	case status != "" && status != "200":
+	case status != "" && errcommon.ModelServerStatusCode(status) != "":
 		return outcomeFailed
 	case cause == requesthandling.TerminationCauseNatural:
 		return outcomeCompleted

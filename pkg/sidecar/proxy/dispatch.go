@@ -148,7 +148,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		// The decode pod dials this address. EPP sets it from the prefill
 		// endpoint it chose. Checked only when the host differs from the
 		// prefill target, which IsAllowed already cleared.
-		if p2p.prefill != nil && p2p.prefill.host != extractHost(prefillHostPort) && !s.allowlistValidator.IsAllowedHost(p2p.prefill.host) {
+		if p2p.prefill != nil && p2p.prefill.host != routing.ExtractHost(prefillHostPort) && !s.allowlistValidator.IsAllowedHost(p2p.prefill.host) {
 			denySSRF(w, r, logger, span, "prefill P2P address", p2p.prefill.String())
 			return
 		}
@@ -166,6 +166,12 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			// pool whose sidecar cannot pull, so the feature is off here.
 			logger.Info("warning: ignoring KV cache source: connector does not support P2P pulls",
 				"connector", s.config.KVConnector, "source", kvCacheSource)
+		case isVLLMGRPCRequest(r):
+			var ok bool
+			p2p, ok = s.prepareVLLMGRPCP2PSource(w, r, logger, p2p)
+			if !ok {
+				return
+			}
 		default:
 			raw, parsed, ok := s.readJSONBody(r, w)
 			if !ok {
@@ -214,8 +220,8 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
-			if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
-				// The EC connectors read a JSON body. A gRPC request falls back to P/D
+			if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) && !isVLLMGRPCRequest(r) {
+				// SGLang gRPC does not support EC disaggregation and falls back to P/D
 				// or decode-only, where the prefiller or decoder encodes the media.
 				logger.V(logging.DEBUG).Info("skipping EC connector for a gRPC request", "encoderCount", len(allowedEncoders))
 			} else {
@@ -265,6 +271,17 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				return
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
+		if p2p.grpcReq != nil {
+			if p2p.source != nil {
+				s.decodeWithP2PSourceVLLMGRPC(w, r, p2p)
+				return
+			}
+			var ok bool
+			r, ok = s.rebuildSanitizedVLLMGRPCRequest(w, r, p2p.grpcReq)
+			if !ok {
+				return
+			}
 		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r, func() {
 			observeToolCallingPassthrough(r, apiType)

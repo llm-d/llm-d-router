@@ -67,6 +67,9 @@ test_cases_llm_d_router_gateway["active-active-redis"]="--set router.modelServer
 test_cases_llm_d_router_gateway["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_gateway["basic-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-override-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=GRPC --set router.modelServers.grpcServiceName=vllm.grpc.engine.VllmEngine --set router.epp.parsers[0]=vllmgrpc-parser --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-empty-service-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.grpcServiceName= --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -108,6 +111,48 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ "${key}" == "triton" ]; then
     if ! grep -q "passthrough-parser" "${output_dir}/llm-d-router-gateway/templates/inferenceextension.yaml"; then
       echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: vllminference-parser" "${epp_yaml}" || ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: vllminference-parser, vllmgrpc-parser, and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "vllm.Inference"' "${gke_yaml}"; then
+      echo "Validation failed: vLLM gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-override-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || grep -q "pluginRef: vllminference-parser" "${epp_yaml}"; then
+      echo "Validation failed: explicit router.epp.parsers override not respected for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: uppercase protocol=GRPC did not set h2c appProtocol for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "vllm.grpc.engine.VllmEngine"' "${gke_yaml}"; then
+      echo "Validation failed: explicit router.modelServers.grpcServiceName override not respected for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-empty-service-gke" ]; then
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
+      echo "Validation failed: empty router.modelServers.grpcServiceName did not omit grpcServiceName on GRPC HealthCheckPolicy for test: ${key}"
       exit 1
     fi
   fi
@@ -264,6 +309,7 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["proxy-service-rollout"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.minReadySeconds=30 --set router.proxy.minReadySeconds=10 --set router.proxy.deploymentStrategy.type=RollingUpdate --set router.proxy.deploymentStrategy.rollingUpdate.maxUnavailable=0 --set router.proxy.deploymentStrategy.rollingUpdate.maxSurge=1"
 test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
 test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
@@ -272,6 +318,7 @@ test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.m
 test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["vllm-grpc"]="--set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.targetPorts[0].number=50051 --set router.epp.metricsDataSource.port=8000 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -310,6 +357,31 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   if [ "${key}" == "tokenizer-python" ]; then
     if ! grep -q "vllm" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "vllm-grpc" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "pluginRef: vllminference-parser" "${epp_yaml}" || ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: vllminference-parser, vllmgrpc-parser, and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if [ "$(grep -c 'http2_protocol_options: {}' "${epp_yaml}")" -lt 2 ]; then
+      echo "Validation failed: standalone Envoy model-server clusters missing http2_protocol_options for test: ${key}"
+      exit 1
+    fi
+    if ! awk '
+      /^---/ { svc=0; ms=0 }
+      /^kind: Service$/ { svc=1 }
+      svc && /^  name: .*-model-servers$/ { ms=1 }
+      ms && /appProtocol: kubernetes\.io\/h2c/ { found=1 }
+      END { exit !found }
+    ' "${epp_yaml}"; then
+      echo "Validation failed: standalone fallback Service missing h2c appProtocol for test: ${key}"
+      exit 1
+    fi
+    if ! grep -Eq "^[[:space:]]+port: 8000$" "${epp_yaml}"; then
+      echo "Validation failed: metricsDataSource.port not rendered in standalone EPP config for test: ${key}"
       exit 1
     fi
   fi
@@ -366,6 +438,26 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-rollout" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    # Select each Deployment and assert its own rollout settings: the combined
+    # YAML would pass with the EPP and proxy values swapped between them.
+    epp_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_max_surge="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxSurge' "${epp_yaml}")"
+    proxy_max_unavailable="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxUnavailable' "${epp_yaml}")"
+    if [ "${epp_min_ready}" != "30" ] || [ "${proxy_min_ready}" != "10" ] || [ "${proxy_max_surge}" != "1" ] || [ "${proxy_max_unavailable}" != "0" ]; then
+      echo "Validation failed: rollout settings not rendered on their own Deployments for test: ${key} (epp minReadySeconds=${epp_min_ready}, proxy minReadySeconds=${proxy_min_ready}, proxy rollingUpdate ${proxy_max_surge}/${proxy_max_unavailable})"
+      exit 1
+    fi
+    # The strategy override must reach the proxy Deployment only; the EPP
+    # Deployment keeps its own default (Recreate with a single replica).
+    epp_strategy_type="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.strategy.type' "${epp_yaml}")"
+    if [ "${epp_strategy_type}" != "Recreate" ]; then
+      echo "Validation failed: proxy deploymentStrategy leaked into the EPP Deployment for test: ${key} (strategy=${epp_strategy_type})"
       exit 1
     fi
   fi
@@ -659,6 +751,43 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   fi
 done
 
+echo "Verifying metrics reader token Secret names..."
+render_metrics_reader_secret() {
+  local chart="$1" release="$2"
+  shift 2
+  local output="${TEMP_DIR}/${chart}-metrics-reader-secret.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace metrics-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.enabled=true "${args[@]}" "$@" > "${output}"; then
+    echo "Metrics reader Secret rendering failed for ${chart}: ${release} $*"
+    exit 1
+  fi
+  local credentials_name
+  metrics_reader_secret=$("${YQ}" -N 'select(.kind == "Secret" and .type == "kubernetes.io/service-account-token") | .metadata.name' "${output}")
+  credentials_name=$("${YQ}" -N 'select(.kind == "ServiceMonitor") | .spec.endpoints[].authorization.credentials.name' "${output}")
+  if [ -z "${metrics_reader_secret}" ] || [ "${credentials_name}" != "${metrics_reader_secret}" ]; then
+    echo "${chart}: ServiceMonitor credentials '${credentials_name}' must name the token Secret '${metrics_reader_secret}' for ${release}; flags: $*"
+    exit 1
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_metrics_reader_secret "${chart}" alpha
+  if [ "${metrics_reader_secret}" != "alpha-metrics-reader-secret" ]; then
+    echo "${chart}: expected token Secret alpha-metrics-reader-secret, got ${metrics_reader_secret}"
+    exit 1
+  fi
+  render_metrics_reader_secret "${chart}" alpha --set router.monitoring.prometheus.auth.secretName=custom-reader
+  if [ "${metrics_reader_secret}" != "custom-reader" ]; then
+    echo "${chart}: expected the secretName override custom-reader, got ${metrics_reader_secret}"
+    exit 1
+  fi
+done
+
 echo "Running llm-d-router-standalone negative validation tests..."
 missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${missing_endpoint_selector_command}"
@@ -771,6 +900,35 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     eval "${skip_verify_render_command}"
     if ! grep -Eq -- "^[[:space:]]+insecureSkipVerify: ${skip_verify_want}$" "${skip_verify_render_output}"; then
       echo "${chart} did not render insecureSkipVerify: ${skip_verify_want} for router.epp.metricsDataSource.insecureSkipVerify=${skip_verify_set}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying router.epp.metricsDataSource.port renders and validates the configured value..."
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for metrics_port_case in "default:absent" "null:absent" "8000:8000"; do
+    metrics_port_set="${metrics_port_case%%:*}"
+    metrics_port_want="${metrics_port_case##*:}"
+    metrics_port_args=""
+    if [ "${metrics_port_set}" != "default" ]; then
+      metrics_port_args="--set router.epp.metricsDataSource.port=${metrics_port_set}"
+    fi
+    metrics_port_render_output="${TEMP_DIR}/${chart}-metrics-port-${metrics_port_set}-render.yaml"
+    ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" --set router.modelServers.matchLabels.app=llm-instance-gateway ${metrics_port_args} > "${metrics_port_render_output}" || exit 1
+    if [ "${metrics_port_want}" = "absent" ]; then
+      if awk '/- type: metrics-data-source/{m=1; next} m && /^    - /{m=0} m && /^[[:space:]]+port:/{found=1} END{exit !found}' "${metrics_port_render_output}"; then
+        echo "${chart} unexpectedly rendered metrics-data-source port for router.epp.metricsDataSource.port=${metrics_port_set}"
+        exit 1
+      fi
+    elif ! awk -v want="${metrics_port_want}" '/- type: metrics-data-source/{m=1; next} m && /^    - /{m=0} m && $1 == "port:" && $2 == want {found=1} END{exit !found}' "${metrics_port_render_output}"; then
+      echo "${chart} did not render port: ${metrics_port_want} under metrics-data-source for router.epp.metricsDataSource.port=${metrics_port_set}"
+      exit 1
+    fi
+  done
+  for bad_metrics_port in 0 -1 65536 abc; do
+    if ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" --set router.modelServers.matchLabels.app=llm-instance-gateway --set "router.epp.metricsDataSource.port=${bad_metrics_port}" >/dev/null 2>&1; then
+      echo "${chart} accepted invalid router.epp.metricsDataSource.port=${bad_metrics_port}"
       exit 1
     fi
   done
@@ -1069,6 +1227,64 @@ for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgate
   fi
 done
 
+echo "Verifying Envoy health-checks the EPP gRPC health port only where ext_proc resolves to EPP pods..."
+# name | extra helm flags | health_check_config count | health port | plaintext health transport_socket_match_criteria | EPP --drain-timeout value or absent
+while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls hc_drain; do
+  hc_render_output="${TEMP_DIR}/envoy-epp-health-port-${hc_case}.yaml"
+  read -r -a hc_flag_args <<<"${hc_flags}"
+  if ! "${HELM}" template hc "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+    "${hc_flag_args[@]}" > "${hc_render_output}"; then
+    echo "Envoy Helm render failed for EPP health port case ${hc_case}"
+    exit 1
+  fi
+  hc_found=$(grep -c -- 'health_check_config:' "${hc_render_output}" || true)
+  if [[ "${hc_found}" != "${hc_count}" ]]; then
+    echo "EPP health port case ${hc_case}: expected ${hc_count} ext_proc health_check_config, got ${hc_found}"
+    exit 1
+  fi
+  if [[ "${hc_count}" != 0 ]]; then
+    hc_port_found=$(grep -A1 -- 'health_check_config:' "${hc_render_output}" | grep -c -- "port_value: ${hc_port}" || true)
+    if [[ "${hc_port_found}" != "${hc_count}" ]]; then
+      echo "EPP health port case ${hc_case}: expected ${hc_count} health_check_config on port ${hc_port}, got ${hc_port_found}"
+      exit 1
+    fi
+  fi
+  if [[ "${hc_tls}" == present ]] && ! { grep -A1 -- 'transport_socket_match_criteria:' "${hc_render_output}" | grep -q -- 'health: plaintext' \
+    && grep -A6 -- 'name: plaintext-health' "${hc_render_output}" | grep -q -- 'envoy.transport_sockets.raw_buffer'; }; then
+    echo "EPP health port case ${hc_case}: plaintext health check transport socket match missing with EPP TLS on"
+    exit 1
+  fi
+  if [[ "${hc_tls}" == present ]] && grep -q -- 'tls_options:' "${hc_render_output}"; then
+    echo "EPP health port case ${hc_case}: health check tls_options rendered for the plaintext health port"
+    exit 1
+  fi
+  if [[ "${hc_tls}" == absent ]] && grep -q -- 'transport_socket_match_criteria' "${hc_render_output}"; then
+    echo "EPP health port case ${hc_case}: transport_socket_match_criteria rendered with EPP TLS off"
+    exit 1
+  fi
+  if [[ "${hc_case}" == service-clusterip ]] && ! grep -A1 -- 'tls_options:' "${hc_render_output}" | grep -q -- 'alpn_protocols: \["h2"\]'; then
+    echo "EPP health port case ${hc_case}: health check tls_options missing with EPP TLS on"
+    exit 1
+  fi
+  hc_drain_found=$(grep -c -- '--drain-timeout=' "${hc_render_output}" || true)
+  if [[ "${hc_drain}" == absent && "${hc_drain_found}" != 0 ]]; then
+    echo "EPP health port case ${hc_case}: expected no EPP --drain-timeout arg, got ${hc_drain_found}"
+    exit 1
+  fi
+  if [[ "${hc_drain}" != absent ]] && { [[ "${hc_drain_found}" != 1 ]] || ! grep -q -- "--drain-timeout=${hc_drain}\"" "${hc_render_output}"; }; then
+    echo "EPP health port case ${hc_case}: expected one EPP --drain-timeout=${hc_drain} arg, got ${hc_drain_found} --drain-timeout args"
+    exit 1
+  fi
+done <<'EOF_HC_CASES'
+sidecar|--set router.proxy.mode=sidecar|1|9003|present|45s
+service-priority|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true|2|9003|present|45s
+service-discovery|--set router.proxy.mode=service --set router.epp.replicas=2 --set router.epp.haMode=all-active|1|9003|present|45s
+service-clusterip|--set router.proxy.mode=service|0|9003|absent|absent
+service-priority-plaintext|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false|2|9100|absent|45s
+service-priority-drain-override|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.flags.drain-timeout=60s|2|9003|present|60s
+EOF_HC_CASES
+
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
 ${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.failOpen=false > "${fail_closed_render_output}"
@@ -1285,3 +1501,141 @@ for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${e
     exit 1
   fi
 done
+
+echo "Verifying llm-d-router-standalone Envoy ext_proc HTTP/2 keepalive..."
+# #4203: without PING keepalive a killed EPP hangs in-flight streamed responses until message_timeout.
+for c in "sidecar:${envoy_default_output}" "service:${proxy_service_render_output}"; do
+  IFS=: read -r name file <<< "${c}"
+  got=$(${YQ} 'select(.kind == "ConfigMap" and (.data | has("envoy.yaml"))) | .data."envoy.yaml"' "${file}" | ${YQ} '.static_resources.clusters[] | select(.name == "ext_proc") | .typed_extension_protocol_options."envoy.extensions.upstreams.http.v3.HttpProtocolOptions".explicit_http_config.http2_protocol_options.connection_keepalive | (.interval // "null") + ":" + (.timeout // "null")')
+  if [ "${got}" != "15s:3s" ]; then
+    echo "Envoy ext_proc connection_keepalive for ${name}: got ${got}, want 15s:3s"
+    exit 1
+  fi
+done
+
+echo "Verifying Envoy ext_proc message_timeout and GKE GCPBackendPolicy timeoutSec overrides..."
+envoy_timeout_output="${TEMP_DIR}/llm-d-router-standalone-envoy-timeout-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.proxy.extProcMessageTimeout=2400s > "${envoy_timeout_output}" || exit 1
+if ! grep -q -- 'message_timeout: 2400s$' "${envoy_timeout_output}"; then
+  echo "Standalone Envoy override did not render message_timeout: 2400s"
+  exit 1
+fi
+for pb in false true; do
+  gke_timeout_output="${TEMP_DIR}/llm-d-router-gateway-gke-timeout-${pb}.yaml"
+  ${HELM} template gke-timeout ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=${pb} --set provider.gke.backendTimeoutSec=2400 --set router.modelServers.matchLabels.app=llm-instance-gateway > "${gke_timeout_output}" || exit 1
+  if "${YQ}" -N 'select(.kind == "GCPBackendPolicy") | .spec.default.timeoutSec' "${gke_timeout_output}" | grep -qv '^2400$'; then
+    echo "GCPBackendPolicy timeoutSec override missed policies (preferredBackends=${pb})"
+    exit 1
+  fi
+done
+
+echo "Verifying standalone Envoy access log formats..."
+if ! "${YQ}" -e '
+  select(.kind == "ConfigMap" and (.data | has("envoy.yaml")))
+  | .data."envoy.yaml" | from_yaml
+  | .static_resources.listeners[] | select(.name == "vllm")
+  | .access_log[0].typed_config.log_format as $listener
+  | (.filter_chains[].filters[] | select(.name == "envoy.filters.network.http_connection_manager")
+     | .typed_config.access_log[0].typed_config.log_format) as $http
+  | ($listener.json_format | sort_keys(..) | to_json) as $fields_json
+  | select(
+      $listener.omit_empty_values == true and $http.omit_empty_values == true
+      and $fields_json == ($http.json_format | sort_keys(..) | to_json)
+      and ($fields_json | contains("...") | not)
+      and $listener.json_format.status == "%RESPONSE_CODE%"
+      and $listener.json_format.details == "%RESPONSE_CODE_DETAILS%"
+      and $listener.json_format.cluster == "%UPSTREAM_CLUSTER%"
+    )
+' "${envoy_default_output}" >/dev/null; then
+  echo "Expected matching Envoy JSON access log fields and omit_empty_values on both logs" >&2
+  exit 1
+fi
+
+echo "Verifying llm-d-router-standalone as two aliased dependencies of one umbrella chart..."
+umbrella_dir="${TEMP_DIR}/umbrella"
+mkdir -p "${umbrella_dir}"
+standalone_chart_dir="$(cd "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" && pwd)"
+cat > "${umbrella_dir}/Chart.yaml" <<UMBRELLA
+apiVersion: v2
+name: umbrella
+version: 0.0.0
+dependencies:
+  - name: llm-d-router-standalone
+    alias: router-qwen
+    version: 0.0.0
+    repository: file://${standalone_chart_dir}
+  - name: llm-d-router-standalone
+    alias: router-gemma
+    version: 0.0.0
+    repository: file://${standalone_chart_dir}
+UMBRELLA
+cat > "${umbrella_dir}/values.yaml" <<'UMBRELLA'
+router-qwen:
+  router:
+    fullnameOverride: qwen
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: qwen
+router-gemma:
+  router:
+    fullnameOverride: gemma
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: gemma
+UMBRELLA
+${HELM} dependency update "${umbrella_dir}" >/dev/null || { echo "Helm dependency update failed for the umbrella chart"; exit 1; }
+umbrella_output_dir="${SCRIPT_ROOT}/bin/llm-d-router-standalone-umbrella-aliases"
+rm -rf "${umbrella_output_dir}"
+${HELM} template umbrella "${umbrella_dir}" --namespace umbrella-ns --output-dir="${umbrella_output_dir}" >/dev/null || { echo "Helm template failed for the umbrella chart"; exit 1; }
+${KUBECTL_VALIDATE} "${umbrella_output_dir}" --local-crds "${TEMP_DIR}" || { echo "Kubectl validation failed for the umbrella chart"; exit 1; }
+# kubectl-validate has no ServiceMonitor schema, so monitoring is enabled only in this unvalidated render.
+umbrella_render="${TEMP_DIR}/umbrella-render.yaml"
+${HELM} template umbrella "${umbrella_dir}" --namespace umbrella-ns --set router-qwen.router.monitoring.prometheus.enabled=true --set router-gemma.router.monitoring.prometheus.enabled=true > "${umbrella_render}" || { echo "Helm template failed for the umbrella chart with monitoring"; exit 1; }
+umbrella_duplicates=$(${YQ} -N 'select(.kind) | .kind + "/" + .metadata.name' "${umbrella_render}" | sort | uniq -d)
+if [ -n "${umbrella_duplicates}" ]; then
+  echo "Umbrella chart rendered duplicate resources:"
+  echo "${umbrella_duplicates}"
+  exit 1
+fi
+for base in qwen gemma; do
+  proxy_container=$(${YQ} -N "select(.kind == \"Deployment\" and .metadata.name == \"${base}-epp\") | .spec.template.spec.containers[] | select(.name == \"envoy-proxy\") | (.args | length | tostring) + \":\" + (.ports | length | tostring)" "${umbrella_render}")
+  case "${proxy_container}" in
+    ""|0:*|*:0) echo "Umbrella instance ${base}: Deployment ${base}-epp has no envoy-proxy container with args and ports (got '${proxy_container}')"; exit 1 ;;
+  esac
+  for resource in "ConfigMap/${base}-envoy" "Service/${base}-epp-model-servers" "Secret/${base}-metrics-reader-secret"; do
+    if ! ${YQ} -N 'select(.kind) | .kind + "/" + .metadata.name' "${umbrella_render}" | grep -qx -- "${resource}"; then
+      echo "Umbrella instance ${base}: ${resource} not rendered"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying llm-d-router-standalone keeps its proxy presets when published under a suffixed name..."
+suffixed_chart_dir="${TEMP_DIR}/suffixed/llm-d-router-standalone"
+mkdir -p "$(dirname "${suffixed_chart_dir}")"
+cp -r "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" "${suffixed_chart_dir}"
+${YQ} -i '.name = .name + "-dev"' "${suffixed_chart_dir}/Chart.yaml"
+suffixed_render="${TEMP_DIR}/suffixed-render.yaml"
+${HELM} template suffixed "${suffixed_chart_dir}" --namespace suffixed-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false > "${suffixed_render}" || { echo "Helm template failed for the suffixed chart"; exit 1; }
+if ! arg_rendered "${suffixed_render}" --concurrency 8; then
+  echo "Suffixed chart did not render the Envoy preset args"
+  exit 1
+fi
+for resource in "ConfigMap/suffixed-envoy" "Service/suffixed-epp-model-servers"; do
+  if ! ${YQ} -N 'select(.kind) | .kind + "/" + .metadata.name' "${suffixed_render}" | grep -qx -- "${resource}"; then
+    echo "Suffixed chart: ${resource} not rendered"
+    exit 1
+  fi
+done
+
+echo "Verifying a whitespace-only router.fullnameOverride falls back to the release name..."
+blank_override_render="${TEMP_DIR}/blank-override-render.yaml"
+${HELM} template blank ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string 'router.fullnameOverride= ' > "${blank_override_render}" || { echo "Helm template failed with a whitespace-only fullnameOverride"; exit 1; }
+if ! ${YQ} -N 'select(.kind == "Deployment") | .metadata.name' "${blank_override_render}" | grep -qx -- "blank-epp"; then
+  echo "Whitespace-only router.fullnameOverride did not fall back to the release name"
+  exit 1
+fi

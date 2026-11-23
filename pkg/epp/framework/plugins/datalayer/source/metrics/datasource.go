@@ -69,6 +69,9 @@ type metricsDatasourceParams struct {
 	// target authenticates this scraper by certificate instead of a bearer token. Both set together.
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
+	// ProxyURL sends scrapes through this HTTP proxy instead of dialing the endpoint,
+	// for model servers reachable only through a proxy, such as a sidecar that adds mTLS.
+	ProxyURL string `json:"proxyURL,omitempty"`
 	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
 	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
@@ -108,7 +111,12 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	opts := []http.Option{intervalOpt}
+	proxyOpt, err := http.ParseProxyURLOption(cfg.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []http.Option{intervalOpt, proxyOpt}
 	if cfg.Port != nil {
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}

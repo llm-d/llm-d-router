@@ -119,6 +119,47 @@ func TestBuildDataLayerConfigExposesCrossReplicaSyncerOnHandle(t *testing.T) {
 	require.Same(t, syncer, handle.CrossReplicaSyncer())
 }
 
+// uncoordinatedSyncer cannot serve GetOrSet.
+type uncoordinatedSyncer struct{ testCrossReplicaSyncer }
+
+func (uncoordinatedSyncer) CheckCoordination() error { return fwkdl.ErrCoordinationUnsupported }
+
+type testCoordinationConsumer struct{ required bool }
+
+func (testCoordinationConsumer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "test-coordination-consumer", Name: "consumer"}
+}
+
+func (c testCoordinationConsumer) RequiresCoordination() bool { return c.required }
+
+func TestBuildDataLayerConfigRejectsSyncerWithoutRequiredCoordination(t *testing.T) {
+	for name, tc := range map[string]struct {
+		syncer   fwkdl.CrossReplicaSyncer
+		required bool
+		wantErr  bool
+	}{
+		"unsupported and required":     {syncer: &uncoordinatedSyncer{}, required: true, wantErr: true},
+		"unsupported and not required": {syncer: &uncoordinatedSyncer{}, required: false},
+		"supported and required":       {syncer: &testCrossReplicaSyncer{}, required: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handle := fwkplugin.NewEppHandle(context.Background(), nil)
+			handle.AddPlugin("syncer", tc.syncer)
+			handle.AddPlugin("screener", &testCoordinationConsumer{required: tc.required})
+			_, err := buildDataLayerConfig(&configapiv1.DataLayerConfig{
+				CrossReplica: &configapiv1.CrossReplicaConfig{SyncerPluginRef: "syncer"},
+			}, handle)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, fwkdl.ErrCoordinationUnsupported)
+			require.ErrorContains(t, err, "plugin screener")
+			require.Nil(t, handle.CrossReplicaSyncer(), "a rejected syncer is not exposed on the handle")
+		})
+	}
+}
+
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
 
 func TestLoadRawConfiguration(t *testing.T) {

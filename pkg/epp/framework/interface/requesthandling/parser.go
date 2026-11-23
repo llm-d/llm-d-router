@@ -135,6 +135,10 @@ type ParsedResponse struct {
 	// cache-read, and cache-creation input counts separately and may spread them
 	// over several stream chunks. Nil when Usage.PromptTokens is complete on its own.
 	DisjointInputTokens *DisjointInputTokens
+	// Completion is the generated text of a non-streamed /v1/completions response with
+	// exactly one choice that finished with "stop" or "length". Nil otherwise, including
+	// when the response body exceeds the parser's size limit.
+	Completion *Completion
 }
 
 // DisjointInputTokens holds the input token counts one parse observed, split by
@@ -144,4 +148,10 @@ type DisjointInputTokens struct {
 	Uncached      int
 	CacheRead     int
 	CacheCreation int
+}
+
+// Completion is the text generated for a single-choice completions response.
+type Completion struct {
+	Text         string
+	FinishReason string
 }

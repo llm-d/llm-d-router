@@ -487,6 +487,8 @@ Requests carrying `Prefer: if-available` (used by the coordinator's speculative 
 
 Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
 
+Envoy answers a gRPC request with HTTP 200 and a gRPC status. A `Prefer: if-available` gRPC request that the router rejects gets the status `FAILED_PRECONDITION` in place of the HTTP 412.
+
 A minimal coordinator-topology configuration:
 
 ```yaml
@@ -749,6 +751,30 @@ With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
 `5557-5564`, and serving `8000-8007`. Only the socket bases are
 compensated; `data_parallel_index` and the global rank carried in KV-event
 batches are unchanged.
+
+### vLLM gRPC Inference Routes
+
+The sidecar serves vLLM gRPC requests on `/vllm.Inference/Generate` and
+`/vllm.Inference/GenerateStream` over cleartext HTTP/2 (H2C) or TLS HTTP/2. On
+disaggregated paths, the sidecar strips client `kv.kv_transfer_params` and
+`kv.ec_transfer_params` from `GenerateRequest` and writes connector parameters
+into `GenerateRequest.kv`. The sidecar sends unary `/vllm.Inference/Generate`
+requests to encode and prefill workers with `max_new_tokens` set to 1. The
+decode worker receives the client method path and streams or returns the
+response.
+
+For multimodal requests, the sidecar forwards full media items on encode
+requests and on prefill requests when encode does not run. After encode runs,
+the sidecar strips pixel bytes and preprocessed kwargs from media items on
+prefill requests and on decoder-only requests. Decode requests behind a
+prefiller carry no media items because the decode worker reads KV cache from the
+prefiller.
+
+With `shared-storage` over gRPC, the sidecar always runs prefill before decode
+because `GenerateRequest` has no `cache_hit_threshold` field. For sequential
+gRPC connectors (`nixlv2`, `offloading`, and `shared-storage`), the sidecar
+rewrites `FinishInfo.num_cached_tokens` on the terminal decode frame with the
+prefiller count.
 
 ### General Sidecar Flags
 

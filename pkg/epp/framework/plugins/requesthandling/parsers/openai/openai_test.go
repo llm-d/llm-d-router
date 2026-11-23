@@ -924,19 +924,24 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"voice":           "default",
 				"ref_audio":       "data:audio/wav;base64,UklGRg==",
 				"ref_text":        "Hello.",
+				"max_new_tokens":  128,
 				"response_format": "wav",
 			},
 			want: &request.InferenceRequestBody{
 				TextToSpeech: &request.TextToSpeechRequest{
-					Input:   "Hello from llm-d.",
-					RefText: "Hello.",
+					Input:    "Hello from llm-d.",
+					RefText:  "Hello.",
+					Voice:    "default",
+					RefAudio: json.RawMessage(`"data:audio/wav;base64,UklGRg=="`),
 				},
+				MaxOutputTokens: ptr.To(int64(128)),
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-					"input":           "Hello from llm-d.",
+					"input":           json.RawMessage(`"Hello from llm-d."`),
 					"voice":           "default",
 					"ref_audio":       "data:audio/wav;base64,UklGRg==",
 					"ref_text":        "Hello.",
+					"max_new_tokens":  json.Number("128"),
 					"response_format": "wav",
 				},
 			},
@@ -956,8 +961,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-					"input":        "Hello from llm-d.",
-					"instructions": "Speak in a cheerful, upbeat radio-host voice.",
+					"input":        json.RawMessage(`"Hello from llm-d."`),
+					"instructions": json.RawMessage(`"Speak in a cheerful, upbeat radio-host voice."`),
 				},
 			},
 		},
@@ -973,10 +978,11 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			want: &request.InferenceRequestBody{
 				TextToSpeech: &request.TextToSpeechRequest{
 					Input: "Stream this response.",
+					Voice: "ryan",
 				},
 				Payload: request.PayloadMap{
 					"model":  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":  "Stream this response.",
+					"input":  json.RawMessage(`"Stream this response."`),
 					"voice":  "ryan",
 					"stream": true,
 				},
@@ -999,7 +1005,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":           "Stream this response as SSE.",
+					"input":           json.RawMessage(`"Stream this response as SSE."`),
 					"stream":          false,
 					"stream_format":   "sse",
 					"response_format": "pcm",
@@ -1023,7 +1029,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":           "Stream this response as raw audio.",
+					"input":           json.RawMessage(`"Stream this response as raw audio."`),
 					"stream":          false,
 					"stream_format":   "audio",
 					"response_format": "wav",
@@ -1047,7 +1053,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":           "Stream this response.",
+					"input":           json.RawMessage(`"Stream this response."`),
 					"stream":          true,
 					"stream_format":   "audio",
 					"response_format": "pcm",
@@ -1066,7 +1072,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				TextToSpeech: &request.TextToSpeechRequest{},
 				Payload: request.PayloadMap{
 					"model": "test",
-					"input": "",
+					"input": json.RawMessage(`""`),
 				},
 			},
 		},
@@ -1210,7 +1216,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-					"input":    "Hello from llm-d.",
+					"input":    json.RawMessage(`"Hello from llm-d."`),
 					"ref_text": "This is the reference clip.",
 				},
 			},
@@ -1565,6 +1571,8 @@ func wantEnvelopeRawFields(want *request.InferenceRequestBody) []string {
 		return envelopeRawFields[responsesAPI]
 	case want.Completions != nil || want.ChatCompletions != nil:
 		return envelopeRawFields[chatCompletionsAPI]
+	case want.TextToSpeech != nil:
+		return envelopeRawFields[audioSpeechAPI]
 	default:
 		return nil
 	}
@@ -1634,14 +1642,14 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				Size:              "1024x1024",
 				NumInferenceSteps: ptr.To[int64](30),
 				NegativePrompt:    "blurry",
-				Image:             attachedImage,
+				InputImages:       []request.UploadedMedia{attachedImage},
 			},
 		},
 		{
 			name:       "images edits request with prompt only",
 			path:       "/v1/images/edits",
 			fields:     map[string]string{"prompt": "make it night"},
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name: "images edits request with stream",
@@ -1651,13 +1659,13 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				"stream": "true",
 			},
 			wantStream: true,
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name:       "images edits request via prefix-mounted path",
 			path:       "/openai/v1/images/edits",
 			fields:     map[string]string{"prompt": "make it night"},
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name:    "images edits request missing prompt",
@@ -1737,6 +1745,39 @@ func TestOpenAIParser_ParseRequestPreservesJSONError(t *testing.T) {
 	}
 	if got, want := err.Error(), "error extracting request body: invalid completions request: must have prompt field"; got != want {
 		t.Fatalf("ParseRequest() error = %q, want %q", got, want)
+	}
+}
+
+func TestOpenAIParser_ParseRequestCompletionsPromptEmbeds(t *testing.T) {
+	parser := NewOpenAIParser()
+	headers := map[string]string{":path": "/v1/completions"}
+
+	for _, tt := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "null prompt with prompt_embeds", body: `{"model":"m","prompt":null,"prompt_embeds":"AAAA"}`},
+		{name: "empty prompt with prompt_embeds", body: `{"model":"m","prompt":"","prompt_embeds":"AAAA"}`},
+		{name: "prompt_embeds without prompt", body: `{"model":"m","prompt_embeds":["AAAA","BBBB"]}`},
+		{name: "null prompt without prompt_embeds", body: `{"model":"m","prompt":null}`, wantErr: true},
+		{name: "null prompt_embeds", body: `{"model":"m","prompt_embeds":null}`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseRequest(context.Background(), []byte(tt.body), headers)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseRequest() error = nil, want prompt validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if got.Body.Completions == nil || got.Body.Model != "m" {
+				t.Fatalf("ParseRequest() body = %+v, want completions request for model m", got.Body)
+			}
+		})
 	}
 }
 
@@ -2567,6 +2608,12 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			want:    ptr.To(int64(64)),
 		},
 		{
+			name:    "completions max_tokens written as a decimal float",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": json.Number("1000.0")},
+			want:    ptr.To(int64(1000)),
+		},
+		{
 			name:    "completions absent",
 			headers: map[string]string{":path": "/v1/completions"},
 			body:    map[string]any{"model": "m", "prompt": "p"},
@@ -2906,12 +2953,12 @@ func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
 	want := &request.ImagesGenerationsRequest{
 		Prompt: "add a hat",
 		N:      ptr.To[int64](2),
-		Image: request.UploadedMedia{
+		InputImages: []request.UploadedMedia{{
 			ContentType: "image/png",
 			SizeBytes:   int64(len(media)),
 			Head:        []byte(media),
 			Hash:        xxhash.Sum64([]byte(media)),
-		},
+		}},
 	}
 	if diff := cmp.Diff(want, result.Body.Images); diff != "" {
 		t.Errorf("Images mismatch (-want +got):\n%s", diff)
@@ -2937,7 +2984,10 @@ func TestOpenAIParser_ImagesEditsCapturesImagePart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := result.Body.Images.Image
+	if got := len(result.Body.Images.InputImages); got != 1 {
+		t.Fatalf("captured %d image parts, want 1", got)
+	}
+	image := result.Body.Images.InputImages[0]
 	if image.SizeBytes != int64(len(media)) {
 		t.Errorf("SizeBytes = %d, want %d", image.SizeBytes, len(media))
 	}
@@ -2949,6 +2999,32 @@ func TestOpenAIParser_ImagesEditsCapturesImagePart(t *testing.T) {
 	}
 	if image.ContentType != "image/png" {
 		t.Errorf("ContentType = %q, want image/png", image.ContentType)
+	}
+}
+
+// A multi-image edit captures every image part in form order, whether sent as
+// repeated "image" parts or under the "image[]" alias; the mask stays ignored.
+func TestOpenAIParser_ImagesEditsCapturesEveryImagePart(t *testing.T) {
+	first, second, third := "first-image", "second-image-bytes", "third"
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "merge these"},
+		videoFormPart{name: "image", value: first, filename: "a.png", mediaType: "image/png"},
+		videoFormPart{name: "image", value: second, filename: "b.jpg", mediaType: "image/jpeg"},
+		videoFormPart{name: "mask", value: "maskbytes", filename: "mask.png", mediaType: "image/png"},
+		videoFormPart{name: "image[]", value: third, filename: "c.webp", mediaType: "image/webp"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []request.UploadedMedia{
+		{ContentType: "image/png", SizeBytes: int64(len(first)), Head: []byte(first), Hash: xxhash.Sum64String(first)},
+		{ContentType: "image/jpeg", SizeBytes: int64(len(second)), Head: []byte(second), Hash: xxhash.Sum64String(second)},
+		{ContentType: "image/webp", SizeBytes: int64(len(third)), Head: []byte(third), Hash: xxhash.Sum64String(third)},
+	}
+	if diff := cmp.Diff(want, result.Body.Images.InputImages); diff != "" {
+		t.Errorf("InputImages mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -2964,8 +3040,8 @@ func TestOpenAIParser_ImagesEditsNoImagePart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if image := result.Body.Images.Image; image.SizeBytes != 0 || image.Head != nil || image.Hash != 0 {
-		t.Errorf("Image = %+v, want the zero value", image)
+	if images := result.Body.Images.InputImages; len(images) != 0 {
+		t.Errorf("InputImages = %+v, want none", images)
 	}
 }
 
@@ -3182,5 +3258,238 @@ func TestOpenAIParser_ParseDecisionsResponse(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got.Usage); diff != "" {
 		t.Errorf("Usage mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The speech request's conditioning fields reach the typed body: they carry no
+// input weight but the prefix-cache salt derives from them.
+func TestOpenAIParser_ParseRequestTextToSpeechConditioning(t *testing.T) {
+	body := `{
+		"model": "qwen3-tts",
+		"input": "hello",
+		"instructions": "cheerfully",
+		"ref_text": "sample transcript",
+		"cache_salt": "tenant-a",
+		"voice": "vivian",
+		"language": "en",
+		"task_type": "CustomVoice",
+		"ref_audio": "https://example.com/voice.wav",
+		"ref_audio_2": "https://example.com/second-voice.wav",
+		"x_vector_only_mode": false
+	}`
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	speech := result.Body.TextToSpeech
+	if speech.Voice != "vivian" || speech.Language != "en" || speech.TaskType != "CustomVoice" {
+		t.Errorf("conditioning = {Voice:%q Language:%q TaskType:%q}, want the request's fields", speech.Voice, speech.Language, speech.TaskType)
+	}
+	if string(speech.RefAudio) != `"https://example.com/voice.wav"` {
+		t.Errorf("RefAudio = %s, want the raw field", speech.RefAudio)
+	}
+	if string(speech.RefAudio2) != `"https://example.com/second-voice.wav"` {
+		t.Errorf("RefAudio2 = %s, want the raw field", speech.RefAudio2)
+	}
+	if speech.XVectorOnlyMode == nil || *speech.XVectorOnlyMode {
+		t.Errorf("XVectorOnlyMode = %v, want false", speech.XVectorOnlyMode)
+	}
+	if speech.CacheSalt != "tenant-a" {
+		t.Errorf("CacheSalt = %q, want tenant-a", speech.CacheSalt)
+	}
+}
+
+// The engine accepts "speaker" as an alias of "voice", and both as a string
+// or an object carrying an id; every form fills the same normalized field. A
+// null or empty id is the default voice, while a missing id is refused.
+func TestOpenAIParser_ParseRequestTextToSpeechSpeakerAlias(t *testing.T) {
+	for name, field := range map[string]string{"voice": "voice", "speaker": "speaker"} {
+		for form, tc := range map[string]struct {
+			value string
+			want  string
+			bad   bool
+		}{
+			"string":          {value: `"ryan"`, want: "ryan"},
+			"object":          {value: `{"id": "ryan"}`, want: "ryan"},
+			"null":            {value: `null`},
+			"object null id":  {value: `{"id": null}`},
+			"object empty id": {value: `{"id": ""}`},
+			"object no id":    {value: `{}`, bad: true},
+			"number":          {value: `5`, bad: true},
+		} {
+			t.Run(name+"/"+form, func(t *testing.T) {
+				body := `{"input": "hello", "` + field + `": ` + tc.value + `}`
+				result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+					map[string]string{":path": "/v1/audio/speech"})
+				if tc.bad {
+					if err == nil {
+						t.Errorf("ParseRequest accepted %s", tc.value)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Body.TextToSpeech.Voice != tc.want {
+					t.Errorf("Voice = %q, want %q", result.Body.TextToSpeech.Voice, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// The engine normalizes a Higgs Audio v3 references array into ref_audio and
+// ref_text, so the parser carries it for the fingerprint.
+func TestOpenAIParser_ParseRequestTextToSpeechReferences(t *testing.T) {
+	body := `{"input": "hello", "references": [{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]}`
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]`
+	if string(result.Body.TextToSpeech.References) != want {
+		t.Errorf("References = %s, want %s", result.Body.TextToSpeech.References, want)
+	}
+}
+
+// The engine resolves the two fields by key presence: a present "voice",
+// including an explicit null, wins over "speaker".
+func TestOpenAIParser_ParseRequestTextToSpeechVoiceTakesPrecedence(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"input": "hello", "voice": "ryan", "speaker": "vivian"}`: "ryan",
+		`{"input": "hello", "voice": null, "speaker": "ryan"}`:     "",
+		`{"input": "hello", "voice": "", "speaker": "ryan"}`:       "",
+		`{"input": "hello", "speaker": "ryan"}`:                    "ryan",
+	} {
+		t.Run(body, func(t *testing.T) {
+			result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+				map[string]string{":path": "/v1/audio/speech"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body.TextToSpeech.Voice != want {
+				t.Errorf("Voice = %q, want %q", result.Body.TextToSpeech.Voice, want)
+			}
+		})
+	}
+}
+
+// A number where a voice belongs is neither of the two shapes the engine
+// normalizes; the request is refused rather than forwarded for the engine to
+// reject with its own error.
+func TestOpenAIParser_ParseRequestTextToSpeechInvalidVoice(t *testing.T) {
+	for _, body := range []string{`{"input": "hello", "voice": 5}`, `{"input": "hello", "speaker": [1]}`} {
+		if _, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+			map[string]string{":path": "/v1/audio/speech"}); err == nil {
+			t.Errorf("ParseRequest accepted %s", body)
+		}
+	}
+}
+
+// An explicit JSON null and an absent conditioning field are the same None to
+// the engine, so the parser keeps them the same typed body, and the salt
+// derived from it is a pure function of that body.
+func TestOpenAIParser_ParseRequestTextToSpeechNullFields(t *testing.T) {
+	withNull, err := NewOpenAIParser().ParseRequest(context.Background(),
+		[]byte(`{"input": "hello", "ref_audio": null, "ref_audio_2": null, "references": null, "speaker_embedding": null}`),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNull.Body.TextToSpeech.RefAudio != nil || withNull.Body.TextToSpeech.RefAudio2 != nil || withNull.Body.TextToSpeech.References != nil || withNull.Body.TextToSpeech.SpeakerEmbedding != nil {
+		t.Errorf("null fields = {%v %v %v %v}, want all nil", withNull.Body.TextToSpeech.RefAudio, withNull.Body.TextToSpeech.RefAudio2, withNull.Body.TextToSpeech.References, withNull.Body.TextToSpeech.SpeakerEmbedding)
+	}
+	absent, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(`{"input": "hello"}`),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(absent.Body.TextToSpeech, withNull.Body.TextToSpeech); diff != "" {
+		t.Errorf("null and absent conditioning must parse to the same body (-absent +null):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_ParseResponse_Completion(t *testing.T) {
+	parser := NewOpenAIParser()
+	body := func(choices string) []byte {
+		return []byte(`{"object":"text_completion","choices":` + choices + `,"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
+	}
+	tests := []struct {
+		name string
+		body []byte
+		want *fwkrh.Completion
+	}{
+		{name: "stop", body: body(`[{"index":0,"text":"hello","finish_reason":"stop"}]`), want: &fwkrh.Completion{Text: "hello", FinishReason: "stop"}},
+		{name: "length", body: body(`[{"index":0,"text":"partial","finish_reason":"length"}]`), want: &fwkrh.Completion{Text: "partial", FinishReason: "length"}},
+		{name: "several choices", body: body(`[{"index":0,"text":"a","finish_reason":"stop"},{"index":1,"text":"b","finish_reason":"stop"}]`)},
+		{name: "unfinished choice", body: body(`[{"index":0,"text":"a","finish_reason":null}]`)},
+		{name: "aborted choice", body: body(`[{"index":0,"text":"a","finish_reason":"abort"}]`)},
+		{name: "no text", body: body(`[{"index":0,"finish_reason":"stop"}]`)},
+		{name: "chat completion", body: []byte(`{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"text_completion"},"finish_reason":"stop"}]}`)},
+		{name: "error body", body: []byte(`{"object":"error","message":"text_completion failed"}`)},
+		{
+			name: "body over the size limit",
+			body: body(`[{"index":0,"text":"` + strings.Repeat("a", maxCompletionResponseBytes) + `","finish_reason":"stop"}]`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), tt.body, nil, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Completion); diff != "" {
+				t.Errorf("Completion mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestOpenAIParser_ParseResponse_UsageWithUnexpectedChoices checks that the
+// completion fields decoded alongside usage do not change what usage returns.
+func TestOpenAIParser_ParseResponse_UsageWithUnexpectedChoices(t *testing.T) {
+	parser := NewOpenAIParser()
+	wantUsage := &request.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3}
+	usage := `"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}`
+	for name, body := range map[string]string{
+		"choices not an array": `{"object":"text_completion","choices":"x",` + usage + `}`,
+		"text not a string":    `{"object":"text_completion","choices":[{"text":7,"finish_reason":"stop"}],` + usage + `}`,
+		"object not a string":  `{"object":1,"choices":[{"text":"a","finish_reason":"stop"}],` + usage + `}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), []byte(body), nil, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if diff := cmp.Diff(wantUsage, got.Usage); diff != "" {
+				t.Errorf("Usage mismatch (-want +got):\n%s", diff)
+			}
+			if got.Completion != nil {
+				t.Errorf("Completion = %+v, want nil", got.Completion)
+			}
+		})
+	}
+	if _, err := parser.ParseResponse(context.Background(), []byte(`{"usage":"x"}`), nil, true); err == nil {
+		t.Error("ParseResponse() error = nil for a usage field that is not an object")
+	}
+}
+
+func BenchmarkOpenAIParser_ParseResponse(b *testing.B) {
+	parser := NewOpenAIParser()
+	text := strings.Repeat("lorem ipsum ", 2000)
+	for name, body := range map[string][]byte{
+		"completions": []byte(`{"object":"text_completion","choices":[{"index":0,"text":"` + text + `","finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+		"chat":        []byte(`{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"` + text + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.ParseResponse(context.Background(), body, nil, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

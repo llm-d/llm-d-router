@@ -53,6 +53,46 @@ helm install my-standalone-router ./config/charts/llm-d-router-standalone \
   --set router.proxy.replicas=3
 ```
 
+#### Several Standalone Routers in One Umbrella Chart
+An umbrella chart can declare `llm-d-router-standalone` once per model under different aliases. The instances share the release name, which is the default base of every resource name, so they would render the same objects. Each instance sets `router.fullnameOverride` to a distinct value, used as the base of its resource names in place of the release name: with the values below, the first instance creates `qwen-epp`, `qwen-envoy` and so on, the second `gemma-epp`, `gemma-envoy`.
+
+Each instance also sets `router.inferencePool.create=false`. The `InferencePool` keeps the release name, so two instances creating one would collide.
+
+Changing `router.fullnameOverride` on an installed release renames its resources: Helm deletes the old objects and creates new ones, which interrupts traffic.
+
+```yaml
+# Chart.yaml
+dependencies:
+  - name: llm-d-router-standalone
+    alias: router-qwen
+    version: <chart-version>
+    repository: oci://ghcr.io/llm-d/charts
+  - name: llm-d-router-standalone
+    alias: router-gemma
+    version: <chart-version>
+    repository: oci://ghcr.io/llm-d/charts
+```
+
+```yaml
+# values.yaml
+router-qwen:
+  router:
+    fullnameOverride: qwen
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: qwen
+router-gemma:
+  router:
+    fullnameOverride: gemma
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: gemma
+```
+
 ---
 
 ### 2. Gateway Mode (`llm-d-router-gateway`)
@@ -249,7 +289,11 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.metricsDataSource.scheme` | Scheme EPP uses to scrape model server metrics (`http` or `https`). | `http` |
+| `router.epp.metricsDataSource.path` | URL path on model server pods that serves Prometheus metrics. | `/metrics` |
+| `router.epp.metricsDataSource.port` | Port override for model server metrics scrapes (1-65535), such as `8000` when inference uses gRPC on `50051`. Unset scrapes each endpoint's inference port. Do not set on multi-port data-parallel pools. | `null` |
+| `router.epp.metricsDataSource.insecureSkipVerify` | Skip TLS certificate verification when `router.epp.metricsDataSource.scheme` is `https`. | `true` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. Ignored when `router.epp.autoscaling.enabled` is `true`. | `1` |
 | `router.epp.haMode` | `leader-elected` or `all-active`. Empty preserves automatic election for fixed replicas > 1, except when cross-replica sync is enabled. Explicit modes must agree with the leader-election flag and cannot be combined with priority routing or GKE preferred backends. | `""` |
 | `router.epp.crossReplica.enabled` | Configure the Alpha Redis syncer, select all-active mode, and allow experimental plugins. | `false` |
@@ -261,6 +305,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.crossReplica.redis.coordinationTTL` | Request-level coordination value expiration; minimum `1ms`. | `180s` |
 | `router.epp.crossReplica.redis.passwordSecretRef` | Existing Secret reference with `name` and `key`, exposed through the plugin's `passwordEnv`. | `{}` |
 | `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. Defaults to `RollingUpdate` with `maxUnavailable: 0` and `maxSurge: 1` for `haMode: all-active`, cross-replica sync, or autoscaling; otherwise `{type: Recreate}`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | Mode-dependent |
+| `router.epp.minReadySeconds` | `spec.minReadySeconds` for the EPP Deployment: how long a newly Ready pod must stay Ready before it counts as available, which also paces rollouts. Unset leaves the Kubernetes default of `0`. Must be a whole number from `0` to `599`: the Deployment's `progressDeadlineSeconds` (the Kubernetes default of `600`; the chart does not set it) has to exceed it, so the render fails on other values. | `null` |
 | `router.epp.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the EPP Deployment. Requires active-active mode (`router.epp.flags.ha-enable-leader-election` must not be `true`). See [Horizontal Pod Autoscaling (HPA)](../../docs/operations.md#horizontal-pod-autoscaling-hpa). | `false` |
 | `router.epp.autoscaling.minReplicas` | Minimum number of EPP replicas for the HPA. | `1` |
 | `router.epp.autoscaling.maxReplicas` | Maximum number of EPP replicas for the HPA. Must be greater than or equal to `minReplicas`. | `5` |
@@ -429,6 +474,7 @@ Configuration for the backend model servers that EPP routes traffic to. These se
 | `router.modelServers.protocol` | Protocol used by model servers. Options: `[http, grpc]`. | `http` |
 | `router.modelServers.targetPorts` | Port(s) EPP routes traffic to on the model servers. | `[{number: 8000}]` |
 | `router.modelServers.targetPortNumber` | Legacy fallback port number for GKE health check policies. | `8000` |
+| `router.modelServers.grpcServiceName` | Service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `type=vllm` and `protocol=grpc`. Set `""` for overall server health or `"vllm.grpc.engine.VllmEngine"` for legacy `VllmEngine` servers. | `vllm.Inference` |
 
 #### Complete Model Server Example
 
@@ -690,7 +736,7 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
 
 ### 7. RBAC
 
-The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name; `<ns>` is the release namespace.
+The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name, or `router.fullnameOverride` when it is set in the standalone chart; `<ns>` is the release namespace.
 
 | Name | Kind | Rendered when | Grants |
 |---|---|---|---|
@@ -724,6 +770,7 @@ Configures routing policies, target Gateway interfaces, and priority objectives 
 | `provider.name` | Name of Gateway implementation. Options: `[none, gke, istio]`. | `none` |
 | `provider.istio.destinationRule.host` | Custom host value for Istio DestinationRule. | `""` |
 | `provider.istio.destinationRule.trafficPolicy.connectionPool` | Connection pool settings for Istio DestinationRule. | `{}` |
+| `provider.gke.backendTimeoutSec` | `timeoutSec` of the `GCPBackendPolicy`. Raise it above the longest time EPP can hold a request in its flow-control queue. | `300` |
 | `provider.gke.preferredBackends.enabled` | Enable Preferred Backends high availability routing for GKE. | `false` |
 | `provider.gke.preferredBackends.preferredReplicas` | Replica count for primary active pod ordinals pinned to PREFERRED tier. | `1` |
 | `provider.gke.preferredBackends.defaultReplicas` | Replica count for standby backup pod ordinals pinned to DEFAULT tier. | `1` |
@@ -771,6 +818,8 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
 | `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on the proxy pod. Applies in service mode only: in sidecar mode the proxy shares the EPP pod, so `router.epp.terminationGracePeriodSeconds` controls the grace period for both containers. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.deploymentStrategy` | Overrides the proxy Deployment's `spec.strategy` when `mode=service`. Unset leaves the Kubernetes default (`RollingUpdate` with 25% `maxUnavailable`, which can drop serving proxies before their replacements are Ready). Ignored in sidecar mode, where `router.epp.deploymentStrategy` governs the shared pod. | `null` |
+| `router.proxy.minReadySeconds` | `spec.minReadySeconds` for the proxy Deployment when `mode=service`, same semantics and `0`-`599` range as `router.epp.minReadySeconds`. Ignored in sidecar mode. | `null` |
 | `router.proxy.nodeSelector` | Node selector for the proxy Deployment when `mode=service`. In sidecar mode the proxy shares the EPP pod. | `{}` |
 | `router.proxy.affinity` | Affinity rules for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.tolerations` | Tolerations for the proxy Deployment when `mode=service`. | `[]` |
@@ -789,6 +838,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.autoscaling.behavior` | Scaling behavior policies for proxy HPA scale-up and scale-down. | `{}` |
 | `router.proxy.autoscaling.metrics` | Custom HPA v2 metrics override for the proxy; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
 | `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Requests EPP did not schedule are load-balanced across the model servers through a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry, without endpoint picking. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
+| `router.proxy.extProcMessageTimeout` | Envoy `ext_proc` `message_timeout`: how long Envoy waits for each EPP response. Raise it above the longest time EPP can hold a request in its flow-control queue. Applies to `proxyType=envoy` only. | `1000s` |
 | `router.proxy.tracing.enabled` | Enable OpenTelemetry tracing in Envoy. Envoy creates a span per request on the main listener and propagates the trace context on the ext_proc gRPC stream to EPP, so EPP spans (`router.tracing.enabled`) join the request trace. Applies to `proxyType=envoy` only. | `false` |
 | `router.proxy.tracing.collectorEndpoint` | OTLP gRPC collector endpoint (`host:port`, scheme optional, port defaults to `4317`) for Envoy spans. Falls back to `router.tracing.otelExporterEndpoint` when empty. | `""` |
 | `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |

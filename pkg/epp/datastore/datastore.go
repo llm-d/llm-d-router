@@ -105,7 +105,7 @@ type Datastore interface {
 	// EndpointDelete removes the endpoint with the given namespaced name.
 	EndpointDelete(id types.NamespacedName)
 
-	// Clears the store state, happens when the pool gets deleted.
+	// Clears the pool and its endpoints, happens when the pool gets deleted.
 	Clear()
 }
 
@@ -163,8 +163,7 @@ func (ds *datastore) Clear() {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.pool = nil
-	ds.objectives = make(map[string]*apixv1.InferenceObjective)
-	ds.modelRewrites = newModelRewriteStore()
+	// Objectives and rewrites stay: their reconcilers own their lifecycle.
 	// stop all pods go routines before clearing the pods map.
 	ds.pods.Range(func(_, v any) bool {
 		ds.epf.ReleaseEndpoint(v.(fwkdl.Endpoint))

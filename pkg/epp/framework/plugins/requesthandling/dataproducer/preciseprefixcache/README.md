@@ -33,11 +33,23 @@ upstream. No-op otherwise.
 | `tokenProcessorConfig` | object | `kvblock.DefaultTokenProcessorConfig()` | KV-block hashing for the EPP-recomputed keys (block size, hash seed). |
 | `indexerConfig` | object | `kvcache.NewDefaultConfig()` | `kvcache.Indexer` config. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
+| `kvEventsSourceRef` | string | _(none)_ | Name of a `kv-events-source` whose decoded batches this producer indexes. The producer then opens no subscribers of its own, and `kvEventsConfig` is rejected. |
 | `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
+| `seedDecodeWhenDisaggregated` | bool | `false` | Also seed a disaggregated request's speculative entries on its decode endpoint. By default only the prefill endpoint is seeded: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
 
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.
+
+The producer subscribes to each discovered endpoint's event socket and
+attributes events to the endpoint it dialed. `kvEventsConfig.zmqEndpoint` is a
+deprecated alternative that binds one socket every engine publishes to. A
+bound socket cannot tell publishers apart, so it takes the pod identity from
+the topic, and any peer that reaches the socket can publish events under any
+pod's identity. The EPP refuses to bind a `zmqEndpoint` on a non-loopback
+address unless `kvEventsConfig.allowUntrustedPublishers` is `true`. Set it only
+when a network policy limits who can reach the port, and prefer per-pod
+subscriptions.
 
 SGLang EAGLE/MTP events describe cached positions as overlapping token pairs.
 The index preserves their trailing lookahead and learns each pod's page size.
@@ -95,3 +107,11 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+### Shared event input
+
+Set `kvEventsSourceRef` to the name of a
+[`kv-events-source`](../../../datalayer/source/kvevents/README.md) to index the
+decoded batches it shares with other consumers. The source owns the subscriptions
+and their recovery. Startup fails when the name matches no plugin, when the named
+plugin is of another type, or when `kvEventsConfig` is set alongside the reference.

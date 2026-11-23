@@ -22,9 +22,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -95,6 +97,9 @@ type dataProducer struct {
 	// the map stays bounded and prompts that leave and return can be re-indexed.
 	// Values are *mergedKeySet.
 	peerMerged sync.Map
+	// estimateTokens is set during startup dependency validation when the
+	// token-producer this plugin consumes is the estimate backend.
+	estimateTokens atomic.Bool
 }
 
 // mergedKeySet is the per-endpoint set stored in peerMerged. keys holds only
@@ -177,7 +182,10 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 // Produce reads the syncer-backed attribute to merge peer recent windows.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	deps := plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: plugin.ConsumedData{
+			Type:    fwkrequest.TokenizedRequest{},
+			Matches: p.recordTokenBackend,
+		}},
 	}
 	if p.syncCrossReplicaState {
 		deps.Optional = map[plugin.DataKey]any{p.syncHashDK: attrprefix.PrefixHashSet{}}
@@ -201,6 +209,11 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	}
 	if config.MaxPrefixBlocksToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
+	}
+	for _, tier := range config.CapacityTiers {
+		if tier != capacityTierHBM && tier != capacityTierCPU {
+			return nil, fmt.Errorf("invalid configuration: CapacityTiers entries must be %q or %q (current value: %q)", capacityTierHBM, capacityTierCPU, tier)
+		}
 	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
@@ -359,6 +372,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		PrefixCacheServers:        prefixCacheServers,
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: bestAvailable,
+		BlockSize:                 blockSize,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -524,11 +538,12 @@ func (p *dataProducer) forgetPeerMerged(endpointID string) {
 // reports the request never ran, so a retry is not routed as cached.
 // See https://github.com/llm-d/llm-d-router/issues/3919.
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
-	// Release the scheduling state; the index-update record written below is
-	// kept until the response arrives.
+	// Release the scheduling state; the index-update record and continuation
+	// state written below are kept until the response arrives.
 	defer p.pluginState.DeleteKey(request.RequestID, plugin.StateKey(p.typedName.Name))
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
+		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
 
@@ -536,8 +551,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
 	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
 	servers := make([]server, 0, 2)
+	var decode *server
 	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
-		servers = append(servers, p.makeserver(targetEndpoint))
+		d := p.makeserver(targetEndpoint)
+		servers = append(servers, d)
+		decode = &d
 	}
 	// Also record for prefill node if present in P/D disaggregated mode.
 	if disaggregated {
@@ -548,8 +566,10 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
+		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
+	promptIndexed := p.trackContinuation(ctx, request, decode, state.BlockSize)
 
 	record := &indexUpdateRecord{
 		servers:         servers,
@@ -562,16 +582,23 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// Update indexer asynchronously to avoid blocking the request path. The
 	// cell guards against a rollback that lands before this goroutine runs.
 	p.wg.Go(func() {
+		var decodeEntry []blockHash
+		if promptIndexed != nil {
+			defer func() { promptIndexed <- decodeEntry }()
+		}
 		record.cell.mu.Lock()
 		defer record.cell.mu.Unlock()
 		if record.cell.rolledBack {
 			return
 		}
-		for _, s := range servers {
+		for i, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				record.inserted[s.ServerID] = append(record.inserted[s.ServerID], p.indexerInst.Add(hashes, s))
 				if p.syncerActive() {
-					p.recent.record(s.String(), hashes)
+					entry := p.recent.record(s.String(), hashes)
+					if i == 0 && decode != nil {
+						decodeEntry = entry
+					}
 				}
 			}
 		}
@@ -612,7 +639,8 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 // removing the entries PreRequest added when the response reports the request
 // never ran on the model server. A prompt whose request failed must not look
 // cached: neither endpoint computed it, and a retry routed on the stale
-// entries would skip prefill.
+// entries would skip prefill. Otherwise it indexes the generated text of a
+// request tracked for continuation.
 func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
@@ -622,8 +650,10 @@ func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.Infer
 		// PreRequest never ran, or the staleness janitor already reaped the record.
 		return
 	}
+	continuation, _ := plugin.ReadPluginStateKey[*continuationState](p.pluginState, request.RequestID, continuationStateKey)
 	p.pluginState.Delete(request.RequestID)
 	if !responseFailed(response) {
+		p.indexContinuation(request, response, continuation)
 		return
 	}
 
@@ -773,25 +803,53 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 	return nil
 }
 
+// coversTier reports whether the auto-tuned capacity covers tier. An empty
+// CapacityTiers covers every tier.
+func (p *dataProducer) coversTier(tier string) bool {
+	return len(p.config.CapacityTiers) == 0 || slices.Contains(p.config.CapacityTiers, tier)
+}
+
+// makeserver sizes the pod's prefix index. With AutoTune, the capacity is the
+// largest tier in CapacityTiers that the endpoint reports, in router blocks:
+// the HBM tier from CacheNumBlocks and the offload-extended tier from
+// KvCacheMaxTokenCapacity. An offload tier holds a copy of what the HBM tier
+// holds (SGLang HiCache, vLLM CPU offloading), so the tiers are compared
+// rather than added. Without metrics the configured capacity applies.
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
-	gpuBlocks := defaultLRUCapacityPerServer
+	capacity := defaultLRUCapacityPerServer
 	fromMetrics := false
-	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
-		// CacheNumBlocks counts engine blocks, but each LRU entry is one router
-		// block, which minBlockSizeTokens can make larger. Size the LRU to the
-		// engine's token capacity so it does not outlive the engine's cache.
-		if engineBlockSize := targetEndpoint.GetMetrics().CacheBlockSize; engineBlockSize > 0 {
-			gpuBlocks = max(1, gpuBlocks*engineBlockSize/p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}))
+	offloadCapacityUnknown := false
+	if m := targetEndpoint.GetMetrics(); p.config.AutoTune && m != nil {
+		// Each LRU entry is one router block, which minBlockSizeTokens can make
+		// larger than the engine's block, so capacities convert through tokens
+		// and the index does not outlive the engine's cache.
+		routerBlockSize := p.GetBlockSize([]fwksched.Endpoint{targetEndpoint})
+		if p.coversTier(capacityTierHBM) && m.CacheNumBlocks > 0 {
+			capacity = m.CacheNumBlocks
+			if engineBlockSize := m.CacheBlockSize; engineBlockSize > 0 {
+				capacity = max(1, capacity*engineBlockSize/routerBlockSize)
+			}
+			fromMetrics = true
 		}
-		fromMetrics = true
-	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
+		if p.coversTier(capacityTierCPU) {
+			if m.KvCacheMaxTokenCapacity > 0 {
+				if blocks := max(1, m.KvCacheMaxTokenCapacity/routerBlockSize); blocks > capacity || !fromMetrics {
+					capacity = blocks
+				}
+				fromMetrics = true
+			} else if m.KvCacheOffloadDetected && fromMetrics {
+				offloadCapacityUnknown = true
+			}
+		}
+	}
+	if !fromMetrics && p.config.LRUCapacityPerServer > 0 {
+		capacity = p.config.LRUCapacityPerServer
 	}
 	return server{
-		ServerID:            ServerID(targetEndpoint.GetMetadata().ID),
-		NumOfGPUBlocks:      gpuBlocks,
-		CapacityFromMetrics: fromMetrics,
+		ServerID:               ServerID(targetEndpoint.GetMetadata().ID),
+		NumOfGPUBlocks:         capacity,
+		CapacityFromMetrics:    fromMetrics,
+		OffloadCapacityUnknown: offloadCapacityUnknown,
 	}
 }
 
