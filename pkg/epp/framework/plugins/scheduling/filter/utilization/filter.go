@@ -28,6 +28,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
 const (
@@ -40,7 +42,9 @@ const (
 	MetricActiveRequests = "active-requests"
 	// MetricRunningRequests is the running request count reported by the model server.
 	MetricRunningRequests = "running-requests"
-	// MetricWaitingQueue is the waiting queue size reported by the model server.
+	// MetricWaitingQueue is the waiting queue size reported by the model
+	// server, less the DeferredQueueSize attribute when the extractor
+	// publishes one.
 	MetricWaitingQueue = "waiting-queue"
 	// MetricKVCacheUtilization is the KV cache usage fraction (0 to 1) reported
 	// by the model server.
@@ -150,18 +154,23 @@ func (f *UtilizationFilter) TypedName() plugin.TypedName {
 }
 
 // Consumes returns the in-flight load attribute when a condition uses the
-// active-requests metric. Model-server metrics are read directly from the
+// active-requests metric, and the optional DeferredQueueSize attribute when
+// one uses waiting-queue. Model-server metrics are read directly from the
 // endpoint and need no producer.
 func (f *UtilizationFilter) Consumes() plugin.DataDependencies {
+	var deps plugin.DataDependencies
 	for _, cond := range f.conditions {
-		if cond.Metric == MetricActiveRequests {
-			return plugin.DataDependencies{
-				Required: map[plugin.DataKey]any{f.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
-			}
+		switch cond.Metric {
+		case MetricActiveRequests:
+			deps.Required = map[plugin.DataKey]any{f.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}}
+		case MetricWaitingQueue:
+			deps.Optional = map[plugin.DataKey]any{deferredQueueSizeDataKey: attrmetrics.ScalarMetricValue(0)}
 		}
 	}
-	return plugin.DataDependencies{}
+	return deps
 }
+
+var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
 
 // Filter keeps the endpoints that satisfy every condition. When all endpoints
 // are filtered out and fallbackOnEmpty is set, the original candidates are
@@ -206,7 +215,13 @@ func (f *UtilizationFilter) metricValue(ctx context.Context, endpoint scheduling
 	case MetricRunningRequests:
 		return float64(metrics.RunningRequestsSize)
 	case MetricWaitingQueue:
-		return float64(metrics.WaitingQueueSize)
+		waiting := float64(metrics.WaitingQueueSize)
+		// A deferred count above the waiting queue comes from series scraped
+		// out of step and leaves the value unchanged.
+		if deferred, ok := attrmetrics.ReadScalarMetricValue(endpoint, deferredQueueSizeDataKey); ok && deferred >= 0 && float64(deferred) <= waiting {
+			waiting -= float64(deferred)
+		}
+		return waiting
 	case MetricKVCacheUtilization:
 		return metrics.KVCacheUsagePercent
 	default:

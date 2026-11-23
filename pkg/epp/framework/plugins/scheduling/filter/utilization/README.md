@@ -6,20 +6,20 @@ This plugin filters candidate endpoints by utilization metrics.
 
 ## What it does
 
-For each scheduling cycle, the plugin evaluates the configured `conditions` against each candidate endpoint. Each condition caps one metric; an endpoint is kept only when it satisfies every condition, and dropped as soon as any condition's metric exceeds its `maxValue`. Multiple conditions therefore express an OR of overload rules: `conditions: [{running-requests <= 40}, {waiting-queue <= 0}]` drops an endpoint when it has more than 40 running requests or a non-empty queue.
+For each scheduling cycle, the plugin evaluates the configured `conditions` against each candidate endpoint. Each condition caps one metric; an endpoint is kept only when it satisfies every condition, and dropped as soon as any condition's metric exceeds its `maxValue`. Multiple conditions therefore express an OR of overload rules: `conditions: [{running-requests <= 40}, {waiting-queue <= 0}]` drops an endpoint when it has more than 40 running requests or a `waiting-queue` value above 0.
 
 Supported metrics:
 
 - `active-requests` — the in-flight request count tracked by the EPP, produced by the `inflight-load-producer` data producer. The count covers every request the EPP has routed to the endpoint and not yet seen complete, so it includes both running and queued requests; the EPP does not distinguish the two.
 - `running-requests` — the running request count reported by the model server.
-- `waiting-queue` — the waiting queue size reported by the model server.
+- `waiting-queue` — the waiting queue size reported by the model server, less the `DeferredQueueSize` attribute of the [`core-metrics-extractor`](../../../datalayer/extractor/metrics/README.md): the queued requests that wait on a KV transfer in progress. An endpoint without the attribute, or with a count that is negative or above its waiting queue, keeps the full waiting queue size.
 - `kv-cache-utilization` — the KV cache usage fraction (0 to 1) reported by the model server.
 
 Endpoints missing a metric are treated as having a zero value for it. When every endpoint is filtered out and `fallbackOnEmpty` is `true`, the original candidate list is returned unchanged, so the request can still be routed somewhere.
 
 ## Inputs consumed
 
-When a condition uses `active-requests`, the plugin consumes `InFlightLoadDataKey` (`InFlightLoad`) — the per-endpoint in-flight load snapshot maintained by the `inflight-load-producer` data producer. The model-server metrics are read directly from the endpoint's scraped metrics and need no producer.
+When a condition uses `active-requests`, the plugin consumes `InFlightLoadDataKey` (`InFlightLoad`) — the per-endpoint in-flight load snapshot maintained by the `inflight-load-producer` data producer. When a condition uses `waiting-queue`, the plugin reads the optional `DeferredQueueSize` attribute. The model-server metrics are read directly from the endpoint's scraped metrics and need no producer.
 
 ## Configuration
 
@@ -53,4 +53,4 @@ schedulingProfiles:
 
 ## See also
 
-The `active-request-scorer`, `running-requests-scorer`, `queue-scorer`, and `kv-cache-utilization-scorer` plugins are the scoring counterparts of this filter: instead of dropping endpoints, they rank them by the same signals. The `endpoint-attribute-filter` plugin filters by arbitrary custom metrics configured through the metrics extraction layer.
+The `active-request-scorer`, `running-requests-scorer`, `queue-scorer`, and `kv-cache-utilization-scorer` plugins are the scoring counterparts of this filter: instead of dropping endpoints, they rank them by the same signals, except that `queue-scorer` ranks by the full waiting queue size. The `endpoint-attribute-filter` plugin filters by arbitrary custom metrics configured through the metrics extraction layer.
