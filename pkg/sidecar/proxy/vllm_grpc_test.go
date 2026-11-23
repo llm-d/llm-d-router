@@ -502,7 +502,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				require.Equal(t, dkv["remote_request_id"], prefillCall.Request.GetRequestId())
 				assert.Equal(t, prefillCall.Request.GetRequestId(), decodeCall.Request.GetRequestId())
 				assert.Equal(t, pkv[requestFieldTransferID], dkv[requestFieldTransferID])
-				assert.Equal(t, extractHost(prefillAddr), dkv["remote_host"])
+				assert.Equal(t, routing.ExtractHost(prefillAddr), dkv["remote_host"])
 				assert.Equal(t, true, dkv["do_remote_prefill"])
 			},
 		},
@@ -529,7 +529,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 			wantCachedCount:    40,
 			extraHeaders: func(prefillAddr string) map[string]string {
 				return map[string]string{
-					routing.KVCachePrefillHeader: net.JoinHostPort(extractHost(prefillAddr), strconv.Itoa(p2pTierPort)),
+					routing.KVCachePrefillHeader: net.JoinHostPort(routing.ExtractHost(prefillAddr), strconv.Itoa(p2pTierPort)),
 				}
 			},
 			verifyLegs: func(t *testing.T, prefillCall, decodeCall grpctest.VLLMCall, prefillAddr string) {
@@ -540,7 +540,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				rp, ok := dkv["remote_prefiller"].(map[string]any)
 				require.True(t, ok)
 				assert.Equal(t, rd["kv_request_id"], rp["kv_request_id"])
-				assert.Equal(t, extractHost(prefillAddr), rp["remote_host"])
+				assert.Equal(t, routing.ExtractHost(prefillAddr), rp["remote_host"])
 				assert.Equal(t, float64(p2pTierPort), rp["remote_port"])
 			},
 		},
@@ -642,7 +642,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 					MoRIIOTPSize:               2,
 					MoRIIODPSize:               4,
 					MoRIIODPSizeLocal:          2,
-					MoRIIORemoteHosts:          []string{extractHost(prefillAddr), "10.9.0.99"},
+					MoRIIORemoteHosts:          []string{routing.ExtractHost(prefillAddr), "10.9.0.99"},
 				}
 				sidecarAddr := startCustomSidecar(t, cfg, nil)
 				client := newVLLMGRPCClient(t, sidecarAddr)

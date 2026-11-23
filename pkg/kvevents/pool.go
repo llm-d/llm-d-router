@@ -583,8 +583,11 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 // granularity so that len(result) matches the canonical chunk count expected by
 // TokensToKVBlockKeys.
 //
-// For 1:many (engine BS > canonical BS): each engine block's features are replicated
-// to all its constituent canonical sub-blocks.
+// For 1:many (engine BS > canonical BS): each canonical sub-block takes the MM items
+// that overlap it, located by the event offsets, and the cache salt stays on the
+// first sub-block of the engine block that carries it (vLLM salts only token 0's block).
+// Without usable offsets, or when the canonical BS does not divide the engine BS,
+// each engine block's features are replicated to its sub-blocks.
 // For many:1 (engine BS < canonical BS): features from the engine blocks whose tokens
 // fall in a canonical block are merged into it, and engine blocks past the last full
 // canonical block are dropped. The cache salt goes to the canonical block holding
@@ -605,10 +608,16 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 	canonical := make([]*kvblock.BlockExtraFeatures, canonicalBlockCount)
 
 	if engineBlockCount < canonicalBlockCount {
-		// 1:many -> replicate each engine feature to its canonical sub-blocks
+		// 1:many -> give each canonical sub-block the part of its engine block's features it overlaps
+		engineBlockSize := numTokens / engineBlockCount
+		divides := numTokens%engineBlockCount == 0 && engineBlockSize%canonicalBlockSize == 0
 		for i := range canonicalBlockCount {
 			engineIdx := i * engineBlockCount / canonicalBlockCount
 			canonical[i] = engineFeatures[engineIdx]
+			if divides {
+				start := i*canonicalBlockSize - engineIdx*engineBlockSize
+				canonical[i] = subBlockFeatures(canonical[i], start, canonicalBlockSize, engineBlockSize)
+			}
 		}
 	} else {
 		// many:1 -> merge each engine block into the canonical block holding its tokens.
@@ -648,6 +657,65 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 	}
 
 	return canonical
+}
+
+// dropOffsetsUnlessDense clears the MM offsets unless ev declares its block size and has one entry per page.
+// vLLM skips null pages in extra_keys but not in token_ids, so a sparse event's entries are not pages.
+func dropOffsetsUnlessDense(ev *BlockStoredEvent, features []*kvblock.BlockExtraFeatures) {
+	if ev.BlockSize > 0 && len(features)*ev.BlockSize == len(ev.Tokens) {
+		return
+	}
+	for _, f := range features {
+		if f != nil {
+			f.MMOffsets = nil
+		}
+	}
+}
+
+// subBlockFeatures returns the features of engine block ef that apply to its tokens [start, start+size).
+// Without usable event offsets every item is kept, since the block doesn't say where an item lies.
+func subBlockFeatures(ef *kvblock.BlockExtraFeatures, start, size, engineBlockSize int) *kvblock.BlockExtraFeatures {
+	if ef == nil || !offsetsUsable(ef, engineBlockSize) {
+		return ef
+	}
+	sub := &kvblock.BlockExtraFeatures{}
+	for k, hash := range ef.MMHashes {
+		itemStart, itemEnd := itemSpan(ef.MMOffsets, k, engineBlockSize)
+		if itemStart < start+size && itemEnd > start {
+			sub.MMHashes = append(sub.MMHashes, hash)
+		}
+	}
+	if start == 0 {
+		sub.CacheSalt = ef.CacheSalt
+	}
+	if len(sub.MMHashes) == 0 && sub.CacheSalt == "" {
+		return nil
+	}
+	return sub
+}
+
+// offsetsUsable reports whether ef has one offset per item, in increasing order, all inside the block,
+// with only the first allowed to be negative (an item continuing from the previous block).
+func offsetsUsable(ef *kvblock.BlockExtraFeatures, engineBlockSize int) bool {
+	if len(ef.MMOffsets) != len(ef.MMHashes) {
+		return false
+	}
+	for k, offset := range ef.MMOffsets {
+		if offset >= engineBlockSize || (k > 0 && offset <= max(ef.MMOffsets[k-1], -1)) {
+			return false
+		}
+	}
+	return true
+}
+
+// itemSpan bounds item k of an engine block: from its offset to the next item's offset or the block end.
+// vLLM sends no length, so an item followed by text is taken to run to that bound, over-tagging the text.
+func itemSpan(offsets []int, k, engineBlockSize int) (int, int) {
+	end := engineBlockSize
+	if k+1 < len(offsets) {
+		end = offsets[k+1]
+	}
+	return max(offsets[k], 0), end
 }
 
 // handleDeviceTierUpdate handles offloading/location-only events (e.g., DeviceTier=CPU
@@ -843,6 +911,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"podIdentifier", podIdentifier)
 					continue
 				}
+				dropOffsetsUnlessDense(ev, extraFeatures)
 			}
 
 			// Realign extraFeatures from engine-block granularity to canonical-block

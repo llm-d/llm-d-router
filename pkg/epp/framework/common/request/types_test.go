@@ -631,9 +631,9 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 }
 
 func TestTextToSpeechRequest_String(t *testing.T) {
-	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 0}", (&TextToSpeechRequest{Input: "hello"}).String())
-	assert.Equal(t, "{InputLength: 5, InstructionsLength: 8, RefTextLength: 0}", (&TextToSpeechRequest{Input: "hello", Instructions: "cheerful"}).String())
-	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 11}", (&TextToSpeechRequest{Input: "hello", RefText: "hello there"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 0, Voice: , Language: , TaskType: }", (&TextToSpeechRequest{Input: "hello"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 8, RefTextLength: 0, Voice: , Language: , TaskType: }", (&TextToSpeechRequest{Input: "hello", Instructions: "cheerful"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 11, Voice: ryan, Language: en, TaskType: CustomVoice}", (&TextToSpeechRequest{Input: "hello", RefText: "hello there", Voice: "ryan", Language: "en", TaskType: "CustomVoice"}).String())
 	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
 }
 
@@ -784,4 +784,18 @@ func TestGenerateRequest_UnmarshalJSONCanonicalPreservesAbsentFeatures(t *testin
 	assert.Equal(t, []uint32{1, 2, 3}, g.TokenIDs)
 	assert.Equal(t, "updated", g.CacheSalt)
 	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
+}
+
+func TestCompletionsRequestEchoDisabled(t *testing.T) {
+	for raw, want := range map[string]bool{
+		`{"prompt":"p"}`:              true,
+		`{"prompt":"p","echo":false}`: true,
+		`{"prompt":"p","echo":null}`:  true,
+		`{"prompt":"p","echo":true}`:  false,
+		`{"prompt":"p","echo":"yes"}`: false,
+	} {
+		var r CompletionsRequest
+		require.NoError(t, json.Unmarshal([]byte(raw), &r), raw)
+		assert.Equal(t, want, r.EchoDisabled(), raw)
+	}
 }

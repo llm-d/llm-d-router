@@ -219,7 +219,7 @@ func (h *testHarness) waitForFinalization(item *FlowItem) (types.QueueOutcome, e
 func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.Duration) *FlowItem {
 	h.t.Helper()
 	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
-	return NewItem(context.Background(), req, ttl, h.clock.Now(), logr.Discard())
+	return NewItem(context.Background(), req, ttl, h.clock.Now(), h.clock, logr.Discard())
 }
 
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
@@ -2200,7 +2200,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 					regimeSince = base.Add(tc.regimeAfter)
 				}
 
-				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
+				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, nil, logr.Discard())
 				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
 				expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 

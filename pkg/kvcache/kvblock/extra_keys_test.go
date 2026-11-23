@@ -133,6 +133,27 @@ func TestParseRawExtraKeys_FirstContinuation(t *testing.T) {
 	}
 }
 
+func TestParseRawExtraKeys_MMOffsets(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		keys []any
+		want []int
+	}{
+		{"tuples", []any{[]any{"a", int64(-6)}, []any{"b", int8(4)}}, []int{-6, 4}},
+		{"salt is not an item", []any{[]any{"img", int64(4)}, "salt"}, []int{4}},
+		{"unsigned offset", []any{[]any{"img", uint16(300)}}, []int{300}},
+		{"bare identifiers", []any{"a", "b"}, nil},
+		{"tuple without an offset", []any{[]any{"img"}}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := kvblock.ParseRawExtraKeys([][]any{tt.keys}, "")
+			require.NoError(t, err)
+			require.NotNil(t, result[0])
+			assert.Equal(t, tt.want, result[0].MMOffsets)
+		})
+	}
+}
+
 func TestParseRawExtraKeys_CacheSalt(t *testing.T) {
 	features := func(salt string, hashes ...string) *kvblock.BlockExtraFeatures {
 		f := &kvblock.BlockExtraFeatures{CacheSalt: salt}

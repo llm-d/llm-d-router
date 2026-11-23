@@ -172,6 +172,24 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of ZMQ subscriber errors", compbasemetrics.ALPHA),
 	}, []string{podIdentifierLabel, "operation"})
+	// LiveOnlySubscribers counts subscribers indexing live events without a
+	// snapshot or replay base after a load failed, from the first such event
+	// until the subscriber follows a complete event sequence again or is removed.
+	LiveOnlySubscribers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only_subscribers",
+		Help: metricsutil.HelpMsgWithStability(
+			"Number of ZMQ subscribers indexing from live events only after a failed snapshot or replay load",
+			compbasemetrics.ALPHA),
+	})
+	// SnapshotLoadDuration observes successful snapshot loads, from the request
+	// until the snapshot's batches are queued for indexing.
+	SnapshotLoadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_load_duration_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of successful snapshot loads in seconds, until the batches are queued for indexing",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+	})
 	// PoolQueueDepth tracks the total number of messages queued across all
 	// worker shards of the event processing pool.
 	PoolQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -196,6 +214,7 @@ func Collectors() []prometheus.Collector {
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
+		LiveOnlySubscribers, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
 	}
 }
@@ -233,13 +252,18 @@ func Register() {
 }
 
 // StartMetricsLogging spawns a goroutine that logs current metric values every
-// interval.
+// interval until ctx ends.
 func StartMetricsLogging(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			logMetrics(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				logMetrics(ctx)
+			}
 		}
 	}()
 }

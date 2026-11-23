@@ -397,8 +397,7 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	}))
 	cached := p.speculativeCache.Get(request.RequestID)
 	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 2)
-	require.Len(t, cached.Value().perPodKeys["10.0.0.2:8080"][0], 1)
+	require.Len(t, cached.Value().perPodKeys, 1)
 	require.Len(t, cached.Value().perPodKeys["10.0.0.3:8080"][0], 4)
 }
 

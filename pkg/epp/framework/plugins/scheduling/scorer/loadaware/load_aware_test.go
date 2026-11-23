@@ -18,12 +18,16 @@ package loadaware_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types" // Import config for thresholds
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
@@ -90,6 +94,18 @@ func TestLoadBasedScorer(t *testing.T) {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 		})
+	}
+}
+
+func TestNewLoadAwareLogsInvalidThreshold(t *testing.T) {
+	var lines []string
+	logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: logutil.DEFAULT})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	loadaware.NewLoadAware(ctx, -5)
+
+	if len(lines) != 1 || !strings.Contains(lines[0], "queueThreshold -5 should be positive") {
+		t.Errorf("expected one log line reporting the configured threshold -5, got %q", lines)
 	}
 }
 

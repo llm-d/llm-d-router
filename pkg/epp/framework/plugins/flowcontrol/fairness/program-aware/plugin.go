@@ -26,6 +26,7 @@ import (
 	"time"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -71,8 +72,13 @@ func (c Config) validate() error {
 	if c.EvictionTTLSeconds < 0 {
 		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
 	}
-	if c.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	if c.EvictionTTLSeconds > 0 {
+		if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+			return err
+		}
+	}
+	if err := duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds); err != nil {
+		return err
 	}
 	if c.LASWeightService < 0 {
 		return fmt.Errorf("lasWeightService must be >= 0, got %v", c.LASWeightService)

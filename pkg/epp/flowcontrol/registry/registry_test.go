@@ -20,6 +20,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	testclock "k8s.io/utils/clock/testing"
@@ -1139,6 +1142,51 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		assert.Equal(t, 0, leaseCount, "Band lease should be released after JIT failure")
 	})
 
+	t.Run("ShouldKeepBandLeaseCount_WhenBandAppearsDuringFailedProvisioning", func(t *testing.T) {
+		t.Parallel()
+		key := flowcontrol.FlowKey{ID: "racing-flow", Priority: dynamicPrio}
+
+		// Connections that saw the band missing race one that provisions the flow after the band
+		// appears. A failed connection must remove only its own flow state: removing the newer one
+		// orphans the band lease it holds.
+		for trial := range 500 {
+			h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for range 8 {
+				wg.Go(func() {
+					<-start
+					for range 20 {
+						if h.fr.WithConnection(key, func(contracts.ActiveFlowConnection) error { return nil }) == nil {
+							return
+						}
+					}
+				})
+			}
+			wg.Go(func() {
+				<-start
+				require.NoError(t, h.fr.ensurePriorityBand(dynamicPrio))
+			})
+			close(start)
+			wg.Wait()
+
+			flows := 0
+			h.fr.flowStates.Range(func(k, _ any) bool {
+				if k.(flowcontrol.FlowKey).Priority == dynamicPrio {
+					flows++
+				}
+				return true
+			})
+			val, ok := h.fr.priorityBandStates.Load(dynamicPrio)
+			require.True(t, ok, "Band lease state should exist")
+			state := val.(*priorityBandState)
+			state.mu.Lock()
+			leaseCount := state.leaseCount
+			state.mu.Unlock()
+			require.Equal(t, flows, leaseCount, "trial %d: band lease count must equal the flows in the registry", trial)
+		}
+	})
+
 	t.Run("ShouldMaintainBandLeaseCount_MatchingActiveFlowCount", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
@@ -1431,8 +1479,69 @@ func TestFlowRegistry_GarbageCollection_PrunesMetricSeries(t *testing.T) {
 	h.fr.ExecuteGCCycle()
 
 	h.assertFlowDoesNotExist(key, "Setup: idle flow must have been collected")
-	assert.Zero(t, countSeriesWithFairnessID(t, flowID),
+	require.Eventually(t, func() bool { return countSeriesWithFairnessID(t, flowID) == 0 },
+		5*time.Second, 10*time.Millisecond,
 		"GC must prune every metric series labeled with the collected flow's fairness ID")
+}
+
+// The GC cycle runs on the Processor loop, so it must not wait for the prune: DeletePartialMatch
+// scans whole metric vectors and blocks while a scrape holds a vector's read lock.
+func TestFlowRegistry_GarbageCollection_DoesNotWaitForMetricPrune(t *testing.T) {
+	// Not parallel: stalls a collection of the process-global metrics registry.
+	eppmetrics.Register()
+	h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+	flowIDs := []string{"gc-prune-off-loop-a", "gc-prune-off-loop-b"}
+	for _, id := range flowIDs {
+		h.openConnectionOnFlow(flowcontrol.FlowKey{ID: id, Priority: highPriority})
+		eppmetrics.RecordFlowControlRequestEnqueueDuration(
+			id, strconv.Itoa(highPriority), "Dispatched", time.Millisecond)
+	}
+
+	// Stall a scrape inside the vector that holds the two series. A vector keeps its read lock
+	// while it sends its series, and one of the two is still unsent when the other arrives.
+	collector, ok := crmetrics.Registry.(prometheus.Collector)
+	require.True(t, ok, "Setup: the metrics registry must be a collector")
+	scrape := make(chan prometheus.Metric)
+	go func() {
+		defer close(scrape)
+		collector.Collect(scrape)
+	}()
+	finishScrape := func() {
+		for range scrape {
+		}
+	}
+	t.Cleanup(finishScrape)
+	stalled := false
+	for m := range scrape {
+		var out dto.Metric
+		if m.Write(&out) != nil {
+			continue
+		}
+		if slices.ContainsFunc(out.GetLabel(), func(lp *dto.LabelPair) bool {
+			return lp.GetName() == "fairness_id" && slices.Contains(flowIDs, lp.GetValue())
+		}) {
+			stalled = true
+			break
+		}
+	}
+	require.True(t, stalled, "Setup: the scrape must reach a series of the test flows")
+
+	h.fakeClock.Step(h.config.FlowGCTimeout + time.Second)
+	gcDone := make(chan struct{})
+	go func() {
+		defer close(gcDone)
+		h.fr.ExecuteGCCycle()
+	}()
+	select {
+	case <-gcDone:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "ExecuteGCCycle waited for the metric prune")
+	}
+
+	finishScrape()
+	require.Eventually(t, func() bool {
+		return countSeriesWithFairnessID(t, flowIDs[0])+countSeriesWithFairnessID(t, flowIDs[1]) == 0
+	}, 5*time.Second, 10*time.Millisecond, "The prune must still delete the collected flows' series")
 }
 
 // TestFlowRegistry_FlowIdleTimeStartsWhenConnectionCloses checks that a flow is

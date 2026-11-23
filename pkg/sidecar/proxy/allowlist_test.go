@@ -520,14 +520,14 @@ var _ = Describe("AllowlistValidator", func() {
 
 		It("should parse host:port correctly", func() {
 			// Test host:port format parsing
-			Expect(extractHost("10.244.1.100:8000")).To(Equal("10.244.1.100"))
-			Expect(extractHost("valid-pod:8000")).To(Equal("valid-pod"))
+			Expect(routing.ExtractHost("10.244.1.100:8000")).To(Equal("10.244.1.100"))
+			Expect(routing.ExtractHost("valid-pod:8000")).To(Equal("valid-pod"))
 			// Just hostname (no port)
-			Expect(extractHost("valid-pod")).To(Equal("valid-pod"))
+			Expect(routing.ExtractHost("valid-pod")).To(Equal("valid-pod"))
 			// IPv6 addresses (net.SplitHostPort handles these correctly
-			Expect(extractHost("[::1]:8000")).To(Equal(testLoopbackIPv6))
+			Expect(routing.ExtractHost("[::1]:8000")).To(Equal(testLoopbackIPv6))
 			// IPv6 without port
-			Expect(extractHost(testLoopbackIPv6)).To(Equal(testLoopbackIPv6))
+			Expect(routing.ExtractHost(testLoopbackIPv6)).To(Equal(testLoopbackIPv6))
 		})
 	})
 })

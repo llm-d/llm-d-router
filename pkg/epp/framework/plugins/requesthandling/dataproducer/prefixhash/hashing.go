@@ -209,7 +209,10 @@ func mmBlockExtra(features []fwkrequest.MultiModalFeature, block, blockSizeToken
 	var out []byte
 	var lenBuf [8]byte
 	for _, f := range features {
-		if f.Length <= 0 {
+		// A hashless feature carries no content identity: encoding it would
+		// contribute only position bytes and make prompts with different media
+		// collide on the blocks it spans (issue #4155).
+		if f.Length <= 0 || f.Hash == "" {
 			continue
 		}
 		featStart, featEnd := f.Offset, f.Offset+f.Length
