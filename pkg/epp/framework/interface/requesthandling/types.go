@@ -55,6 +55,8 @@ const (
 
 // Response contains information from the response received to be passed to the Response requesthandling plugins
 type Response struct {
+	// InferenceActivity is set only for opted-in, protocol-verified output in this chunk.
+	InferenceActivity *InferenceActivity
 	// RequestID is the unique identifier for the request; see scheduling.InferenceRequest.RequestID.
 	RequestID string
 	// Headers is a map of the response headers. Nil during body processing

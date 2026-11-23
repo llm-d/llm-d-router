@@ -24,13 +24,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/modelhealth"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -3661,4 +3669,102 @@ func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
 	assert.Equal(t, reqCtx.FirstTokenTimestamp(), resp.FirstTokenTimestamp)
 	assert.Equal(t, reqCtx.ResponseCompleteTimestamp(), resp.CompleteTimestamp)
 	assert.Equal(t, reqCtx.ModelServerStreaming(), resp.Streaming)
+}
+
+func TestModelHealthPipeline(t *testing.T) {
+	const complete = `{"object":"chat.completion","model":"m","choices":[{"index":0,"message":{"content":"ok"},"finish_reason":"stop"}]}`
+	const streamed = "data: {\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n"
+	for _, tc := range []struct {
+		name, body, status, contentType string
+		want                            bool
+	}{
+		{"json", complete, "200", "application/json", true},
+		{"sse", streamed, "200", "text/event-stream", true},
+		{"http error", complete, "500", "application/json", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plugin, err := modelhealth.Factory(t.Name(), json.NewDecoder(strings.NewReader(`{"inactivityInterval":"1h","maxObservationAge":"2h"}`)), fwkplugin.NewEppHandle(t.Context(), nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry())))
+			require.NoError(t, err)
+			monitor := plugin.(*modelhealth.Monitor)
+			datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{plugin})
+			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "worker"}, Address: "127.0.0.10", Port: "8000"}, nil)
+			ep.GetAttributes().Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{})
+			ep.GetAttributes().Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection{{ID: "m"}})
+			require.NoError(t, monitor.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
+			parser := openai.NewOpenAIParser()
+			parsed, err := parser.ParseRequest(t.Context(), []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), map[string]string{":path": "/v1/chat/completions"})
+			require.NoError(t, err)
+			reqCtx := newResponseBodyTestRequestContext("health-test")
+			reqCtx.Parser = parser
+			reqCtx.TargetPod = ep.GetMetadata().Clone()
+			reqCtx.SchedulingRequest = &fwksched.InferenceRequest{RequestID: "health-test", TargetModel: "m", Body: parsed.Body}
+			reqCtx.Request.Metadata = map[string]any{metadata.DestinationEndpointNamespace: map[string]any{metadata.DestinationEndpointServedKey: "127.0.0.10:8000"}}
+			reqCtx.Response.Headers = map[string]string{":status": tc.status, "content-type": tc.contentType}
+			config := NewConfig().WithPreRequestPlugins(monitor).WithResponseReceivedPlugins(monitor).WithResponseStreamingPlugins(monitor)
+			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, config, "")
+			result := &fwksched.SchedulingResult{PrimaryProfileName: "single", ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"single": {TargetEndpoints: []fwksched.Endpoint{fwksched.NewEndpoint(reqCtx.TargetPod, nil, nil)}},
+			}}
+			require.NoError(t, director.runPreRequestPlugins(t.Context(), reqCtx.SchedulingRequest, result))
+			director.HandleResponseHeader(t.Context(), reqCtx)
+			handlers.NewStreamingServer(nil, director, nil, 0).HandleResponseBody(t.Context(), reqCtx, []byte(tc.body), true)
+
+			raw, ok := ep.GetAttributes().Get(attrmodels.InferenceHealthDataKey.WithNonEmptyProducerName(t.Name()))
+			require.True(t, ok)
+			health := raw.(*attrmodels.InferenceHealth)
+			require.Equal(t, tc.want, health.Up)
+			require.Equal(t, tc.want, health.Known)
+		})
+	}
+}
+
+func TestModelHealthProbeLifecycle(t *testing.T) {
+	release := make(chan struct{})
+	var started atomic.Bool
+	var first sync.Once
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		first.Do(func() {
+			started.Store(true)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		})
+		_, _ = fmt.Fprintf(w, `{"object":"chat.completion","model":%q,"choices":[{"index":0,"message":{"content":"ok"},"finish_reason":"stop"}]}`, payload.Model)
+	}))
+	t.Cleanup(backend.Close)
+	plugin, err := modelhealth.Factory(t.Name(), json.NewDecoder(strings.NewReader(`{"inactivityInterval":"200ms","requestTimeout":"1s"}`)), fwkplugin.NewEppHandle(t.Context(), nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry())))
+	require.NoError(t, err)
+	monitor := plugin.(*modelhealth.Monitor)
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(backend.URL, "http://"))
+	require.NoError(t, err)
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "worker"}, Address: host, Port: port}, nil)
+	ep.GetAttributes().Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 1})
+	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection{{ID: "m"}})
+	require.NoError(t, monitor.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
+	require.Never(t, started.Load, 350*time.Millisecond, 10*time.Millisecond)
+	ep.GetAttributes().Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{})
+	key := attrmodels.InferenceHealthDataKey.WithNonEmptyProducerName(t.Name())
+	health := func() *attrmodels.InferenceHealth {
+		raw, ok := ep.GetAttributes().Get(key)
+		require.True(t, ok)
+		return raw.(*attrmodels.InferenceHealth)
+	}
+	require.Eventually(t, started.Load, 2*time.Second, time.Millisecond)
+	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection{{ID: "new-model"}})
+	require.False(t, health().Known)
+	close(release)
+	require.Never(t, func() bool { return health().Known }, 100*time.Millisecond, time.Millisecond)
+	require.Eventually(t, func() bool { return health().Up }, 2*time.Second, time.Millisecond)
+	require.Equal(t, "new-model", health().Model)
+	require.NoError(t, monitor.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep}))
+	_, ok := ep.GetAttributes().Get(key)
+	require.False(t, ok)
 }

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/cespare/xxhash/v2"
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/utils/ptr"
@@ -3409,4 +3411,38 @@ func TestOpenAIParser_ParseRequestTextToSpeechNullFields(t *testing.T) {
 	if diff := cmp.Diff(absent.Body.TextToSpeech, withNull.Body.TextToSpeech); diff != "" {
 		t.Errorf("null and absent conditioning must parse to the same body (-absent +null):\n%s", diff)
 	}
+}
+
+func TestInferenceActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name, body   string
+		stream, want bool
+	}{
+		{name: "complete", body: `{"object":"chat.completion","model":"m","choices":[{"index":0,"message":{"content":"ok"},"finish_reason":"stop"}]}`, want: true},
+		{name: "empty", body: `{"object":"chat.completion","model":"m","choices":[{"index":0,"message":{"content":""},"finish_reason":"stop"}]}`},
+		{name: "unfinished", body: `{"object":"chat.completion","model":"m","choices":[{"index":0,"message":{"content":"ok"}}]}`},
+		{name: "error", body: `{"error":{"type":"server_error"}}`},
+		{name: "text delta", stream: true, body: "data: {\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n", want: true},
+		{name: "role only", stream: true, body: "data: {\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n"},
+		{name: "no event terminator", stream: true, body: "data: {\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}"},
+		{name: "done", stream: true, body: "data: [DONE]\n\n"},
+		{name: "usage only", stream: true, body: "data: {\"model\":\"m\",\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := map[string]string{reqcommon.HeaderContentType: reqcommon.ContentTypeJSON}
+			if tc.stream {
+				headers[reqcommon.HeaderContentType] = reqcommon.MediaTypeEventStream
+			}
+			for split := 0; split <= len(tc.body); split++ {
+				tracker := (&OpenAIParser{}).NewResponseActivityTracker()
+				first := tracker.Observe([]byte(tc.body[:split]), headers, false)
+				last := tracker.Observe([]byte(tc.body[split:]), headers, true)
+				require.Equal(t, tc.want, first == "m" || last == "m", "split %d", split)
+			}
+		})
+	}
+	tracker := (&OpenAIParser{}).NewResponseActivityTracker()
+	headers := map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}
+	require.Empty(t, tracker.Observe([]byte(strings.Repeat("x", fwkrh.MaxActivityResponseBytes+1)), headers, false))
+	require.Empty(t, tracker.Observe([]byte("data: {}\n\n"), headers, true))
 }

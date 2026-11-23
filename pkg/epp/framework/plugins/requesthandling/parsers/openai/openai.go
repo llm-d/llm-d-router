@@ -1095,3 +1095,109 @@ func extractRawUsage(raw json.RawMessage) *request.Usage {
 	}
 	return usage
 }
+
+type activityTracker struct {
+	carry    []byte
+	event    []byte
+	disabled bool
+}
+
+// NewResponseActivityTracker creates independent framing state for a response.
+func (*OpenAIParser) NewResponseActivityTracker() fwkrh.ResponseActivityTracker {
+	return &activityTracker{}
+}
+
+func (t *activityTracker) Observe(body []byte, headers map[string]string, end bool) string {
+	if t.disabled {
+		return ""
+	}
+	media, _, _ := strings.Cut(headers[reqcommon.HeaderContentType], ";")
+	if strings.EqualFold(strings.TrimSpace(media), reqcommon.MediaTypeEventStream) {
+		return t.stream(body)
+	}
+	if !strings.EqualFold(strings.TrimSpace(media), reqcommon.ContentTypeJSON) {
+		t.disabled = true
+		return ""
+	}
+	if len(t.carry)+len(body) > fwkrh.MaxActivityResponseBytes {
+		t.disabled = true
+		t.carry = nil
+		return ""
+	}
+	t.carry = append(t.carry, body...)
+	if !end {
+		return ""
+	}
+	t.disabled = true
+	return activityModel(t.carry, false)
+}
+
+func (t *activityTracker) stream(body []byte) string {
+	model := ""
+	for len(body) > 0 {
+		line, rest, complete := bytes.Cut(body, []byte("\n"))
+		if len(t.carry)+len(t.event)+len(line) > fwkrh.MaxActivityResponseBytes {
+			t.disabled = true
+			return model
+		}
+		t.carry = append(t.carry, line...)
+		if !complete {
+			return model
+		}
+		line = bytes.TrimSuffix(t.carry, []byte("\r"))
+		switch {
+		case len(line) == 0:
+			if bytes.Equal(bytes.TrimSpace(t.event), []byte("[DONE]")) {
+				t.disabled = true
+				return model
+			}
+			if m := activityModel(t.event, true); m != "" {
+				model = m
+			}
+			t.event = t.event[:0]
+		case bytes.HasPrefix(line, []byte("data:")):
+			t.event = append(t.event, bytes.TrimPrefix(line[5:], []byte(" "))...)
+			t.event = append(t.event, '\n')
+		}
+		t.carry = t.carry[:0]
+		body = rest
+	}
+	return model
+}
+
+type activityEnvelope struct {
+	Object  string          `json:"object"`
+	Model   string          `json:"model"`
+	Error   json.RawMessage `json:"error"`
+	Choices []struct {
+		Index   *int `json:"index"`
+		Message *struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		Delta *struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+func activityModel(body []byte, stream bool) string {
+	var envelope activityEnvelope
+	if len(body) == 0 || json.Unmarshal(body, &envelope) != nil || envelope.Model == "" ||
+		(len(envelope.Error) > 0 && !bytes.Equal(envelope.Error, []byte("null"))) || len(envelope.Choices) != 1 {
+		return ""
+	}
+	choice := envelope.Choices[0]
+	if choice.Index == nil || *choice.Index != 0 {
+		return ""
+	}
+	if stream {
+		if envelope.Object == "chat.completion.chunk" && choice.Delta != nil && choice.Delta.Content != "" {
+			return envelope.Model
+		}
+	} else if envelope.Object == "chat.completion" && choice.Message != nil && choice.Message.Content != "" &&
+		(choice.FinishReason == "stop" || choice.FinishReason == "length") {
+		return envelope.Model
+	}
+	return ""
+}
