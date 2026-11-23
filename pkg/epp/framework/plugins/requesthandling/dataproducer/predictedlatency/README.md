@@ -55,6 +55,39 @@ Set `endpointRoleLabel` to the label distinguishing prefill from decode pods. TP
 automatically neutralized for prefill endpoints (`TPOTValid=true`, `TPOTHeadroom=0`),
 ensuring TPOT doesn't affect scoring, admission, or tier classification for prefill pods.
 
+## Live feature pipeline validation
+
+`TestLiveFeaturePipeline` sends three sequential streaming requests with at most
+16 output tokens each. It uses the production hooks and Go HTTP client with real
+Python training and prediction services, checks the captured feature values,
+waits for both model artifacts to change, and predicts after a model reload.
+Token IDs and timing come from vLLM. Endpoint metrics are fixed nonzero fixtures.
+
+Use disposable Python services with a shared model directory, an empty training
+data store, and these training settings:
+
+```bash
+export LATENCY_MIN_SAMPLES_FOR_RETRAIN=2
+export LATENCY_MIN_SAMPLES_FOR_RETRAIN_FRESH=2
+export LATENCY_RETRAINING_INTERVAL_SEC=2
+export LATENCY_TEST_TRAIN_RATIO=0
+export LATENCY_ENSEMBLE_MODE=false
+```
+
+With a vLLM server exposing `/tokenize` and `/v1/completions`, run:
+
+```bash
+LATENCY_TEST_VLLM_URL=http://127.0.0.1:8000 \
+TRAINING_SERVER_URL=http://127.0.0.1:8001 \
+PREDICTION_SERVER_URL=http://127.0.0.1:8002 \
+go test -race -count=1 -run '^TestLiveFeaturePipeline$' \
+  ./pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency
+```
+
+The test skips when `LATENCY_TEST_VLLM_URL` is unset. It requires exclusive access
+to the disposable Python services. It does not start servers or download models.
+The issue's A-C routing performance scenarios require separate validation.
+
 ## Files
 
 | File | Purpose |
@@ -62,7 +95,8 @@ ensuring TPOT doesn't affect scoring, admission, or tier classification for pref
 | `plugin.go` | Struct, factory, config, per-request context, queue helpers |
 | `requestcontrol_hooks.go` | PreRequest, ResponseHeader, ResponseBody hooks |
 | `dataproducer_hooks.go` | Produce, Produces, Consumes |
-| `training.go` | buildTrainingEntry, buildPredictionRequest, bulkPredict |
+| `features.go` | Schema providers, dependencies and capture scopes |
+| `training.go` | Training entries, metric snapshots, bulk transport |
 | `prediction.go` | generatePredictions, validatePrediction, TPOT neutralization |
 | `decode_token_sampler.go` | Poisson-distributed token sampling for TPOT |
 | `running_request_queue.go` | Per-pod request priority queue |

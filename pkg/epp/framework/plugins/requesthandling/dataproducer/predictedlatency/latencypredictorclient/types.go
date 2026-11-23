@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient/protocol"
 )
 
 const (
@@ -162,13 +164,15 @@ type PredictorInterface interface {
 // --- Data Models ---
 
 type TrainingEntry struct {
-	KVCachePercentage  float64 `json:"kv_cache_percentage"`
-	InputTokenLength   int     `json:"input_token_length"`
-	NumRequestWaiting  int     `json:"num_request_waiting"`
-	NumRequestRunning  int     `json:"num_request_running"`
-	NumTokensGenerated int     `json:"num_tokens_generated"`
-	ActualTTFT         float64 `json:"actual_ttft_ms"`
-	ActualTPOT         float64 `json:"actual_tpot_ms"`
+	// Features carries additional schema fields. TrainingFromFeatures initializes both representations.
+	Features           *protocol.Features `json:"-"`
+	KVCachePercentage  float64            `json:"kv_cache_percentage"`
+	InputTokenLength   int                `json:"input_token_length"`
+	NumRequestWaiting  int                `json:"num_request_waiting"`
+	NumRequestRunning  int                `json:"num_request_running"`
+	NumTokensGenerated int                `json:"num_tokens_generated"`
+	ActualTTFT         float64            `json:"actual_ttft_ms"`
+	ActualTPOT         float64            `json:"actual_tpot_ms"`
 	// PredictedTTFT and PredictedTPOT are the selected-endpoint predictions
 	// paired with the matching actual for live drift detection. Omitted when
 	// no valid selected prediction was available for that sample.
@@ -191,12 +195,14 @@ type BulkTrainingRequest struct {
 }
 
 type PredictionRequest struct {
-	KVCachePercentage  float64 `json:"kv_cache_percentage"`
-	InputTokenLength   int     `json:"input_token_length"`
-	NumRequestWaiting  int     `json:"num_request_waiting"`
-	NumRequestRunning  int     `json:"num_request_running"`
-	NumTokensGenerated int     `json:"num_tokens_generated"`
-	PrefixCacheScore   float64 `json:"prefix_cache_score"`
+	// Features carries additional schema fields. PredictionFromFeatures initializes both representations.
+	Features           *protocol.Features `json:"-"`
+	KVCachePercentage  float64            `json:"kv_cache_percentage"`
+	InputTokenLength   int                `json:"input_token_length"`
+	NumRequestWaiting  int                `json:"num_request_waiting"`
+	NumRequestRunning  int                `json:"num_request_running"`
+	NumTokensGenerated int                `json:"num_tokens_generated"`
+	PrefixCacheScore   float64            `json:"prefix_cache_score"`
 	// EncoderInputSize is the total size of the request's multimodal encoder
 	// items; EncoderMatchedSize is the portion likely present in the target
 	// pod's encoder cache. Both are 0 for text-only requests.
