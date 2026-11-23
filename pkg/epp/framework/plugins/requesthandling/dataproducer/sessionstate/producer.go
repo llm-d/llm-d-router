@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -49,10 +50,12 @@ func (p Parameters) validate() error {
 	if p.EvictionTTLSeconds < 0 {
 		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", p.EvictionTTLSeconds)
 	}
-	if p.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
+	if p.EvictionTTLSeconds > 0 {
+		if err := duration.ValidateSeconds("evictionTtlSeconds", p.EvictionTTLSeconds); err != nil {
+			return err
+		}
 	}
-	return nil
+	return duration.ValidateSeconds("evictionSweepSeconds", p.EvictionSweepSeconds)
 }
 
 var (
