@@ -20,9 +20,12 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -247,4 +250,32 @@ func TestLogMetrics(t *testing.T) {
 			t.Errorf("Expected 'max_pod_hit_count=42' in log output, but it was not found. Full output: %s", output)
 		}
 	})
+}
+
+func TestStartMetricsLoggingStopsWhenContextEnds(t *testing.T) {
+	var beats atomic.Int64
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "metrics beat") {
+			beats.Add(1)
+		}
+	}, funcr.Options{})
+	ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+
+	StartMetricsLogging(ctx, time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for beats.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no metrics beat logged")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	// A beat already in progress when the context ends may still finish.
+	time.Sleep(20 * time.Millisecond)
+	stopped := beats.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := beats.Load(); got != stopped {
+		t.Fatalf("metrics beats kept coming after the context ended: %d, then %d", stopped, got)
+	}
 }
