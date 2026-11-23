@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 const (
@@ -516,9 +517,15 @@ func TestDataParallelSizeLocalFlag(t *testing.T) {
 	}
 
 	opts.PoolName = testPoolName
-	opts.DataParallelSizeLocal = 0
-	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-size-local") {
-		t.Errorf("Expected Validate() to reject zero data-parallel-size-local, got: %v", err)
+	for _, invalid := range []int{0, -1, datastore.MaxDataParallelSizeLocal + 1} {
+		opts.DataParallelSizeLocal = invalid
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-size-local") {
+			t.Errorf("Expected Validate() to reject data-parallel-size-local=%d, got: %v", invalid, err)
+		}
+	}
+	opts.DataParallelSizeLocal = datastore.MaxDataParallelSizeLocal
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to accept the largest data-parallel-size-local, got: %v", err)
 	}
 }
 

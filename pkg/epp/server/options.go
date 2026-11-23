@@ -40,6 +40,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -238,7 +239,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Number of data-parallel ranks a model server pod serves behind its target port: the value of vLLM's "+
 			"--data-parallel-size-local for a vLLM Rust frontend serving them on one port. Above 1, the pool must have exactly one target port, and each pod "+
 			"becomes that many endpoints on that port, one per rank, with RankIndex 0 to N-1. A pod's "+
-			"llm-d.ai/data-parallel-size-local annotation overrides this value for that pod.")
+			"llm-d.ai/data-parallel-size-local annotation overrides this value for that pod. "+
+			fmt.Sprintf("The value is from 1 to %d.", datastore.MaxDataParallelSizeLocal))
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,
@@ -477,8 +479,9 @@ func (opts *Options) Validate() error {
 		}
 	}
 
-	if opts.DataParallelSizeLocal < 1 {
-		return fmt.Errorf("data-parallel-size-local must be at least 1, got %d", opts.DataParallelSizeLocal)
+	if opts.DataParallelSizeLocal < 1 || opts.DataParallelSizeLocal > datastore.MaxDataParallelSizeLocal {
+		return fmt.Errorf("data-parallel-size-local must be from 1 to %d, got %d",
+			datastore.MaxDataParallelSizeLocal, opts.DataParallelSizeLocal)
 	}
 	if opts.DataParallelSizeLocal > 1 && opts.EndpointSelector != nil && len(opts.EndpointTargetPorts) != 1 {
 		return fmt.Errorf("data-parallel-size-local above 1 requires exactly one %q, got %d",

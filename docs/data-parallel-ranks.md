@@ -4,14 +4,14 @@ vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ra
 
 ## Rank endpoints
 
-The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation, or from the `--data-parallel-size-local` flag for pods without it, so pods in one pool can run different DP sizes (for example prefill with 2 ranks and decode with 4). The pool must have exactly one target port. The endpoints are named `<pod>-rank-<i>` and share the pod's address and port.
+The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation, or from the `--data-parallel-size-local` flag for pods without it, so pods in one pool can run different DP sizes (for example prefill with 2 ranks and decode with 4). The pool must have exactly one target port. N is at most 64, and a pod with a larger or malformed value gets no endpoints. The endpoints are named `<pod>-rank-<i>` and share the pod's address and port.
 
 When the scheduler picks a rank endpoint, the EPP:
 
 - sets `x-data-parallel-rank` to the endpoint's data-parallel rank, replacing any value the client sent;
 - sends the request to that endpoint's address only, without fallback destinations, because the header applies to every destination.
 
-Requests to endpoints without ranks keep their headers and fallbacks.
+Requests to endpoints without ranks keep their headers and their fallbacks without ranks. The EPP drops a rank endpoint from the fallbacks of such a request, because it sets no rank for it.
 
 ## SGLang
 

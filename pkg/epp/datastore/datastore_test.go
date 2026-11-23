@@ -975,7 +975,8 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		}, endpoints(ds))
 	})
 
-	for _, value := range []string{"0", "-1", "two"} {
+	aboveMax := strconv.Itoa(MaxDataParallelSizeLocal + 1)
+	for _, value := range []string{"0", "-1", "two", aboveMax, "4000000000000000000"} {
 		t.Run("malformed annotation "+value+" gets no endpoints", func(t *testing.T) {
 			ds := newDatastore(t, 1, 8000)
 			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("bad", map[string]string{dataParallelSizeLocalAnnotation: value})))
@@ -989,6 +990,19 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		assert.Empty(t, endpoints(ds))
 	})
 
+	t.Run("the largest rank count is accepted", func(t *testing.T) {
+		ds := newDatastore(t, 1, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("max", map[string]string{dataParallelSizeLocalAnnotation: strconv.Itoa(MaxDataParallelSizeLocal)})))
+		assert.Len(t, endpoints(ds), MaxDataParallelSizeLocal)
+	})
+
+	t.Run("raising the rank count adds rank endpoints and updates the others", func(t *testing.T) {
+		ds := newDatastore(t, 1, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "3"})))
+		assert.Equal(t, map[string]rank{"p-rank-0": {0, 3, 0}, "p-rank-1": {1, 3, 1}, "p-rank-2": {2, 3, 2}}, endpoints(ds))
+	})
+
 	t.Run("lowering the rank count removes the extra rank endpoints", func(t *testing.T) {
 		ds := newDatastore(t, 1, 8000)
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
@@ -996,6 +1010,55 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
 		assert.Equal(t, map[string]rank{"p-rank-0": {0, 2, 0}, "p-rank-1": {1, 2, 1}}, endpoints(ds))
 	})
+}
+
+// A resync runs at startup and after each pool change. It must drop a pod whose
+// rank count cannot be read, and keep the rank endpoints of the other pods.
+func TestDataParallelSizeLocal_ResyncDropsPodWithMalformedAnnotation(t *testing.T) {
+	ctx := context.Background()
+	readyPod := func(name, ip, ranks string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Namespace:   "default",
+				Labels:      map[string]string{"app": "vllm"},
+				Annotations: map[string]string{dataParallelSizeLocalAnnotation: ranks},
+			},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				PodIP:      ip,
+			},
+		}
+	}
+	names := func(ds Datastore) []string {
+		endpoints := ds.PodList(AllPodsPredicate)
+		got := make([]string, 0, len(endpoints))
+		for _, ep := range endpoints {
+			got = append(got, ep.GetMetadata().ID.Name)
+		}
+		return got
+	}
+	newPool := func(port int32) *datalayer.EndpointPool {
+		pool := fwkgaie.MakeInferencePool("test-pool").Namespace("default").
+			Selector(map[string]string{"app": "vllm"}).ObjRef()
+		pool.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(port)}}
+		return poolutil.InferencePoolToEndpointPool(pool)
+	}
+
+	good := readyPod("good", "10.0.0.1", "2")
+	bad := readyPod("bad", "10.0.0.2", "2")
+	fakeClient := fake.NewClientBuilder().WithObjects(good, bad).Build()
+	ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	require.NoError(t, ds.PoolSet(ctx, fakeClient, newPool(8000)))
+	require.ElementsMatch(t, []string{"good-rank-0", "good-rank-1", "bad-rank-0", "bad-rank-1"}, names(ds))
+
+	bad.Annotations[dataParallelSizeLocalAnnotation] = "two"
+	require.NoError(t, fakeClient.Update(ctx, bad))
+	// A changed target port makes PoolSet resync every pod.
+	require.NoError(t, ds.PoolSet(ctx, fakeClient, newPool(8001)))
+
+	assert.ElementsMatch(t, []string{"good-rank-0", "good-rank-1"}, names(ds))
 }
 
 func TestDataParallelSizeLocal_PortDeactivationRemovesRanks(t *testing.T) {

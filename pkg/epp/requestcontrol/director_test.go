@@ -4008,9 +4008,11 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 			wantRank:     "3",
 		},
 		{
-			name:         "endpoint without ranks keeps the client's header and its fallbacks",
-			result:       result(endpoint("pod2", "10.0.0.2", 0, 0), endpoint("pod1-rank-1", "10.0.0.1", 1, 2)),
-			wantEndpoint: "10.0.0.2:8000,10.0.0.1:8000",
+			name: "endpoint without ranks keeps the client's header and its fallbacks without ranks",
+			result: result(endpoint("pod2", "10.0.0.2", 0, 0), endpoint("pod1-rank-1", "10.0.0.1", 1, 2),
+				endpoint("pod3", "10.0.0.3", 0, 0)),
+			// The EPP sets no rank here, so the rank endpoint must not get the client's.
+			wantEndpoint: "10.0.0.2:8000,10.0.0.3:8000",
 			wantRank:     "7",
 		},
 	}
@@ -4030,4 +4032,19 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 			assert.Equal(t, tt.wantRank, got.SchedulingRequest.Headers[routing.DataParallelRankHeader])
 		})
 	}
+
+	// The header mutation is built from Request.Headers, so the rank must be there
+	// when no header map exists yet.
+	t.Run("rank endpoint sets its rank on a request without headers", func(t *testing.T) {
+		dir := &Director{requestControlPlugins: *NewConfig()}
+		reqCtx := &handlers.RequestContext{
+			Request:           &handlers.Request{},
+			SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req"},
+		}
+
+		got, err := dir.prepareRequest(ctx, reqCtx, result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2)))
+
+		require.NoError(t, err)
+		assert.Equal(t, "3", got.Request.Headers[routing.DataParallelRankHeader])
+	})
 }

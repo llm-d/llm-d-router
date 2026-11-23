@@ -64,6 +64,10 @@ const (
 	// behind its target port, overriding --data-parallel-size-local for that pod.
 	// Example: "4"
 	dataParallelSizeLocalAnnotation = "llm-d.ai/data-parallel-size-local"
+
+	// MaxDataParallelSizeLocal is the largest rank count of a pod. Each rank is an endpoint
+	// with its own metrics collector, so a mistyped value must not create thousands of them.
+	MaxDataParallelSizeLocal = 64
 )
 
 // The datastore is a local cache of relevant data for the given InferencePool (currently all pulled from k8s-api)
@@ -184,8 +188,9 @@ func (ds *datastore) podRanksPerPort(pod *corev1.Pod) (int, error) {
 		return ds.ranksPerPort, nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || n < 1 {
-		return 0, fmt.Errorf("pod annotation %q is %q, not a positive integer", dataParallelSizeLocalAnnotation, value)
+	if err != nil || n < 1 || n > MaxDataParallelSizeLocal {
+		return 0, fmt.Errorf("pod annotation %q is %q, not an integer from 1 to %d",
+			dataParallelSizeLocalAnnotation, value, MaxDataParallelSizeLocal)
 	}
 	return n, nil
 }
