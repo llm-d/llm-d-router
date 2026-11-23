@@ -25,8 +25,8 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
-	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 var errInvalidJSON = errors.New("invalid JSON")
@@ -84,14 +84,8 @@ func sendError(w http.ResponseWriter, r *http.Request, status int, msg string) e
 	return reqcommon.WriteAPIError(w, reqcommon.DetectAPIType(path), status, msg)
 }
 
-// grpcMethodRoutes maps served gRPC method paths to their request API types.
-var grpcMethodRoutes = map[string]reqcommon.APIType{
-	vllmpb.Inference_Generate_FullMethodName:       reqcommon.APITypeVLLMGenerate,
-	vllmpb.Inference_GenerateStream_FullMethodName: reqcommon.APITypeVLLMGenerate,
-}
-
 func isVLLMGRPCPath(p string) bool {
-	_, ok := grpcMethodRoutes[strings.TrimSuffix(p, "/")]
+	_, ok := routing.PDVLLMGRPCMethods[strings.TrimSuffix(p, "/")]
 	return ok
 }
 
