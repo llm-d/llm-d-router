@@ -24,6 +24,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 func TestRecentWindowOwnsHashesAndSnapshots(t *testing.T) {
@@ -67,11 +69,101 @@ func TestRecentWindowRemoveDuplicatesAndContinue(t *testing.T) {
 	require.Equal(t, [][]blockHash{{10, 11, 12, 13, 14, 15}}, w.snapshot("ep"))
 }
 
+func TestRecentWindowReplaceAppendsNewestSlot(t *testing.T) {
+	w := newRecentWindow(10)
+	first := w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.replace("ep", first, []blockHash{1, 2, 9})
+
+	require.Equal(t, [][]blockHash{{3, 4}, {1, 2, 9}}, w.snapshot("ep"))
+	set := w.sequenced("ep")
+	require.Equal(t, uint64(1), set.SequenceBase(), "withdrawn oldest slot is trimmed")
+	require.Equal(t, uint64(4), set.SequenceTip())
+	require.Equal(t, 9, set.ElementSize(2), "one retraction of generation 0")
+	require.Equal(t, 24, set.ElementSize(3), "one content slot for the replacement")
+}
+
+func TestRecentWindowReplaceIgnoresStaleEntries(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	other := w.record("ep", []blockHash{1, 2})
+
+	// An equal prompt recorded since is a different entry.
+	w.replace("ep", other, []blockHash{7})
+	require.Equal(t, [][]blockHash{{1, 2}, {7}}, w.snapshot("ep"))
+	w.replace("ep", other, []blockHash{8})
+	require.Equal(t, [][]blockHash{{1, 2}, {7}}, w.snapshot("ep"), "a replaced entry is not replaced twice")
+
+	// An entry withdrawn by removePrompt is not replaced.
+	kept := w.record("ep", []blockHash{6})
+	w.removePrompt("ep", []blockHash{6})
+	w.replace("ep", kept, []blockHash{10})
+	w.replace("ep", nil, []blockHash{10})
+	w.replace("ep", other, nil)
+	w.replace("unknown", other, []blockHash{10})
+	require.Equal(t, [][]blockHash{{1, 2}, {7}}, w.snapshot("ep"))
+
+	// An entry trimmed out of the window is not resurrected.
+	small := newRecentWindow(3)
+	old := small.record("ep", []blockHash{1, 2})
+	small.record("ep", []blockHash{3, 4})
+	small.replace("ep", old, []blockHash{9})
+	require.Equal(t, [][]blockHash{{3, 4}}, small.snapshot("ep"))
+}
+
+func TestRecentWindowReplaceKeepsHandleAcrossCompaction(t *testing.T) {
+	w := newRecentWindow(64)
+	entries := make([][]blockHash, 0, 200)
+	for i := range 200 {
+		entries = append(entries, w.record("ep", []blockHash{blockHash(i)}))
+	}
+	last := entries[len(entries)-1]
+	w.replace("ep", last, []blockHash{1000})
+	snap := w.snapshot("ep")
+	require.Equal(t, []blockHash{1000}, snap[len(snap)-1])
+	require.NotContains(t, snap, []blockHash{199}, "the replaced prompt is withdrawn")
+}
+
+func TestRecentWindowReplaceStreamMatchesSnapshot(t *testing.T) {
+	w := newRecentWindow(8)
+	entries := make([][]blockHash, 0, 40)
+	for i := range 40 {
+		entries = append(entries, w.record("ep", []blockHash{blockHash(i), blockHash(i + 100)}))
+		if i%3 == 0 {
+			w.replace("ep", entries[i], []blockHash{blockHash(i), blockHash(i + 100), blockHash(i + 200)})
+		}
+		if i%5 == 0 {
+			w.removePrompt("ep", []blockHash{blockHash(i), blockHash(i + 100)})
+		}
+	}
+
+	set := w.sequenced("ep")
+	elems := make([][]byte, 0, set.SequenceTip()-set.SequenceBase())
+	for gen := set.SequenceBase(); gen < set.SequenceTip(); gen++ {
+		elems = append(elems, set.AppendElement(nil, gen))
+	}
+	peer, err := (&attrprefix.PrefixHashSet{}).NewSequence(set.SequenceBase(), elems)
+	require.NoError(t, err)
+
+	var got [][]blockHash
+	for _, prompt := range peer.(*attrprefix.PrefixHashSet).Prompts {
+		if len(prompt) > 0 {
+			got = append(got, uint64sToBlockHashes(prompt))
+		}
+	}
+	require.Equal(t, w.snapshot("ep"), got, "a peer rebuilding from the stream sees the local window")
+}
+
 func TestRecentWindowMatchesReference(t *testing.T) {
 	for _, budget := range []int{1, 2, 3, 7, 32} {
 		t.Run(strconv.Itoa(budget), func(t *testing.T) {
 			w := newRecentWindow(budget)
 			want := make(map[string]*referenceWindow)
+			type handle struct {
+				entry []blockHash
+				id    int
+			}
+			handles := make(map[string][]handle)
 			rng := rand.New(rand.NewPCG(1, uint64(budget)))
 			endpoints := []string{"ep-a", "ep-b", "ep-c"}
 			for step := range 4000 {
@@ -84,6 +176,14 @@ func TestRecentWindowMatchesReference(t *testing.T) {
 				case 0:
 					w.forget(id)
 					delete(want, id)
+					delete(handles, id)
+				case 4, 5:
+					// Replace a random earlier entry, which may be trimmed or withdrawn by now.
+					if hs := handles[id]; len(hs) > 0 {
+						h := hs[rng.IntN(len(hs))]
+						w.replace(id, h.entry, hashes)
+						referenceOf(want, id).replace(h.id, hashes, budget)
+					}
 				case 1, 2, 3:
 					// Also withdraw known records, including duplicate sequences.
 					if visible := want[id].visible(); len(visible) > 0 && rng.IntN(2) == 0 {
@@ -92,8 +192,11 @@ func TestRecentWindowMatchesReference(t *testing.T) {
 					w.removePrompt(id, hashes)
 					referenceOf(want, id).remove(hashes, budget)
 				default:
-					w.record(id, hashes)
-					referenceOf(want, id).record(hashes, budget)
+					entry := w.record(id, hashes)
+					refID := referenceOf(want, id).record(hashes, budget)
+					if len(entry) > 0 {
+						handles[id] = append(handles[id], handle{entry: entry, id: refID})
+					}
 				}
 				for _, endpoint := range endpoints {
 					got := w.snapshot(endpoint)
@@ -114,14 +217,16 @@ func TestRecentWindowMatchesReference(t *testing.T) {
 type referenceSlot struct {
 	hashes []blockHash
 	drop   bool
+	id     int
 }
 
 // referenceWindow models recentWindow independently: the same integer is the
 // hash budget and the slot budget. A withdrawal keeps its slot and appends a
 // retraction, and both count toward the slot budget.
 type referenceWindow struct {
-	slots []referenceSlot
-	total int
+	slots  []referenceSlot
+	total  int
+	nextID int
 }
 
 func referenceOf(windows map[string]*referenceWindow, id string) *referenceWindow {
@@ -147,18 +252,48 @@ func (w *referenceWindow) visible() [][]blockHash {
 	return out
 }
 
-func (w *referenceWindow) record(hashes []blockHash, budget int) {
+// record returns the id of the appended slot, or 0 for an empty prompt.
+func (w *referenceWindow) record(hashes []blockHash, budget int) int {
 	if len(hashes) == 0 {
-		return
+		return 0
 	}
 	prompt := hashes
 	if len(prompt) > budget {
 		prompt = prompt[:budget]
 	}
 	cp := slices.Clone(prompt)
-	w.slots = append(w.slots, referenceSlot{hashes: cp})
+	w.nextID++
+	id := w.nextID
+	w.slots = append(w.slots, referenceSlot{hashes: cp, id: id})
 	w.total += len(cp)
 	w.trim(budget)
+	return id
+}
+
+// replace withdraws the slot with the given id and appends a retraction and
+// the new prompt. It is a no-op when the slot is gone or already withdrawn.
+func (w *referenceWindow) replace(id int, hashes []blockHash, budget int) {
+	if id == 0 || len(hashes) == 0 {
+		return
+	}
+	for i := range w.slots {
+		slot := &w.slots[i]
+		if slot.drop || slot.id != id || len(slot.hashes) == 0 {
+			continue
+		}
+		prompt := hashes
+		if len(prompt) > budget {
+			prompt = prompt[:budget]
+		}
+		cp := slices.Clone(prompt)
+		w.total -= len(slot.hashes)
+		slot.hashes = nil
+		w.nextID++
+		w.slots = append(w.slots, referenceSlot{drop: true}, referenceSlot{hashes: cp, id: w.nextID})
+		w.total += len(cp)
+		w.trim(budget)
+		return
+	}
 }
 
 func (w *referenceWindow) remove(hashes []blockHash, budget int) {
@@ -254,6 +389,28 @@ func BenchmarkRecentWindowRecord(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// BenchmarkRecentWindowRecordThenReplace measures a request that is recorded at
+// admission and replaced at completion, with a full window behind it.
+func BenchmarkRecentWindowRecordThenReplace(b *testing.B) {
+	for _, promptHashes := range []int{1, 64} {
+		b.Run("hashes="+strconv.Itoa(promptHashes), func(b *testing.B) {
+			w := newRecentWindow(defaultLRUCapacityPerServer)
+			hashes := make([]blockHash, promptHashes)
+			for i := range hashes {
+				hashes[i] = blockHash(i)
+			}
+			for range defaultLRUCapacityPerServer / promptHashes {
+				w.record("ep", hashes)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				w.replace("ep", w.record("ep", hashes), hashes)
+			}
+		})
 	}
 }
 
