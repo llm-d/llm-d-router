@@ -415,6 +415,9 @@ func TestSessionIDHeader_PreRequest_ReleasesPresenceRecord(t *testing.T) {
 		name       string
 		candidates []scheduling.Endpoint
 		result     *scheduling.SchedulingResult
+		// dropHeader removes the session header between Choose and PreRequest,
+		// as an earlier PreRequest plugin that rewrites request headers can.
+		dropHeader bool
 		wantPod    string
 	}{
 		{
@@ -435,6 +438,13 @@ func TestSessionIDHeader_PreRequest_ReleasesPresenceRecord(t *testing.T) {
 			result:     nil,
 			wantPod:    podKey("pod-a"),
 		},
+		{
+			name:       "session header removed before PreRequest",
+			candidates: []scheduling.Endpoint{endpointA, endpointB},
+			result:     schedulingResultFor(endpointA),
+			dropHeader: true,
+			wantPod:    podKey("pod-a"),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -446,6 +456,9 @@ func TestSessionIDHeader_PreRequest_ReleasesPresenceRecord(t *testing.T) {
 			if _, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, req.RequestID, testPluginKey); err != nil {
 				t.Fatalf("Choose did not record the bound pod's presence: %v", err)
 			}
+			if tt.dropHeader {
+				delete(req.Headers, DefaultHeader)
+			}
 
 			s.PreRequest(context.Background(), req, tt.result)
 
@@ -454,6 +467,9 @@ func TestSessionIDHeader_PreRequest_ReleasesPresenceRecord(t *testing.T) {
 			}
 			if _, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, req.RequestID, testPluginKey); !errors.Is(err, plugin.ErrNotFound) {
 				t.Errorf("presence record after PreRequest: err = %v, want %v", err, plugin.ErrNotFound)
+			}
+			if _, ok := s.pluginState.LastAccessTime(req.RequestID); ok {
+				t.Errorf("request %q still has an entry in the PluginState after PreRequest", req.RequestID)
 			}
 		})
 	}

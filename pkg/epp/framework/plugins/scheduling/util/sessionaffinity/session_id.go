@@ -315,11 +315,16 @@ func (s *SessionIDHeader) boundPod(sessionID string) string {
 // when its bound pod is absent from the candidate set. It also releases the
 // presence record Choose wrote for this request, which is read only here.
 func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+	if request == nil {
+		return
+	}
+	// The record is keyed by request ID, so the release cannot sit behind the
+	// session lookup: an earlier PreRequest plugin may have rewritten the headers.
+	defer s.pluginState.Delete(request.RequestID)
 	sessionID := s.resolveSessionID(ctx, request)
 	if sessionID == "" {
 		return
 	}
-	defer s.pluginState.Delete(request.RequestID)
 	podName := s.pickedPodName(schedulingResult)
 	if podName == "" {
 		return
