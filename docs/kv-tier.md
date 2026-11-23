@@ -14,15 +14,17 @@ We propose that llm-d own its KV tier. The tier has two parts:
 - **A daemon on each node, `kvtierd`.** It owns a pool of KV blocks in shared memory. Every engine on the node can use it.
 - **A shim in each engine.** A shim is a small Python adapter loaded inside vLLM. It connects the engine to the daemon.
 
+On GPU the shim talks to the daemon. On TPU there is no daemon. The shim talks to TPU Sync.
+
 Together they carry out router hints such as "pull this prefix from node X".
 
 How the tier relates to other projects:
 
 - **On GPU, the tier moves the data itself.** It uses TCP everywhere, and RDMA where the nodes have RDMA NICs.
-- **On TPU, TPU Sync moves the data by default.** Our tier supplies the hint protocol. A proof-of-concept connector already runs `kv.fetch` and `kv.prefetch` on TPU Sync. Our tier also runs hints that TPU Sync does not support yet.
+- **On TPU, TPU Sync moves and stores the data.** We add only a shim that turns router hints into TPU Sync calls. A proof of concept runs `kv.fetch` and `kv.prefetch` this way.
 - **Mooncake Store is an alternative on GPU.** An engine runs one or the other. Customers already on Mooncake Store should stay on it.
 
-The code works. It is checked in on branches of a fork of [llm-d-router](https://github.com/llm-d/llm-d-router). No PR is open yet. The TPU shim is an experimental prototype, so open TPU questions do not block the GPU work.
+The code works. It is checked in on branches of a fork of [llm-d-router](https://github.com/llm-d/llm-d-router). No code PR is open yet. The TPU work does not block the GPU work. They share only the hint format.
 
 ## Why
 
@@ -31,14 +33,14 @@ Today KVCR is the only tier that carries out the router's KV hints. KVCR is a ti
 Owning the tier gives llm-d three things:
 
 - **llm-d can add hints on its own.** Examples are compression for cross-host transfer, pinning shared prefixes and retention priority. We can prototype them without a release of vLLM, tpu-inference, TPU Sync or KVCR.
-- **GPU and TPU share one design.** The hint protocol and the eviction policy behave the same on both. The router needs no accelerator-specific path.
-- **A per-node pool adds what an engine's own cache cannot.** Blocks outlive engine restarts. Engines on a node share one pool. The router can move a prefix to the node where a request lands, so that node does not recompute it.
+- **GPU and TPU share one hint protocol.** The router sends the same hints to both and needs no accelerator-specific path.
+- **On GPU, a per-node pool adds what an engine's own cache cannot.** Blocks outlive engine restarts. Engines on a node share one pool. The router can move a prefix to the node where a request lands, so that node does not recompute it.
 
 The hints follow vLLM's KV hint format, which KVCR also uses. A router can drive either tier with the same messages.
 
 ## Design
 
-Each node runs one daemon, `kvtierd`, written in Go. It owns a shared-memory pool of fixed-size KV blocks. Each engine's shim copies blocks in and out of the pool. Neither vLLM nor tpu-inference needs a change.
+This section describes the GPU tier. The TPU path is under TPU Sync below. Each node runs one daemon, `kvtierd`, written in Go. It owns a shared-memory pool of fixed-size KV blocks. Each engine's shim copies blocks in and out of the pool. vLLM needs no change.
 
 ### Fetch: pull a prefix when the request arrives
 
@@ -126,7 +128,6 @@ Engines share blocks only when their bytes are interchangeable. The namespace co
 - Every stored or removed block becomes an event. Each engine connected in that namespace receives it, in the order the pool changed.
 - The vLLM shim turns these into vLLM KV events (`BlockStored`, `BlockRemoved`, medium `CPU`). llm-d's prefix indexer already consumes those, so the router learns of evictions with no new channel.
 - A shim that loses its daemon reports all its blocks as removed.
-- The TPU shim does not report KV events to vLLM yet.
 
 The router can lose sight of blocks that are still in a pool:
 
@@ -143,12 +144,12 @@ These projects follow two architectures:
 - **KVCR and this tier are peer to peer and hint-driven.** Each node holds its own blocks. The router directs moves through vLLM's KV hints.
 - **Mooncake Store is centrally coordinated.** A master tracks every block, and engines pull on demand. It does not read router hints, so a router cannot ask it to prefetch or move.
 
-KVCR is the closest comparison on GPU. On TPU, this tier builds on TPU Sync.
+KVCR is the closest comparison on GPU. On TPU, TPU Sync is the tier.
 
 | Project | What it does | Overlap with this tier | Proposed fit |
 | --- | --- | --- | --- |
 | [KVCR](https://github.com/ai-dynamo/kvcr) (NVIDIA Dynamo) | Secondary tier for vLLM. Runs the four hint actions. Uses NIXL for transfers. GPU only. | Same hints, same vLLM hook | An alternative on GPU. Same hint format, so routers drive either. |
-| [TPU Sync](https://github.com/google/tpu-sync) | C++ library. Copies between TPU memory and host memory. Host pool that survives restarts. Reads across hosts. Global registry. One secondary backend. | Host pool, restart survival, cross-host moves | Default TPU data path. This tier adds the hint protocol and runs hints TPU Sync does not. |
+| [TPU Sync](https://github.com/google/tpu-sync) | C++ library. Copies between TPU memory and host memory. Host pool that survives restarts. Reads across hosts. Global registry. One secondary backend. | Host pool, restart survival, cross-host moves | The TPU data path. Our shim adds the hint protocol. |
 | [Mooncake](https://github.com/kvcache-ai/Mooncake) | Store: cluster-wide DRAM and SSD pool with a central master, leases and pins. Transfer Engine: RDMA, TCP, NVLink. Conductor: KV event index. | Cross-node pool and lookup | An alternative to Mooncake Store on GPU. Transfer Engine could be our transport. |
 | `llmd_fs_backend` (llm-d-kv-cache) | Replaces vLLM's offloading spec. Stores blocks as files. | None at the memory tier | Complementary. The planned SSD tier could reuse its file and GPUDirect Storage code. |
 
@@ -166,7 +167,7 @@ The first one works today. A proof-of-concept connector (`llmd_kv_tiering.tpusyn
 TPU Sync sets three limits on the hints:
 
 - It has no caller-driven eviction. `kv.move` and `kv.evict_on_fetch` therefore copy the blocks but leave the source copy.
-- A push lands only in free blocks. A peer whose store is full refuses it.
+- A push lands only in free blocks. A full store refuses it unless TPU Sync's evict sweep is on.
 - Each engine's store has its own host pool. Two engines on one host do not share blocks through it.
 
 ### Mooncake
@@ -184,7 +185,7 @@ What this tier has that Mooncake Store lacks:
 - No master. Each node runs one Go binary that owns its pool.
 - The router directs moves, including ahead of a request. Mooncake's vLLM connector does not read router hints.
 - Faster pulls over TCP, and at long prompts over RDMA (see Results).
-- The same design on TPU.
+- The same hints on TPU.
 
 This tier depends on the router. It does nothing across nodes unless the router sends a hint. The llm-d router's hint support is still an open PR ([#4303](https://github.com/llm-d/llm-d-router/pull/4303)).
 
@@ -212,15 +213,12 @@ Each test pulls a cached prompt from the other replica with a `kv.fetch` hint. I
 | H200, TCP | Qwen3-32B, 30k tokens | 4.54 s | 0.95 s | 2.49 s |
 | H200, RDMA | Qwen3-32B, 11.6k tokens | 1.38 s | 0.188 s | 0.185 s |
 | H200, RDMA | Qwen3-32B, 30k tokens | 4.50 s | 0.424 s | 0.420 s |
-| TPU7x, TCP | Qwen3-8B, 11.6k tokens | 0.33 s | 0.26 s | does not run on TPU |
 
-The values are medians of 5, measured in November 2026 on two H200 nodes on GKE and on two single-host TPU7x replicas. Both tiers ran on the same nodes, vLLM image and router. The Qwen3-32B rows were measured on November 20 on the code in the branches below. The Qwen3-8B, TPU and KVCR numbers come from runs on an earlier revision.
+The values are medians of 5, measured in November 2026 on two H200 nodes on GKE. Both tiers ran on the same nodes, vLLM image and router. The Qwen3-32B rows were measured on November 20 on the code in the branches below. The Qwen3-8B, TPU and KVCR numbers come from runs on an earlier revision.
 
 - **TCP is faster because the tier spreads the work.** Each pull uses 8 TCP connections, about 100 Gbit/s, and copies into vLLM on 8 threads. With one connection and one thread, the Qwen3-8B 11.6k pull took 1.03 s, slower than KVCR.
 - **RDMA ties because both tiers push.** The source's helper writes blocks straight into the destination vLLM's CPU tier with RDMA WRITE. A 30k-token pull moves 7.85 GB in about 218 ms. On these nodes RDMA READ reached 137 to 162 Gbit/s on 4 KiB-page memory. WRITE reached 293 to 307 Gbit/s.
 - **The result holds through the router.** The router's endpoint picker (EPP) from [#4303](https://github.com/llm-d/llm-d-router/pull/4303) chose the sources. Repeat requests that landed on the other replica pulled an 11.6k-token prefix in 240 ms median with this tier and 555 ms with KVCR. Recompute took 331 ms.
-- **Pulled KV is correct on TPU.** Greedy outputs with pulled KV matched the source's own cached output in 8 of 8 prompts.
-- **The pool survives restarts on TPU.** After an engine restart, old prompts loaded from the pool in about 0.1 s, against 0.3 s to recompute. After a daemon restart under a running vLLM, the worker reconnected in 14 s and pulls resumed.
 
 ### Against Mooncake Store
 
@@ -268,23 +266,36 @@ A second run sent the same hint straight to A's daemon, with no request to A's e
 - **Killing the source daemon during a run of pulls caused no errors.** The request in flight recomputed. Both engines stayed up.
 - **Killing the destination daemon in the middle of a fetch failed cleanly.** That request recomputed, and so did requests during the downtime. After the daemon came back, 16 of 16 pulls were full hits.
 
+### Earlier TPU prototype on the daemon
+
+These were measured with the daemon on TPU7x hosts. That path is not proposed. They are kept for the record.
+
+- **A pull beat recompute.** Qwen3-8B at 11.6k tokens took 0.26 s to pull over TCP, against 0.33 s to recompute.
+- **Pulled KV was correct.** Greedy outputs with pulled KV matched the source's own cached output in 8 of 8 prompts.
+- **The pool survived restarts.** After an engine restart, old prompts loaded from the pool in about 0.1 s, against 0.3 s to recompute. After a daemon restart under a running vLLM, the worker reconnected in 14 s and pulls resumed.
+
 ### On TPU Sync
 
-This is the first run of the proof-of-concept connector. Two Qwen3-8B replicas ran on TPU7x, one host each, with TPU Sync and no daemon. Each prompt is about 30k tokens, of which 29,952 tokens (117 blocks, 4.4 GB) are cacheable. Times are time to first token. Each row is a few single runs, not a benchmark.
+Two replicas ran on TPU7x, one host each, with TPU Sync and no daemon. The values are time to first token, medians of 5, with one request at a time.
 
-| Request on B | Time to first token | Blocks loaded |
-| --- | --- | --- |
-| Recompute, no hint | 0.53 s | 0 |
-| `kv.fetch` hint naming A | 0.46 to 0.50 s | 117 from A in 0.34 to 0.42 s |
-| No hint, after A's `kv.prefetch` naming B | 0.12 s | 117 from B's host memory in 0.02 s |
-| A's own HBM prefix-cache hit, for reference | 0.09 to 0.14 s | 0 |
+| | Qwen3-8B, 11.6k | Qwen3-8B, 30k | Qwen3-32B, 11.6k | Qwen3-32B, 30k |
+| --- | --- | --- | --- | --- |
+| Recompute on B | 0.194 s | 0.529 s | 0.461 s | 1.363 s |
+| `kv.fetch` hint naming A | 0.238 s | 0.570 s | 0.434 s | 0.927 s |
+| No hint, after A's `kv.prefetch` naming B | 0.075 s | 0.12 to 0.17 s | 0.091 s | 0.165 s |
+| A's own HBM prefix-cache hit | 0.055 s | 0.088 s | 0.101 s | 0.116 s |
 
-- **The pull saves little on this model.** Qwen3-8B prefills 30k tokens in about half a second on this hardware, and the pull takes about 0.4 s.
-- **Outputs were correct.** Each prompt starts with a random code and ends by asking for it. All 6 requests served from pulled or pushed blocks returned the right code. In 3 of 3 cases, B's output from pulled blocks was identical to A's output from its own prefix cache.
+The Qwen3-8B 30k prefetch cell is the range of five runs from the evict sweep test below, not a median.
+
+- **Prefetch is 2 to 8 times faster than recompute.** The blocks are already in B's host memory, and loading them takes 0.02 to 0.04 s.
+- **Fetch helps only on long prompts with the larger model.** It is 1.5 times faster than recompute for Qwen3-32B at 30k tokens. It is about even at 11.6k, and slower on Qwen3-8B. Prefill is fast on this hardware, so a pull has little to save.
+- **Fetch time is almost all transfer.** The 30k pull on Qwen3-32B moves 7.9 GB in about 0.79 s, roughly 80 Gbit/s.
+- **Outputs were correct.** Each prompt starts with a random code and ends by asking for it. All 40 requests served from pulled or pushed blocks returned the right code.
 - **Without a hint, B did not read from A.** The connector reads a peer only when a `kv.fetch` hint names it.
-- **The store evicts by itself.** 1,872 blocks were saved into a 1,500-block store, and no save was refused.
+- **A push into a full store is refused by default.** An idle pod's store is full after a few dozen long prompts. With 600-block stores filled past capacity, five of five 30k pushes were refused, and B recomputed.
+- **TPU Sync's evict sweep keeps room for pushes.** With the store monitor and the sweep on, and watermarks at 25% and 40%, five of five pushes landed in the same full stores. A burst larger than the free share would still be refused. The sweep offers cold blocks to peers before it drops them. We did not measure that traffic.
 
-Not tested yet: a push to a peer whose store is full, a failure during a load, concurrent traffic, and replicas that span several hosts. The image also needed changes to run the TPU Sync wheel: jax 0.11.2, flax 0.12.12, and a one-line fix in tpu-inference's batched attention kernel.
+Not tested yet: a failure during a load, concurrent traffic, and replicas that span several hosts. The image also needed changes to run the TPU Sync wheel: jax 0.11.2, flax 0.12.12, and a one-line fix in tpu-inference's batched attention kernel.
 
 ## Risks and open questions
 
@@ -297,14 +308,20 @@ The biggest open question was how the TPU path should work with TPU Sync. Three 
 5. **Secondary backend.** Is it pluggable from outside, for example for this daemon or Mooncake Store?
 6. **Extension hooks.** Can outside code add transforms on host blocks, such as compression, or new hint actions? Partly. The TPU Sync team says another process on the host can share the store's host memory and operate on the blocks. It must restore the original format before a block is copied back to the TPU. There is no hook API for this, and we have not tried it. New hint actions are not answered.
 
-The TPU path can now be a thin adapter onto TPU Sync for fetch and prefetch. The daemon-based shim stays for what TPU Sync cannot do yet: deleting the source copy on a move, and sharing one pool between engines on a host.
+The TPU path is a thin shim onto TPU Sync. What TPU Sync cannot do yet, we will file as issues on google/tpu-sync:
+
+- A block index a router can follow, as a watch stream or a list call on the registry.
+- A way to trigger a push from outside the engine. Today a prefetch must ride on an inference request.
+- Caller-driven removal of a block, for `kv.move`.
+- A way to stop the evict sweep from offering cold blocks to peers.
+- The JAX Python wrapper for the store in the `tpu-sync-jax` wheel, with `set_eviction_callback`.
+- A wheel that runs with the jax version tpu-inference ships.
 
 Other risks:
 
 - **The Mooncake comparison is narrow.** It covers one model and two replicas, with random and writer-local placement. Larger clusters and load from many sessions are not measured yet.
-- **The TPU shim depends on tpu-inference internals** (`offload_manager`, `cpu_backend`, `chunk_pool`). An upgrade can break it. This is one more reason to move the TPU data path onto TPU Sync.
 - **RDMA failure handling is tested against a fake NIXL agent,** not real NIC failures. The logic is covered. Real completion and failure behavior is not.
-- **Some numbers come from an earlier revision.** The Qwen3-8B, TPU and KVCR numbers were measured before later fixes. The Qwen3-32B ones were measured on the code in the branches below.
+- **Some numbers come from an earlier revision.** The Qwen3-8B and KVCR numbers were measured before later fixes. The Qwen3-32B ones were measured on the code in the branches below.
 - **The router's index is not ready for this tier.** It does not keep the raw block hashes that prefetch and move need. After it restarts, it cannot rediscover blocks that are already in a pool. The Design section describes both.
 - **Hint names need agreement.** New actions should be agreed with the vLLM hint RFC authors before release. Routers then do not need two vocabularies.
 - **A restarted daemon is unavailable for about 14 s.** It creates its 32 GiB pool only when the first engine connects, and touching every page takes that long. Stores in that window are lost. Starting the daemon with `--slot-bytes` creates the pool at startup. The deployment examples should set it.
@@ -317,13 +334,13 @@ The code targets [llm-d-router](https://github.com/llm-d/llm-d-router):
 - its packages in `pkg/kvtier`
 - the engine shims in `kv_connectors/llmd_kv_tiering`
 
-It is split into six stacked branches on a fork. Each branch is one commit that passes `make lint` and its tests. No PR is open yet. Each will open after the one before it is reviewed.
+It is split into six stacked branches on a fork. Each branch is one commit that passes `make lint` and its tests. No code PR is open yet. Each will open after the one before it is reviewed.
 
 | # | Branch | Contents |
 | --- | --- | --- |
 | 1 | [`kvtier-1-daemon`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-1-daemon) | Daemon and vLLM GPU tier: store, load, KV events, restart survival |
 | 2 | [`kvtier-2-hints`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-2-hints) | Router hints, peer transfer over TCP |
-| 3 | [`kvtier-3-tpu`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-3-tpu) | TPU shim: a reference path and a place to try new hints |
+| 3 | [`kvtier-3-tpu`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-3-tpu) | Early TPU prototype on the daemon. Replaced by branch 6. Not proposed for merge. |
 | 4 | [`kvtier-4-rdma`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-4-rdma) | RDMA through a NIXL helper. It pushes into the pool, or into vLLM's CPU tier on GPU. |
 | 5 | [`kvtier-5-direct-prefetch`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-5-direct-prefetch) | Direct router-to-daemon call for prefetch and move, guarded by a token |
 | 6 | [`kvtier-6-tpusync`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-6-tpusync) | Proof-of-concept TPU connector that runs fetch and prefetch on TPU Sync |
@@ -331,8 +348,9 @@ It is split into six stacked branches on a fork. Each branch is one commit that 
 Next steps:
 
 - [x] Show that router hints can drive TPU Sync, and build a proof-of-concept adapter (`kvtier-6-tpusync`).
-- [ ] Resolve the remaining TPU Sync questions above: events, secondary backend, extension hooks.
-- [ ] Test the TPU Sync adapter under concurrent traffic, with failures during a load, and on a larger model.
+- [x] Benchmark the TPU Sync connector on Qwen3-8B and Qwen3-32B.
+- [ ] File the TPU Sync asks as issues and agree on them with their team.
+- [ ] Test the TPU Sync connector under concurrent traffic and with failures during a load.
 - [ ] Agree names for new hint actions with the vLLM hint RFC authors.
 - [ ] Add authentication to the rest of the daemon's peer port. Add a router plugin that sends prefetch and move through the direct call.
 - [ ] Compare against Mooncake Store on larger clusters and under load from many sessions.
