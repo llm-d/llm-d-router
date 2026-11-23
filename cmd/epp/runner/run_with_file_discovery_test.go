@@ -411,7 +411,7 @@ dataLayer:
 // TestRunWithFileDiscovery_LogsDataLayerError is a regression test for
 // https://github.com/llm-d/llm-d-router/issues/4395: a data layer that fails
 // to configure made the EPP exit with status 1 and no log line naming the
-// error, because runWithFileDiscovery returned the error without logging it.
+// error, because the file-discovery path returned the error without logging it.
 func TestRunWithFileDiscovery_LogsDataLayerError(t *testing.T) {
 	dir := t.TempDir()
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
@@ -466,11 +466,12 @@ dataLayer:
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	require.NoError(t, err)
 
-	err = r.runWithFileDiscovery(ctx, opts, rawConfig)
+	err = r.runFileDiscovery(ctx, opts, rawConfig)
 	require.ErrorContains(t, err, "data layer enabled but no data sources configured")
 
 	mu.Lock()
 	defer mu.Unlock()
+	assert.Contains(t, logged.String(), "File discovery mode failed")
 	assert.Contains(t, logged.String(), "data layer enabled but no data sources configured")
 }
 
@@ -557,18 +558,18 @@ dataLayer:
 	require.NoError(t, err)
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+	go func() { runErr <- r.runFileDiscovery(ctx, opts, rawConfig) }()
 
 	select {
 	case err := <-runErr:
 		require.ErrorContains(t, err, "metrics server")
 	case <-time.After(10 * time.Second):
-		t.Fatal("runWithFileDiscovery did not return after the metrics server failed to bind")
+		t.Fatal("runFileDiscovery did not return after the metrics server failed to bind")
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Contains(t, logged.String(), "EPP stopped")
+	assert.Contains(t, logged.String(), "File discovery mode failed")
 	assert.Contains(t, logged.String(), "address already in use")
 }
 

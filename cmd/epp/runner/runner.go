@@ -318,7 +318,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	dlCfg := rawConfig.DataLayer
 	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
-		return r.runWithFileDiscovery(ctx, opts, rawConfig)
+		return r.runFileDiscovery(ctx, opts, rawConfig)
 	}
 	if err := validateKubernetesDiscoveryFlags(opts); err != nil {
 		setupLog.Error(err, "Failed to validate flags")
@@ -1368,8 +1368,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	ds := datastore.NewDatastore(r.servingCtx, epf).WithEndpointPool(pool)
 	objectivePriorities, err := loadObjectivesFile(opts.ObjectivesFile, ds)
 	if err != nil {
-		setupLog.Error(err, "Failed to load objectives file", "path", opts.ObjectivesFile)
-		return err
+		return fmt.Errorf("failed to load objectives file %q: %w", opts.ObjectivesFile, err)
 	}
 
 	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
@@ -1403,28 +1402,23 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	eppConfig, err := r.parseConfigurationPhaseTwo(r.servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
-		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
 
 	disc, err := r.resolveDiscovery(rawConfig)
 	if err != nil {
-		setupLog.Error(err, "Failed to resolve discovery plugin")
-		return err
+		return fmt.Errorf("failed to resolve discovery plugin: %w", err)
 	}
 
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
-		setupLog.Error(err, "Plugin stability validation failed")
-		return err
+		return fmt.Errorf("plugin stability validation failed: %w", err)
 	}
 
 	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
-		setupLog.Error(err, "Failed to configure datalayer")
 		return fmt.Errorf("failed to configure datalayer: %w", err)
 	}
 
 	if r.schedulerConfig == nil {
-		setupLog.Error(errSchedulerConfigMissing, "Failed to create scheduler")
 		return errSchedulerConfigMissing
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
@@ -1523,10 +1517,18 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle)
 	})
 	// A canceled context is the normal shutdown. Any other error ends the
-	// process with exit status 1, and no other line names it.
-	err = g.Run(ctx)
+	// process with exit status 1 and is logged by runFileDiscovery. The error is
+	// returned unwrapped so errors.Is still matches context.Canceled.
+	return g.Run(ctx)
+}
+
+// runFileDiscovery runs the file-discovery path and logs the error it returns,
+// so every failure of the mode is named in one place. A canceled context is
+// the normal shutdown and stays unlogged.
+func (r *Runner) runFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	err := r.runWithFileDiscovery(ctx, opts, rawConfig)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		setupLog.Error(err, "EPP stopped")
+		setupLog.Error(err, "File discovery mode failed")
 	}
 	return err
 }
