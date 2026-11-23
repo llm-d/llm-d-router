@@ -41,6 +41,51 @@ const maxGRPCFrameBytes = 64 << 20
 
 var failedPreconditionStatus = strconv.FormatUint(uint64(codes.FailedPrecondition), 10)
 
+var unavailableStatus = strconv.FormatUint(uint64(codes.Unavailable), 10)
+
+// rerunOnUnavailable returns the error that asks the pipeline to run step
+// again, or nil when st does not qualify. It applies to an UNAVAILABLE status
+// of a vLLM prefill or decode leg while the request has a re-run left. A
+// caller must return the error before it writes to the client.
+func rerunOnUnavailable(step string, reqCtx *pipeline.RequestContext, st grpcStatusWire) error {
+	if st.status != unavailableStatus || !reqCtx.CanRerunStep() {
+		return nil
+	}
+	// An SGLang decode leg runs next to an open prefill stream, so a re-run
+	// there needs its own teardown.
+	vllmReq, ok := reqCtx.GRPC.(*pipeline.VLLMGRPCRequest)
+	if !ok {
+		return nil
+	}
+	from, ok := rerunFrom(step, vllmReq)
+	if !ok {
+		return nil
+	}
+	return &pipeline.StepRerunError{
+		Step:  step,
+		From:  from,
+		Cause: &pipeline.UpstreamError{Step: step, StatusCode: grpcStatusToHTTPStatus(st.status)},
+	}
+}
+
+// rerunFrom returns the step that a re-run of step starts from, and false for
+// a step that cannot run again. The re-run starts from the step whose output
+// the failed leg loads. Decode loads the KV blocks of prefill, or the encoder
+// cache of encode when prefill did not run. Prefill loads the encoder cache of
+// encode. When no such step ran, step runs again alone.
+func rerunFrom(step string, vllmReq *pipeline.VLLMGRPCRequest) (string, bool) {
+	switch {
+	case step != PrefillStepName && step != DecodeStepName:
+		return "", false
+	case step == DecodeStepName && vllmReq.PrefillRan:
+		return PrefillStepName, true
+	case vllmReq.EncodeRan:
+		return EncodeStepName, true
+	default:
+		return step, true
+	}
+}
+
 type grpcStatusWire struct {
 	status     string
 	message    string
@@ -203,6 +248,9 @@ func relayGRPCStream(
 			return out, nil
 		}
 		if st.status != grpcframe.StatusOK {
+			if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+				return out, err
+			}
 			writeRawGRPCError(w, st)
 			return out, &pipeline.UpstreamStreamedError{Step: step, StatusCode: grpcStatusToHTTPStatus(st.status)}
 		}
@@ -369,6 +417,9 @@ func isHTTPTranslatedGRPC(reqCtx *pipeline.RequestContext) bool {
 }
 
 func upstreamGRPCError(step string, reqCtx *pipeline.RequestContext, st grpcStatusWire) error {
+	if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+		return err
+	}
 	httpStatus := grpcStatusToHTTPStatus(st.status)
 	if isHTTPTranslatedGRPC(reqCtx) {
 		return &pipeline.UpstreamError{Step: step, StatusCode: httpStatus}
@@ -382,6 +433,9 @@ func upstreamGRPCError(step string, reqCtx *pipeline.RequestContext, st grpcStat
 }
 
 func decodePreCommitGRPCError(step string, reqCtx *pipeline.RequestContext, st grpcStatusWire) error {
+	if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+		return err
+	}
 	httpStatus := grpcStatusToHTTPStatus(st.status)
 	if isHTTPTranslatedGRPC(reqCtx) {
 		return &pipeline.UpstreamError{Step: step, StatusCode: httpStatus}

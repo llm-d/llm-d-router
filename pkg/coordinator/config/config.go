@@ -94,6 +94,7 @@ type PipelineConfig struct {
 	ForceStream               bool         `mapstructure:"force_stream"`
 	ForceStreamBufferSize     string       `mapstructure:"force_stream_buffer_size"`
 	ForceStreamMaxRequestSize string       `mapstructure:"force_stream_max_request_size"`
+	MaxStepReruns             int          `mapstructure:"max_step_reruns"`
 	Steps                     []StepConfig `mapstructure:"steps"`
 }
 
@@ -131,6 +132,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("pipeline.force_stream", false)
 	v.SetDefault("pipeline.force_stream_buffer_size", "")
 	v.SetDefault("pipeline.force_stream_max_request_size", "")
+	v.SetDefault("pipeline.max_step_reruns", 0)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)

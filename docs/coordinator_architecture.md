@@ -78,6 +78,7 @@ absorb further processing modes as they are added.
   - [Connector selection](#connector-selection)
   - [Should the coordinator use the tokens-in format?](#should-the-coordinator-use-the-tokens-in-format)
   - [Worker protocol for `/inference/v1/generate`](#worker-protocol-for-inferencev1generate)
+  - [Step re-runs](#step-re-runs)
   - [The built-in steps](#the-built-in-steps)
   - [Adding a step to the pipeline](#adding-a-step-to-the-pipeline)
 - [References](#references)
@@ -649,6 +650,10 @@ type Step interface {
   `reqCtx.ResponseWriter`, or the client is gone). A step that has written an error
   response itself returns a `pipeline.ResponseWrittenError` instead, so the request still
   counts as failed.
+- A step that gets a retryable upstream failure can ask the pipeline to run it again.
+  While `reqCtx.CanRerunStep()` is true, and before the step writes to
+  `reqCtx.ResponseWriter`, it returns a `pipeline.StepRerunError`. See
+  [Step re-runs](#step-re-runs).
 - A response-producing step writes the client response to `reqCtx.ResponseWriter`,
   typically by proxying the upstream response with `httputil.ReverseProxy` set to
   `FlushInterval: -1`, which forwards each write immediately (SSE chunks stream through; a
@@ -917,6 +922,36 @@ token sequences, `logprobs`, `top_logprobs`, `truncate_prompt_tokens`, and
 coordinator still requires a `render` step when `use_openai_format` is `false`, because
 OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
 upstream gRPC methods regardless of `worker_protocol`.
+
+### Step re-runs
+
+`pipeline.max_step_reruns` sets how many times one request can run a failed step again.
+The default value `0` disables re-runs.
+
+The pipeline runs a step again when all of these conditions are true:
+
+- The worker legs of the request use `vllm.Inference` gRPC.
+- The `prefill` or `decode` leg returns the gRPC status `UNAVAILABLE`.
+- No response byte reached the client.
+
+vLLM returns `UNAVAILABLE` for an error that the engine marks as retryable.
+[vllm-project/vllm#67430](https://github.com/vllm-project/vllm/issues/67430) proposes to
+add a failed load of the KV blocks or of the encoder cache to these errors. The failed step
+cannot use the output of the step before it, so the re-run starts at that earlier step:
+
+| Failed step | Steps that run again |
+| :---- | :---- |
+| `decode` | `prefill`, `decode` |
+| `decode`, when `prefill` did not run | `encode`, `decode` |
+| `prefill` | `encode`, `prefill` |
+
+When the earlier step did not run for the request, only the failed step runs again. The
+gateway schedules each leg of a re-run, so a leg can reach a different worker. After the
+last re-run, the client gets the error of the worker. The `step_reruns_total` metric counts
+the re-runs.
+
+A gateway that sheds load can also return `UNAVAILABLE`. Each re-run then adds load, so
+use a small value.
 
 ### The built-in steps
 

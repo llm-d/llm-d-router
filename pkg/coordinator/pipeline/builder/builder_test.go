@@ -19,6 +19,7 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +100,16 @@ func TestValidatePipeline(t *testing.T) {
 		{
 			name:    "invalid worker_protocol is rejected",
 			cfg:     config.PipelineConfig{WorkerProtocol: "ws", UseOpenAIFormat: true, Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "max_step_reruns is accepted",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, MaxStepReruns: 2, Steps: []config.StepConfig{decode}},
+			wantErr: false,
+		},
+		{
+			name:    "negative max_step_reruns is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, MaxStepReruns: -1, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 		{
@@ -326,5 +337,51 @@ func TestBuildValidatesWorkerProtocolAndRenderRequirement(t *testing.T) {
 	}}
 	if _, err := Build(withRender, gateway.New(config.GatewayConfig{})); err != nil {
 		t.Fatalf("Build() unexpected error with render step: %v", err)
+	}
+}
+
+// rerunOnceStep asks for a re-run on its first attempt, then succeeds.
+type rerunOnceStep struct{ attempts int }
+
+func (*rerunOnceStep) Name() string { return "rerun-once" }
+
+func (s *rerunOnceStep) Execute(context.Context, *pipeline.RequestContext) error {
+	s.attempts++
+	if s.attempts > 1 {
+		return nil
+	}
+	return &pipeline.StepRerunError{Step: s.Name(), Cause: errors.New("unavailable")}
+}
+
+func TestBuildAppliesMaxStepReruns(t *testing.T) {
+	const stepType = "test-rerun-once"
+	pipeline.Register(stepType, func(*gateway.Client, map[string]any) (pipeline.Step, error) {
+		return &rerunOnceStep{}, nil
+	})
+
+	tests := []struct {
+		name      string
+		maxReruns int
+		wantErr   bool
+	}{
+		{name: "re-runs are off by default", maxReruns: 0, wantErr: true},
+		{name: "max_step_reruns reaches the pipeline", maxReruns: 1, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Pipeline: config.PipelineConfig{
+				UseOpenAIFormat: true,
+				MaxStepReruns:   tt.maxReruns,
+				Steps:           []config.StepConfig{{Type: stepType}},
+			}}
+			p, err := Build(cfg, nil)
+			if err != nil {
+				t.Fatalf("Build() unexpected error: %v", err)
+			}
+			err = p.Execute(context.Background(), &pipeline.RequestContext{})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Execute() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
