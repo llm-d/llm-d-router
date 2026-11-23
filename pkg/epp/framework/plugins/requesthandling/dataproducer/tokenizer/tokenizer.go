@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -373,6 +372,11 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 	}
 	if endpointPicker != nil {
 		p.endpointDiscovery = newEndpointDiscoveryHandler(typedName, endpointPicker)
+		if lb := endpointPicker.config.LoadBalancer; lb != nil && lb.Type == sessionAffinityLoadBalancerType {
+			sessionConfig := sessionaffinity.SessionIDConfig{Sources: lb.Sources}
+			sessionConfig.ApplyDefaults()
+			p.sessionSources = sessionConfig.Sources
+		}
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -389,11 +393,13 @@ type Plugin struct {
 	backendName       string
 	dk                plugin.DataKey
 	endpointDiscovery *endpointDiscoveryHandler
+	sessionSources    []sessionaffinity.SessionIDSource
 }
 
 // compile-time assertions.
 var (
 	_ fwkrh.DataProducer         = &Plugin{}
+	_ plugin.ConsumerPlugin      = &Plugin{}
 	_ fwkrh.TimeoutAwareProducer = &Plugin{}
 	_ datalayer.Registrant       = &Plugin{}
 )
@@ -406,6 +412,11 @@ func (p *Plugin) TypedName() plugin.TypedName {
 // Backend returns the configured backend identifier (BackendVLLM or BackendEstimate).
 func (p *Plugin) Backend() string {
 	return p.backendName
+}
+
+// Consumes declares request attributes used for render session affinity.
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	return sessionaffinity.SourcesConsumes(p.sessionSources)
 }
 
 // Produces returns the data keys this plugin produces, along with the
@@ -477,10 +488,8 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		log.FromContext(ctx).V(logging.DEBUG).Info("ignoring client-supplied prompt token IDs, rendering", "reason", ignored)
 	}
 
-	if p.endpointDiscovery != nil && p.endpointDiscovery.picker.config.loadBalancerType() == sessionAffinityLoadBalancerType {
-		if session := strings.TrimSpace(request.Headers[sessionaffinity.DefaultSessionIDHeader]); session != "" {
-			ctx = context.WithValue(ctx, renderAffinityKeyCtxKey{}, request.TargetModel+"\x00"+session)
-		}
+	if session := sessionaffinity.ResolveSessionID(ctx, request, p.sessionSources); session != "" {
+		ctx = context.WithValue(ctx, renderAffinityKeyCtxKey{}, request.TargetModel+"\x00"+session)
 	}
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
 	if auth, ok := metadata.GetLowerCaseHeaderValue(request.Headers, "authorization"); ok {

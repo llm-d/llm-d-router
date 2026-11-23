@@ -882,6 +882,24 @@ func TestPluginFactory_EndpointDiscoveryValidation(t *testing.T) {
 			}`,
 			wantErr: "unsupported load balancer",
 		},
+		{
+			name: "rejects an ambiguous session source",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {"loadBalancer": {
+					"type": "session-affinity", "sources": [{"header": "x-chat", "attribute": "SessionIDDataKey"}]
+				}}}
+			}`,
+			wantErr: "loadBalancer.sources[0]: exactly one of header or attribute must be set",
+		},
+		{
+			name: "rejects session sources with default round-robin",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {"loadBalancer": {"sources": [{"header": "x-chat"}]}}}
+			}`,
+			wantErr: "loadBalancer.sources requires",
+		},
 	}
 
 	for _, tt := range tests {

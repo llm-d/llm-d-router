@@ -183,6 +183,7 @@ EPP contract does not establish parity for them.
 | `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
 | `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
 | `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm: `round-robin` or `session-affinity`. |
+| `vllm.endpointDiscovery.loadBalancer.sources` | `[{header: x-session-id}]` | Ordered session ID sources for `session-affinity`. Each entry sets either `header` or `attribute`. Set `producer` for an attribute published under a plugin instance name. |
 | `vllm.endpointDiscovery.attemptTimeout` | unset         | Optional positive duration limiting each render attempt, e.g. `1s`. |
 | `vllm.endpointDiscovery.discoverModelLimits` | `false` | Probe model context capacity; see [Context limits](#context-limits). |
 | `vllm.endpointDiscovery.minModelLen` | `0` | Minimum eligible renderer context capacity. |
@@ -405,13 +406,41 @@ endpoint's inference port. Use this when `/v1/*/render` is served on the same
 listener as inference.
 
 Set `vllm.endpointDiscovery.loadBalancer.type: session-affinity` to keep
-requests with the same target model and `x-session-id` on the same render
+requests with the same target model and session ID on the same render
 endpoint. Renderers with a tokenizer segment cache can reuse entries across turns.
 The picker uses rendezvous hashing over eligible render URLs, so EPP replicas
 with the same endpoints agree without sharing session state. A retry selects
-the next highest-ranked eligible URL. Requests with a missing or blank
-`x-session-id` use round-robin. A hot session can concentrate work on one
-renderer.
+the next highest-ranked eligible URL. The first source with a nonblank value
+supplies the session ID. If all sources are missing or blank, the picker uses
+round-robin. A hot session can concentrate work on one renderer.
+
+To use the same session ID for rendering and scheduling, configure the same
+sources on the token producer and the [session affinity scorer](../../../scheduling/scorer/sessionaffinity/README.md).
+This example prefers the `x-conversation-id` header and falls back to the
+`llm-d-session` cookie extracted by the [session ID producer](../sessionid/README.md).
+
+```yaml
+plugins:
+  - type: session-id-producer
+    parameters:
+      cookieName: llm-d-session
+  - type: token-producer
+    parameters:
+      modelName: "${MODEL_NAME}"
+      vllm:
+        endpointDiscovery:
+          loadBalancer:
+            type: session-affinity
+            sources: &sessionSources
+              - header: x-conversation-id
+              - attribute: SessionIDDataKey
+                producer: session-id-producer
+  - type: session-affinity-scorer
+    parameters:
+      strategy: session_id
+      sessionIdConfig:
+        sources: *sessionSources
+```
 
 When render uses a different listener, configure ordered `portRules`. The
 first matching Kubernetes label selector resolves the port as

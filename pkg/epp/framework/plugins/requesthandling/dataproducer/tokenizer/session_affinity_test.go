@@ -30,22 +30,44 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 func TestProduce_DiscoverySessionAffinity(t *testing.T) {
 	warmupCtx, cancel := context.WithCancel(t.Context())
 	cancel()
-	p, err := NewPlugin(warmupCtx, "affinity", &tokenizerPluginConfig{
-		ModelName: "m",
-		VLLM: &vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{
-			LoadBalancer: &loadBalancerConfig{Type: sessionAffinityLoadBalancerType},
-		}},
-	})
+	newPlugin := func(sources ...sessionaffinity.SessionIDSource) *Plugin {
+		t.Helper()
+		p, err := NewPlugin(warmupCtx, "affinity", &tokenizerPluginConfig{
+			ModelName: "m",
+			VLLM: &vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{
+				LoadBalancer: &loadBalancerConfig{Type: sessionAffinityLoadBalancerType, Sources: sources},
+			}},
+		})
+		require.NoError(t, err)
+		return p
+	}
+	p := newPlugin()
+	cookie, err := sessionid.Factory("cookies", plugin.StrictDecoder(json.RawMessage(`{"cookieName":"sid"}`)), nil)
 	require.NoError(t, err)
-	picker := p.endpointDiscovery.picker
+	withSources := newPlugin(
+		sessionaffinity.SessionIDSource{Header: "X-Conversation"},
+		sessionaffinity.SessionIDSource{Attribute: "SessionIDDataKey", Producer: cookie.TypedName().Name},
+	)
+	plugins := []plugin.Plugin{withSources, cookie}
+	phases := datalayer.ResolveDataProducerPhases(plugins, map[string]requesthandling.DataProducerPhase{
+		withSources.TypedName().Name: requesthandling.DataProducerPhaseRequestHandling,
+	})
+	require.Equal(t, requesthandling.DataProducerPhaseRequestHandling, phases[cookie.TypedName().Name])
+	order, err := datalayer.ValidateAndOrderDataDependencies(plugins, datalayer.WithDataProducerPhases(phases))
+	require.NoError(t, err)
+	require.Equal(t, []string{cookie.TypedName().String(), withSources.TypedName().String()}, order)
 	var unavailable atomic.Uint32
 	var failedCalls atomic.Int32
 	for id := uint32(1); id <= 3; id++ {
@@ -61,10 +83,12 @@ func TestProduce_DiscoverySessionAffinity(t *testing.T) {
 		t.Cleanup(server.Close)
 		host, port, err := net.SplitHostPort(server.Listener.Addr().String())
 		require.NoError(t, err)
-		require.NoError(t, picker.Upsert(discoveredEndpoint("rank-"+strconv.Itoa(int(id)), host, port).GetMetadata()))
+		md := discoveredEndpoint("rank-"+strconv.Itoa(int(id)), host, port).GetMetadata()
+		require.NoError(t, p.endpointDiscovery.picker.Upsert(md))
+		require.NoError(t, withSources.endpointDiscovery.picker.Upsert(md))
 	}
 
-	render := func(model string, headers map[string]string) uint32 {
+	renderThrough := func(model string, headers map[string]string, producers ...requesthandling.DataProducer) uint32 {
 		t.Helper()
 		req := &scheduling.InferenceRequest{
 			TargetModel: model,
@@ -74,7 +98,9 @@ func TestProduce_DiscoverySessionAffinity(t *testing.T) {
 				Completions: &fwkrequest.CompletionsRequest{Prompt: fwkrequest.Prompt{Raw: "hello"}},
 			},
 		}
-		require.NoError(t, p.Produce(t.Context(), req, nil))
+		for _, producer := range producers {
+			require.NoError(t, producer.Produce(t.Context(), req, nil))
+		}
 		require.NotNil(t, req.Body.TokenizedRequest)
 		require.Len(t, req.Body.TokenizedRequest.Prompts, 1)
 		tokens := req.Body.TokenizedRequest.Prompts[0].TokenIDs
@@ -82,6 +108,9 @@ func TestProduce_DiscoverySessionAffinity(t *testing.T) {
 		return tokens[0]
 	}
 
+	render := func(model string, headers map[string]string) uint32 {
+		return renderThrough(model, headers, p)
+	}
 	session := map[string]string{sessionaffinity.DefaultSessionIDHeader: "turns-42"}
 	primary := render("m", session)
 	require.Equal(t, primary, render("m", session))
@@ -105,6 +134,28 @@ func TestProduce_DiscoverySessionAffinity(t *testing.T) {
 	require.EqualValues(t, 2, failedCalls.Load())
 	unavailable.Store(0)
 	require.Equal(t, primary, render("m", session))
+
+	renderConfigured := func(headers map[string]string) uint32 {
+		return renderThrough("m", headers, cookie.(*sessionid.Producer), withSources)
+	}
+	// Pick a cookie whose renderer differs from the header's, so the winner
+	// with both sources present identifies the source that took precedence.
+	var cookieID string
+	var cookieTarget uint32
+	for i := range 64 {
+		cookieID = "cookie-" + strconv.Itoa(i)
+		cookieTarget = render("m", map[string]string{sessionaffinity.DefaultSessionIDHeader: cookieID})
+		if cookieTarget != primary {
+			break
+		}
+	}
+	require.NotEqual(t, primary, cookieTarget)
+	cookieHeader := "sid=" + cookieID
+	require.Equal(t, cookieTarget, renderConfigured(map[string]string{"cookie": cookieHeader}))
+	require.Equal(t, cookieTarget, renderConfigured(map[string]string{"cookie": "theme=dark; " + cookieHeader}))
+	require.Equal(t, primary, renderConfigured(map[string]string{"x-conversation": "turns-42", "cookie": cookieHeader}))
+	fallback := []uint32{renderConfigured(session), renderConfigured(session), renderConfigured(session)}
+	require.ElementsMatch(t, []uint32{1, 2, 3}, fallback, "configured sources replace the default header")
 }
 
 func TestSessionAffinityLoadBalancer_MembershipChanges(t *testing.T) {

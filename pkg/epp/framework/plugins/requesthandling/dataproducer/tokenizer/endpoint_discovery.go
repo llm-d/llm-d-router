@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 const (
@@ -46,7 +47,8 @@ type renderAffinityKeyCtxKey struct{}
 var errNoRenderEndpoints = errors.New("no vLLM render endpoints discovered")
 
 type loadBalancerConfig struct {
-	Type string `json:"type,omitempty"`
+	Type    string                            `json:"type,omitempty"`
+	Sources []sessionaffinity.SessionIDSource `json:"sources,omitempty"`
 }
 
 // endpointPortRule maps matching inference endpoints to a render port range.
@@ -207,6 +209,14 @@ func newDiscoveredEndpointPicker(config *endpointDiscoveryConfig) (*discoveredEn
 	loadBalancer, err := newEndpointLoadBalancer(config.loadBalancerType())
 	if err != nil {
 		return nil, err
+	}
+	if lb := config.LoadBalancer; lb != nil && len(lb.Sources) > 0 {
+		if lb.Type != sessionAffinityLoadBalancerType {
+			return nil, fmt.Errorf("loadBalancer.sources requires loadBalancer.type=%s", sessionAffinityLoadBalancerType)
+		}
+		if err := sessionaffinity.ValidateSources(lb.Sources); err != nil {
+			return nil, fmt.Errorf("loadBalancer.%w", err)
+		}
 	}
 	portRules, err := compileEndpointPortRules(config)
 	if err != nil {
