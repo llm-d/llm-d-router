@@ -19,14 +19,13 @@ package preciseprefixcache
 import (
 	"context"
 	"fmt"
-	"net"
-	"strconv"
 
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
@@ -108,23 +107,8 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	return nil
 }
 
-// subscriberEndpoints returns the endpoint's KV-events, replay and snapshot
-// socket addresses; an empty replay or snapshot address disables that path.
-// An endpoint with ZMQPort gets no replay or snapshot address: those ports
-// follow the configured port plus RankIndex and can belong to another engine
-// on the same address.
+// subscriberEndpoints returns the endpoint's KV-events, replay, and snapshot
+// socket addresses.
 func (p *Producer) subscriberEndpoints(meta *fwkdl.EndpointMetadata) (zmqEndpoint, replayEndpoint, snapshotEndpoint string) {
-	if meta.ZMQPort > 0 {
-		return "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(meta.ZMQPort)), "", ""
-	}
-	offset := meta.GetRankIndex()
-	cfg := p.kvEventsConfig.PodDiscoveryConfig
-	zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(cfg.SocketPort+offset))
-	if replayPort := cfg.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+offset))
-	}
-	if snapshotPort := cfg.SnapshotSocketPort; snapshotPort > 0 {
-		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+offset))
-	}
-	return zmqEndpoint, replayEndpoint, snapshotEndpoint
+	return srckvevents.SubscriberEndpoints(meta, p.kvEventsConfig.PodDiscoveryConfig)
 }

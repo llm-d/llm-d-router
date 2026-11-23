@@ -1762,4 +1762,16 @@ func TestProduce_RankEndpointsWithoutPodDiscoveryUseAddressAndPort(t *testing.T)
 
 	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
 	assert.Equal(t, sets.New("10.0.0.1:8000"), gotFilter)
+
+	// Global bound zmqEndpoint leaves DiscoverPods=true in DefaultConfig, yet still
+	// identifies pods from the event topic (plain address:port).
+	p.kvEventsConfig = &kvevents.Config{DiscoverPods: true, ZMQEndpoint: "tcp://127.0.0.1:5557"}
+	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
+	assert.Equal(t, sets.New("10.0.0.1:8000"), gotFilter)
+
+	// A bound kv-events-source (sharedEvents != nil) subscribes per rank endpoint.
+	p.kvEventsConfig = kvevents.DefaultConfig()
+	p.sharedEvents = &kvevents.Pool{}
+	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
+	assert.Equal(t, sets.New("10.0.0.1:8000/rank-0", "10.0.0.1:8000/rank-1"), gotFilter)
 }

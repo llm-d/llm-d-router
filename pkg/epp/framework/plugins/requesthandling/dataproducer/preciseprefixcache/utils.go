@@ -18,22 +18,22 @@ package preciseprefixcache
 
 import (
 	"fmt"
-	"strconv"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 )
 
 // indexPodIdentifier returns the identifier the KV-block index stores md's blocks
-// under. With pod discovery each data-parallel rank publishes to its own subscriber,
-// so a rank endpoint, which shares its pod's address and port, adds its rank.
+// under. vLLM already publishes KV events per rank; when the EPP subscribes per
+// endpoint via pod discovery (or a bound kv-events-source), a rank endpoint adds
+// its rank so ranks sharing one pod address and port stay distinct in the index.
 func (p *Producer) indexPodIdentifier(md *fwkdl.EndpointMetadata) string {
-	id := fmt.Sprintf("%s:%s", md.Address, md.Port)
-	if md.RankByHeader && p.kvEventsConfig != nil && p.kvEventsConfig.DiscoverPods {
-		id += "/rank-" + strconv.Itoa(md.RankIndex)
+	if p.sharedEvents != nil || (p.kvEventsConfig != nil && p.kvEventsConfig.DiscoverPods && p.kvEventsConfig.ZMQEndpoint == "") {
+		return srckvevents.PodIdentifier(md)
 	}
-	return id
+	return fmt.Sprintf("%s:%s", md.Address, md.Port)
 }
 
 // extractEndpointSet builds the index pod identifier set used to filter
