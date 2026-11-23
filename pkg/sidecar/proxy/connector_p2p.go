@@ -119,7 +119,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	logger := log.FromContext(r.Context())
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
-		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
+		logger.Error(err, "cannot build the decode request", "prefill_host", routing.ExtractHost(prefillPodHostPort))
 		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
@@ -136,7 +136,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	kvRequestID := newUUID()
 	kv := make([]any, 0, 8)
 	kv = append(kv,
-		"prefill_host", extractHost(prefillPodHostPort),
+		"prefill_host", routing.ExtractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
 		"p2p_prefill", p2p.prefill.String())
 	if source != nil {

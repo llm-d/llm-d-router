@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -120,7 +119,7 @@ func (s *PrefillStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Re
 		return internalUpstreamError(PrefillStepName, reqCtx, cause)
 	}
 
-	reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = extractHost(prefillEndpoint)
+	reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = routing.ExtractHost(prefillEndpoint)
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapPort] = port
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapRoom] = room
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
@@ -441,16 +440,6 @@ func sglangPayloadHasInputIDs(payload []byte) bool {
 	return found
 }
 
-func extractHost(hostWithPort string) string {
-	hostWithPort, _ = strings.CutPrefix(hostWithPort, "http://")
-	hostWithPort, _ = strings.CutPrefix(hostWithPort, "https://")
-	host, _, err := net.SplitHostPort(hostWithPort)
-	if err != nil {
-		return hostWithPort
-	}
-	return host
-}
-
 func int64FromParam(v any) (int64, bool) {
 	switch val := v.(type) {
 	case int:
@@ -471,6 +460,6 @@ func sglangErrorBodyGRPCCode(httpCode uint32) codes.Code {
 	case http.StatusNotFound:
 		return codes.NotFound
 	default:
-		return pipeline.HTTPStatusToGRPCCode(int(httpCode))
+		return grpcframe.UpstreamHTTPStatusToCode(int(httpCode))
 	}
 }

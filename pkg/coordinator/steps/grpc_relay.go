@@ -410,7 +410,7 @@ func uncommittedHTTPError(step string, reqCtx *pipeline.RequestContext, resp *ht
 	}
 	grpcframe.WriteError(
 		reqCtx.ResponseWriter,
-		pipeline.HTTPStatusToGRPCCode(resp.StatusCode),
+		grpcframe.UpstreamHTTPStatusToCode(resp.StatusCode),
 		fmt.Sprintf("upstream HTTP %d (request_id: %s)", resp.StatusCode, reqCtx.RequestID),
 	)
 	return &pipeline.ResponseWrittenError{

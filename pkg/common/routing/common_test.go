@@ -447,3 +447,23 @@ func TestRankPort(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractHost(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"10.244.1.100:8000", "10.244.1.100"},
+		{"valid-pod:8000", "valid-pod"},
+		{"valid-pod", "valid-pod"},
+		{"[::1]:8000", "::1"},
+		{"::1", "::1"},
+		{"http://10.0.0.5:8000", "10.0.0.5"},
+		{"https://pod.ns.svc:8443", "pod.ns.svc"},
+	}
+	for _, tt := range tests {
+		if got := ExtractHost(tt.input); got != tt.want {
+			t.Errorf("ExtractHost(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

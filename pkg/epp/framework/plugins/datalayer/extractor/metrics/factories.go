@@ -41,6 +41,9 @@ type (
 		Name string `json:"name"`
 		// QueuedRequestsSpec defines the metric specification string for retrieving queued request count.
 		QueuedRequestsSpec string `json:"queuedRequestsSpec"`
+		// DeferredRequestsSpec defines the metric specification string for the queued requests that
+		// wait on a KV transfer in progress. Published as the DeferredQueueSize attribute. Optional.
+		DeferredRequestsSpec string `json:"deferredRequestsSpec,omitempty"`
 		// RunningRequestsSpec defines the metric specification string for retrieving running requests count.
 		RunningRequestsSpec string `json:"runningRequestsSpec"`
 		// KVUsageSpec defines the metric specification string for retrieving KV cache usage.
@@ -108,12 +111,13 @@ type (
 // Default engine configurations for vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
-		Name:                "vllm",
-		QueuedRequestsSpec:  "vllm:num_requests_waiting",
-		RunningRequestsSpec: "vllm:num_requests_running",
-		KVUsageSpec:         "vllm:kv_cache_usage_perc",
-		LoRASpec:            "vllm:lora_requests_info",
-		CacheInfoSpec:       "vllm:cache_config_info",
+		Name:                 "vllm",
+		QueuedRequestsSpec:   "vllm:num_requests_waiting",
+		DeferredRequestsSpec: `vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}`,
+		RunningRequestsSpec:  "vllm:num_requests_running",
+		KVUsageSpec:          "vllm:kv_cache_usage_perc",
+		LoRASpec:             "vllm:lora_requests_info",
+		CacheInfoSpec:        "vllm:cache_config_info",
 		// The CPU offload tier reports its capacity as a label of
 		// vllm:kv_offload_config_info (vLLM after v0.32.0, from the engine's first
 		// scheduler step). With TieringOffloadingSpec the label is on the
@@ -141,6 +145,20 @@ var defaultEngineConfigs = []engineConfigParams{
 			{AttributeKey: attrmetrics.NixlFailedTransfersKey, MetricSpec: "vllm:nixl_num_failed_transfers_total", Optional: true},
 			{AttributeKey: attrmetrics.NixlFailedNotificationsKey, MetricSpec: "vllm:nixl_num_failed_notifications_total", Optional: true},
 			{AttributeKey: attrmetrics.NixlKVExpiredRequestsKey, MetricSpec: "vllm:nixl_num_kv_expired_reqs_total", Optional: true},
+		},
+	},
+	{
+		Name:                "vllm-omni",
+		QueuedRequestsSpec:  "vllm_omni:num_requests_waiting",
+		RunningRequestsSpec: "vllm_omni:num_requests_running",
+		// vLLM-Omni's diffusion stages have no KV cache, and this mapping serves
+		// both its audio and image pools. The per-stage vllm:* families exist
+		// only on autoregressive stages.
+		KVUsageSpec:   "",
+		LoRASpec:      "",
+		CacheInfoSpec: "",
+		CustomMetrics: []customMetricConfigParams{
+			{AttributeKey: attrmetrics.VLLMOmniStageWaitingRequestsKey, MetricSpec: "vllm_omni:stage_waiting_requests", Aggregation: metricAggregationSum, Optional: true},
 		},
 	},
 	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
@@ -291,6 +309,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 
 		mapping, err := NewMappingFromConfig(MappingConfig{
 			Queue:                 engineConfig.QueuedRequestsSpec,
+			Deferred:              engineConfig.DeferredRequestsSpec,
 			Running:               engineConfig.RunningRequestsSpec,
 			KVUsage:               engineConfig.KVUsageSpec,
 			Lora:                  engineConfig.LoRASpec,
