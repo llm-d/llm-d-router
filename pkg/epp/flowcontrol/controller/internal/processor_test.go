@@ -1266,29 +1266,63 @@ func TestProcessor(t *testing.T) {
 						"removing an already-finalized item during dispatch must record its drop")
 				})
 
-				t.Run("should advance to the next band when the selected item is already finalized", func(t *testing.T) {
+				t.Run("should keep the higher band first in line when its head item is already finalized", func(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					qHigh := h.addQueue(keyHigh)
 					qLow := h.addQueue(keyLow)
 
 					zombieHigh := h.newTestItem("zombie-high", keyHigh, testTTL)
+					liveHigh := h.newTestItem("live-high", keyHigh, testTTL)
 					liveLow := h.newTestItem("live-low", keyLow, testTTL)
 					require.NoError(t, qHigh.Add(zombieHigh))
+					require.NoError(t, qHigh.Add(liveHigh))
 					require.NoError(t, qLow.Add(liveLow))
 					zombieHigh.Finalize(context.Canceled)
 
 					policy := &fakeBandSelectionPolicy{}
 					h.processor.bandSelectionPolicy = policy
 
-					require.True(t, h.processor.dispatchCycle(context.Background()))
-
-					require.NotNil(t, liveLow.FinalState())
-					assert.Equal(t, types.QueueOutcomeDispatched, liveLow.FinalState().Outcome,
-						"a live item in a lower-ranked band should dispatch when a higher band only had a finalized item")
-					assert.Equal(t, []int{keyLow.Priority}, policy.dispatched,
-						"RecordDispatch should charge only the band that actually dispatched")
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+					assert.Nil(t, liveHigh.FinalState(), "first cycle only removes the finalized head item")
+					assert.Nil(t, liveLow.FinalState(), "lower band must not dispatch ahead of live items in the higher band")
+					assert.Empty(t, policy.dispatched, "a non-dispatched removal must not record a dispatch")
 					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load())
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+					require.NotNil(t, liveHigh.FinalState())
+					assert.Equal(t, types.QueueOutcomeDispatched, liveHigh.FinalState().Outcome,
+						"next cycle should dispatch the live item queued behind the finalized one in the higher band")
+					assert.Nil(t, liveLow.FinalState(), "lower band must remain queued while the higher band dispatches")
+					assert.Equal(t, []int{keyHigh.Priority}, policy.dispatched,
+						"RecordDispatch should charge only the band that actually dispatched")
+				})
+
+				t.Run("should not record a dispatch or drop when Remove fails", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					item := h.newTestItem("swept", keyHigh, testTTL)
+					require.NoError(t, qHigh.Add(item))
+
+					h.ManagedQueueFunc = func(flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+						return &mocks.MockManagedQueue{
+							RemoveFunc: func(flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
+								return nil, errors.New("already swept")
+							},
+						}, nil
+					}
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a swept-item Remove failure must not record a dispatch")
+					for outcome := range h.processor.dropCounts {
+						assert.Zero(t, h.processor.dropCounts[outcome].Load(),
+							"a swept-item Remove failure must not double-count a drop")
+					}
 				})
 
 				t.Run("should not record a dispatch when the item is finalized during reserve", func(t *testing.T) {

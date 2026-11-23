@@ -588,7 +588,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue // Continue to the next band to maximize work conservation.
 		}
 		if !dispatched {
-			continue
+			// The band may still hold live items. End the cycle so the next one re-selects from it
+			// before any lower-ranked band is offered the slot.
+			return false
 		}
 		p.bandSelectionPolicy.RecordDispatch(ctx, priority)
 		return true
@@ -703,7 +705,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, e
 	removedItemAcc, err := managedQ.Remove(itemAcc.Handle())
 	if err != nil {
 		// This happens benignly if the item was already removed by the cleanup sweep loop.
-		// We log it at a low level for visibility and report non-dispatch so the cycle can continue.
+		// We log it at a low level for visibility and report non-dispatch so the cycle ends without recording a dispatch.
 		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
 			"flowKey", key, "requestID", req.ID(), "err", err)
 		return false, nil
