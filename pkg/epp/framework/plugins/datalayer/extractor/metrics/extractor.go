@@ -146,6 +146,9 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	if !ok {
 		return fmt.Errorf("no mapping found for engine type %q and no default mapping registered", engineType)
 	}
+	if meta := ep.GetMetadata(); meta != nil && meta.RankByHeader && mapping.RankLabel != "" {
+		families = rankSeries(families, mapping.RankLabel, strconv.Itoa(meta.RankIndex))
+	}
 
 	var errs []error
 	current := ep.GetMetrics()
@@ -310,6 +313,33 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// rankSeries returns families without the series whose rankLabel names a rank other
+// than rank. Series without rankLabel are kept. The input map is shared with the
+// data source and is not modified.
+func rankSeries(families sourcemetrics.PrometheusMetricMap, rankLabel, rank string) sourcemetrics.PrometheusMetricMap {
+	filtered := make(sourcemetrics.PrometheusMetricMap, len(families))
+	for name, family := range families {
+		kept := make([]*dto.Metric, 0, len(family.GetMetric()))
+		for _, metric := range family.GetMetric() {
+			if value, ok := labelValue(metric, rankLabel); !ok || value == rank {
+				kept = append(kept, metric)
+			}
+		}
+		if len(kept) == len(family.GetMetric()) {
+			filtered[name] = family
+			continue
+		}
+		filtered[name] = &dto.MetricFamily{
+			Name:   family.Name,
+			Help:   family.Help,
+			Type:   family.Type,
+			Unit:   family.Unit,
+			Metric: kept,
+		}
+	}
+	return filtered
 }
 
 // putBuiltinScalarAttribute writes a built-in scalar metric to the endpoint's
