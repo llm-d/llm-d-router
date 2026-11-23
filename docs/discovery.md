@@ -536,8 +536,13 @@ epp \
   --grpc-port 9002 \
   --grpc-health-port 9003 \
   --metrics-port 9090 \
-  --secure-serving=false
+  --secure-serving=false \
+  --tracing=false
 ```
+
+`--tracing=false` turns off span export. Tracing is on by default and sends
+spans to an OpenTelemetry collector on `localhost:4317`, so drop the flag when
+one is running.
 
 The EPP serves the `ext_proc` gRPC listener over TLS with a self-signed
 certificate by default. `--secure-serving=false` serves it in plaintext,

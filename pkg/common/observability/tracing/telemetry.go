@@ -24,6 +24,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
@@ -41,12 +43,64 @@ import (
 	"github.com/llm-d/llm-d-router/version"
 )
 
+// repeatedErrorInterval is how often an error the handler has already logged is
+// logged again. An exporter that cannot reach its collector fails the same way on
+// every batch, every few seconds, for as long as the process runs.
+const repeatedErrorInterval = 5 * time.Minute
+
+// maxTrackedErrors bounds how many distinct messages the handler remembers. Past it
+// the handler forgets them all, so each logs at Error once more.
+const maxTrackedErrors = 32
+
 type errorHandler struct {
 	logger logr.Logger
+	now    func() time.Time // time.Now when nil
+
+	mu   sync.Mutex
+	seen map[string]*errorRepeat
 }
 
+type errorRepeat struct {
+	lastLogged time.Time
+	lastSeen   time.Time
+	suppressed int
+}
+
+// Handle logs the first occurrence of each error at Error. Repeats of it are held
+// back and logged at most once per repeatedErrorInterval, at Info and without a
+// stack trace, with the number held back since the last one. An error that has not
+// occurred for repeatedErrorInterval logs at Error again.
 func (h *errorHandler) Handle(err error) {
-	h.logger.V(logging.DEFAULT).Error(err, "trace error occurred")
+	if err == nil {
+		return
+	}
+	now := time.Now
+	if h.now != nil {
+		now = h.now
+	}
+	msg := err.Error()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	t := now()
+	r, ok := h.seen[msg]
+	if !ok || t.Sub(r.lastSeen) >= repeatedErrorInterval {
+		if !ok && (h.seen == nil || len(h.seen) >= maxTrackedErrors) {
+			h.seen = make(map[string]*errorRepeat)
+		}
+		h.seen[msg] = &errorRepeat{lastLogged: t, lastSeen: t}
+		h.logger.V(logging.DEFAULT).Error(err, "trace error occurred")
+		return
+	}
+
+	r.lastSeen = t
+	if t.Sub(r.lastLogged) < repeatedErrorInterval {
+		r.suppressed++
+		return
+	}
+	h.logger.V(logging.DEFAULT).Info("trace error still occurring", "error", msg, "suppressed", r.suppressed)
+	r.lastLogged, r.suppressed = t, 0
 }
 
 // InitTextMapPropagator installs W3C trace context and baggage propagators.
