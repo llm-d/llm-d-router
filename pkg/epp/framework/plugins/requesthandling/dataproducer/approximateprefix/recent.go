@@ -133,36 +133,22 @@ func (w *recentWindow) headCopy(hashes []blockHash) []blockHash {
 // Peers read the window as a whole on every publish, so draining would wipe
 // peer-visible hashes on the next idle publish tick.
 func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
-	prompts, _ := w.snapshotWindow(endpointID)
-	live := prompts[:0:0]
-	for _, p := range prompts {
-		if len(p) > 0 {
-			live = append(live, p)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	buf := w.pending[endpointID]
+	if buf == nil {
+		return nil
+	}
+	live := make([][]blockHash, 0, len(buf.slots)-buf.start)
+	for _, slot := range buf.slots[buf.start:] {
+		if !withdrawnSlot(slot) {
+			live = append(live, append([]blockHash(nil), slot.hashes...))
 		}
 	}
 	if len(live) == 0 {
 		return nil
 	}
 	return live
-}
-
-// snapshotWindow returns content slots, including empty withdrawn prompts, and
-// the generation of the first element. Retraction slots are omitted.
-func (w *recentWindow) snapshotWindow(endpointID string) ([][]blockHash, uint64) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	buf := w.pending[endpointID]
-	if buf == nil {
-		return nil, 0
-	}
-	var prompts [][]blockHash
-	for _, slot := range buf.slots[buf.start:] {
-		if slot.drop {
-			continue
-		}
-		prompts = append(prompts, append([]blockHash(nil), slot.hashes...))
-	}
-	return prompts, buf.base
 }
 
 // sequenced is the value incremental replication publishes for endpointID.
