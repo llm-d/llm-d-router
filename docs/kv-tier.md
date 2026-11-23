@@ -167,7 +167,7 @@ TPU Sync sets three limits on the hints:
 
 - It has no caller-driven eviction. `kv.move` and `kv.evict_on_fetch` therefore copy the blocks but leave the source copy.
 - A push lands only in free blocks. A peer whose store is full refuses it.
-- Each store's host pool is private. Two engines on one host do not share blocks through it.
+- Each engine's store has its own host pool. Two engines on one host do not share blocks through it.
 
 ### Mooncake
 
@@ -288,14 +288,14 @@ Not tested yet: a push to a peer whose store is full, a failure during a load, c
 
 ## Risks and open questions
 
-The biggest open question was how the TPU path should work with TPU Sync. Three of the six questions are now answered:
+The biggest open question was how the TPU path should work with TPU Sync. Three of the six questions are now answered, and two are partly answered:
 
-1. ✅ **Hints in.** Can an engine connector ask TPU Sync to pull given blocks from a given peer, for example from a `kv.fetch` hint? Yes. The proof-of-concept connector does it, and it also pushes on `kv.prefetch`.
-2. ✅ **Connector version.** Which tpu-inference version pairs with the current TPU Sync wheel? We found none. The `RaidenOffloadConnector` on tpu-inference `main` still imports `tpu_raiden`, and it logs remote chunks without fetching them. We wrote our own connector against the current `KVCacheStore` API.
-3. ✅ **Sharing.** Can several engines on one host share a TPU Sync host pool? No. Each store's pool is private, and two engines get separate memory segments.
-4. **Events.** Does TPU Sync publish block stored and removed events that a router could index? We have not found an event stream. Its global registry answers lookups by hash, one at a time. The router therefore cannot see which blocks a pod holds in host memory. A hint can name a peer that has already evicted the blocks, and that request recomputes. A prefetch also cannot name blocks by hash. It must ride on a request to the source that carries the real prompt.
+1. ✅ **Hints in.** Can an engine connector ask TPU Sync to pull given blocks from a given peer, for example from a `kv.fetch` hint? Yes. The TPU Sync team confirmed it: the store provides Load and RemoteRead calls. The proof-of-concept connector uses them, and it also pushes on `kv.prefetch`.
+2. ✅ **Connector version.** Which tpu-inference version pairs with the current TPU Sync wheel? None. The TPU Sync team confirmed that the `RaidenOffloadConnector` in tpu-inference is deprecated. The `KVCacheStore` API is the supported surface. We wrote our own connector against it.
+3. ✅ **Sharing.** Can several engines on one host share a TPU Sync host pool? Not between engines. Two engines on one host get separate memory segments. A helper process can reach one store's host memory. See question 6.
+4. **Events.** Does TPU Sync publish block stored and removed events that a router could index? Partly. We have not found an event stream that a router could subscribe to. Its global registry answers lookups by hash, one at a time. The store does have an eviction callback that reports evicted block hashes to code inside the engine. A connector could turn that into KV events. We have not tried it. Until then the router cannot see which blocks a pod holds in host memory. A hint can name a peer that has already evicted the blocks, and that request recomputes. A prefetch also cannot name blocks by hash. It must ride on a request to the source that carries the real prompt.
 5. **Secondary backend.** Is it pluggable from outside, for example for this daemon or Mooncake Store?
-6. **Extension hooks.** Can outside code add transforms on host blocks, such as compression, or new hint actions?
+6. **Extension hooks.** Can outside code add transforms on host blocks, such as compression, or new hint actions? Partly. The TPU Sync team says another process on the host can share the store's host memory and operate on the blocks. It must restore the original format before a block is copied back to the TPU. There is no hook API for this, and we have not tried it. New hint actions are not answered.
 
 The TPU path can now be a thin adapter onto TPU Sync for fetch and prefetch. The daemon-based shim stays for what TPU Sync cannot do yet: deleting the source copy on a move, and sharing one pool between engines on a host.
 
