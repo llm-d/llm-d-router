@@ -27,6 +27,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/utils/clock"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -58,6 +59,8 @@ type FlowItem struct {
 	effectiveTTL    time.Duration
 	originalRequest flowcontrol.FlowControlRequest
 	logger          logr.Logger
+	// clock measures the queue duration at finalization.
+	clock clock.PassiveClock
 	// span is the request's trace span, kept for the queue duration exemplar because finalization can run on a
 	// goroutine that has no request context.
 	span trace.Span
@@ -88,18 +91,24 @@ type FlowItem struct {
 var _ flowcontrol.QueueItemAccessor = &FlowItem{}
 
 // NewItem allocates and initializes a new FlowItem for a request lifecycle. Only the trace span is kept from ctx.
+// A nil clk defaults to the real clock.
 func NewItem(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
 	effectiveTTL time.Duration,
 	enqueueTime time.Time,
+	clk clock.PassiveClock,
 	logger logr.Logger,
 ) *FlowItem {
+	if clk == nil {
+		clk = clock.RealClock{}
+	}
 	return &FlowItem{
 		enqueueTime:     enqueueTime,
 		effectiveTTL:    effectiveTTL,
 		originalRequest: req,
 		logger:          logger,
+		clock:           clk,
 		span:            trace.SpanFromContext(ctx),
 		done:            make(chan *FinalState, 1),
 	}
@@ -178,7 +187,7 @@ func (fi *FlowItem) finalizeInternal(err error) {
 	// Atomically store the pointer. This is the critical memory barrier that publishes the state safely.
 	fi.finalState.Store(finalState)
 
-	duration := time.Since(fi.enqueueTime)
+	duration := fi.clock.Since(fi.enqueueTime)
 	flowKey := fi.originalRequest.FlowKey()
 	metrics.RecordFlowControlRequestQueueDuration(
 		trace.ContextWithSpan(context.Background(), fi.span),
