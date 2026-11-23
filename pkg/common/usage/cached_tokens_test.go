@@ -203,6 +203,10 @@ func TestCachedTokens(t *testing.T) {
 			block: map[string]any{"prompt_tokens": float64(64)},
 		},
 		{
+			name:  "null prompt token details",
+			block: map[string]any{"prompt_tokens": float64(64), "prompt_tokens_details": nil},
+		},
+		{
 			name:   "explicit zero",
 			block:  map[string]any{"prompt_tokens_details": map[string]any{"cached_tokens": float64(0)}},
 			wantOK: true,

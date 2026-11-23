@@ -441,6 +441,17 @@ func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T
 			connector:   kv.NIXL,
 			runPrefill:  true,
 		},
+		{
+			// vLLM without --enable-prompt-tokens-details sends a usage block
+			// with no details object however many tokens were cached.
+			name: "prefill usage without prompt token details",
+			prefillBody: map[string]any{
+				"kv_transfer_params": map[string]any{"block_id": "block-1"},
+				"usage":              map[string]any{"prompt_tokens": 64},
+			},
+			connector:  kv.NIXL,
+			runPrefill: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -476,6 +487,62 @@ func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T
 
 			if got := clientCachedTokens(t, recorder.Body.String()); got != decodeCachedTokens {
 				t.Errorf("client cached_tokens = %d, want the decode worker's %d", got, decodeCachedTokens)
+			}
+		})
+	}
+}
+
+// A prefill usage block without a details object measured nothing: vLLM without
+// --enable-prompt-tokens-details sends one however many tokens were cached. The
+// details the decode worker sent, including their absence, reach the client
+// unchanged rather than being replaced with a fabricated zero.
+func TestCachedTokens_AbsentDetailsStayAbsent(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non-streaming"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			usageWithoutDetails := map[string]any{"prompt_tokens": 64, "completion_tokens": 1, "total_tokens": 65}
+			gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+				case gateway.PhasePrefill:
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"kv_transfer_params": map[string]any{"block_id": "block-1"},
+						"usage":              usageWithoutDetails,
+					})
+				case gateway.PhaseDecode:
+					if stream {
+						writeUsageSSE(t, w, usageWithoutDetails)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"usage": usageWithoutDetails})
+				default:
+					http.Error(w, "not found", http.StatusNotFound)
+				}
+			}))
+			defer gwServer.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+			reqCtx := cachedTokensRequestContext(stream)
+
+			prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+			if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("prefill failed: %v", err)
+			}
+			if reqCtx.PrefillCachedTokens != nil {
+				t.Errorf("prefill claimed a count of %d from a usage block that reported none", *reqCtx.PrefillCachedTokens)
+			}
+
+			decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+			recorder := httptest.NewRecorder()
+			reqCtx.ResponseWriter = recorder
+			if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("decode failed: %v", err)
+			}
+
+			if strings.Contains(recorder.Body.String(), reqcommon.FieldPromptTokensDetails) {
+				t.Errorf("client body carries %s: %s", reqcommon.FieldPromptTokensDetails, recorder.Body.String())
 			}
 		})
 	}
