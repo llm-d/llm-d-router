@@ -838,11 +838,13 @@ These metrics are owned by the `program-aware-fairness` Flow Control policy. The
 Control alone does not emit them. `program_id` is the request's fairness ID and shares the
 `fairness_id` label cap. Programs past the cap are not reported on these gauges.
 
+The `policy` label is the configured plugin instance name.
+
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_program_aware_jains_fairness_index` | Gauge | - | Jain's fairness index across programs. |
-| `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
-| `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
+| `llm_d_epp_program_aware_jains_fairness_index` | Gauge | `policy` | Jain's fairness index across programs. |
+| `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `policy`, `program_id` | Mean wait time. |
+| `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `policy`, `program_id` | Attained service. |
 
 ### Latency by prompt bucket and path
 

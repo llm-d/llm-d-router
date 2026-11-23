@@ -24,8 +24,7 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-func newCollectors(name string) (fairnessIndex prometheus.Gauge, avgWaitTimeMs *prometheus.GaugeVec) {
-	labels := prometheus.Labels{"policy": name}
+func newCollectors(labels prometheus.Labels) (fairnessIndex prometheus.Gauge, avgWaitTimeMs *prometheus.GaugeVec) {
 	fairnessIndex = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Subsystem:   eppmetrics.LLMDRouterEndpointPickerSubsystem,

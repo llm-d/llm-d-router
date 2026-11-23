@@ -170,7 +170,7 @@ func TestPick_IdleProgramServiceDecaysWithoutVisits(t *testing.T) {
 		LASWeightService:   1.0,
 		LASWeightHeadWait:  0.0,
 		LASHalfLifeSeconds: 1,
-	}, "test")
+	}, nil)
 	require.NoError(t, err)
 	las, ok := strategy.(*LASStrategy)
 	require.True(t, ok)
@@ -479,7 +479,7 @@ func TestNewStrategy_TurnPriority(t *testing.T) {
 		Strategy:                      "turn-priority",
 		TurnPriorityTimeWeight:        0.25,
 		TurnPriorityInactivitySeconds: 120,
-	}, "test")
+	}, nil)
 	require.NoError(t, err)
 
 	tp, ok := strategy.(*turnPriorityStrategy)
@@ -490,7 +490,7 @@ func TestNewStrategy_TurnPriority(t *testing.T) {
 }
 
 func TestNewStrategy_UnknownRejected(t *testing.T) {
-	_, err := newStrategy(Config{Strategy: "nope"}, "test")
+	_, err := newStrategy(Config{Strategy: "nope"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "turn-priority")
 }

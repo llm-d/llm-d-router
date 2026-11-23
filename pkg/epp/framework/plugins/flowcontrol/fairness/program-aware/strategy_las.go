@@ -83,13 +83,13 @@ func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds float
 	return s.attainedService
 }
 
-func newAttainedServiceCollector(name string) *prometheus.GaugeVec {
+func newAttainedServiceCollector(labels prometheus.Labels) *prometheus.GaugeVec {
 	return prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem:   eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:        "program_aware_attained_service_tokens",
 			Help:        metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program.", compbasemetrics.ALPHA),
-			ConstLabels: prometheus.Labels{"policy": name},
+			ConstLabels: labels,
 		},
 		[]string{"program_id"},
 	)

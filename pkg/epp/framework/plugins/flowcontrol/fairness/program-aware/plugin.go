@@ -116,11 +116,12 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 	if name == "" {
 		name = ProgramAwarePluginType
 	}
-	strategy, err := newStrategy(cfg, name)
+	labels := prometheus.Labels{"policy": name}
+	strategy, err := newStrategy(cfg, labels)
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	fairnessIndex, avgWaitTimeMs := newCollectors(name)
+	fairnessIndex, avgWaitTimeMs := newCollectors(labels)
 	p := &ProgramAwarePlugin{name: name, strategy: strategy, fairnessIndex: fairnessIndex, avgWaitTimeMs: avgWaitTimeMs}
 	if handle != nil {
 		if reg := handle.Metrics(); reg != nil {
@@ -207,7 +208,7 @@ func (p *ProgramAwarePlugin) DumpState() (json.RawMessage, error) {
 // instances constructed in tests.
 func (p *ProgramAwarePlugin) getStrategy() Strategy {
 	if p.strategy == nil {
-		s, _ := newStrategy(DefaultConfig(), p.name)
+		s, _ := newStrategy(DefaultConfig(), nil)
 		return s
 	}
 	return p.strategy
