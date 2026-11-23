@@ -235,7 +235,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				}
 				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
 				return ReqRequestHeadersAndResponseGRPC(
-					map[string]string{":path": fwkepp.GenerateGRPCMethodName},
+					map[string]string{":path": fwkepp.GenerateGRPCMethodName, reqcommon.RequestIDHeaderKey: "test-request-id"},
 					map[string]string{"content-type": "application/grpc"},
 					gRPCPayload[:len(gRPCPayload)/2],
 					gRPCPayload[len(gRPCPayload)/2:],
@@ -251,18 +251,18 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					},
 				}
 				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
-				return ExpectBufferResp(string(gRPCPayload), "application/grpc")
+				return ExpectBufferResp(string(gRPCPayload), "application/grpc", "test-request-id")
 			}(),
 		},
 		{
 			name: "response buffering: invalid gRPC",
 			requests: ReqRequestHeadersAndResponseGRPC(
-				map[string]string{":path": fwkepp.GenerateGRPCMethodName},
+				map[string]string{":path": fwkepp.GenerateGRPCMethodName, reqcommon.RequestIDHeaderKey: "test-request-id"},
 				map[string]string{"content-type": "application/grpc"},
 				[]byte("no healthy upstream"),
 			),
 			pods:          []eppharness.PodState{eppharness.P(0, 4, 0.2)},
-			wantResponses: ExpectBufferResp("no healthy upstream", "application/grpc"),
+			wantResponses: ExpectBufferResp("no healthy upstream", "application/grpc", "test-request-id"),
 		},
 		{
 			name: "response with token usage",
@@ -277,7 +277,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				}
 				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
 				return ReqRequestHeadersAndResponseGRPC(
-					map[string]string{":path": fwkepp.GenerateGRPCMethodName},
+					map[string]string{":path": fwkepp.GenerateGRPCMethodName, reqcommon.RequestIDHeaderKey: "test-request-id"},
 					map[string]string{"content-type": "application/grpc"},
 					gRPCPayload[:len(gRPCPayload)/2],
 					gRPCPayload[len(gRPCPayload)/2:],
@@ -294,7 +294,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					},
 				}
 				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
-				return ExpectBufferResp(string(gRPCPayload), "application/grpc")
+				return ExpectBufferResp(string(gRPCPayload), "application/grpc", "test-request-id")
 			}(),
 			// Labels are empty because we skipped the Request phase.
 			wantMetrics: map[string]string{},

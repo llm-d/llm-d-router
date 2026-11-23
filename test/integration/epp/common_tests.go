@@ -325,48 +325,62 @@ func jsonContentTypeHeader() *envoyCorev3.HeaderValueOption {
 	}
 }
 
+// requestIDResponseHeader returns the x-request-id header EPP sets on the
+// response, or nil when requestID is empty. EPP returns the request ID it
+// resolved in the request-headers phase, so a sequence that starts at the
+// response phase (ReqResponseOnly) gets none back, and a request without an
+// x-request-id gets a generated UUID that a test cannot predict.
+func requestIDResponseHeader(requestID string) []*envoyCorev3.HeaderValueOption {
+	if requestID == "" {
+		return nil
+	}
+	return []*envoyCorev3.HeaderValueOption{{Header: &envoyCorev3.HeaderValue{
+		Key:      reqcommon.RequestIDHeaderKey,
+		RawValue: []byte(requestID),
+	}}}
+}
+
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
 // This uses the shared primitive but adds EPP-specific headers we expect.
-func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingResponse {
-	return fwkepp.NewResponseBufferedResponse(
-		body,
-		contentType != "application/grpc", // For gRPC, the EoS will not be set to true but it will return a trailer.
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+// requestID is the x-request-id the response must carry; pass "" when the
+// sequence skips the request-headers phase.
+func ExpectBufferResp(body, contentType, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte(contentType),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
-			Key:      reqcommon.RequestIDHeaderKey,
-			RawValue: []byte("test-request-id"),
-		}},
+	}, requestIDResponseHeader(requestID)...)
+	return fwkepp.NewResponseBufferedResponse(
+		body,
+		contentType != "application/grpc", // For gRPC, the EoS will not be set to true but it will return a trailer.
+		headers...,
 	)
 }
 
 // ExpectStreamResp asserts that the EPP streams the response chunks (pass-through).
 // It constructs a sequence of:
-// 1. ResponseHeaders (with "x-went-into-resp-headers" and "text/event-stream")
+// 1. ResponseHeaders (with "x-went-into-resp-headers" and "text/event-stream",
+// plus x-request-id when requestID is not empty)
 // 2. ResponseBody chunks (with EndOfStream=true on the final chunk)
-func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
+func ExpectStreamResp(requestID string, chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, fwkepp.NewResponseHeaders(
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte("text/event-stream"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "status", RawValue: []byte("200")}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
-			Key:      reqcommon.RequestIDHeaderKey,
-			RawValue: []byte("test-request-id"),
-		}},
-	))
+		{Header: &envoyCorev3.HeaderValue{Key: "status", RawValue: []byte("200")}},
+	}, requestIDResponseHeader(requestID)...)
+	res = append(res, fwkepp.NewResponseHeaders(headers...))
 
 	// 2. The Body Chunk Frames
 	for i, chunk := range chunks {
@@ -376,22 +390,20 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 }
 
 // ExpectGRPCStreamResp asserts that the EPP streams the gRPC response chunks.
-func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
+// requestID is the x-request-id the response must carry, or "" for none.
+func ExpectGRPCStreamResp(requestID string, chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, fwkepp.NewResponseHeaders(
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte("application/grpc"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
-			Key:      reqcommon.RequestIDHeaderKey,
-			RawValue: []byte("test-request-id"),
-		}},
-	))
+	}, requestIDResponseHeader(requestID)...)
+	res = append(res, fwkepp.NewResponseHeaders(headers...))
 
 	for _, chunk := range chunks {
 		res = append(res, fwkepp.NewResponseStreamChunk(chunk, false))

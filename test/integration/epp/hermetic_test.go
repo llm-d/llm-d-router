@@ -339,7 +339,7 @@ dataLayer:
 					pods: []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					wantResponses: ExpectBufferResp(
 						fmt.Sprintf(`{"max_tokens":100,"model":%q,"prompt":"test6","temperature":0}`, modelSheddable),
-						"application/json"),
+						"application/json", ""),
 				},
 				{
 					name: "response buffering: invalid JSON",
@@ -348,7 +348,7 @@ dataLayer:
 						"no healthy upstream",
 					),
 					pods:          []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
-					wantResponses: ExpectBufferResp("no healthy upstream", "application/json"),
+					wantResponses: ExpectBufferResp("no healthy upstream", "application/json", ""),
 				},
 				{
 					name: "response buffering: empty EOS chunk (JSON)",
@@ -360,7 +360,7 @@ dataLayer:
 					pods: []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					wantResponses: ExpectBufferResp(
 						fmt.Sprintf(`{"max_tokens":100,"model":%q,"prompt":"test6","temperature":0}`, modelSheddable),
-						"application/json"),
+						"application/json", ""),
 				},
 				{
 					name: "response streaming: SSE token counting",
@@ -375,6 +375,7 @@ dataLayer:
 					pods:         []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					waitForModel: modelSheddable,
 					wantResponses: ExpectStreamResp(
+						"", // No request phase, so EPP has no request ID to return.
 						`data: {}`,
 						`data: {"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`+"\n"+`data: [DONE]`,
 						"",

@@ -21,6 +21,9 @@ import (
 	"strings"
 	"testing"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/baggage"
@@ -30,6 +33,8 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
 // responseHeaders collects the generated response headers, lowercasing keys and
@@ -191,4 +196,94 @@ func TestGenerateResponseHeaders_TraceparentOmittedWhenTracingDisabled(t *testin
 	got, _ := responseHeaders(ctx, t, server, reqCtx)
 
 	assert.NotContains(t, got, "traceparent")
+}
+
+// responseHeaderValues returns the x-request-id values Process set on the
+// response-headers mutation of the stream.
+func responseHeaderValues(t *testing.T, sent []*extProcPb.ProcessingResponse, key string) []string {
+	t.Helper()
+
+	var values []string
+	for _, resp := range sent {
+		headers := resp.GetResponseHeaders()
+		if headers == nil {
+			continue
+		}
+		for _, opt := range headers.GetResponse().GetHeaderMutation().GetSetHeaders() {
+			if strings.EqualFold(opt.GetHeader().GetKey(), key) {
+				values = append(values, string(opt.GetHeader().GetRawValue()))
+			}
+		}
+	}
+	return values
+}
+
+// The request ID is resolved in the request-headers phase, so what the response
+// carries depends on whether that phase ran. A stream that starts at the
+// response phase has no ID to return, and a request that supplies none gets the
+// generated one rather than an empty header.
+func TestProcessReturnsRequestIDOnlyWhenResolved(t *testing.T) {
+	responsePhase := []*extProcPb.ProcessingRequest{
+		{Request: &extProcPb.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extProcPb.HttpHeaders{
+			Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+				{Key: reqcommon.HeaderContentType, RawValue: []byte(reqcommon.ContentTypeJSON)},
+			}},
+		}}},
+		{Request: &extProcPb.ProcessingRequest_ResponseBody{ResponseBody: &extProcPb.HttpBody{
+			Body: []byte(`{}`), EndOfStream: true,
+		}}},
+	}
+
+	for _, tc := range []struct {
+		name           string
+		requestHeaders map[string]string
+		skipRequest    bool
+		want           string
+	}{
+		{
+			name:           "client request ID is returned",
+			requestHeaders: map[string]string{":path": reqcommon.PathChatCompletions, reqcommon.RequestIDHeaderKey: "req-from-client"},
+			want:           "req-from-client",
+		},
+		{
+			name:           "generated request ID is returned",
+			requestHeaders: map[string]string{":path": reqcommon.PathChatCompletions},
+		},
+		{
+			name:        "no request phase returns no request ID",
+			skipRequest: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTracerProvider(t, noop.NewTracerProvider())
+
+			reqs := make([]*extProcPb.ProcessingRequest, 0, 4)
+			if !tc.skipRequest {
+				reqs = append(reqs,
+					newRequestHeaders(tc.requestHeaders),
+					&extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{
+						Body: []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), EndOfStream: true,
+					}}},
+				)
+			}
+			reqs = append(reqs, responsePhase...)
+
+			srv := &replayProcessServer{ctx: context.Background(), reqs: reqs}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			_ = NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv)
+
+			got := responseHeaderValues(t, srv.sentResponses, reqcommon.RequestIDHeaderKey)
+
+			if tc.skipRequest {
+				require.Empty(t, got, "a stream with no request phase has no request ID to return")
+				return
+			}
+			require.Len(t, got, 1, "the client must receive exactly one x-request-id")
+			if tc.want != "" {
+				require.Equal(t, tc.want, got[0])
+				return
+			}
+			require.NotEmpty(t, got[0], "a request without an x-request-id gets the generated one")
+		})
+	}
 }
