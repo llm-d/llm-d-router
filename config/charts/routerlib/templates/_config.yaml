@@ -23,6 +23,8 @@
     {{- else if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
       {{- /* passthrough-parser claims no paths and terminates registration. Keep it last. */}}
       {{- $parsers = list "vllminference-parser" "vllmgrpc-parser" "passthrough-parser" }}
+    {{- else if and (eq (lower $modelServerType) "sglang") (eq (lower $modelServerProtocol) "grpc") }}
+      {{- $parsers = list "sglanggrpc-parser" "passthrough-parser" }}
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
