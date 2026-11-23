@@ -26,12 +26,15 @@ import (
 	"github.com/go-logr/logr"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extractormocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -203,5 +206,85 @@ func TestNotificationDispatchRecoversPanickingExtractor(t *testing.T) {
 	}
 	if got := len(working.GetEvents()); got != 1 {
 		t.Fatalf("working extractor received %d events, want 1", got)
+	}
+}
+
+func TestHasNotificationExtractor(t *testing.T) {
+	sliceGVK := schema.GroupVersionKind{Group: "discovery.k8s.io", Version: "v1", Kind: "EndpointSlice"}
+	watcher := fwkplugin.TypedName{Type: "watcher", Name: "watcher"}
+	skipped := fwkplugin.TypedName{Type: "skipped", Name: "skipped"}
+
+	runtime := NewRuntime(time.Second)
+	if err := runtime.Register(fwkdl.PendingRegistration{
+		Owner:      watcher,
+		SourceType: sourcenotifications.NotificationSourceType,
+		Extractor:  extractormocks.NewNotificationExtractor("watcher-extractor").WithGVK(sliceGVK),
+		DefaultSource: sourcenotifications.NewK8sNotificationSource(
+			sourcenotifications.NotificationSourceType, "watcher/slices", sliceGVK),
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// No default source and none configured: skipped with a warning.
+	if err := runtime.Register(fwkdl.PendingRegistration{
+		Owner:      skipped,
+		SourceType: "no-such-source",
+		Extractor:  extractormocks.NewNotificationExtractor("skipped-extractor").WithGVK(sliceGVK),
+		IfMissing:  fwkdl.Warn,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if runtime.HasNotificationExtractor(watcher) {
+		t.Fatal("HasNotificationExtractor() before Configure = true")
+	}
+	if err := runtime.Configure(&Config{}, logr.Discard()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	if !runtime.HasNotificationExtractor(watcher) {
+		t.Error("HasNotificationExtractor(watcher) = false, want true")
+	}
+	if runtime.HasNotificationExtractor(skipped) {
+		t.Error("HasNotificationExtractor(skipped) = true, want false")
+	}
+	if runtime.HasNotificationExtractor(fwkplugin.TypedName{Type: "other", Name: "other"}) {
+		t.Error("HasNotificationExtractor(unregistered) = true, want false")
+	}
+}
+
+func TestNotificationCacheByObject(t *testing.T) {
+	podGVK := schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
+	sliceGVK := schema.GroupVersionKind{Group: "discovery.k8s.io", Version: "v1", Kind: "EndpointSlice"}
+	cmGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	sel := labels.SelectorFromSet(labels.Set{"kubernetes.io/service-name": "model-server"})
+
+	runtime := NewRuntime(time.Second)
+	newSource := func(name string, gvk schema.GroupVersionKind, opts ...sourcenotifications.K8sNotificationSourceOption) DataSourceConfig {
+		return DataSourceConfig{
+			Plugin:     sourcenotifications.NewK8sNotificationSource(sourcenotifications.NotificationSourceType, name, gvk, opts...),
+			Extractors: []fwkplugin.Plugin{extractormocks.NewNotificationExtractor(name + "-extractor").WithGVK(gvk)},
+		}
+	}
+	if err := runtime.Configure(&Config{Sources: []DataSourceConfig{
+		newSource("pods", podGVK),
+		newSource("slices", sliceGVK, sourcenotifications.WithNamespace("models"), sourcenotifications.WithLabelSelector(sel)),
+		newSource("configmaps", cmGVK, sourcenotifications.WithLabelSelector(sel)),
+	}}, logr.Discard()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	got := map[schema.GroupVersionKind]cache.ByObject{}
+	for obj, byObject := range runtime.NotificationCacheByObject() {
+		got[obj.GetObjectKind().GroupVersionKind()] = byObject
+	}
+	if len(got) != 2 {
+		t.Fatalf("NotificationCacheByObject() has %d entries, want 2 (unscoped Pod source left out): %v", len(got), got)
+	}
+	slices, ok := got[sliceGVK]
+	if !ok || len(slices.Namespaces) != 1 || slices.Namespaces["models"].LabelSelector.String() != sel.String() {
+		t.Errorf("EndpointSlice scope = %+v, want namespace models with selector %s", slices, sel)
+	}
+	cms, ok := got[cmGVK]
+	if !ok || cms.Namespaces != nil || cms.Label.String() != sel.String() {
+		t.Errorf("ConfigMap scope = %+v, want all namespaces with selector %s", cms, sel)
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/cache/synctrack"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -42,6 +43,38 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
+
+// NotificationCacheByObject returns manager cache options that scope the
+// watch of every configured ScopedNotificationSource to its namespace and
+// label selector. Sources that are not scoped are left out and watch their
+// GVK cluster-wide, as before. Call it after Configure and pass the result to
+// the manager that BindNotificationSources binds to.
+func (r *Runtime) NotificationCacheByObject() map[client.Object]cache.ByObject {
+	byObject := make(map[client.Object]cache.ByObject)
+	_ = r.notification.ForEach(func(_ string, src fwkdl.NotificationSource) error {
+		scoped, ok := src.(fwkdl.ScopedNotificationSource)
+		if !ok {
+			return nil
+		}
+		namespace, selector := scoped.Namespace(), scoped.LabelSelector()
+		if namespace == "" && (selector == nil || selector.Empty()) {
+			return nil
+		}
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(src.GVK())
+		cfg := cache.Config{}
+		if selector != nil && !selector.Empty() {
+			cfg.LabelSelector = selector
+		}
+		if namespace == "" {
+			byObject[obj] = cache.ByObject{Label: cfg.LabelSelector}
+		} else {
+			byObject[obj] = cache.ByObject{Namespaces: map[string]cache.Config{namespace: cfg}}
+		}
+		return nil
+	})
+	return byObject
+}
 
 // BindNotificationSource registers a watcher/reconciler for the source's GVK.
 // The framework core owns the cache and reconciliation; the source only receives

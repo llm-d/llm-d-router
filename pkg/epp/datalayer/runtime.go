@@ -67,6 +67,9 @@ type Runtime struct {
 
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
+	// notificationOwners holds the owners of code-registered extractors that
+	// Configure bound to a NotificationSource. Written only by Configure.
+	notificationOwners map[fwkplugin.TypedName]struct{}
 
 	collectors *collectorManager // per-endpoint poller, keyed by namespaced name
 	logger     logr.Logger       // Set in Configure; used where no context is available (e.g. ReleaseEndpoint).
@@ -196,6 +199,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	}
 
 	// Resolve code-registered pending registrations after processing user config.
+	r.notificationOwners = make(map[fwkplugin.TypedName]struct{})
 	for _, pending := range r.pendingRegistrations {
 		var gvkFilter *schema.GroupVersionKind
 		if ns, ok := pending.DefaultSource.(fwkdl.NotificationSource); ok {
@@ -242,6 +246,9 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 			}
 		} else {
 			r.extractors.Append(srcName, pending.Extractor)
+			if _, ok := matchedSrc.(fwkdl.NotificationSource); ok {
+				r.notificationOwners[pending.Owner] = struct{}{}
+			}
 		}
 	}
 
@@ -254,6 +261,15 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		"notifiers", r.notification.Count(),
 		"endpointSources", r.endpoint.Count())
 	return nil
+}
+
+// HasNotificationExtractor reports whether Configure bound an extractor that
+// owner registered (see Register) to a NotificationSource, so owner receives
+// Kubernetes notification events once Start binds the sources to a manager.
+// Call it after Configure.
+func (r *Runtime) HasNotificationExtractor(owner fwkplugin.TypedName) bool {
+	_, ok := r.notificationOwners[owner]
+	return ok
 }
 
 // Register stores a pending source/extractor dependency declared by a plugin.

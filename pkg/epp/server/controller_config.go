@@ -58,12 +58,22 @@ type ControllerConfig struct {
 	// migrate instead of dual-writing one object.
 	SecondaryObjectiveGV       schema.GroupVersion
 	PopulateNonLeaderDatastore bool
+	// skipPodReconciler leaves the Pod reconciler out, for discovery plugins
+	// that populate the datastore themselves. See DisablePodReconciler.
+	skipPodReconciler bool
 }
 
 func NewControllerConfig(startCrdReconcilers bool) ControllerConfig {
 	return ControllerConfig{
 		startCrdReconcilers: startCrdReconcilers,
 	}
+}
+
+// DisablePodReconciler leaves the Pod reconciler out of SetupWithManager. Use
+// it when an endpoint discovery plugin populates the datastore, so Pods in the
+// pool namespace are neither watched nor added as endpoints.
+func (cc *ControllerConfig) DisablePodReconciler() {
+	cc.skipPodReconciler = true
 }
 
 func (cc *ControllerConfig) PopulateControllerConfig(cfg *rest.Config) error {

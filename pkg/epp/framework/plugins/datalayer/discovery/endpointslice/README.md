@@ -1,0 +1,152 @@
+# EndpointSlice Discovery Plugin
+
+**Type:** `endpointslice-discovery`
+**Interface:** `EndpointDiscovery`
+
+Builds the endpoint datastore from Kubernetes EndpointSlices instead of Pods.
+
+## What It Does
+
+Default Kubernetes discovery reads `pod.status.podIP` of the Pods an
+`InferencePool` selects. That is not usable when the model servers are not
+Pods with routable Pod IPs, for example servers running outside the cluster,
+or `hostNetwork` Pods that all report one node IP while the reachable
+addresses live elsewhere. A controller that knows the real addresses can
+publish them as EndpointSlices of a selector-less Service; this plugin reads
+those slices.
+
+## How It Works
+
+- **Watch.** The plugin owns no Kubernetes client. It registers a
+  `k8s-notification-source` for EndpointSlices scoped to `namespace` and
+  `selector`; the EPP binds it to its controller manager, whose cache holds
+  only those slices (see
+  [Kubernetes-backed discovery plugins](../../../../../../../docs/discovery.md#kubernetes-backed-discovery-plugins)).
+- **Reconcile.** The plugin's extractor hands every slice event to the
+  `Start` goroutine, which updates its set of slices, recomputes the endpoint
+  set and applies the difference from the previous reconcile with
+  `notifier.Upsert` and `notifier.Delete`. The extractor returns only after
+  the event is applied. An endpoint whose address, port and labels are
+  unchanged is not upserted again.
+- **Endpoints.** Each slice endpoint becomes one EPP endpoint, using its first
+  address (the only one the EndpointSlice API defines as meaningful) and the
+  slice port selected by `portName`. The endpoint ID is
+  `<slice namespace>/<service>.<hostname>`, falling back to the address when
+  the endpoint has no hostname, and `<service>` falls back to the slice name.
+  An endpoint listed by two slices of one Service is reported once.
+- **Readiness.** Endpoints whose `ready` condition is false, or whose
+  `terminating` condition is true, are not reported. An unset `ready`
+  condition counts as ready.
+- **Labels.** Slice labels are copied onto the endpoint unchanged, so the
+  controller that writes the slices sets the keys EPP plugins read, for
+  example `llm-d.ai/role` for the role filters and `llm-d.ai/engine-type` for
+  the metrics extractor.
+- **Ready channel.** `Ready()` is closed when `Start` runs. The EPP's
+  readiness additionally waits until the notification source has processed
+  its initial list, so the datastore holds the existing endpoints first.
+
+## Inputs Consumed
+
+`discovery.k8s.io/v1` EndpointSlices with `addressType` `IPv4` or `IPv6`.
+Slices of other address types are skipped.
+
+## Configuration
+
+**Location:** `dataLayer.discovery.endpoints.pluginRef` referencing a plugin entry of
+type `endpointslice-discovery` in `plugins`.
+**Enabled by default:** No.
+**Stability:** Alpha (requires `--allow-experimental-plugins`).
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `namespace` | `string` | yes | -- | Namespace of the EndpointSlices. |
+| `selector` | `string` | no | all slices | Label selector, for example `kubernetes.io/service-name=model-server`. |
+| `portName` | `string` | no | -- | Slice port to route to. When empty, a slice must declare exactly one port. |
+
+The plugin runs under the EPP's regular controller manager, with the
+`InferencePool`, `InferenceObjective`, `InferenceModelRewrite` and Pod
+reconcilers off, so no `InferencePool` is needed and `--pool-name` is
+optional (it defaults to `epp`; with `--ha-enable-leader-election` it is
+required, because it names the leader election lease). The manager connects to the API server with
+the same client config as the Kubernetes discovery modes (`ctrl.GetConfig()`):
+the EPP's `--kubeconfig` flag, then `$KUBECONFIG`, then the in-cluster config.
+
+### RBAC
+
+The EPP ServiceAccount needs `get`, `list` and `watch` on
+`discovery.k8s.io/endpointslices` in `namespace`, plus what the enabled
+manager features need, as in the default Kubernetes mode: leases for leader
+election, token reviews and subject access reviews for metrics
+authentication.
+
+### Examples
+
+```yaml
+plugins:
+  - type: endpointslice-discovery
+    name: slice-discovery
+    parameters:
+      namespace: default
+      selector: kubernetes.io/service-name=model-server
+      portName: http
+dataLayer:
+  discovery:
+    endpoints:
+      pluginRef: slice-discovery
+```
+
+A selector-less headless Service and an EndpointSlice the config above
+selects:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: 9080
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: model-server-d0
+  labels:
+    kubernetes.io/service-name: model-server
+    endpointslice.kubernetes.io/managed-by: example-controller
+    llm-d.ai/role: decode
+addressType: IPv6
+ports:
+  - name: http
+    port: 9080
+endpoints:
+  - addresses: ["2001:db8::20"]
+    hostname: d0
+    conditions:
+      ready: true
+```
+
+## Limitations
+
+- The plugin reads the selected slices only. It does not resolve a Service's
+  Pod selector or read Pods.
+- Metrics are scraped from `address:port`; separate metrics endpoints are not
+  supported.
+- Labels are read per slice, so every endpoint in a slice gets the same
+  labels. Publish one slice per endpoint when endpoints need different labels,
+  for example different roles.
+- Terminating endpoints are not reported even when their `serving` condition
+  is true.
+- The `InferencePool` reconcilers do not run in this mode, so the same
+  K8s-only features as in file discovery are inactive (see
+  [docs/discovery.md](../../../../../../../docs/discovery.md#kubernetes-only-features-that-do-not-run-in-discovery-plugin-mode)).
+
+## Related Documentation
+
+- [Endpoint Discovery](../../../../../../../docs/discovery.md)
+- [File Discovery Plugin](../file/README.md)
+- [Plugins Index](../../../README.md)
