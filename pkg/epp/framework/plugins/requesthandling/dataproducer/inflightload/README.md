@@ -48,7 +48,9 @@ For text requests, the estimate is then bounded by the client-requested cap
 average is kept within [100, 4 096], so SHORT <= UNKNOWN <= LONG.
 Image requests are estimated as diffusion work (`num_inference_steps` x output
 pixels x `n`, in token-equivalent units); they are not read from the bucket and
-are not bounded by these caps.
+are not bounded by these caps. Layered image requests denoise `layers + 1`
+frames and use `resolution`, or the 640px layered default, when `size` is
+absent or `auto`.
 When the `outlen-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
 logs a one-time warning.
 

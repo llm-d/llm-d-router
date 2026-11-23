@@ -70,6 +70,10 @@ const (
 	imageDefaultPixels         int64 = 1024 * 1024
 	imageMaxInferenceSteps     int64 = 200
 	imageMaxImages             int64 = 10
+	// Layered image models denoise a sequence of layers plus the origin frame.
+	imageDefaultLayers        int64 = 4
+	imageDefaultLayeredPixels int64 = 640 * 640
+	imageMaxLayers            int64 = 10
 	// imageMaxPixels bounds oversized requests and keeps the pixel product
 	// inside int64. Raise it if a deployment serves larger outputs.
 	imageMaxPixels int64 = 4096 * 4096
@@ -194,8 +198,10 @@ func ttsOutputFrames(tts *fwkrequest.TextToSpeechRequest, clientCap *int64) int6
 }
 
 // imageOutputWork estimates the diffusion work an image request will perform:
-// num_inference_steps x output pixels x image count. One work unit is 10,000
-// pixel-steps, so a 1024x1024, 50-step, single-image request is about 5,243.
+// num_inference_steps x output pixels x image count, with layered requests
+// additionally denoising the origin frame plus one frame per requested layer.
+// One work unit is 10,000 pixel-steps, so a 1024x1024, 50-step, single-image
+// request is about 5,243.
 func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 	steps := imageDefaultInferenceSteps
 	if images.NumInferenceSteps != nil && *images.NumInferenceSteps > 0 {
@@ -205,6 +211,19 @@ func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 	if images.N != nil && *images.N > 0 {
 		n = min(*images.N, imageMaxImages)
 	}
+
+	layers := int64(1)
+	layered := images.Layers != nil || images.Resolution != nil
+	if layered {
+		requested := imageDefaultLayers
+		if images.Layers != nil && *images.Layers > 0 {
+			requested = min(*images.Layers, imageMaxLayers)
+		}
+		// Qwen-Image-Layered denoises the origin frame plus one frame per
+		// requested layer.
+		layers = requested + 1
+	}
+
 	pixels := imageDefaultPixels
 	if w, h := fwkrequest.ParseResolution(images.Size); w > 0 && h > 0 {
 		// Divide before multiplying so an oversized dimension cannot overflow.
@@ -213,8 +232,19 @@ func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 		} else {
 			pixels = w * h
 		}
+	} else if layered {
+		pixels = imageDefaultLayeredPixels
+		if images.Resolution != nil && *images.Resolution > 0 {
+			resolution := *images.Resolution
+			if resolution > imageMaxPixels/resolution {
+				pixels = imageMaxPixels
+			} else {
+				pixels = resolution * resolution
+			}
+		}
 	}
-	work := int64(math.Ceil(float64(steps*n*pixels) / imageWorkScale))
+
+	work := int64(math.Ceil(float64(steps*n*layers*pixels) / imageWorkScale))
 	return max(work, 1)
 }
 

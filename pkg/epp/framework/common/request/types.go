@@ -679,6 +679,12 @@ type ImagesGenerationsRequest struct {
 	Size string `json:"size,omitempty"`
 	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
 	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// Layers is the number of output layers for layered image models. Nil means
+	// the server default.
+	Layers *int64 `json:"layers,omitempty"`
+	// Resolution is the requested resolution for layered image models, in pixels.
+	// Nil means the server default.
+	Resolution *int64 `json:"resolution,omitempty"`
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`

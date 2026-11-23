@@ -182,11 +182,13 @@ func TestEstimateOutputFromRequest_Images(t *testing.T) {
 	e := NewSimpleTokenEstimator(nil)
 
 	tests := []struct {
-		name  string
-		size  string
-		steps *int64
-		n     *int64
-		want  int64
+		name       string
+		size       string
+		steps      *int64
+		n          *int64
+		layers     *int64
+		resolution *int64
+		want       int64
 	}{
 		{name: "default size and steps", size: "", want: 5243},
 		{name: "512 square twenty steps", size: "512x512", steps: ptr.To(int64(20)), want: 525},
@@ -199,10 +201,22 @@ func TestEstimateOutputFromRequest_Images(t *testing.T) {
 		{name: "oversized dimension does not overflow", size: "2000000000x2", steps: ptr.To(int64(50)), want: 83887},
 		{name: "uppercase and whitespace size", size: " 1024X1024 ", steps: ptr.To(int64(50)), want: 5243},
 		{name: "zero steps and images use defaults", size: "1024x1024", steps: ptr.To(int64(0)), n: ptr.To(int64(0)), want: 5243},
+		{name: "four layers", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), want: 26215},
+		{name: "two layers", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(2)), want: 15729},
+		{name: "layers use default resolution", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), want: 10240},
+		{name: "resolution uses default layers", steps: ptr.To(int64(50)), resolution: ptr.To(int64(640)), want: 10240},
+		{name: "resolution and layers", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(640)), want: 10240},
+		{name: "size wins over resolution", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(640)), want: 26215},
+		{name: "layer count is capped", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(100)), want: 57672},
+		{name: "zero layers use default", steps: ptr.To(int64(50)), layers: ptr.To(int64(0)), want: 10240},
+		{name: "layered images multiply", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(2)), layers: ptr.To(int64(4)), want: 52429},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, e.EstimateOutputFromRequest(imagesRequest(tt.size, tt.steps, tt.n)))
+			req := imagesRequest(tt.size, tt.steps, tt.n)
+			req.Body.Images.Layers = tt.layers
+			req.Body.Images.Resolution = tt.resolution
+			require.Equal(t, tt.want, e.EstimateOutputFromRequest(req))
 		})
 	}
 }
