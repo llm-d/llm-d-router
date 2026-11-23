@@ -38,6 +38,23 @@ const (
 	testConfigFile = "fake-config.yaml"
 )
 
+func TestDiscoveryStalenessThresholdFlag(t *testing.T) {
+	for _, value := range []string{"0s", "-1s", "1s", "2s", "30s"} {
+		t.Run(value, func(t *testing.T) {
+			opts := NewOptions()
+			fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			opts.AddFlags(fs)
+			require.NoError(t, fs.Parse([]string{"--discovery-staleness-threshold=" + value}))
+			require.NoError(t, opts.Complete())
+			if value == "-1s" || value == "1s" {
+				require.Error(t, opts.Validate())
+			} else {
+				require.NoError(t, opts.Validate())
+			}
+		})
+	}
+}
+
 func TestToolCallingTelemetryOption(t *testing.T) {
 	opts := NewOptions()
 	require.False(t, opts.EnableToolCallingTelemetry)
