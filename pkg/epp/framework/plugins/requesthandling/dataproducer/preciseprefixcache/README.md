@@ -108,6 +108,26 @@ correlate.
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
 
+### Cache tiers
+
+Each KV event names the medium that holds its blocks. The index stores the
+medium lowercased as the block's device tier, and
+`indexerConfig.kvCacheBackendConfigs` sets each tier's scoring weight. A tier
+with no configured weight scores 0. A configured list replaces the defaults in
+`kvcache.DefaultKVCacheBackendConfig()`.
+
+SGLang publishes these media:
+
+| SGLang medium | Device tier | Blocks |
+|---------------|-------------|--------|
+| `GPU` | `gpu` | device memory |
+| `CPU_PINNED` | `cpu_pinned` | HiCache host memory |
+| `EXTERNAL` | `external` | HiCache storage, for every `--hicache-storage-backend`; requires an SGLang build with [sgl-project/sglang#50154](https://github.com/sgl-project/sglang/pull/50154) |
+| `DISK` | `disk` | defined by SGLang but not published |
+
+A `kvCacheBackendConfigs` for SGLang pods lists `cpu_pinned` to score
+host-memory blocks; a `cpu` entry does not match them.
+
 ### Shared event input
 
 Set `kvEventsSourceRef` to the name of a
