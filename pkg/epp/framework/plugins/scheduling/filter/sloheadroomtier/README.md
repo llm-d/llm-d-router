@@ -3,7 +3,8 @@
 **Type:** `slo-headroom-tier-filter`
 
 Probabilistic filter that selects endpoints based on predicted latency headroom
-(SLO - predicted). Splits endpoints into positive (meets SLO) and negative (violates SLO)
+(SLO - predicted; TTFT headroom also subtracts the time since the EPP received the request).
+Splits endpoints into positive (meets SLO) and negative (violates SLO)
 tiers and probabilistically selects one tier.
 
 This filter is only needed when SLO headers are configured. When no SLO is set,

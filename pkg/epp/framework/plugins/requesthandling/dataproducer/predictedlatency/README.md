@@ -12,7 +12,7 @@ DataProducer, PreRequest, ResponseHeader, ResponseBody, ProducerPlugin, Consumer
 
 - Bulk predictions during `Produce` (writes `LatencyPredictionInfo` to endpoint attributes; endpoints whose metrics have never been scraped get none)
 - SLO headroom calculation per endpoint: `headroom = SLO - predicted_latency` (used by downstream scorer and admission plugins)
-  - TTFT headroom also subtracts the time the request waited in flow control
+  - TTFT headroom also subtracts the time from the request's arrival at the EPP until its predictions return
 - TTFT training data collection on first token / EOS
 - TPOT training data collection at EOS (streaming mode)
 - Per-endpoint running request queue tracking (TPOT SLO priority queue)
@@ -49,6 +49,16 @@ automatically neutralized.
 Set this when clients send `"stream": true` and you want to train separate TTFT (time to
 first token) and TPOT (time per output token) models. TTFT is recorded on the first
 streaming chunk, and TPOT is sampled across subsequent tokens.
+
+## TTFT Measurement
+
+The predicted TTFT, the TTFT training label and the `ttft` gauge count from `PreRequest`, when the
+request is dispatched to the endpoint. They exclude the time the request spent in the EPP before
+that, such as flow control wait. In streaming mode the `ttft` gauge therefore reads lower than
+`llm_d_epp_request_ttft_seconds` for a request that waited.
+
+The TTFT SLO counts from the request's arrival at the EPP, so the TTFT SLO violation metrics add
+the time before `PreRequest` to the measured TTFT.
 
 ## Disaggregated Serving
 

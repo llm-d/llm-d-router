@@ -18,9 +18,7 @@ limitations under the License.
 package predictedlatency
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient"
 	"github.com/stretchr/testify/assert"
@@ -136,37 +134,6 @@ func TestValidatePrediction_NonStreamingMode(t *testing.T) {
 	assert.True(t, tpotOk, "TPOT should always be valid in non-streaming mode")
 	assert.True(t, valid, "overall should be valid")
 	assert.Equal(t, 0.0, headroom, "headroom should be 0 in non-streaming mode")
-}
-
-func TestValidatePrediction_FlowControlWaitCountsAgainstTTFT(t *testing.T) {
-	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, nil)
-	pred := &latencypredictor.PredictionResponse{TTFT: 50}
-
-	tests := []struct {
-		name         string
-		wait         time.Duration
-		wantTTFTOk   bool
-		wantHeadroom float64
-	}{
-		{name: "no wait", wait: 0, wantTTFTOk: true, wantHeadroom: 50},
-		{name: "wait leaves headroom", wait: 40 * time.Millisecond, wantTTFTOk: true, wantHeadroom: 10},
-		{name: "wait leaves exactly the predicted TTFT", wait: 50 * time.Millisecond, wantTTFTOk: false, wantHeadroom: 0},
-		{name: "wait leaves too little for the endpoint", wait: 60 * time.Millisecond, wantTTFTOk: false, wantHeadroom: -10},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := createTestInferenceRequest("queued", 100, 0)
-			req.FlowControlQueueDuration = tt.wait
-			ctx := newPredictedLatencyContext(req)
-			pl.parseSLOHeaders(context.Background(), req, ctx)
-
-			ttftOk, _, valid, _, ttftHeadroom := pl.validatePrediction(pred, ctx, 0)
-			assert.Equal(t, tt.wantTTFTOk, ttftOk, "ttftOk")
-			assert.Equal(t, tt.wantTTFTOk, valid, "isValid")
-			assert.InDelta(t, tt.wantHeadroom, ttftHeadroom, 1e-9, "ttftHeadroom")
-		})
-	}
 }
 
 func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {

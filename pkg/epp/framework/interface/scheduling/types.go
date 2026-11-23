@@ -56,9 +56,8 @@ type InferenceRequest struct {
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
-	// FlowControlQueueDuration is how long flow control held the request before dispatching it.
-	// Zero when flow control is disabled.
-	FlowControlQueueDuration time.Duration
+	// ReceivedTimestamp is when the EPP received the request.
+	ReceivedTimestamp time.Time
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 
