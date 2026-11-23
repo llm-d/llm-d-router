@@ -295,7 +295,7 @@ The Qwen3-8B 30k prefetch cell is the range of five runs from the evict sweep te
 - **A push into a full store is refused by default.** An idle pod's store is full after a few dozen long prompts. With 600-block stores filled past capacity, five of five 30k pushes were refused, and B recomputed.
 - **TPU Sync's evict sweep keeps room for pushes.** With the store monitor and the sweep on, and watermarks at 25% and 40%, five of five pushes landed in the same full stores. A burst larger than the free share would still be refused. The sweep offers cold blocks to peers before it drops them. We did not measure that traffic.
 
-Not tested yet: a failure during a load, concurrent traffic, and replicas that span several hosts. The image also needed changes to run the TPU Sync wheel: jax 0.11.2, flax 0.12.12, and a one-line fix in tpu-inference's batched attention kernel.
+Not tested yet: a failure during a load, concurrent traffic, and replicas that span several hosts. We ran on an older image, `vllm-tpu:v0.27.0`, and had to raise jax and flax and patch one kernel line by hand. tpu-inference `main` already pins the jax and libtpu versions the TPU Sync wheel needs.
 
 ## Risks and open questions
 
@@ -314,8 +314,6 @@ The TPU path is a thin shim onto TPU Sync. What TPU Sync cannot do yet, we will 
 - A way to trigger a push from outside the engine. Today a prefetch must ride on an inference request.
 - Caller-driven removal of a block, for `kv.move`.
 - A way to stop the evict sweep from offering cold blocks to peers.
-- The JAX Python wrapper for the store in the `tpu-sync-jax` wheel, with `set_eviction_callback`.
-- A wheel that runs with the jax version tpu-inference ships.
 
 Other risks:
 
