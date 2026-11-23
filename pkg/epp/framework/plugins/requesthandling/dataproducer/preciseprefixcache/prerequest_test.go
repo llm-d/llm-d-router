@@ -1558,6 +1558,7 @@ func TestPreRequest_PrefillProfile_EngineBlockPerTarget(t *testing.T) {
 		},
 	}
 	p := newProducerForPreRequest(ctx, true, idx)
+	p.seedDecode = true
 
 	keys := keyRange(1, 6)
 	req := &scheduling.InferenceRequest{RequestID: "req-pd-engine-block"}
