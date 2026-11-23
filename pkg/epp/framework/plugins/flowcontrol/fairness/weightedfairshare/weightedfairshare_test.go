@@ -133,6 +133,28 @@ func TestConfig_RejectsInvalid(t *testing.T) {
 	}
 }
 
+// A nonzero sweepSeconds or idleTtlSeconds must convert to a positive duration. A zero
+// idleTtlSeconds turns pruning off.
+func TestConfig_Seconds(t *testing.T) {
+	for params, wantErr := range map[string]string{
+		`{"idleTtlSeconds":0}`:     "",
+		`{"sweepSeconds":1e-9}`:    "",
+		`{"sweepSeconds":1e-10}`:   "sweepSeconds 1e-10 is too small to represent as a duration",
+		`{"sweepSeconds":1e10}`:    "sweepSeconds 1e+10 exceeds the representable duration",
+		`{"idleTtlSeconds":1e-10}`: "idleTtlSeconds 1e-10 is too small to represent as a duration",
+		`{"idleTtlSeconds":1e10}`:  "idleTtlSeconds 1e+10 exceeds the representable duration",
+	} {
+		t.Run(params, func(t *testing.T) {
+			_, err := WeightedFairShareFairnessPolicyFactory("x", json.NewDecoder(bytes.NewReader([]byte(params))), nil)
+			if wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, wantErr)
+		})
+	}
+}
+
 // The cost of a completed request is costPerRequest + costPerInputToken*prompt +
 // costPerOutputToken*completion. At weight 1 the flow's virtual service equals that cost.
 func TestCost(t *testing.T) {

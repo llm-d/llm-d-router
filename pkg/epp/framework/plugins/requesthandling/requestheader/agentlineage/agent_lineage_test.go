@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -986,6 +987,30 @@ func TestPluginFactory_RejectsInvalidParameters(t *testing.T) {
 	} {
 		if _, err := PluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil); err == nil {
 			t.Errorf("PluginFactory(%s) succeeded, want error", raw)
+		}
+	}
+}
+
+// TestPluginFactory_ParentEntryTTLSeconds pins that a nonzero
+// parentEntryTtlSeconds must convert to a positive duration and that zero
+// selects the default TTL.
+func TestPluginFactory_ParentEntryTTLSeconds(t *testing.T) {
+	if p := newPlugin(t, `{"parentEntryTtlSeconds":0}`); p.parentEntryTTL != defaultParentEntryTTL {
+		t.Errorf("parentEntryTTL = %v, want %v", p.parentEntryTTL, defaultParentEntryTTL)
+	}
+	bound := float64(math.MaxInt64) / float64(time.Second)
+	for _, tc := range []struct {
+		seconds float64
+		wantErr string
+	}{
+		{1e-10, "agent-lineage: parentEntryTtlSeconds 1e-10 is too small to represent as a duration"},
+		{1e10, "agent-lineage: parentEntryTtlSeconds 1e+10 exceeds the representable duration"},
+		{bound, "agent-lineage: parentEntryTtlSeconds 9.223372036854776e+09 exceeds the representable duration"},
+	} {
+		raw := fmt.Sprintf(`{"parentEntryTtlSeconds":%v}`, tc.seconds)
+		_, err := PluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil)
+		if err == nil || err.Error() != tc.wantErr {
+			t.Errorf("PluginFactory(%s) error = %v, want %q", raw, err, tc.wantErr)
 		}
 	}
 }

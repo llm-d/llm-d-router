@@ -23,11 +23,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -153,13 +153,10 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	}
 	ttl := defaultParentEntryTTL
 	if params.ParentEntryTTLSeconds != 0 {
-		if params.ParentEntryTTLSeconds > float64(math.MaxInt64)/float64(time.Second) {
-			return nil, fmt.Errorf("agent-lineage: parentEntryTtlSeconds %v exceeds the representable duration", params.ParentEntryTTLSeconds)
+		if err := duration.ValidateSeconds("parentEntryTtlSeconds", params.ParentEntryTTLSeconds); err != nil {
+			return nil, fmt.Errorf("agent-lineage: %w", err)
 		}
 		ttl = time.Duration(params.ParentEntryTTLSeconds * float64(time.Second))
-		if ttl <= 0 {
-			return nil, fmt.Errorf("agent-lineage: parentEntryTtlSeconds %v is too small to represent as a duration", params.ParentEntryTTLSeconds)
-		}
 	}
 	maxEntries := params.MaxParentEntries
 	if maxEntries == 0 {

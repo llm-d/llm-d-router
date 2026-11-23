@@ -33,6 +33,7 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -76,11 +77,18 @@ func DefaultConfig() Config {
 }
 
 func (c Config) validate() error {
-	switch {
-	case c.IdleTTLSeconds < 0:
+	if c.IdleTTLSeconds < 0 {
 		return fmt.Errorf("idleTtlSeconds must be >= 0, got %v", c.IdleTTLSeconds)
-	case c.SweepSeconds <= 0:
-		return fmt.Errorf("sweepSeconds must be > 0, got %v", c.SweepSeconds)
+	}
+	if c.IdleTTLSeconds > 0 {
+		if err := duration.ValidateSeconds("idleTtlSeconds", c.IdleTTLSeconds); err != nil {
+			return err
+		}
+	}
+	if err := duration.ValidateSeconds("sweepSeconds", c.SweepSeconds); err != nil {
+		return err
+	}
+	switch {
 	case c.CostPerRequest < 0:
 		return fmt.Errorf("costPerRequest must be >= 0, got %v", c.CostPerRequest)
 	case c.CostPerInputToken < 0:
