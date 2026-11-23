@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -35,6 +36,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -49,6 +51,7 @@ func NewSchedulerProfile() *SchedulerProfile {
 		filters: []fwksched.Filter{},
 		scorers: []*WeightedScorer{},
 		// picker remains nil since profile doesn't support multiple pickers
+		pickMu: &sync.Mutex{},
 	}
 }
 
@@ -58,6 +61,30 @@ type SchedulerProfile struct {
 	filters []fwksched.Filter
 	scorers []*WeightedScorer
 	picker  fwksched.Picker
+
+	// reservers reserve the endpoint the picker selects, under
+	// reservationName, as soon as the picker returns. Bound by
+	// NewSchedulerWithConfig; empty means no reserving.
+	reservers       []fwkrh.EndpointReserver
+	reservationName string
+	// bound records that NewSchedulerWithConfig bound the profile, so the
+	// scheduler leaves reserving its picks to the profile.
+	bound bool
+	// pickMu serializes the pick-time critical section: pick-time scorers,
+	// picker and reservation. NewSchedulerWithConfig shares one mutex across
+	// the profiles of a scheduler, because their picks can reserve the same
+	// endpoints.
+	pickMu *sync.Mutex
+}
+
+// bindReservations makes the profile reserve every pick through reservers
+// under the profile name the scheduler knows it by, and run its pick-time
+// critical section under pickMu.
+func (p *SchedulerProfile) bindReservations(name string, reservers []fwkrh.EndpointReserver, pickMu *sync.Mutex) {
+	p.reservationName = name
+	p.reservers = reservers
+	p.pickMu = pickMu
+	p.bound = true
 }
 
 // WithName sets the profile name that labels the profile's scheduler metrics.
@@ -137,7 +164,10 @@ func (p *SchedulerProfile) String() string {
 }
 
 // Run runs a SchedulerProfile. It invokes all the SchedulerProfile plugins for the given request in this
-// order - Filters, Scorers, Picker. After completing all, it returns the result.
+// order - Filters, Scorers, Picker - and then reserves the picked endpoint through the bound reservers.
+// Scorers that opt into pick-time scoring (fwksched.PickTimeScorer) run after the other scorers, together
+// with the picker and the reservation, in one critical section (see pickWithLiveLoad).
+// After completing all, it returns the result.
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
@@ -150,9 +180,73 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 	// if we got here, there is at least one endpoint to score
 	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
 
+	if p.hasPickTimeScorers() {
+		return p.pickWithLiveLoad(ctx, request, endpoints, weightedScorePerEndpoint), nil
+	}
+
 	result := p.runPickerPlugin(ctx, request, weightedScorePerEndpoint)
+	p.reserve(ctx, request, result)
 
 	return result, nil
+}
+
+// pickWithLiveLoad runs the pick-time scorers, the picker and the reservation
+// of the picked endpoint as one critical section.
+//
+// Requests are scheduled concurrently, one goroutine each. A load scorer that
+// runs with the other scorers reads the in-flight load as it was when the
+// request started scoring; endpoints that concurrent requests pick and reserve
+// between that read and this request's own pick are invisible to it, so a
+// burst converges on whichever endpoint looked least loaded. Reserving earlier
+// cannot close that gap, because the stale read has already happened. Here the
+// load is read only after every earlier pick has been reserved, and this
+// request's reservation lands before the next request reads it, so the burst
+// is placed exactly as if its requests had been scheduled one at a time.
+//
+// The critical section holds only the pick-time scorers, the picker and the
+// reservation; filters and the other scorers run concurrently before it.
+func (p *SchedulerProfile) pickWithLiveLoad(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint,
+	weightedScorePerEndpoint map[fwksched.Endpoint]float64,
+) *fwksched.ProfileRunResult {
+	pickMu := p.pickMu
+	if pickMu == nil {
+		pickMu = &unboundPickMu
+	}
+	pickMu.Lock()
+	defer pickMu.Unlock()
+
+	p.addScores(ctx, request, endpoints, weightedScorePerEndpoint, true)
+	result := p.runPickerPlugin(ctx, request, weightedScorePerEndpoint)
+	p.reserve(ctx, request, result)
+
+	return result
+}
+
+// unboundPickMu guards the pick-time critical section of a profile that was
+// not constructed through NewSchedulerProfile.
+var unboundPickMu sync.Mutex
+
+// hasPickTimeScorers reports whether any of the profile's scorers runs at
+// pick time.
+func (p *SchedulerProfile) hasPickTimeScorers() bool {
+	for _, scorer := range p.scorers {
+		if scorer.scoresAtPick() {
+			return true
+		}
+	}
+	return false
+}
+
+// reserve reserves the picked endpoint through every bound reserver, so that
+// requests scheduled concurrently observe the pick immediately instead of
+// after the dispatch-time (PreRequest) accounting lands.
+func (p *SchedulerProfile) reserve(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.ProfileRunResult) {
+	if result == nil || len(result.TargetEndpoints) == 0 {
+		return
+	}
+	for _, reserver := range p.reservers {
+		reserver.ReserveProfileResult(ctx, request.RequestID, p.reservationName, result)
+	}
 }
 
 func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
@@ -217,7 +311,35 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	return filteredEndpoints
 }
 
+// runScorerPlugins runs the scorers that do not run at pick time and returns
+// the weighted score per endpoint.
 func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	weightedScorePerEndpoint := make(map[fwksched.Endpoint]float64, len(endpoints))
+	for _, endpoint := range endpoints {
+		weightedScorePerEndpoint[endpoint] = float64(0) // initialize weighted score per endpoint with 0 value
+	}
+	p.addScores(ctx, request, endpoints, weightedScorePerEndpoint, false)
+	return weightedScorePerEndpoint
+}
+
+// numScorers returns how many of the profile's scorers run at pick time
+// (atPick true) or with the other scorers (atPick false).
+func (p *SchedulerProfile) numScorers(atPick bool) int {
+	n := 0
+	for _, scorer := range p.scorers {
+		if scorer.scoresAtPick() == atPick {
+			n++
+		}
+	}
+	return n
+}
+
+// addScores runs the scorers of one phase, the pick-time scorers when atPick
+// is true and the other scorers otherwise, and adds their weighted scores to
+// weightedScorePerEndpoint.
+func (p *SchedulerProfile) addScores(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint,
+	weightedScorePerEndpoint map[fwksched.Endpoint]float64, atPick bool,
+) {
 	logger := log.FromContext(ctx)
 	// Cache the leveled loggers and their enabled state once. The per-endpoint
 	// Info call in the scoring loop below evaluates and boxes its variadic args
@@ -229,7 +351,15 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	debugEnabled := debug.Enabled()
 	verbose := logger.V(logutil.VERBOSE)
 	verboseEnabled := verbose.Enabled()
-	if debugEnabled {
+	completedMsg := "Completed running scorer plugins successfully"
+	if atPick {
+		// The candidates were already logged before the first scorer phase;
+		// keep the critical section free of the endpoint dump.
+		completedMsg = "Completed running pick-time scorer plugins successfully"
+		if verboseEnabled {
+			verbose.Info("Running pick-time scorer plugins")
+		}
+	} else if debugEnabled {
 		debug.Info("Before running scorer plugins", "endpoints", endpoints)
 	}
 
@@ -247,18 +377,17 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(
-			semconv.LLMDEPPScorerCount(len(p.scorers)),
+			semconv.LLMDEPPScorerCount(p.numScorers(atPick)),
 			semconv.LLMDEPPScoringCandidateEndpoints(len(endpoints)),
 		)
 		span.SetAttributes(requestSpanAttributes(request)...)
 	}
 
-	weightedScorePerEndpoint := make(map[fwksched.Endpoint]float64, len(endpoints))
-	for _, endpoint := range endpoints {
-		weightedScorePerEndpoint[endpoint] = float64(0) // initialize weighted score per endpoint with 0 value
-	}
-	// Iterate through each scorer in the chain and accumulate the weighted scores.
+	// Iterate through each scorer of this phase and accumulate the weighted scores.
 	for _, scorer := range p.scorers {
+		if scorer.scoresAtPick() != atPick {
+			continue
+		}
 		typedName := scorer.TypedName()
 		if verboseEnabled {
 			verbose.Info("Running scorer plugin", "plugin", typedName)
@@ -275,10 +404,8 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 		}
 	}
 	if verboseEnabled {
-		verbose.Info("Completed running scorer plugins successfully")
+		verbose.Info(completedMsg)
 	}
-
-	return weightedScorePerEndpoint
 }
 
 // runScorer invokes a single weighted scorer and records its latency metric.

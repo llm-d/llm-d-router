@@ -66,7 +66,7 @@ const (
 	burstSize    = 64
 )
 
-func newProducer(t *testing.T) *inflightload.InFlightLoadProducer {
+func newProducer(t testing.TB) *inflightload.InFlightLoadProducer {
 	t.Helper()
 	pl, err := inflightload.InFlightLoadProducerFactory(producerName, nil, fakeHandle{})
 	if err != nil {
@@ -78,7 +78,7 @@ func newProducer(t *testing.T) *inflightload.InFlightLoadProducer {
 // newRig builds the real producer, token-load scorer and endpoints wired the
 // same way the director wires them (datalayer ModelServers registered with
 // the producer, then converted with the same metadata/metrics/attributes).
-func newRig(t *testing.T) (*inflightload.InFlightLoadProducer, fwksched.Scorer, []fwksched.Endpoint, fwkplugin.DataKey) {
+func newRig(t testing.TB) (*inflightload.InFlightLoadProducer, fwksched.Scorer, []fwksched.Endpoint, fwkplugin.DataKey) {
 	t.Helper()
 	ctx := context.Background()
 	prod := newProducer(t)
