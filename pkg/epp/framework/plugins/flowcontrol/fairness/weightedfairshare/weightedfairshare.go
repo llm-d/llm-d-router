@@ -76,18 +76,24 @@ func DefaultConfig() Config {
 	}
 }
 
-func (c Config) validate() error {
+// pruneDurations returns the idle TTL and sweep interval. A zero TTL turns
+// pruning off.
+func (c Config) pruneDurations() (idleTTL, sweep time.Duration, err error) {
 	if c.IdleTTLSeconds < 0 {
-		return fmt.Errorf("idleTtlSeconds must be >= 0, got %v", c.IdleTTLSeconds)
+		return 0, 0, fmt.Errorf("idleTtlSeconds must be >= 0, got %v", c.IdleTTLSeconds)
 	}
 	if c.IdleTTLSeconds > 0 {
-		if err := duration.ValidateSeconds("idleTtlSeconds", c.IdleTTLSeconds); err != nil {
-			return err
+		if idleTTL, err = duration.FromSeconds("idleTtlSeconds", c.IdleTTLSeconds); err != nil {
+			return 0, 0, err
 		}
 	}
-	if err := duration.ValidateSeconds("sweepSeconds", c.SweepSeconds); err != nil {
-		return err
+	if sweep, err = duration.FromSeconds("sweepSeconds", c.SweepSeconds); err != nil {
+		return 0, 0, err
 	}
+	return idleTTL, sweep, nil
+}
+
+func (c Config) validate() error {
 	switch {
 	case c.CostPerRequest < 0:
 		return fmt.Errorf("costPerRequest must be >= 0, got %v", c.CostPerRequest)
@@ -117,6 +123,9 @@ type weightedFairShare struct {
 	name string
 	cfg  Config
 
+	idleTTL time.Duration // zero turns pruning off
+	sweep   time.Duration
+
 	// Keyed by FlowKey, so a tenant's flows at different priorities are accounted separately.
 	state sync.Map // flowcontrol.FlowKey -> *flowState
 
@@ -140,6 +149,10 @@ func WeightedFairShareFairnessPolicyFactory(
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", WeightedFairShareFairnessPolicyType, name, err)
 		}
 	}
+	idleTTL, sweep, err := cfg.pruneDurations()
+	if err != nil {
+		return nil, fmt.Errorf("%s plugin %q: %w", WeightedFairShareFairnessPolicyType, name, err)
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", WeightedFairShareFairnessPolicyType, name, err)
 	}
@@ -162,7 +175,14 @@ func WeightedFairShareFairnessPolicyFactory(
 	for id := range cfg.FlowWeights {
 		metricsutil.PinFairnessID(id)
 	}
-	return &weightedFairShare{name: name, cfg: cfg, vserviceGauge: vservice, weightGauge: weight}, nil
+	return &weightedFairShare{
+		name:          name,
+		cfg:           cfg,
+		idleTTL:       idleTTL,
+		sweep:         sweep,
+		vserviceGauge: vservice,
+		weightGauge:   weight,
+	}, nil
 }
 
 func (p *weightedFairShare) TypedName() fwkplugin.TypedName {
@@ -323,12 +343,11 @@ func (p *weightedFairShare) weightFor(key flowcontrol.FlowKey) float64 {
 
 // maybePrune runs an idle sweep at most once per sweepSeconds.
 func (p *weightedFairShare) maybePrune(now time.Time) {
-	if p.cfg.IdleTTLSeconds <= 0 {
+	if p.idleTTL <= 0 {
 		return
 	}
-	interval := int64(p.cfg.SweepSeconds * float64(time.Second))
 	last := p.lastSweep.Load()
-	if last != 0 && now.UnixNano()-last < interval {
+	if last != 0 && now.UnixNano()-last < int64(p.sweep) {
 		return
 	}
 	if !p.lastSweep.CompareAndSwap(last, now.UnixNano()) {
@@ -339,7 +358,6 @@ func (p *weightedFairShare) maybePrune(now time.Time) {
 
 // prune drops flows untouched for longer than the idle TTL, with their metric series.
 func (p *weightedFairShare) prune(now time.Time) {
-	ttl := time.Duration(p.cfg.IdleTTLSeconds * float64(time.Second))
 	p.state.Range(func(key, value any) bool {
 		st, ok := value.(*flowState)
 		if !ok {
@@ -347,7 +365,7 @@ func (p *weightedFairShare) prune(now time.Time) {
 			return true
 		}
 		// A zero timestamp is a freshly created entry Pick has not read yet.
-		if touched := st.lastTouch(); touched.IsZero() || now.Sub(touched) <= ttl {
+		if touched := st.lastTouch(); touched.IsZero() || now.Sub(touched) <= p.idleTTL {
 			return true
 		}
 		p.state.Delete(key)

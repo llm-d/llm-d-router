@@ -95,10 +95,11 @@ func (c *SessionIDConfig) Validate() error {
 	if err := ValidateSources(c.Sources); err != nil {
 		return err
 	}
-	if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+	if _, err := duration.FromSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
 		return err
 	}
-	return duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds)
+	_, err := duration.FromSeconds("evictionSweepSeconds", c.EvictionSweepSeconds)
+	return err
 }
 
 // ValidateSources rejects a source that does not set exactly one of Header or

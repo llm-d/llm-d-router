@@ -155,6 +155,15 @@ func TestConfig_Seconds(t *testing.T) {
 	}
 }
 
+func TestConfig_StoredDurations(t *testing.T) {
+	p := newPolicy(t, `{"sweepSeconds":0.5,"idleTtlSeconds":2}`)
+	assert.Equal(t, 500*time.Millisecond, p.sweep)
+	assert.Equal(t, 2*time.Second, p.idleTTL)
+
+	p = newPolicy(t, `{"idleTtlSeconds":0}`)
+	assert.Zero(t, p.idleTTL)
+}
+
 // The cost of a completed request is costPerRequest + costPerInputToken*prompt +
 // costPerOutputToken*completion. At weight 1 the flow's virtual service equals that cost.
 func TestCost(t *testing.T) {

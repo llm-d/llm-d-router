@@ -23,19 +23,21 @@ import (
 	"time"
 )
 
-// ValidateSeconds rejects a number of seconds that does not convert to a
-// positive time.Duration. A ticker panics on a non-positive interval.
-func ValidateSeconds(field string, seconds float64) error {
+// FromSeconds converts a number of seconds to a positive time.Duration, or
+// returns an error when the result is not positive or does not fit. A ticker
+// panics on a non-positive interval.
+func FromSeconds(field string, seconds float64) (time.Duration, error) {
 	if seconds <= 0 {
-		return fmt.Errorf("%s must be > 0, got %v", field, seconds)
+		return 0, fmt.Errorf("%s must be > 0, got %v", field, seconds)
 	}
 	// float64(math.MaxInt64) rounds up to 2^63, the first value outside int64.
 	nanos := seconds * float64(time.Second)
 	if nanos >= float64(math.MaxInt64) {
-		return fmt.Errorf("%s %v exceeds the representable duration", field, seconds)
+		return 0, fmt.Errorf("%s %v exceeds the representable duration", field, seconds)
 	}
-	if time.Duration(nanos) <= 0 {
-		return fmt.Errorf("%s %v is too small to represent as a duration", field, seconds)
+	d := time.Duration(nanos)
+	if d <= 0 {
+		return 0, fmt.Errorf("%s %v is too small to represent as a duration", field, seconds)
 	}
-	return nil
+	return d, nil
 }

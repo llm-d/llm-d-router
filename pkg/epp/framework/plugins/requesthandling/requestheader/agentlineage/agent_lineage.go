@@ -153,10 +153,10 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	}
 	ttl := defaultParentEntryTTL
 	if params.ParentEntryTTLSeconds != 0 {
-		if err := duration.ValidateSeconds("parentEntryTtlSeconds", params.ParentEntryTTLSeconds); err != nil {
+		var err error
+		if ttl, err = duration.FromSeconds("parentEntryTtlSeconds", params.ParentEntryTTLSeconds); err != nil {
 			return nil, fmt.Errorf("agent-lineage: %w", err)
 		}
-		ttl = time.Duration(params.ParentEntryTTLSeconds * float64(time.Second))
 	}
 	maxEntries := params.MaxParentEntries
 	if maxEntries == 0 {

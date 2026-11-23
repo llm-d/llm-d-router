@@ -70,18 +70,24 @@ func DefaultConfig() Config {
 	}
 }
 
-func (c Config) validate() error {
+// evictionDurations returns the eviction TTL and sweep interval. A zero TTL
+// turns eviction off.
+func (c Config) evictionDurations() (ttl, sweep time.Duration, err error) {
 	if c.EvictionTTLSeconds < 0 {
-		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
+		return 0, 0, fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
 	}
 	if c.EvictionTTLSeconds > 0 {
-		if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
-			return err
+		if ttl, err = duration.FromSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+			return 0, 0, err
 		}
 	}
-	if err := duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds); err != nil {
-		return err
+	if sweep, err = duration.FromSeconds("evictionSweepSeconds", c.EvictionSweepSeconds); err != nil {
+		return 0, 0, err
 	}
+	return ttl, sweep, nil
+}
+
+func (c Config) validate() error {
 	if c.LASWeightService < 0 {
 		return fmt.Errorf("lasWeightService must be >= 0, got %v", c.LASWeightService)
 	}
@@ -116,6 +122,10 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", ProgramAwarePluginType, name, err)
 		}
 	}
+	ttl, sweep, err := cfg.evictionDurations()
+	if err != nil {
+		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
@@ -139,10 +149,8 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 				}
 			}
 		}
-		if cfg.EvictionTTLSeconds > 0 {
-			interval := time.Duration(cfg.EvictionSweepSeconds * float64(time.Second))
-			ttl := time.Duration(cfg.EvictionTTLSeconds * float64(time.Second))
-			go p.runEviction(handle.Context(), interval, ttl)
+		if ttl > 0 {
+			go p.runEviction(handle.Context(), sweep, ttl)
 		}
 	}
 	return p, nil
