@@ -254,15 +254,6 @@ func appendPromptKey(dst []byte, hashes []blockHash) []byte {
 	return dst
 }
 
-// promptKeyUint64 is promptKey for sync-attribute prompts that are still
-// []uint64, avoiding a blockHash conversion on the steady-state merge path.
-func promptKeyUint64(hashes []uint64) string {
-	if len(hashes) == 0 {
-		return ""
-	}
-	return string(appendPromptKeyUint64(make([]byte, 0, 8+8*len(hashes)), hashes))
-}
-
 // appendPromptKeyUint64 appends the promptKey encoding of hashes to dst.
 func appendPromptKeyUint64(dst []byte, hashes []uint64) []byte {
 	if len(hashes) == 0 {

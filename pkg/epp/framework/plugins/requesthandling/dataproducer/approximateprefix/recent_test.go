@@ -207,17 +207,27 @@ func TestRecentWindowKeySetMatchesPromptKey(t *testing.T) {
 	w.record("ep", []blockHash{3})
 	w.record("ep", []blockHash{1, 2})
 	w.record("other", []blockHash{9})
-	// Longer than the window, so the stored entry is head-capped.
-	w.record("ep", []blockHash{4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
 
-	got := w.keySet("ep")
-	want := map[string]struct{}{}
-	for _, prompt := range w.snapshot("ep") {
-		want[promptKey(prompt)] = struct{}{}
+	keysOf := func(id string) map[string]struct{} {
+		want := map[string]struct{}{}
+		for _, prompt := range w.snapshot(id) {
+			want[promptKey(prompt)] = struct{}{}
+		}
+		return want
 	}
-	require.Equal(t, want, got)
+	// Two copies of {1, 2} and one {3}: different lengths, and the duplicate
+	// collapses to one key. The other endpoint stays out of this set.
+	got := w.keySet("ep")
+	require.Equal(t, keysOf("ep"), got)
+	require.Len(t, got, 2)
 	_, other := got[promptKey([]blockHash{9})]
 	require.False(t, other)
+
+	// Longer than the window, so the stored entry is head-capped and the
+	// earlier prompts are evicted.
+	w.record("ep", []blockHash{4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
+	require.Equal(t, keysOf("ep"), w.keySet("ep"))
+	require.Equal(t, [][]blockHash{{4, 5, 6, 7, 8, 9, 10, 11}}, w.snapshot("ep"))
 
 	w.forget("ep")
 	require.Nil(t, w.keySet("ep"))
