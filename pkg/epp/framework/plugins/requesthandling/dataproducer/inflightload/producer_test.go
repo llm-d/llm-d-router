@@ -1562,30 +1562,60 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 }
 
 // TestInFlightLoadProducer_DecodeWithoutPrefill_PreRequest verifies that a
-// decode-labeled endpoint is charged its input tokens whenever the request is not
-// also scheduled to a prefill-only endpoint: a monolithic pod mislabeled decode,
-// the disagg handler's decode-only decision, and encode-decode (an encode-only
-// worker runs the encoder, not the LLM prefill).
+// decode-labeled endpoint is charged only its estimated output when the scheduler
+// ran a prefill stage on a different endpoint, whatever that endpoint's role, and
+// is charged its input tokens otherwise: a monolithic pod mislabeled decode, the
+// disagg handler's decode-only decision, and encode-decode (an encode worker runs
+// the encoder, not the LLM prefill, even when it is labeled encode-prefill).
 func TestInFlightLoadProducer_DecodeWithoutPrefill_PreRequest(t *testing.T) {
 	t.Parallel()
 
 	// 4 input tokens; a LONG outlen bucket estimates 4096 output tokens.
 	const inputTok, outputTok = 4, 4096
 
+	decodePod := func() fwksched.Endpoint { return newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode) }
+
 	tests := []struct {
-		name     string
-		profiles map[string]fwksched.Endpoint
+		name       string
+		profiles   map[string]fwksched.Endpoint
+		wantDecode int64
 	}{
 		{
-			name:     "decode profile only",
-			profiles: map[string]fwksched.Endpoint{"decode": newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)},
+			name:       "decode profile only",
+			profiles:   map[string]fwksched.Endpoint{"decode": decodePod()},
+			wantDecode: inputTok + outputTok,
 		},
 		{
 			name: "encode and decode, no prefill",
 			profiles: map[string]fwksched.Endpoint{
 				"encode": newStubSchedulingEndpointWithRole("encode-pod", bylabel.RoleEncode),
-				"decode": newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode),
+				"decode": decodePod(),
 			},
+			wantDecode: inputTok + outputTok,
+		},
+		{
+			name: "encode on an encode-prefill pod, no prefill stage",
+			profiles: map[string]fwksched.Endpoint{
+				"encode": newStubSchedulingEndpointWithRole("encode-prefill-pod", bylabel.RoleEncodePrefill),
+				"decode": decodePod(),
+			},
+			wantDecode: inputTok + outputTok,
+		},
+		{
+			name: "prefill on a prefill-decode pod",
+			profiles: map[string]fwksched.Endpoint{
+				profilePrefill: newStubSchedulingEndpointWithRole("combined-pod", bylabel.RolePrefillDecode),
+				"decode":       decodePod(),
+			},
+			wantDecode: outputTok,
+		},
+		{
+			name: "prefill on a prefill pod",
+			profiles: map[string]fwksched.Endpoint{
+				profilePrefill: newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill),
+				"decode":       decodePod(),
+			},
+			wantDecode: outputTok,
 		},
 	}
 	for _, tc := range tests {
@@ -1601,8 +1631,7 @@ func TestInFlightLoadProducer_DecodeWithoutPrefill_PreRequest(t *testing.T) {
 
 			require.NoError(t, producer.PreRequest(context.Background(), req, res))
 
-			require.Equal(t, int64(inputTok+outputTok), producer.tokenTracker.get(fullEndpointName("decode-pod")),
-				"decode pod runs prefill itself, so it carries input + estimated output")
+			require.Equal(t, tc.wantDecode, producer.tokenTracker.get(fullEndpointName("decode-pod")))
 		})
 	}
 }
