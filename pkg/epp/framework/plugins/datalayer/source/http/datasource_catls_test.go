@@ -233,17 +233,23 @@ func TestHTTPDataSource_ClientCertRotation(t *testing.T) {
 	require.NoError(t, ds.Start(ctx))
 
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{MetricsHost: u.Host}, nil)
-	scrapedAs := func() string {
-		_, err := ds.Poll(ctx, ep)
-		require.NoError(t, err)
+	scrapedAs := func() (string, error) {
+		if _, err := ds.Poll(ctx, ep); err != nil {
+			return "", err
+		}
 		mu.Lock()
 		defer mu.Unlock()
-		return seen
+		return seen, nil
 	}
-	require.Equal(t, "client-v1", scrapedAs())
+	cn, err := scrapedAs()
+	require.NoError(t, err)
+	require.Equal(t, "client-v1", cn)
 
 	// Wait for the watcher to be watching the files before rotating them.
 	time.Sleep(100 * time.Millisecond)
 	writeCertKeyTo(t, certPath, keyPath, "client-v2")
-	require.Eventually(t, func() bool { return scrapedAs() == "client-v2" }, 15*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool {
+		cn, err := scrapedAs()
+		return assert.NoError(t, err) && cn == "client-v2"
+	}, 15*time.Second, 50*time.Millisecond)
 }
