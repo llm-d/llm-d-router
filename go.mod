@@ -58,7 +58,7 @@ require (
 	k8s.io/code-generator v0.37.2
 	k8s.io/component-base v0.37.2
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
-	sigs.k8s.io/controller-runtime v0.25.2
+	sigs.k8s.io/controller-runtime v0.25.3
 	sigs.k8s.io/controller-tools v0.21.0
 	sigs.k8s.io/gateway-api v1.6.3
 	sigs.k8s.io/gateway-api-inference-extension v1.6.2

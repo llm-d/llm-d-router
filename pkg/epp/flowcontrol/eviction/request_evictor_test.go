@@ -205,10 +205,10 @@ func TestRequestEvictor_CtxCancellationTriggersCleanup(t *testing.T) {
 	assert.Equal(t, 1, re.queue.EvictableLen())
 	assert.NotNil(t, re.EvictionRegistry().Get("req-1"))
 
-	// Cancel the context — the goroutine in PreRequest should fire and call cleanupRequest.
+	// Cancel the context. The AfterFunc callback registered in PreRequest should call cleanupRequest.
 	cancel()
 
-	// Wait briefly for the goroutine to execute all steps of cleanupRequest.
+	// The callback runs in its own goroutine, so wait for it to finish all steps of cleanupRequest.
 	assert.Eventually(t, func() bool {
 		return re.queue.InFlightLen() == 0 &&
 			re.queue.EvictableLen() == 0 &&

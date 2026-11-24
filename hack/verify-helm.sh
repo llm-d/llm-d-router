@@ -70,6 +70,7 @@ test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set r
 test_cases_llm_d_router_gateway["vllm-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["vllm-grpc-override-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=GRPC --set router.modelServers.grpcServiceName=vllm.grpc.engine.VllmEngine --set router.epp.parsers[0]=vllmgrpc-parser --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["vllm-grpc-empty-service-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.grpcServiceName= --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["sglang-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=sglang --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -126,8 +127,8 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
       echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
       exit 1
     fi
-    if ! grep -q 'grpcServiceName: "vllm.Inference"' "${gke_yaml}"; then
-      echo "Validation failed: vLLM gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
+    if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
+      echo "Validation failed: default vLLM gRPC HealthCheckPolicy did not omit grpcServiceName for test: ${key}"
       exit 1
     fi
   fi
@@ -153,6 +154,23 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
     gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
     if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
       echo "Validation failed: empty router.modelServers.grpcServiceName did not omit grpcServiceName on GRPC HealthCheckPolicy for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "sglang-grpc-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: sglanggrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: sglanggrpc-parser and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
+      echo "Validation failed: default SGLang gRPC HealthCheckPolicy did not omit grpcServiceName for test: ${key}"
       exit 1
     fi
   fi
@@ -319,6 +337,7 @@ test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServe
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["vllm-grpc"]="--set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.targetPorts[0].number=50051 --set router.epp.metricsDataSource.port=8000 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["sglang-grpc"]="--set router.modelServers.type=sglang --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -382,6 +401,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     fi
     if ! grep -Eq "^[[:space:]]+port: 8000$" "${epp_yaml}"; then
       echo "Validation failed: metricsDataSource.port not rendered in standalone EPP config for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "sglang-grpc" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "pluginRef: sglanggrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: sglanggrpc-parser and passthrough-parser not found in rendered output for test: ${key}"
       exit 1
     fi
   fi
@@ -929,6 +955,37 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   for bad_metrics_port in 0 -1 65536 abc; do
     if ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" --set router.modelServers.matchLabels.app=llm-instance-gateway --set "router.epp.metricsDataSource.port=${bad_metrics_port}" >/dev/null 2>&1; then
       echo "${chart} accepted invalid router.epp.metricsDataSource.port=${bad_metrics_port}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying router.modelServers.type and protocol case normalization..."
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for engine_case in \
+    "vLLM:GRPC:absent:vllminference-parser,vllmgrpc-parser,passthrough-parser" \
+    "SGLang:GRPC:sglang:sglanggrpc-parser,passthrough-parser" \
+    "Triton:HTTP:triton:passthrough-parser"; do
+    IFS=: read -r engine_set protocol_set engine_want parsers_want <<< "${engine_case}"
+    engine_render_output="${TEMP_DIR}/${chart}-model-server-type-${engine_set}-${protocol_set}-render.yaml"
+    ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" \
+      --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set "router.modelServers.type=${engine_set}" \
+      --set "router.modelServers.protocol=${protocol_set}" > "${engine_render_output}" || exit 1
+    engine_config=$("${YQ}" -N 'select(.kind == "ConfigMap" and (.data | has("default-plugins.yaml"))) | .data."default-plugins.yaml"' "${engine_render_output}")
+    extractor_count=$(printf '%s\n' "${engine_config}" | "${YQ}" '[.plugins[] | select(.type == "core-metrics-extractor")] | length')
+    if [ "${extractor_count}" != "1" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected 1 core-metrics-extractor plugin, got ${extractor_count}"
+      exit 1
+    fi
+    default_engine=$(printf '%s\n' "${engine_config}" | "${YQ}" '.plugins[] | select(.type == "core-metrics-extractor") | .parameters.defaultEngine // "absent"')
+    if [ "${default_engine}" != "${engine_want}" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected core-metrics-extractor defaultEngine=${engine_want}, got ${default_engine}"
+      exit 1
+    fi
+    rendered_parsers=$(printf '%s\n' "${engine_config}" | "${YQ}" '.requestHandler.parsers // [] | map(.pluginRef) | join(",")')
+    if [ "${rendered_parsers}" != "${parsers_want}" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected requestHandler.parsers=${parsers_want}, got ${rendered_parsers}"
       exit 1
     fi
   done

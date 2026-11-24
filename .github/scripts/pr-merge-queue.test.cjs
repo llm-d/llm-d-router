@@ -124,6 +124,30 @@ describe('evaluateAndEnqueue', () => {
     assert.equal(res.reason, 'already_queued');
   });
 
+  it('treats a concurrent enqueue error as already queued', async () => {
+    const github = {
+      graphql: async (query) => {
+        if (query.includes('enqueuePullRequest')) {
+          throw new Error(
+            'Request failed due to following response errors:\n - Pull request is already in the queue'
+          );
+        }
+        return { repository: { pullRequest: makePr() } };
+      },
+    };
+
+    const res = await evaluateAndEnqueue({
+      github,
+      owner: 'llm-d',
+      repo: 'llm-d-router',
+      pull_number: 42,
+      sleep: async () => {},
+    });
+
+    assert.equal(res.enqueued, false);
+    assert.equal(res.reason, 'already_queued');
+  });
+
   it('retries transient BLOCKED state when approved and enqueues once CLEAN', async () => {
     let fetchCount = 0;
     const github = {

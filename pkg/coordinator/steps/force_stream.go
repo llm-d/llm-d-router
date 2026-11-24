@@ -107,7 +107,7 @@ var errForceStreamUnreadable = errors.New("force-stream: upstream stream unreada
 
 // errForceStreamTruncated marks a forced stream that ended with a clean EOF before
 // any terminal marker: no data: [DONE] line and no shape terminal (a Responses
-// terminal event or a choice finish_reason). The reassembly would look complete
+// terminal event or a finish_reason on every choice). The reassembly would look complete
 // but omit the cut-off tail, so the request falls back to the pass-through rather
 // than return a truncated reply as a 200. It is handled like errForceStreamUnreadable.
 var errForceStreamTruncated = errors.New("force-stream: upstream stream ended before a terminal marker")
@@ -755,8 +755,8 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, generated, ech
 	// omitting a cut-off tail. The Responses and Messages shapes close on their own
 	// terminal event with no [DONE] line, so a terminal event is required there
 	// (terminated() keys on the captured terminal state). The other shapes accept
-	// either a finish_reason or the [DONE] marker. A stream with neither falls back
-	// rather than return a truncated reply as a 200.
+	// either a finish_reason on every choice or the [DONE] marker. A stream with
+	// neither falls back rather than return a truncated reply as a 200.
 	if reassembler.shape == sseShapeResponses || reassembler.shape == sseShapeMessages {
 		if !reassembler.terminated() {
 			return errForceStreamTruncated

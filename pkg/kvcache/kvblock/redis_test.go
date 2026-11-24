@@ -17,6 +17,7 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,10 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	miniredisserver "github.com/alicebob/miniredis/v2/server"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	. "github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
@@ -298,4 +301,23 @@ func TestRedisLookup_AllKeysBadIsNotAPipelineFailure(t *testing.T) {
 	result, err := index.Lookup(t.Context(), []BlockHash{badKey1, badKey2}, sets.Set[string]{})
 	require.NoError(t, err)
 	require.Empty(t, result)
+}
+
+// A lookup that reaches the end of the cached prefix is the normal case on
+// almost every request, so it must not log at the default verbosity.
+func TestRedisLookup_PrefixEndIsQuietAtDefaultVerbosity(t *testing.T) {
+	index := createRedisIndexForTesting(t)
+	var logged []string
+	logger := funcr.New(func(prefix, args string) {
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: 0})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	pod := PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{1}, []PodEntry{pod}))
+
+	got, err := index.Lookup(ctx, []BlockHash{1, 2, 3}, sets.New[string]())
+	require.NoError(t, err)
+	require.Equal(t, map[BlockHash][]PodEntry{1: {pod}}, got)
+	require.Empty(t, logged)
 }

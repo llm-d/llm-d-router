@@ -24,10 +24,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -228,6 +232,41 @@ func TestUncollectedMetricsExcludedFromSaturation(t *testing.T) {
 				Objectives: fwksched.RequestObjectives{Priority: -1},
 			}
 			if err := admitter.Admit(context.Background(), req, tt.pods); (err != nil) != tt.wantRejected {
+				t.Errorf("expected rejection %v, got error: %v", tt.wantRejected, err)
+			}
+		})
+	}
+}
+
+// TestDeferredRequestsLeaveQueueRatio admits the way the director does: the
+// pods are scoped to the admitter's declarations before Admit.
+func TestDeferredRequestsLeaveQueueRatio(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		waiting        int
+		deferred       float64
+		wantSaturation float64
+		wantRejected   bool
+	}{
+		{name: "every waiting request deferred", waiting: 2, deferred: 2, wantSaturation: 0},
+		{name: "one of two deferred", waiting: 2, deferred: 1, wantSaturation: 0.2},
+		{name: "two of four deferred", waiting: 4, deferred: 2, wantSaturation: 0.4, wantRejected: true},
+		{name: "deferred above waiting", waiting: 2, deferred: 3, wantSaturation: 0.4, wantRejected: true},
+		{name: "negative deferred", waiting: 2, deferred: -1, wantSaturation: 0.4, wantRejected: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := newEndpoint("pod-0", tt.waiting, 0)
+			pod.Put(attrmetrics.ScalarMetricDataKey("DeferredQueueSize"), attrmetrics.ScalarMetricValue(tt.deferred))
+			admitter := newAdmitter(defaultParams()).WithRandFn(func() float64 { return 0.9 })
+			datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{admitter})
+			pods, _ := datalayer.Scope(logr.Discard(), fwkrh.AdmissionExtensionPoint, admitter, []fwksched.Endpoint{pod})
+			if got := admitter.computeSaturation(pods); got != tt.wantSaturation {
+				t.Errorf("expected saturation %v, got %v", tt.wantSaturation, got)
+			}
+			req := &fwksched.InferenceRequest{
+				Objectives: fwksched.RequestObjectives{Priority: -1},
+			}
+			if err := admitter.Admit(context.Background(), req, pods); (err != nil) != tt.wantRejected {
 				t.Errorf("expected rejection %v, got error: %v", tt.wantRejected, err)
 			}
 		})

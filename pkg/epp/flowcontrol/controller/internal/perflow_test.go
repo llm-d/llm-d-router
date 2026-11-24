@@ -198,7 +198,9 @@ func TestPerFlowCapacityReleased(t *testing.T) {
 			switch action {
 			case "dispatch":
 				require.Zero(t, reservations)
-				require.NoError(t, h.processor.dispatchItem(first))
+				dispatched, err := h.processor.dispatchItem(first)
+				require.NoError(t, err)
+				require.True(t, dispatched)
 				require.Equal(t, types.QueueOutcomeDispatched, first.FinalState().Outcome)
 				require.Equal(t, 1, reservations)
 			case "cancel":

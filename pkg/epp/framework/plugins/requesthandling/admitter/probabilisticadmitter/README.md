@@ -21,8 +21,13 @@ For sheddable requests (priority < 0), the plugin computes cluster saturation us
 roofline formula and rejects with probability `p = min(sat^power * k, 1.0)`:
 
 ```
-saturation = avg over pods of: max(WaitingQueueSize / queueDepthThreshold, KVCacheUsagePercent / kvCacheUtilThreshold)
+saturation = avg over pods of: max((WaitingQueueSize - DeferredQueueSize) / queueDepthThreshold, KVCacheUsagePercent / kvCacheUtilThreshold)
 ```
+
+`DeferredQueueSize` is the [`core-metrics-extractor`](../../../datalayer/extractor/metrics/README.md)
+attribute for the queued requests that wait on a KV transfer in progress. A pod without the
+attribute, or with a count that is negative or above its waiting queue, contributes its full
+`WaitingQueueSize`.
 
 | Condition | Behavior |
 |-----------|----------|
@@ -240,4 +245,4 @@ that participates in a broader admission and rate-limiting pipeline.
 ## Dependencies
 
 None. The plugin reads `WaitingQueueSize` and `KVCacheUsagePercent` directly from endpoint
-metrics - no data producer prerequisite.
+metrics - no data producer prerequisite. The `DeferredQueueSize` attribute is optional.

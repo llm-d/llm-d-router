@@ -107,14 +107,14 @@ func TestCalculateSummary(t *testing.T) {
 			name: "single endpoint",
 			endpoints: []fwkdl.Endpoint{
 				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
-					KVCacheUsagePercent: 50.0,
+					KVCacheUsagePercent: 0.5,
 					WaitingQueueSize:    3,
 					RunningRequestsSize: 5,
 					UpdateTime:          time.Now(),
 				}),
 			},
 			want: summary{
-				kvCache:         stats{mean: 50.0, stdv: 0},
+				kvCache:         stats{mean: 0.5, stdv: 0},
 				queueSize:       stats{mean: 3.0, stdv: 0},
 				runningRequests: stats{mean: 5.0, stdv: 0},
 			},
@@ -123,22 +123,39 @@ func TestCalculateSummary(t *testing.T) {
 			name: "multiple endpoints aggregated",
 			endpoints: []fwkdl.Endpoint{
 				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
-					KVCacheUsagePercent: 30.0,
+					KVCacheUsagePercent: 0.3,
 					WaitingQueueSize:    2,
 					RunningRequestsSize: 1,
 					UpdateTime:          time.Now(),
 				}),
 				fwkdl.NewEndpoint(pod2, &fwkdl.Metrics{
-					KVCacheUsagePercent: 70.0,
+					KVCacheUsagePercent: 0.7,
 					WaitingQueueSize:    5,
 					RunningRequestsSize: 3,
 					UpdateTime:          time.Now(),
 				}),
 			},
 			want: summary{
-				kvCache:         stats{mean: 50.0, stdv: 28.28},
+				kvCache:         stats{mean: 0.5, stdv: 0.2828427},
 				queueSize:       stats{mean: 3.5, stdv: 2.12},
 				runningRequests: stats{mean: 2.0, stdv: 1.41},
+			},
+		},
+		{
+			// KV cache usage is a 0-1 fraction, so pool stats keep its precision.
+			name: "low and close KV cache usage keeps its precision",
+			endpoints: []fwkdl.Endpoint{
+				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
+					KVCacheUsagePercent: 0.004,
+					UpdateTime:          time.Now(),
+				}),
+				fwkdl.NewEndpoint(pod2, &fwkdl.Metrics{
+					KVCacheUsagePercent: 0.007,
+					UpdateTime:          time.Now(),
+				}),
+			},
+			want: summary{
+				kvCache: stats{mean: 0.0055, stdv: 0.0021213},
 			},
 		},
 	}
@@ -146,7 +163,10 @@ func TestCalculateSummary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := calculateSummary(tt.endpoints)
-			assert.Equal(t, tt.want, got)
+			assert.InDelta(t, tt.want.kvCache.mean, got.kvCache.mean, 1e-6, "kv cache mean")
+			assert.InDelta(t, tt.want.kvCache.stdv, got.kvCache.stdv, 1e-6, "kv cache stdv")
+			assert.Equal(t, tt.want.queueSize, got.queueSize)
+			assert.Equal(t, tt.want.runningRequests, got.runningRequests)
 		})
 	}
 }
