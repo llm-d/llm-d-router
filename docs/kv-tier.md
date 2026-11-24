@@ -1,7 +1,7 @@
-# Node-level KV tier (`kvtierd`)
+# RFC: Node-level KV tier (`kvtierd`)
 
-- **Status:** Proposal
-- **Date:** 2026-11-20
+- **Status:** RFC. Open for comment. No decision is made yet.
+- **Date:** 2026-11-24
 - **Tracking issue:** TBD
 - **Target components:** `llm-d-router` (new `kvtierd` daemon, engine shims for vLLM, EPP hint plugins)
 
@@ -28,15 +28,47 @@ The code works. It is checked in on branches of a fork of [llm-d-router](https:/
 
 ## Why
 
-Today KVCR is the only tier that carries out the router's KV hints. KVCR is a tiering library in NVIDIA's Dynamo project. It supports the four hint actions in vLLM's hint format. A new hint action therefore depends on one implementation.
+The router needs a tier that carries out its KV hints on every accelerator llm-d serves. The matrix below compares the options against what the router needs.
 
-Owning the tier gives llm-d three things:
+| What the router needs | vLLM CPU offload | [KVCR](https://github.com/ai-dynamo/kvcr) | Mooncake Store | CPU sharing proposal ([llm-d#3047](https://github.com/llm-d/llm-d/issues/3047)) | vllm-torchtpu and TPU Sync | This proposal |
+| --- | --- | --- | --- | --- | --- | --- |
+| Hardware | GPU | GPU | GPU | GPU | TPU | GPU and TPU |
+| Carries out router hints | No | Yes, all four actions | No | No | No | Yes on GPU. `kv.fetch` on TPU so far. |
+| llm-d can add a hint on its own | No | No. Its policy interface covers placement and eviction, not hints. | No | No | No | Yes |
 
-- **llm-d can add hints on its own.** Examples are compression for cross-host transfer, pinning shared prefixes and retention priority. We can prototype them without a release of vLLM, tpu-inference, TPU Sync or KVCR.
-- **GPU and TPU share one hint protocol.** The router sends the same hints to both and needs no accelerator-specific path.
-- **On GPU, a per-node pool adds what an engine's own cache cannot.** Blocks outlive engine restarts. Engines on a node share one pool. The router can move a prefix to the node where a request lands, so that node does not recompute it.
+KVCR already covers most of the list on GPU. Three gaps remain:
 
-The hints follow vLLM's KV hint format, which KVCR also uses. A router can drive either tier with the same messages.
+- **No option covers both GPU and TPU.** KVCR runs the hints on GPU only. On TPU, vllm-torchtpu moves blocks between pods but does not read hints. The router would need a different path for each accelerator.
+- **llm-d cannot add a hint on its own.** Examples are compression for cross-host transfer, pinning shared prefixes and retention priority. Each one waits on another project's design and release.
+- **No hint-driven option has a per-node pool.** KVCR leaves it out by design. The CPU sharing proposal has the pool but no hints and no transfer between nodes.
+
+This proposal closes the gaps with one rule. The hint policy lives in one layer that llm-d owns. Each accelerator supplies the mechanism that stores and copies blocks.
+
+- **On GPU the mechanism is a per-node daemon.** It also provides the shared pool.
+- **On TPU the mechanism is vllm-torchtpu and TPU Sync.** llm-d adds only a thin shim.
+
+The router sends the same hints to both, and a new hint is defined once. The hints follow vLLM's KV hint format, which KVCR also uses. A router can drive either tier with the same messages.
+
+### The tradeoff
+
+This proposal has a cost. llm-d would maintain another KV tier on GPU: the daemon, its transfer code and a shim for each engine. SGLang support is in progress and needs a second shim and a way to receive hints.
+
+The alternative is to build nothing on GPU:
+
+- **On GPU, use KVCR as it is.** It already runs the four hints, has an SGLang preview and can keep its pool across an engine failure.
+- **On TPU, put the effort into vllm-torchtpu and TPU Sync.** The asks at the end of Risks apply either way.
+- **Keep a separate recipe for each accelerator.** The router sends the same hint format to both.
+
+| | This proposal | KVCR on GPU, TPU Sync on TPU |
+| --- | --- | --- |
+| What llm-d maintains | The GPU daemon and a shim for each engine and accelerator | The router, the recipes, and at most a thin TPU shim |
+| Hint behavior on GPU and TPU | Defined once, in llm-d's layer | Implemented twice, by KVCR and by vllm-torchtpu. It can drift. |
+| Adding a hint | llm-d adds it on its own | Each one goes through KVCR for GPU and vllm-torchtpu for TPU |
+| Per-node shared pool on GPU | Yes | No. The CPU sharing proposal could supply it, but it has no hints yet. |
+| SGLang on GPU | In progress | In preview today |
+| Deployment | One recipe shape | One recipe for each accelerator |
+
+The alternative is less code for llm-d to own, and it works on GPU today. This proposal is worth its cost only if llm-d needs the flexibility to add hints on its own, or the per-node pool. A written hint contract that KVCR and vllm-torchtpu both follow would reduce the drift without a new tier. On GPU, KVCR already runs the four hints, so the case for the daemon rests on the three gaps above.
 
 ## Design
 
