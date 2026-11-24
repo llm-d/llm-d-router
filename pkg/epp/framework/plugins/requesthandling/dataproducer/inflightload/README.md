@@ -92,3 +92,5 @@ plugins:
       kvEventsSourceRef: decode-events
 ```
 A deployment without a prefill profile names the source covering its serving engines instead.
+
+For SGLang disaggregated decode, decode workers publish KV events only when started with `--disaggregation-decode-enable-radix-cache` and `--enable-kv-cache-events`, and the `kv-events-source` sets `engineType: sglang` (see [SGLang disaggregated decode](../preciseprefixcache/README.md#sglang-disaggregated-decode)). Under `EAGLE` and `EAGLE3`, each `BlockStored` block of `P` bigram positions spans `P+1` tokens including its trailing lookahead token, so prompts with `P` or fewer tokens have no full bigram block and complete at `StartOfStream`. SGLang reads `session_id` from the request JSON payload and ignores the `X-Session-ID` header, so `BlockStored` carries a session id only when the request payload includes `session_id`; otherwise prefill completes at `StartOfStream`.

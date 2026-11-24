@@ -677,3 +677,140 @@ func TestKVEventPrefillCompletion_RankEndpointResetDropsOnlyOwnRank(t *testing.T
 	require.Equal(t, int64(0), producer.requestTracker.get(fullEndpointName("prefill-0")))
 	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }
+
+func bigramStoreBatch(stamp string, tokens []uint32, pageSize int, lookahead uint32) kvevents.EventBatch {
+	return kvevents.EventBatch{Events: []kvevents.GenericEvent{&kvevents.BlockStoredEvent{
+		SessionID:      &stamp,
+		BlockSize:      pageSize,
+		Tokens:         tokens,
+		LookaheadToken: &lookahead,
+		BlockHashes:    make([]uint64, len(tokens)/pageSize),
+	}}}
+}
+
+func TestKVEventPrefillCompletion_SGLangBigramDecodeStore(t *testing.T) {
+	t.Parallel()
+	t.Run("page size 1 releases on final prompt bigram", func(t *testing.T) {
+		t.Parallel()
+		const name = "kv-bigram-page1"
+		producer := newKVEventsProducer(t, name)
+		ctx := context.Background()
+		prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+		decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+		prefillID := fullEndpointName("prefill-0")
+
+		// A 6-token prompt spans 5 bigrams: (t0,t1)..(t4,t5).
+		prompt := seq(10, 6)
+		req := newStampedRequest("req-bg-1", prompt)
+		require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+		source := kvevents.EventSource{Endpoint: decodeSource}
+
+		for i := range len(prompt) - 2 {
+			require.NoError(t, producer.ProcessEvents(ctx, source,
+				bigramStoreBatch("req-bg-1", prompt[i:i+1], 1, prompt[i+1])))
+			require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+		}
+		require.NoError(t, producer.ProcessEvents(ctx, source,
+			bigramStoreBatch("req-bg-1", prompt[4:5], 1, prompt[5])))
+		require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+		require.Equal(t, float64(1), completions(name, signalKVEvent))
+	})
+
+	t.Run("exact page multiple releases on last full bigram page", func(t *testing.T) {
+		t.Parallel()
+		const (
+			name     = "kv-bigram-exact"
+			pageSize = 16
+		)
+		producer := newKVEventsProducer(t, name)
+		ctx := context.Background()
+		prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+		decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+		prefillID := fullEndpointName("prefill-0")
+
+		// 64 tokens span 63 bigrams: 3 full 16-bigram pages ending at (prompt[32:48], prompt[48]).
+		prompt := seq(0, 64)
+		req := newStampedRequest("req-bg-exact", prompt)
+		require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+		source := kvevents.EventSource{Endpoint: decodeSource}
+
+		require.NoError(t, producer.ProcessEvents(ctx, source,
+			bigramStoreBatch("req-bg-exact", prompt[0:16], pageSize, prompt[16])))
+		require.NoError(t, producer.ProcessEvents(ctx, source,
+			bigramStoreBatch("req-bg-exact", prompt[16:32], pageSize, prompt[32])))
+		require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+
+		require.NoError(t, producer.ProcessEvents(ctx, source,
+			bigramStoreBatch("req-bg-exact", prompt[32:48], pageSize, prompt[48])))
+		require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+		require.Equal(t, float64(1), completions(name, signalKVEvent))
+	})
+
+	t.Run("cached prompt generated bigram page respects stamp ownership", func(t *testing.T) {
+		t.Parallel()
+		const (
+			name     = "kv-bigram-cached"
+			pageSize = 16
+		)
+		producer := newKVEventsProducer(t, name)
+		ctx := context.Background()
+		prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+		decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+		prefillID := fullEndpointName("prefill-0")
+		source := kvevents.EventSource{Endpoint: decodeSource}
+
+		prompt := seq(0, 64)
+		const firstGenerated uint32 = 900
+
+		// Under the producer's own stamp, (prompt[48:64], firstGenerated) is outside
+		// the prompt and completes prefill.
+		own := newStampedRequest("req-bg-own", prompt)
+		require.NoError(t, producer.PreRequest(ctx, own, pdResult(prefill, decode)))
+		require.NoError(t, producer.ProcessEvents(ctx, source,
+			bigramStoreBatch("req-bg-own", prompt[48:64], pageSize, firstGenerated)))
+		require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+		require.Equal(t, float64(1), completions(name, signalKVEvent))
+
+		// Under a client session id, a concurrent longer request sharing the session
+		// could store (prompt[48:64], otherToken), so only first byte completes it.
+		shared := newStampedRequest("req-bg-shared", prompt)
+		shared.Body.Payload = fwkrequest.PayloadMap{sessionIDField: "client-sess"}
+		res := pdResult(prefill, decode)
+		require.NoError(t, producer.PreRequest(ctx, shared, res))
+		require.NoError(t, producer.ProcessEvents(ctx, source,
+			bigramStoreBatch("client-sess", prompt[48:64], pageSize, firstGenerated)))
+		require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+
+		shared.SchedulingResult = res
+		producer.ResponseBody(ctx, shared, &fwkrh.Response{StartOfStream: true}, nil)
+		require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+		require.Equal(t, float64(1), completions(name, signalFirstByte))
+	})
+
+	t.Run("prompt with pageSize tokens has no full bigram page", func(t *testing.T) {
+		t.Parallel()
+		const (
+			name     = "kv-bigram-short"
+			pageSize = 16
+		)
+		producer := newKVEventsProducer(t, name)
+		ctx := context.Background()
+		prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+		decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+		prefillID := fullEndpointName("prefill-0")
+
+		// 16 tokens span 15 bigrams, short of a 16-bigram page.
+		prompt := seq(0, pageSize)
+		req := newStampedRequest("req-bg-short", prompt)
+		res := pdResult(prefill, decode)
+		require.NoError(t, producer.PreRequest(ctx, req, res))
+		require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource},
+			bigramStoreBatch("req-bg-short", seq(100, pageSize), pageSize, 200)))
+		require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+
+		req.SchedulingResult = res
+		producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+		require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+		require.Equal(t, float64(1), completions(name, signalFirstByte))
+	})
+}

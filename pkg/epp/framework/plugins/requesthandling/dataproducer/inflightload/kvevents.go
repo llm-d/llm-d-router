@@ -79,23 +79,34 @@ type pendingPrefill struct {
 // and stored nothing new for. A client-chosen stamp may be shared with other
 // requests, whose blocks must not complete this one. Prompts shorter than
 // the engine block store no prompt block; a request made only of such
-// prompts never completes from events.
-func (p *pendingPrefill) markStored(tokens []uint32, blockSize int) bool {
+// prompts never completes from events. With a lookahead token (SGLang bigram
+// events), a block of blockSize cached positions spans blockSize+1 tokens
+// ending at *lookahead.
+func (p *pendingPrefill) markStored(tokens []uint32, blockSize int, lookahead *uint32) bool {
 	if blockSize <= 0 || len(tokens) < blockSize {
 		return false
 	}
 	tail := tokens[len(tokens)-blockSize:]
+	minTokens := blockSize
+	if lookahead != nil {
+		minTokens = blockSize + 1
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	complete, hasFullBlock := true, false
 	for i, prompt := range p.prompts {
-		if len(prompt) < blockSize {
+		if len(prompt) < minTokens {
 			continue
 		}
 		hasFullBlock = true
 		if !p.done[i] {
-			end := len(prompt) / blockSize * blockSize
-			p.done[i] = slices.Equal(prompt[end-blockSize:end], tail)
+			if lookahead != nil {
+				end := (len(prompt) - 1) / blockSize * blockSize
+				p.done[i] = slices.Equal(prompt[end-blockSize:end], tail) && prompt[end] == *lookahead
+			} else {
+				end := len(prompt) / blockSize * blockSize
+				p.done[i] = slices.Equal(prompt[end-blockSize:end], tail)
+			}
 		}
 		if !p.done[i] {
 			complete = false
@@ -107,12 +118,21 @@ func (p *pendingPrefill) markStored(tokens []uint32, blockSize int) bool {
 	if complete || !p.ownStamp {
 		return complete
 	}
-	return !p.promptBlock(tail, blockSize)
+	return !p.promptBlock(tail, blockSize, lookahead)
 }
 
-// promptBlock reports whether tail is one of the prompts' full blocks.
-func (p *pendingPrefill) promptBlock(tail []uint32, blockSize int) bool {
+// promptBlock reports whether tail (and lookahead, when set) is one of the
+// prompts' full blocks.
+func (p *pendingPrefill) promptBlock(tail []uint32, blockSize int, lookahead *uint32) bool {
 	for _, prompt := range p.prompts {
+		if lookahead != nil {
+			for start := 0; start+blockSize < len(prompt); start += blockSize {
+				if slices.Equal(prompt[start:start+blockSize], tail) && prompt[start+blockSize] == *lookahead {
+					return true
+				}
+			}
+			continue
+		}
 		for start := 0; start+blockSize <= len(prompt); start += blockSize {
 			if slices.Equal(prompt[start:start+blockSize], tail) {
 				return true
@@ -311,7 +331,7 @@ func (p *InFlightLoadProducer) ProcessEvents(ctx context.Context, source kvevent
 			continue
 		}
 		for _, pending := range p.watch.lookup(source.Endpoint, *stored.SessionID) {
-			if pending.markStored(stored.Tokens, stored.BlockSize) {
+			if pending.markStored(stored.Tokens, stored.BlockSize, stored.LookaheadToken) {
 				p.onPrefillComplete(ctx, pending.requestID, pending.result, signalKVEvent)
 			}
 		}

@@ -153,3 +153,37 @@ Set `kvEventsSourceRef` to the name of a
 decoded batches it shares with other consumers. The source owns the subscriptions
 and their recovery. Startup fails when the name matches no plugin, when the named
 plugin is of another type, or when `kvEventsConfig` is set alongside the reference.
+
+### SGLang disaggregated decode
+
+An SGLang decode worker (`--disaggregation-mode decode`) disables its radix
+cache by default and publishes no KV events. Pass
+`--disaggregation-decode-enable-radix-cache` and `--enable-kv-cache-events` on
+the decode workers so transferred prefixes enter the decode radix tree and emit
+`BlockStored` and `BlockRemoved` events, and set `engineType: sglang` on the
+`kv-events-source` (or `kvEventsConfig.engineType: sglang` when the producer
+manages its own subscriptions).
+
+SGLang marks `--disaggregation-decode-enable-radix-cache` experimental and
+enforces these constraints on decode workers:
+
+- Incompatible with `--enable-hisparse`, `--disaggregation-transfer-backend fake`,
+  and `--disaggregation-decode-allocation-policy prefill_complete`.
+- Speculative decoding accepts `EAGLE`, `EAGLE3` (`NEXTN`), `DSPARK`, and
+  `DFLASH` (`EAGLE` and `NEXTN` on Gemma4 drafts resolve to `FROZEN_KV_MTP` and
+  are rejected). `EAGLE` and `EAGLE3` publish bigram events; `DSPARK` and
+  `DFLASH` publish plain token events.
+- Sliding-window attention (SWA) models reject `--enable-hierarchical-cache`
+  alongside decode radix caching, SWA-compress models (such as Gemma4 and
+  MiMo-V2) are rejected, and DeepSeek-V4 requires the unified KV layout.
+- Multimodal models using the `transformers` model implementation disable the
+  radix cache.
+- Data-parallel attention (`--enable-dp-attention`) logs an experimental
+  warning and requires rank-aware routing for prefix hits.
+
+Decode radix caching lets a matched decode worker skip re-transferring cached
+prefix pages from prefill, while SGLang decode workers reject requests that
+carry no bootstrap room id with HTTP 400. Keep `always-disagg-pd-decider` for
+SGLang P/D pools (see
+[disaggregation.md](../../../../../../../docs/disaggregation.md#prefix-based-pd-decider))
+and leave `seedDecodeWhenDisaggregated` at `false`.
