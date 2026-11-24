@@ -186,16 +186,26 @@ func (p *Plugin) lookupTeam(request *scheduling.InferenceRequest) (string, *team
 // request fields (tools, stop sequences) and low for multi-byte UTF-8 text.
 func (p *Plugin) estimateCost(request *scheduling.InferenceRequest, cfg TeamConfig) (prompt int64, cost float64) {
 	prompt = int64(request.RequestSizeBytes / fwkrequest.BytesPerToken)
-	var output int64
+	output, ok := requestedOutput(request)
 	switch {
-	case request.Body != nil && request.Body.MaxOutputTokens != nil:
-		output = *request.Body.MaxOutputTokens
+	case ok && output >= 0:
 	case cfg.MaxOutputTokens > 0:
 		output = cfg.MaxOutputTokens
 	default:
 		output = p.defaultOut
 	}
 	return prompt, float64(prompt) + p.outputWeight*float64(output)
+}
+
+// requestedOutput returns the request's output-token cap, or false when it sets none. The cap can
+// be negative: a parser converts an out-of-range max_tokens such as 1e300 to MinInt64 on amd64.
+// A negative cap is over any maxOutputTokens limit and never reserved, since a negative
+// reservation would free daily budget.
+func requestedOutput(request *scheduling.InferenceRequest) (int64, bool) {
+	if request.Body == nil || request.Body.MaxOutputTokens == nil {
+		return 0, false
+	}
+	return *request.Body.MaxOutputTokens, true
 }
 
 // RequestHeader decides the request's class. A request within the team's contract (its size
@@ -208,8 +218,9 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	teamID, team := p.lookupTeam(request)
 	committed := p.classes[team.classIndex]
 	prompt, cost := p.estimateCost(request, team.cfg)
+	output, hasOutputCap := requestedOutput(request)
 	overSize := (team.cfg.MaxPromptTokens > 0 && prompt > team.cfg.MaxPromptTokens) ||
-		(team.cfg.MaxOutputTokens > 0 && request.Body != nil && request.Body.MaxOutputTokens != nil && *request.Body.MaxOutputTokens > team.cfg.MaxOutputTokens)
+		(team.cfg.MaxOutputTokens > 0 && hasOutputCap && (output < 0 || output > team.cfg.MaxOutputTokens))
 
 	now := p.now()
 	team.mu.Lock()

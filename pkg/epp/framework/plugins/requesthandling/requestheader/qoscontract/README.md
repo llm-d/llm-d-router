@@ -31,7 +31,7 @@ Until settlement, output is charged at its cap, not at a running estimate, becau
 
 Input tokens are estimated as request bytes / 4, because tokenization runs after flow control. The bytes include the JSON structure, so the estimate runs high for a short prompt with large request fields (tool definitions, many stop sequences) and low for multi-byte UTF-8 text. The daily charge is corrected at settlement; the `maxPromptTokens` check uses the estimate. `maxOutput` is the request's output cap, else the team's `maxOutputTokens`, else `defaultOutputReservation`.
 
-`maxOutputTokens` binds only a request that sets an output cap (`max_tokens`, or `max_completion_tokens` for chat completions and `max_output_tokens` for the Responses API). A request without one is not checked against it: it is served at the team's class, reserves `maxOutputTokens`, and can generate past it. Settlement charges the output it actually generated to the daily budget. To make the limit bind for every request, set a default cap upstream, for example at the gateway.
+`maxOutputTokens` binds only a request that sets an output cap (`max_tokens`, or `max_completion_tokens` for chat completions and `max_output_tokens` for the Responses API). A request without one is not checked against it: it is served at the team's class, reserves `maxOutputTokens`, and can generate past it. Settlement charges the output it actually generated to the daily budget. To make the limit bind for every request, set a default cap upstream, for example at the gateway. A cap too large for an int64 (for example `1e300`) can reach the plugin as a negative number; it counts as over `maxOutputTokens`, and when the team has no output limit it reserves as if no cap were set.
 
 ### Why a RequestHeader Plugin
 

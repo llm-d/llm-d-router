@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -253,6 +254,30 @@ func TestRequestHeader_MissingOutputCapReservesTeamMax(t *testing.T) {
 	require.NoError(t, p.RequestHeader(t.Context(), req))
 	_, daily := usage(p, "team-a")
 	assert.InDelta(t, 300, daily, 1e-9, "reserve = 100 + 2*100 (team maxOutputTokens)")
+}
+
+// TestRequestHeader_NegativeOutputCap verifies that a negative output cap, which a parser produces
+// from an out-of-range max_tokens (1e300 converts to MinInt64 on amd64), is over the size limit
+// and never makes a negative reservation that frees daily budget.
+func TestRequestHeader_NegativeOutputCap(t *testing.T) {
+	t.Run("over the size limit", func(t *testing.T) {
+		p, _ := newTestPlugin(t, nil)
+		req := newRequest("team-a", 100, math.MinInt64)
+		require.NoError(t, p.RequestHeader(t.Context(), req))
+		inflight, daily := usage(p, "team-a")
+		assert.Equal(t, 0, inflight, "a downgraded request holds no slot")
+		assert.InDelta(t, 0, daily, 1e-9, "a downgraded request is not charged")
+		resp := &fwkrh.Response{Headers: map[string]string{}}
+		p.ResponseHeader(t.Context(), req, resp, nil)
+		assert.Equal(t, "standard", resp.Headers[ClassHeader], "moved one class down from critical")
+	})
+	t.Run("no output limit reserves the default", func(t *testing.T) {
+		p, _ := newTestPlugin(t, func(params *Parameters) { params.DefaultOutputReservation = 50 })
+		req := newRequest("team-d", 100, math.MinInt64)
+		require.NoError(t, p.RequestHeader(t.Context(), req))
+		_, daily := usage(p, "team-d")
+		assert.InDelta(t, 200, daily, 1e-9, "reserve = 100 + 2*50 (defaultOutputReservation), as for a missing cap")
+	})
 }
 
 func TestRequestHeader_OverConcurrencyCommitDowngradesOneClass(t *testing.T) {
