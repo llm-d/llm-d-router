@@ -133,6 +133,32 @@ func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
 	return copyPromptHashes(buf.prompts[buf.start:])
 }
 
+// keySet returns the promptKey of each prompt buffered for endpointID.
+// The caller owns the map. It is nil when the endpoint has no prompts.
+func (w *recentWindow) keySet(endpointID string) map[string]struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	buf := w.pending[endpointID]
+	if buf == nil {
+		return nil
+	}
+	prompts := buf.prompts[buf.start:]
+	if len(prompts) == 0 {
+		return nil
+	}
+	keys := make(map[string]struct{}, len(prompts))
+	longest := 0
+	for _, p := range prompts {
+		longest = max(longest, len(p))
+	}
+	scratch := make([]byte, 0, 8+8*longest)
+	for _, p := range prompts {
+		scratch = appendPromptKey(scratch[:0], p)
+		keys[string(scratch)] = struct{}{}
+	}
+	return keys
+}
+
 // forget drops the buffer for endpointID when the endpoint leaves the pool.
 func (w *recentWindow) forget(endpointID string) {
 	w.mu.Lock()
@@ -213,12 +239,19 @@ func promptKey(hashes []blockHash) string {
 	if len(hashes) == 0 {
 		return ""
 	}
-	b := make([]byte, 8+8*len(hashes))
-	binary.LittleEndian.PutUint64(b[:8], uint64(len(hashes)))
-	for i, h := range hashes {
-		binary.LittleEndian.PutUint64(b[8+8*i:], uint64(h))
+	return string(appendPromptKey(make([]byte, 0, 8+8*len(hashes)), hashes))
+}
+
+// appendPromptKey appends the promptKey encoding of hashes to dst.
+func appendPromptKey(dst []byte, hashes []blockHash) []byte {
+	if len(hashes) == 0 {
+		return dst
 	}
-	return string(b)
+	dst = binary.LittleEndian.AppendUint64(dst, uint64(len(hashes)))
+	for _, h := range hashes {
+		dst = binary.LittleEndian.AppendUint64(dst, uint64(h))
+	}
+	return dst
 }
 
 // promptKeyUint64 is promptKey for sync-attribute prompts that are still
@@ -227,10 +260,17 @@ func promptKeyUint64(hashes []uint64) string {
 	if len(hashes) == 0 {
 		return ""
 	}
-	b := make([]byte, 8+8*len(hashes))
-	binary.LittleEndian.PutUint64(b[:8], uint64(len(hashes)))
-	for i, h := range hashes {
-		binary.LittleEndian.PutUint64(b[8+8*i:], h)
+	return string(appendPromptKeyUint64(make([]byte, 0, 8+8*len(hashes)), hashes))
+}
+
+// appendPromptKeyUint64 appends the promptKey encoding of hashes to dst.
+func appendPromptKeyUint64(dst []byte, hashes []uint64) []byte {
+	if len(hashes) == 0 {
+		return dst
 	}
-	return string(b)
+	dst = binary.LittleEndian.AppendUint64(dst, uint64(len(hashes)))
+	for _, h := range hashes {
+		dst = binary.LittleEndian.AppendUint64(dst, h)
+	}
+	return dst
 }

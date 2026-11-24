@@ -387,8 +387,8 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 // LRU-touch the indexer on every request. Each new peer prompt is Added on its
 // own so indexer LRU eviction keeps prompt-prefix semantics. Peer prompts are
 // not recorded into the recent window (no echo). When the attribute digest
-// matches the last processed value, the pod is skipped without snapshot or
-// prompt-key work.
+// matches the last processed value, the pod is skipped without local
+// key-set or prompt-key work.
 func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 	if !p.syncerActive() || p.indexerInst == nil {
 		return
@@ -408,21 +408,24 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 			p.rememberPeerMergedDigest(endpointID, digest)
 			continue
 		}
-		local := p.recent.snapshot(endpointID)
-		localSet := make(map[string]struct{}, len(local))
-		for _, prompt := range local {
-			localSet[promptKey(prompt)] = struct{}{}
+		localSet := p.recent.keySet(endpointID)
+		longest := 0
+		for _, prompt := range set.Prompts {
+			longest = max(longest, len(prompt))
 		}
+		// One buffer for every peer key. A map lookup of string(scratch) does
+		// not allocate; storing a new key does.
+		scratch := make([]byte, 0, 8+8*longest)
 		active := make(map[string]struct{}, len(set.Prompts))
 		for _, prompt := range set.Prompts {
 			if len(prompt) == 0 {
 				continue
 			}
-			key := promptKeyUint64(prompt)
-			if _, ok := localSet[key]; ok {
+			scratch = appendPromptKeyUint64(scratch[:0], prompt)
+			if _, ok := localSet[string(scratch)]; ok {
 				continue
 			}
-			active[key] = struct{}{}
+			active[string(scratch)] = struct{}{}
 		}
 		if p.peerMergedCovers(endpointID, active) {
 			p.rememberPeerMergedDigest(endpointID, digest)
@@ -438,8 +441,8 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 			if len(prompt) == 0 {
 				continue
 			}
-			key := promptKeyUint64(prompt)
-			if _, ok := novel[key]; !ok {
+			scratch = appendPromptKeyUint64(scratch[:0], prompt)
+			if _, ok := novel[string(scratch)]; !ok {
 				continue
 			}
 			p.indexerInst.Add(uint64sToBlockHashes(prompt), server)

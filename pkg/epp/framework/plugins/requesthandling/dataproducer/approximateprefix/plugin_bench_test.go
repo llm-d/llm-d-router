@@ -131,8 +131,10 @@ func BenchmarkProduce(b *testing.B) {
 }
 
 // BenchmarkProduceCrossSync compares Produce cost with cross-replica merge
-// disabled, enabled with an empty peer window, and enabled with a steady-state
-// peer window already folded into peerMerged (the common hot-path case).
+// disabled, enabled with an empty peer window, enabled with a steady-state
+// peer window already folded into peerMerged (the common hot-path case), and
+// enabled with a churn window whose digest changes every round while its
+// prompt keys stay the same.
 func BenchmarkProduceCrossSync(b *testing.B) {
 	const (
 		numPods         = 96
@@ -147,6 +149,9 @@ func BenchmarkProduceCrossSync(b *testing.B) {
 		cfg    config
 		handle plugin.Handle
 		peers  bool
+		// churn alternates two orderings of the same prompts, so the digest
+		// changes each round and no prompt is new.
+		churn bool
 	}
 	modes := []mode{
 		{
@@ -183,6 +188,18 @@ func BenchmarkProduceCrossSync(b *testing.B) {
 			handle: testHandleWithSyncer(),
 			peers:  true,
 		},
+		{
+			name: "syncOnChurn",
+			cfg: func() config {
+				c := defaultConfig
+				c.SyncCrossReplicaState = &syncOn
+				c.AutoTune = false
+				c.BlockSizeTokens = benchBlockSize
+				return c
+			}(),
+			handle: testHandleWithSyncer(),
+			churn:  true,
+		},
 	}
 
 	for _, m := range modes {
@@ -201,9 +218,26 @@ func BenchmarkProduceCrossSync(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+			var churnSets [2][]*attrprefix.PrefixHashSet
+			if m.churn {
+				churnSets = attachChurnWindows(endpoints, p, peerPrompts, hashesPerPrompt)
+				for i, ep := range endpoints {
+					ep.Put(p.syncHashDK, churnSets[0][i])
+				}
+				if err := p.Produce(b.Context(), req, endpoints); err != nil {
+					b.Fatal(err)
+				}
+			}
 
 			b.ReportAllocs()
+			round := 0
 			for b.Loop() {
+				if m.churn {
+					round ^= 1
+					for i, ep := range endpoints {
+						ep.Put(p.syncHashDK, churnSets[round][i])
+					}
+				}
 				if err := p.Produce(b.Context(), req, endpoints); err != nil {
 					b.Fatal(err)
 				}
@@ -224,4 +258,32 @@ func attachPeerWindow(endpoints []fwksched.Endpoint, p *dataProducer, prompts, h
 		}
 		ep.Put(p.syncHashDK, &attrprefix.PrefixHashSet{Prompts: promptsU64})
 	}
+}
+
+// attachChurnWindows records prompts local prompts per endpoint and returns two
+// sync attributes per endpoint. Both hold those prompts plus one peer prompt,
+// in different orders, so the prompt keys match and the digests differ.
+func attachChurnWindows(endpoints []fwksched.Endpoint, p *dataProducer, prompts, hashesPerPrompt int) [2][]*attrprefix.PrefixHashSet {
+	var sets [2][]*attrprefix.PrefixHashSet
+	for i, ep := range endpoints {
+		id := ep.GetMetadata().ID.String()
+		local := make([][]uint64, prompts)
+		for j := range local {
+			hashes := make([]uint64, hashesPerPrompt)
+			for k := range hashes {
+				hashes[k] = uint64(i+1)<<32 | uint64(j+1)<<16 | uint64(k+1)
+			}
+			local[j] = hashes
+			p.recent.record(id, uint64sToBlockHashes(hashes))
+		}
+		peer := make([]uint64, hashesPerPrompt)
+		for k := range peer {
+			peer[k] = uint64(i+1)<<32 | 0xffff<<16 | uint64(k+1)
+		}
+		forward := append(append([][]uint64{}, local...), peer)
+		reverse := append([][]uint64{peer}, local...)
+		sets[0] = append(sets[0], &attrprefix.PrefixHashSet{Prompts: forward})
+		sets[1] = append(sets[1], &attrprefix.PrefixHashSet{Prompts: reverse})
+	}
+	return sets
 }

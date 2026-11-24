@@ -63,19 +63,29 @@ func (s *PrefixHashSet) ContentDigest() uint64 {
 }
 
 // hashPrompts is length-prefixed so adjacent equal hashes from different
-// prompt boundaries cannot collide.
+// prompt boundaries cannot collide. Values are written through a fixed
+// buffer. The digest matches one Write per uint64.
 func hashPrompts(prompts [][]uint64) uint64 {
 	h := xxhash.New()
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(len(prompts)))
-	_, _ = h.Write(buf[:])
-	for _, p := range prompts {
-		binary.LittleEndian.PutUint64(buf[:], uint64(len(p)))
-		_, _ = h.Write(buf[:])
-		for _, v := range p {
-			binary.LittleEndian.PutUint64(buf[:], v)
-			_, _ = h.Write(buf[:])
+	var arr [4096]byte
+	n := 0
+	write := func(v uint64) {
+		if n == len(arr) {
+			_, _ = h.Write(arr[:])
+			n = 0
 		}
+		binary.LittleEndian.PutUint64(arr[n:], v)
+		n += 8
+	}
+	write(uint64(len(prompts)))
+	for _, p := range prompts {
+		write(uint64(len(p)))
+		for _, v := range p {
+			write(v)
+		}
+	}
+	if n > 0 {
+		_, _ = h.Write(arr[:n])
 	}
 	return h.Sum64()
 }

@@ -118,7 +118,7 @@ bench, scaled up).
 Empty-window overhead is a `syncerActive` check plus a miss on the optional
 attribute. Steady-state merge skips work when the sync attribute digest is
 unchanged (Peek + cached `ContentDigest`), so cost stays near sync-off.
-Novel prompts (window slides) pay snapshot, prompt-key, and indexer `Add` work.
+A changed digest builds the local key set and the peer prompt keys. Indexer `Add` runs for prompts that are new.
 Reproduce with:
 
 ```bash
