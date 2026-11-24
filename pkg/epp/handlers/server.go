@@ -729,13 +729,18 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// headers, then start it. The headers are only available here, so the span
 			// cannot be started at the top of Process without orphaning the trace.
 			ctx = extractTraceContext(ctx, v)
-			// Baggage attributes go first: a later duplicate key wins, so a client
-			// cannot replace an attribute the EPP sets.
 			ctx, span = tracer.Start(ctx, "request",
 				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(baggageAttributes(ctx, s.traceBaggageKeys)...),
-				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String())),
 			)
+			if span.IsRecording() {
+				// Baggage attributes go first: a later duplicate key wins, so a client
+				// cannot replace an attribute the EPP sets.
+				if attrs := baggageAttributes(ctx, s.traceBaggageKeys); len(attrs) > 0 {
+					span.SetAttributes(attrs...)
+				}
+				span.SetAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String()))
+				tracing.AttributeRequest(ctx, span)
+			}
 
 			// Tag every log line of this request with the trace it belongs to.
 			ctx = tracing.LoggerWithSpanContext(ctx, span)
