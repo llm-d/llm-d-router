@@ -330,6 +330,43 @@ func TestSubCanonicalStores_BlockHeldByDeviceTierUpdate(t *testing.T) {
 }
 
 // A remove on a device tier that never announced the block releases nothing.
+// A token-less device-tier update holds the anchors of its blocks even when
+// none of them names a request key, such as the trailing pages of a node.
+func TestSubCanonicalStores_UnresolvedDeviceTierUpdateHoldsAnchor(t *testing.T) {
+	pool, idx, tp := newTestPool(t, 16)
+	conversation := makeTokens(180)
+	root := radixNodeStore(conversation, 0, 100, 1, trunkHashBase)
+	trailing := root.BlockHashes[96:]
+	child := radixNodeStore(conversation, 100, 180, 1, trunkHashBase)
+	child.DeviceTier = "CPU"
+	processStores(t, pool,
+		root,
+		&BlockStoredEvent{BlockHashes: trailing, BlockSize: 1, DeviceTier: "CPU"},
+		&BlockRemovedEvent{BlockHashes: trailing},
+		child,
+	)
+	indexed, total := indexedPrefixBlocks(t, idx, tp, conversation, nil)
+	assert.Equal(t, total, indexed)
+}
+
+// A pool that starts on an index another pool filled has no anchors. A child
+// of a page that ends a canonical block resumes from that block's request key.
+func TestSubCanonicalStores_ParentResolvedFromIndex(t *testing.T) {
+	first, idx, tp := newTestPool(t, 16)
+	conversation := makeTokens(100)
+	processStores(t, first, radixNodeStore(conversation, 0, 48, 1, trunkHashBase))
+
+	restarted, err := NewPool(DefaultConfig(), idx, tp, nil)
+	require.NoError(t, err)
+	processStores(t, restarted,
+		radixNodeStore(conversation, 48, 90, 1, trunkHashBase),
+		radixNodeStore(conversation, 90, 100, 1, trunkHashBase),
+	)
+	indexed, total := indexedPrefixBlocks(t, idx, tp, conversation, nil)
+	assert.Equal(t, 6, total)
+	assert.Equal(t, total, indexed)
+}
+
 func TestSubCanonicalStores_RemoveWithoutStoreKeepsAnchor(t *testing.T) {
 	pool, idx, tp := newTestPool(t, 16)
 	conversation := makeTokens(180)

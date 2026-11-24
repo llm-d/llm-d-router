@@ -855,8 +855,9 @@ func (p *Pool) anchoredStore(
 	var head residual
 	tokens := ev.Tokens
 	if ev.ParentHash != 0 {
-		parent, found := p.anchors.lookup(podIdentifier, namespacedEngineKey(modelSeed, ev.ParentHash))
-		if !found || parent.node.blockSize != size {
+		var resolved bool
+		head, resolved = p.resumeParent(ctx, podIdentifier, namespacedEngineKey(modelSeed, ev.ParentHash), size, canonical)
+		if !resolved {
 			const reason = "unresolved_sub_canonical_parent"
 			metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
 			log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
@@ -870,7 +871,6 @@ func (p *Pool) anchoredStore(
 				"blockSize", ev.BlockSize)
 			return
 		}
-		head = parent.resume(canonical)
 		if len(head.tokens) > 0 {
 			tokens = slices.Concat(head.tokens, ev.Tokens)
 		}
@@ -921,6 +921,27 @@ func (p *Pool) anchoredStore(
 		keys:       requestKeys,
 	}, canonical)
 	p.dedup.trackStore(scope, ev.BlockHashes)
+}
+
+// resumeParent returns the residual a store of engine block size size chains
+// from when its parent is parentKey. A parent without an anchor, such as one
+// stored before the pool started on a persisted index, resumes from the
+// request key the index maps it to with no residual; that key is the parent's
+// own only when the parent ends a canonical block.
+func (p *Pool) resumeParent(
+	ctx context.Context, podIdentifier string, parentKey kvblock.BlockHash, size, canonical int,
+) (residual, bool) {
+	if parent, found := p.anchors.lookup(podIdentifier, parentKey); found {
+		if parent.node.blockSize != size {
+			return residual{}, false
+		}
+		return parent.resume(canonical), true
+	}
+	key, err := p.index.GetRequestKey(ctx, parentKey)
+	if err != nil {
+		return residual{}, false
+	}
+	return residual{key: key}, true
 }
 
 // processEventBatch processes a batch of events using type switches.
@@ -1139,9 +1160,13 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 			if len(requestKeys) == 0 {
-				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
+				resolved := p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier)
+				// An anchor counts the tier holding its block whether or not the
+				// update named a request key, and the tier's remove releases it
+				// only when the dedup filter tracked the store.
+				anchored := len(ev.Tokens) == 0 && p.anchors.retain(podIdentifier, engineKeys)
+				if resolved || anchored {
 					p.dedup.trackStore(storeScope, ev.BlockHashes)
-					p.anchors.retain(podIdentifier, engineKeys)
 				}
 				continue
 			}

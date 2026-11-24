@@ -220,21 +220,25 @@ func (a *partialBlockAnchors) record(podIdentifier string, node *anchorNode, can
 	}
 }
 
-// retain counts one more store for each of engineKeys that is anchored. It
-// mirrors a store that announces blocks without their tokens.
-func (a *partialBlockAnchors) retain(podIdentifier string, engineKeys []kvblock.BlockHash) {
+// retain counts one more store for each of engineKeys that is anchored and
+// reports whether any was. It mirrors a store that announces blocks without
+// their tokens.
+func (a *partialBlockAnchors) retain(podIdentifier string, engineKeys []kvblock.BlockHash) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	pod := a.pods[podIdentifier]
 	if pod == nil {
-		return
+		return false
 	}
+	anchored := false
 	for _, key := range engineKeys {
 		if entry, ok := pod.entries[key]; ok {
 			entry.stores++
 			pod.entries[key] = entry
+			anchored = true
 		}
 	}
+	return anchored
 }
 
 // remove mirrors one BlockRemoved event after the dedup filter. Each hash in
