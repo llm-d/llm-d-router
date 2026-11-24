@@ -53,6 +53,15 @@ type CrossReplicaSyncer interface {
 	GetOrSet(ctx context.Context, key StateKey, id string, candidate any) (actual any, existed bool, err error)
 }
 
+// CrossReplicaStarter is an optional interface for a CrossReplicaSyncer that
+// must start serving, for example open a listener, before it is used. The data
+// layer calls Start once when cross-replica sync starts, and not when a
+// configuration is only validated. ctx bounds the start itself. An error stops
+// the EPP from starting.
+type CrossReplicaStarter interface {
+	Start(ctx context.Context) error
+}
+
 // ErrCoordinationUnsupported is returned by GetOrSet from a CrossReplicaSyncer
 // that cannot provide linearizable request-level state across replicas.
 var ErrCoordinationUnsupported = errors.New("the cross-replica syncer does not support GetOrSet")

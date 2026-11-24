@@ -1488,7 +1488,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
 	g.Add("cross-replica-sync", func(ctx context.Context) error {
-		r.dlRuntime.StartCrossReplicaSync(r.servingCtx)
+		if err := r.dlRuntime.StartCrossReplicaSync(r.servingCtx); err != nil {
+			return err
+		}
 		<-ctx.Done()
 		return nil
 	})

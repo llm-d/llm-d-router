@@ -401,7 +401,9 @@ func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 	r.notificationSyncs = nil
 	r.notificationSyncMu.Unlock()
 
-	r.StartCrossReplicaSync(ctx)
+	if err := r.StartCrossReplicaSync(ctx); err != nil {
+		return err
+	}
 
 	for _, d := range r.dispatchers.Dispatchers() {
 		if id, ok := d.(*intervalDispatcher); ok {
@@ -461,12 +463,19 @@ func (*Runtime) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "datalayer", Name: "runtime"}
 }
 
-// StartCrossReplicaSync starts the shared cross-replica publishing loop.
-func (r *Runtime) StartCrossReplicaSync(ctx context.Context) {
+// StartCrossReplicaSync starts the configured cross-replica syncer, when it
+// implements CrossReplicaStarter, and the shared cross-replica publishing loop.
+func (r *Runtime) StartCrossReplicaSync(ctx context.Context) error {
 	if r.crossReplicaPub == nil {
-		return
+		return nil
+	}
+	if starter, ok := r.crossReplicaPub.syncer.(fwkdl.CrossReplicaStarter); ok {
+		if err := starter.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start cross-replica syncer: %w", err)
+		}
 	}
 	r.crossReplicaPub.start(ctx)
+	return nil
 }
 
 // NewEndpoint sets up data polling on the provided endpoint.
