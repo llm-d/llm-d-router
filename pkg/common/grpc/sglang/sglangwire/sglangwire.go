@@ -47,21 +47,23 @@ var ErrMalformed = protoscan.ErrMalformed
 // Field numbers come from the generated descriptors, so a renumbered field
 // fails the tests instead of silently corrupting messages.
 var (
-	reqRid            = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "rid")
-	reqText           = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "text")
-	reqInputIDs       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "input_ids")
-	reqStream         = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "stream")
-	reqSamplingParams = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "sampling_params")
-	reqImageData      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "image_data")
-	reqMMHashes       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "mm_hashes")
-	reqVideoData      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "video_data")
-	reqAudioData      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "audio_data")
-	reqExtraKey       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "extra_key")
-	reqBootstrapHost  = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_host")
-	reqBootstrapPort  = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_port")
-	reqBootstrapRoom  = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_room")
-	reqPriority       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "priority")
-	reqCacheSalt      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "cache_salt")
+	reqRid                 = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "rid")
+	reqText                = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "text")
+	reqInputIDs            = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "input_ids")
+	reqStream              = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "stream")
+	reqSamplingParams      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "sampling_params")
+	reqImageData           = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "image_data")
+	reqMMHashes            = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "mm_hashes")
+	reqVideoData           = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "video_data")
+	reqAudioData           = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "audio_data")
+	reqExtraKey            = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "extra_key")
+	reqBootstrapHost       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_host")
+	reqBootstrapPort       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_port")
+	reqBootstrapRoom       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_room")
+	reqRoutedDPRank        = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "routed_dp_rank")
+	reqDisaggPrefillDPRank = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "disagg_prefill_dp_rank")
+	reqPriority            = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "priority")
+	reqCacheSalt           = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "cache_salt")
 
 	optStringOrOne = protoscan.FieldNum(&sglangapiv1.OptionalStringOrList{}, "one")
 	optStringValue = protoscan.FieldNum(&sglangapiv1.OptionalString{}, "value")
@@ -108,15 +110,17 @@ type Request struct {
 	// Stream is the stream field.
 	Stream bool
 	// Payload is the request payload without any bootstrap_host,
-	// bootstrap_port, or bootstrap_room field, which a client may not set.
-	// When the client sent none, Payload aliases the scanned payload with no
-	// copy. Both legs of a request share it. See LegEnvelope.
+	// bootstrap_port, bootstrap_room, or disagg_prefill_dp_rank field, which a
+	// client may not set. When the client sent none, Payload aliases the
+	// scanned payload with no copy. Both legs of a request share it. See
+	// LegEnvelope.
 	Payload []byte
 }
 
 // ScanGenerateRequest checks that payload is well-formed GenerateRequest wire
 // data at the top level, reads the stream field, and drops client bootstrap
-// fields. Nested messages are left for the SGLang worker to validate.
+// and prefill DP-rank fields. Nested messages are left for the SGLang worker
+// to validate.
 func ScanGenerateRequest(payload []byte) (Request, error) {
 	req := Request{Payload: payload}
 	var stripped []byte // set once the first bootstrap field is dropped
@@ -130,7 +134,7 @@ func ScanGenerateRequest(payload []byte) (Request, error) {
 			return Request{}, ErrMalformed
 		}
 		end := pos + n + m
-		if num == reqBootstrapHost || num == reqBootstrapPort || num == reqBootstrapRoom {
+		if num == reqBootstrapHost || num == reqBootstrapPort || num == reqBootstrapRoom || num == reqDisaggPrefillDPRank {
 			if stripped == nil {
 				stripped = make([]byte, 0, len(payload)-(n+m))
 				stripped = append(stripped, payload[:pos]...)
@@ -159,6 +163,10 @@ type Bootstrap struct {
 	Host string
 	Port int64
 	Room int64
+	// RoutedDPRank sets routed_dp_rank when non-nil.
+	RoutedDPRank *int64
+	// DisaggPrefillDPRank sets disagg_prefill_dp_rank when non-nil.
+	DisaggPrefillDPRank *int64
 }
 
 // LegEnvelope returns the gRPC frame header and the bootstrap suffix that
@@ -203,6 +211,12 @@ func bootstrapSize(b *Bootstrap) int {
 		outer, _ := optionalStringSize(b.Host)
 		size += protowire.SizeTag(reqBootstrapHost) + protowire.SizeBytes(outer)
 	}
+	if b.RoutedDPRank != nil {
+		size += protowire.SizeTag(reqRoutedDPRank) + protowire.SizeVarint(int64Varint(*b.RoutedDPRank))
+	}
+	if b.DisaggPrefillDPRank != nil {
+		size += protowire.SizeTag(reqDisaggPrefillDPRank) + protowire.SizeVarint(int64Varint(*b.DisaggPrefillDPRank))
+	}
 	return size
 }
 
@@ -222,7 +236,16 @@ func appendBootstrap(out []byte, b *Bootstrap) []byte {
 		out = protowire.AppendString(out, b.Host)
 	}
 	out = appendOptionalInt64(out, reqBootstrapPort, b.Port)
-	return appendOptionalInt64(out, reqBootstrapRoom, b.Room)
+	out = appendOptionalInt64(out, reqBootstrapRoom, b.Room)
+	if b.RoutedDPRank != nil {
+		out = protowire.AppendTag(out, reqRoutedDPRank, protowire.VarintType)
+		out = protowire.AppendVarint(out, int64Varint(*b.RoutedDPRank))
+	}
+	if b.DisaggPrefillDPRank != nil {
+		out = protowire.AppendTag(out, reqDisaggPrefillDPRank, protowire.VarintType)
+		out = protowire.AppendVarint(out, int64Varint(*b.DisaggPrefillDPRank))
+	}
+	return out
 }
 
 func appendOptionalInt64(out []byte, num protowire.Number, v int64) []byte {

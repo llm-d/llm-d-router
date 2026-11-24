@@ -45,15 +45,16 @@ func testRequest() *sglangapiv1.GenerateRequest {
 		Rid:      &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "rid-1"}},
 		InputIds: &sglangapiv1.TokenIdsOrList{Value: &sglangapiv1.TokenIdsOrList_One{One: &sglangapiv1.TokenIds{Ids: []int64{1, 2, 300000}}}},
 		Stream:   proto.Bool(true),
-		// Client-supplied bootstrap_host, bootstrap_port, and bootstrap_room
-		// must never reach a worker: the coordinator sets them. Other
-		// bootstrap_* fields, such as bootstrap_pair_key, pass through.
-		BootstrapHost:    optStr("spoofed"),
-		BootstrapPort:    optInt(1),
-		BootstrapRoom:    optInt(2),
-		BootstrapPairKey: optStr("pair"),
-		Priority:         proto.Int64(5),
-		CustomLabels:     map[string]string{"k": "v"},
+		// Client-supplied bootstrap_host, bootstrap_port, bootstrap_room, and
+		// disagg_prefill_dp_rank must never reach a worker: the router sets them.
+		// Other bootstrap_* fields, such as bootstrap_pair_key, pass through.
+		BootstrapHost:       optStr("spoofed"),
+		BootstrapPort:       optInt(1),
+		BootstrapRoom:       optInt(2),
+		BootstrapPairKey:    optStr("pair"),
+		DisaggPrefillDpRank: proto.Int64(9),
+		Priority:            proto.Int64(5),
+		CustomLabels:        map[string]string{"k": "v"},
 	}
 }
 
@@ -89,7 +90,7 @@ func TestScanGenerateRequestStripsClientBootstrapFields(t *testing.T) {
 	require.True(t, req.Stream)
 
 	want := testRequest()
-	want.BootstrapHost, want.BootstrapPort, want.BootstrapRoom = nil, nil, nil
+	want.BootstrapHost, want.BootstrapPort, want.BootstrapRoom, want.DisaggPrefillDpRank = nil, nil, nil, nil
 	var got sglangapiv1.GenerateRequest
 	require.NoError(t, proto.Unmarshal(req.Payload, &got))
 	if diff := cmp.Diff(want, &got, protocmp.Transform()); diff != "" {
@@ -102,7 +103,7 @@ func TestScanGenerateRequestStripsClientBootstrapFields(t *testing.T) {
 	// Without client bootstrap fields (the normal case), Payload aliases the
 	// input and the scan does not allocate.
 	clean := testRequest()
-	clean.BootstrapHost, clean.BootstrapPort, clean.BootstrapRoom = nil, nil, nil
+	clean.BootstrapHost, clean.BootstrapPort, clean.BootstrapRoom, clean.DisaggPrefillDpRank = nil, nil, nil, nil
 	cleanPayload := mustMarshal(t, clean)
 	req, err = ScanGenerateRequest(cleanPayload)
 	require.NoError(t, err)
@@ -135,21 +136,36 @@ func TestLegEnvelopeMatchesProto(t *testing.T) {
 		{
 			name: "no bootstrap (decode-only)",
 			want: func(r *sglangapiv1.GenerateRequest) {
-				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom = nil, nil, nil
+				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom, r.DisaggPrefillDpRank = nil, nil, nil, nil
 			},
 		},
 		{
 			name: "port and room (prefill)",
 			b:    &Bootstrap{Port: 8998, Room: -123456789012345},
 			want: func(r *sglangapiv1.GenerateRequest) {
-				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom = nil, optInt(8998), optInt(-123456789012345)
+				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom, r.DisaggPrefillDpRank = nil, optInt(8998), optInt(-123456789012345), nil
 			},
 		},
 		{
 			name: "host, port, and room (decode)",
 			b:    &Bootstrap{Host: "10.2.3.4", Port: 8998, Room: 0},
 			want: func(r *sglangapiv1.GenerateRequest) {
-				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom = optStr("10.2.3.4"), optInt(8998), optInt(0)
+				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom, r.DisaggPrefillDpRank = optStr("10.2.3.4"), optInt(8998), optInt(0), nil
+			},
+		},
+		{
+			name: "host, port, room, and DP ranks",
+			b: &Bootstrap{
+				Host:                "10.2.3.4",
+				Port:                8998,
+				Room:                42,
+				RoutedDPRank:        proto.Int64(0),
+				DisaggPrefillDPRank: proto.Int64(3),
+			},
+			want: func(r *sglangapiv1.GenerateRequest) {
+				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom = optStr("10.2.3.4"), optInt(8998), optInt(42)
+				r.RoutedDpRank = proto.Int64(0)
+				r.DisaggPrefillDpRank = proto.Int64(3)
 			},
 		},
 	}

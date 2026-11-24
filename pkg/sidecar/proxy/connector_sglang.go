@@ -24,6 +24,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -79,15 +80,44 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Inject bootstrap info for both prefill and decode
 	bootstrapInfo := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
-	// With data-parallel prefill ranks, SGLang's prefill otherwise requires rank
-	// bootstrap_room % dp_size, and decode would look the rank up.
-	if rank, _ := r.Context().Value(prefillDPRankKey).(string); rank != "" {
-		if n, err := strconv.Atoi(rank); err == nil {
-			bootstrapInfo[reqcommon.FieldDisaggPrefillDPRank] = n
+	delete(bootstrapInfo, reqcommon.FieldDisaggPrefillDPRank)
+
+	prefillRank, decodeRank := sglangLegDPRanks(r)
+	if prefillRank == nil && decodeRank == nil {
+		body, err := json.Marshal(bootstrapInfo)
+		if err != nil {
+			if err := errorJSONInvalid(w, r, err); err != nil {
+				logger.Error(err, "failed to send error response to client")
+			}
+			return
 		}
+		s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
+		return
 	}
 
-	body, err := json.Marshal(bootstrapInfo)
+	// Write both disagg_prefill_dp_rank and routed_dp_rank in the JSON body so
+	// native /generate and OpenAI routes agree on each leg's rank.
+	if prefillRank != nil {
+		bootstrapInfo[reqcommon.FieldDisaggPrefillDPRank] = *prefillRank
+	}
+	prefillData := maps.Clone(bootstrapInfo)
+	if prefillRank != nil {
+		prefillData[reqcommon.FieldRoutedDPRank] = *prefillRank
+	} else {
+		delete(prefillData, reqcommon.FieldRoutedDPRank)
+	}
+	if decodeRank != nil {
+		bootstrapInfo[reqcommon.FieldRoutedDPRank] = *decodeRank
+	}
+
+	prefillBody, err := json.Marshal(prefillData)
+	if err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
+			logger.Error(err, "failed to send error response to client")
+		}
+		return
+	}
+	decodeBody, err := json.Marshal(bootstrapInfo)
 	if err != nil {
 		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
@@ -96,7 +126,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
+	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
 }
 
 func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
@@ -120,23 +150,61 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefil
 	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	bootstrapHost := routing.ExtractHost(prefillPodHostPort)
-	head, tail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
-		Host: bootstrapHost,
-		Port: int64(sglangBootstrapPort),
-		Room: roomID,
+	prefillRank, decodeRank := sglangLegDPRanks(r)
+	prefillHead, prefillTail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
+		Host:                bootstrapHost,
+		Port:                int64(sglangBootstrapPort),
+		Room:                roomID,
+		RoutedDPRank:        prefillRank,
+		DisaggPrefillDPRank: prefillRank,
 	})
 	if err != nil {
 		logger.Error(err, "failed to encode GenerateRequest")
 		grpcframe.WriteError(w, codes.ResourceExhausted, err.Error())
 		return
 	}
+	prefillBody := slices.Concat(prefillHead, scanned.Payload, prefillTail)
+	decodeBody := prefillBody
+	if prefillRank != nil || decodeRank != nil {
+		decodeHead, decodeTail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
+			Host:                bootstrapHost,
+			Port:                int64(sglangBootstrapPort),
+			Room:                roomID,
+			RoutedDPRank:        decodeRank,
+			DisaggPrefillDPRank: prefillRank,
+		})
+		if err != nil {
+			logger.Error(err, "failed to encode GenerateRequest")
+			grpcframe.WriteError(w, codes.ResourceExhausted, err.Error())
+			return
+		}
+		decodeBody = slices.Concat(decodeHead, scanned.Payload, decodeTail)
+	}
+
 	logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)
 
-	body := slices.Concat(head, scanned.Payload, tail)
-	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, nil)
+	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorSGLang, nil, nil)
+}
+
+// parseDPRank returns the data-parallel rank in raw, or nil when raw is not a
+// non-negative integer.
+func parseDPRank(raw string) *int64 {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return nil
+	}
+	v := int64(n)
+	return &v
+}
+
+// sglangLegDPRanks returns the rank the EPP picked on the prefill worker and the
+// rank of the decode request, each nil when the request names none.
+func sglangLegDPRanks(r *http.Request) (prefillRank, decodeRank *int64) {
+	raw, _ := r.Context().Value(prefillDPRankKey).(string)
+	return parseDPRank(raw), parseDPRank(r.Header.Get(routing.DataParallelRankHeader))
 }
 
 func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {

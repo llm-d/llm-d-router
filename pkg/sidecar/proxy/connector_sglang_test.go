@@ -135,9 +135,9 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	// sendRanked sends a chat completion with the given extra headers and returns the
-	// recorded prefill and decode bodies and headers.
-	sendRanked := func(headers map[string]string) (map[string]any, map[string]any, http.Header, http.Header) {
+	// sendRankedBody sends body as a chat completion with the given extra headers and
+	// returns the recorded prefill and decode bodies and headers.
+	sendRankedBody := func(body string, headers map[string]string) (map[string]any, map[string]any, http.Header, http.Header) {
 		go func() {
 			defer GinkgoRecover()
 			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
@@ -150,7 +150,6 @@ var _ = Describe("SGLang Connector", func() {
 			<-testInfo.stoppedCh
 		})
 
-		body := `{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`
 		req, err := http.NewRequest(http.MethodPost, "http://"+testInfo.proxy.addr.String()+reqcommon.PathChatCompletions,
 			bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
@@ -167,24 +166,44 @@ var _ = Describe("SGLang Connector", func() {
 		return testInfo.prefillHandler.GetCompletionRequests()[0], testInfo.decodeHandler.GetCompletionRequests()[0],
 			testInfo.prefillHandler.GetCompletionHeaders()[0], testInfo.decodeHandler.GetCompletionHeaders()[0]
 	}
+	sendRanked := func(headers map[string]string) (map[string]any, map[string]any, http.Header, http.Header) {
+		return sendRankedBody(`{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`, headers)
+	}
+
+	// The router sets disagg_prefill_dp_rank. A client value would send decode to a
+	// prefill rank that the EPP did not pick.
+	It("drops a client disagg_prefill_dp_rank when the EPP sent no rank", func() {
+		prefill, decode, _, _ := sendRankedBody(
+			`{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50, "disagg_prefill_dp_rank": 9}`, nil)
+		Expect(prefill).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(decode).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+	})
 
 	// SGLang's prefill must know its rank was picked externally, or it requires
 	// rank bootstrap_room % dp_size; decode uses it to find the prefill rank.
-	It("sends the EPP's prefill rank as disagg_prefill_dp_rank to both requests", func() {
+	// Writing routed_dp_rank into each leg's body also covers native /generate.
+	It("sends the EPP's prefill and decode ranks in both request bodies and headers", func() {
 		prefill, decode, prefillHeaders, decodeHeaders := sendRanked(map[string]string{
 			routing.DataParallelRankHeader:        "0",
 			routing.PrefillDataParallelRankHeader: "3",
 		})
 		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(3)))
 		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(0)))
 		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("3"))
 		Expect(decodeHeaders.Get(routing.DataParallelRankHeader)).To(Equal("0"))
 	})
 
-	It("omits disagg_prefill_dp_rank when the EPP picked no prefill rank", func() {
-		prefill, decode, prefillHeaders, _ := sendRanked(map[string]string{routing.DataParallelRankHeader: "1"})
+	It("omits disagg_prefill_dp_rank and prefill routed_dp_rank when the EPP sent none", func() {
+		prefill, decode, prefillHeaders, _ := sendRanked(map[string]string{
+			routing.DataParallelRankHeader:        "1",
+			routing.PrefillDataParallelRankHeader: routing.NoDataParallelRank,
+		})
 		Expect(prefill).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(prefill).ToNot(HaveKey(reqcommon.FieldRoutedDPRank))
 		Expect(decode).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(1)))
 		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(BeEmpty())
 	})
 
@@ -326,6 +345,30 @@ var _ = Describe("SGLang Connector", func() {
 		roomID := prefillReq.GetBootstrapRoom().GetOne().GetValue()
 		Expect(roomID).To(BeNumerically(">", 0))
 		Expect(decodeReq.GetBootstrapRoom().GetOne().GetValue()).To(Equal(roomID))
+	})
+
+	It("should send prefill and decode DP ranks on native gRPC SglangService/Generate", func() {
+		prefillBackend := newMockSGLangGRPCServer([]string{""})
+		DeferCleanup(prefillBackend.Stop)
+		decodeBackend := newMockSGLangGRPCServer([]string{"ranked"})
+		DeferCleanup(decodeBackend.Stop)
+		startGRPCProxy(Config{DecoderURL: decoderURLOf(decodeBackend), KVConnector: constants.KVConnectorSGLang})
+
+		Expect(generateTexts(&sglangapiv1.GenerateRequest{
+			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "Hello"}},
+		},
+			routing.PrefillEndpointHeader, prefillBackend.addr,
+			routing.DataParallelRankHeader, "1",
+			routing.PrefillDataParallelRankHeader, "3",
+		)).To(Equal([]string{"ranked"}))
+
+		Eventually(prefillBackend.RequestCount).Should(Equal(1))
+		prefillReq := prefillBackend.LastRequest()
+		decodeReq := decodeBackend.LastRequest()
+		Expect(prefillReq.RoutedDpRank).To(Equal(proto.Int64(3)))
+		Expect(prefillReq.DisaggPrefillDpRank).To(Equal(proto.Int64(3)))
+		Expect(decodeReq.RoutedDpRank).To(Equal(proto.Int64(1)))
+		Expect(decodeReq.DisaggPrefillDpRank).To(Equal(proto.Int64(3)))
 	})
 
 	It("should pass through SglangService/Generate over h2c when prefill header is absent", func() {
@@ -561,3 +604,19 @@ func (m *mockSGLangGRPCServer) Generate(req *sglangapiv1.GenerateRequest, stream
 	}
 	return nil
 }
+
+var _ = DescribeTable("parseDPRank",
+	func(raw string, want *int64) {
+		got := parseDPRank(raw)
+		if want == nil {
+			Expect(got).To(BeNil())
+			return
+		}
+		Expect(got).To(HaveValue(Equal(*want)))
+	},
+	Entry("a rank", "2", proto.Int64(2)),
+	Entry("a rank with spaces", " 2 ", proto.Int64(2)),
+	Entry("no value", "", nil),
+	Entry("a negative number", "-1", nil),
+	Entry("not a number", "one", nil),
+)

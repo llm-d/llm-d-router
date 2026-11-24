@@ -144,6 +144,9 @@ const (
 	FieldBootstrapHost = "bootstrap_host"
 	FieldBootstrapPort = "bootstrap_port"
 	FieldBootstrapRoom = "bootstrap_room"
+	// FieldRoutedDPRank is the SGLang request field naming the target
+	// data-parallel rank of a request leg.
+	FieldRoutedDPRank = "routed_dp_rank"
 	// FieldDisaggPrefillDPRank is the SGLang request field naming the data-parallel
 	// rank of the prefill worker in a P/D pair.
 	FieldDisaggPrefillDPRank = "disagg_prefill_dp_rank"
