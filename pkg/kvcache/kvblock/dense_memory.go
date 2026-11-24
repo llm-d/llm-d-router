@@ -369,14 +369,37 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 	// drop a mapping whose entries have not landed yet.
 	if engineKeys != nil {
 		d.mu.Lock()
-		for ek, rks := range engineToRequestMapping(engineKeys, requestKeys) {
-			d.engineToRequestKeys.set(ek, rks)
-		}
+		d.setEngineMappingsLocked(engineKeys, requestKeys)
 		d.mu.Unlock()
 	}
 
 	d.maybeSweep()
 	return nil
+}
+
+// setEngineMappingsLocked stores the proportional engine-key mappings without
+// building the intermediate map: distribution position i maps to engine key
+// i*len(engineKeys)/n and request key i*len(requestKeys)/n, both monotone in
+// i, so each engine key's request keys are one contiguous subslice of
+// requestKeys and the walk allocates nothing. Engine keys within one Add are
+// distinct (per-event block hashes are chained); a repeated engine key would
+// keep only its last run. Called with mu held for writing.
+func (d *DenseMemoryIndex) setEngineMappingsLocked(engineKeys, requestKeys []BlockHash) {
+	e, r := len(engineKeys), len(requestKeys)
+	if e == 0 || r == 0 {
+		return
+	}
+	n := max(e, r)
+	for prev := 0; prev < n; {
+		pe := prev * e / n
+		next := prev + 1
+		for next < n && next*e/n == pe {
+			next++
+		}
+		lo := prev * r / n
+		d.engineToRequestKeys.set(engineKeys[pe], requestKeys[lo:lo+next-prev])
+		prev = next
+	}
 }
 
 // groupAddLocked records a group-announced copy. A re-announcement of a live
