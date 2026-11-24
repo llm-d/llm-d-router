@@ -525,6 +525,14 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 			}
 			allEmpty := true
 			for _, rk := range groups[i] {
+				if !SampledKey(rk, m.sampleModulus) {
+					// An unsampled request key never has a pod cache, so its
+					// emptiness cannot be checked. The mapping stays for pods
+					// that still hold the block; the engine map's count cap
+					// reclaims it.
+					allEmpty = false
+					break
+				}
 				if pc, found := m.data.Peek(rk); found && pc != nil && pc.size() > 0 {
 					allEmpty = false
 					break

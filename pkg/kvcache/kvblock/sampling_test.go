@@ -103,3 +103,48 @@ func TestConfigSampleModulus(t *testing.T) {
 		DenseMemoryConfig: &kvblock.DenseMemoryIndexConfig{SampleModulus: 16},
 	}))
 }
+
+// TestSampleModulusEvictKeepsUnsampledMapping pins the engine-key evict path
+// under sampling: an unsampled request key has no entry state to check, so
+// the first eviction by any pod must not drop the mapping that other pods
+// still need for parent resolution.
+func TestSampleModulusEvictKeepsUnsampledMapping(t *testing.T) {
+	const modulus = 4
+	for name, idx := range newSampledIndex(t, modulus) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			engineKey := kvblock.BlockHash(9001)
+			pod := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+			requestKey := kvblock.BlockHash(2) // 2 & 3 != 0: never sampled
+			require.False(t, kvblock.SampledKey(requestKey, modulus))
+
+			require.NoError(t, idx.Add(ctx, []kvblock.BlockHash{engineKey}, []kvblock.BlockHash{requestKey}, []kvblock.PodEntry{pod}))
+			require.NoError(t, idx.Evict(ctx, kvblock.EngineKey, []kvblock.BlockHash{engineKey}, []kvblock.PodEntry{pod}))
+
+			rk, err := idx.GetRequestKey(ctx, engineKey)
+			require.NoError(t, err, "eviction by one pod dropped the mapping for pods that still hold the block")
+			require.Equal(t, requestKey, rk)
+		})
+	}
+}
+
+// TestSampleModulusEvictRemovesSampledMapping guards the fix's boundary: a
+// chain of sampled keys whose entries are all gone still drops its mapping.
+func TestSampleModulusEvictRemovesSampledMapping(t *testing.T) {
+	const modulus = 4
+	for name, idx := range newSampledIndex(t, modulus) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			engineKey := kvblock.BlockHash(9001)
+			pod := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+			requestKey := kvblock.BlockHash(4) // 4 & 3 == 0: sampled
+			require.True(t, kvblock.SampledKey(requestKey, modulus))
+
+			require.NoError(t, idx.Add(ctx, []kvblock.BlockHash{engineKey}, []kvblock.BlockHash{requestKey}, []kvblock.PodEntry{pod}))
+			require.NoError(t, idx.Evict(ctx, kvblock.EngineKey, []kvblock.BlockHash{engineKey}, []kvblock.PodEntry{pod}))
+
+			_, err := idx.GetRequestKey(ctx, engineKey)
+			require.Error(t, err, "an all-sampled empty chain must still drop its mapping")
+		})
+	}
+}

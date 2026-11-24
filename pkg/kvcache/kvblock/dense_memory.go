@@ -486,14 +486,22 @@ func (d *DenseMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Bl
 			if chains[i] == nil {
 				continue
 			}
-			allEmpty := true
+			removable := true
 			for _, rk := range chains[i] {
+				if !SampledKey(rk, d.sampleModulus) {
+					// An unsampled request key never has a slot, so its
+					// emptiness cannot be checked. The mapping stays for
+					// pods that still hold the block; the engine sweep
+					// reclaims it under capacity pressure.
+					removable = false
+					break
+				}
 				if j, ok := d.tbl.find(rk); ok && slotLen(&d.tbl.slots[j].slot, &d.arena) > 0 {
-					allEmpty = false
+					removable = false
 					break
 				}
 			}
-			if allEmpty {
+			if removable {
 				d.engineToRequestKeys.remove(key)
 			}
 		}
