@@ -109,13 +109,13 @@ func TestConfigSampleModulus(t *testing.T) {
 // the first eviction by any pod must not drop the mapping that other pods
 // still need for parent resolution.
 func TestSampleModulusEvictKeepsUnsampledMapping(t *testing.T) {
-	const modulus = 4
+	const modulus = 8
 	for name, idx := range newSampledIndex(t, modulus) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			engineKey := kvblock.BlockHash(9001)
 			pod := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
-			requestKey := kvblock.BlockHash(2) // 2 & 3 != 0: never sampled
+			requestKey := kvblock.BlockHash(2) // 2 & 7 != 0: never sampled
 			require.False(t, kvblock.SampledKey(requestKey, modulus))
 
 			require.NoError(t, idx.Add(ctx, []kvblock.BlockHash{engineKey}, []kvblock.BlockHash{requestKey}, []kvblock.PodEntry{pod}))
@@ -131,13 +131,13 @@ func TestSampleModulusEvictKeepsUnsampledMapping(t *testing.T) {
 // TestSampleModulusEvictRemovesSampledMapping guards the fix's boundary: a
 // chain of sampled keys whose entries are all gone still drops its mapping.
 func TestSampleModulusEvictRemovesSampledMapping(t *testing.T) {
-	const modulus = 4
+	const modulus = 8
 	for name, idx := range newSampledIndex(t, modulus) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			engineKey := kvblock.BlockHash(9001)
 			pod := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
-			requestKey := kvblock.BlockHash(4) // 4 & 3 == 0: sampled
+			requestKey := kvblock.BlockHash(8) // 8 & 7 == 0: sampled
 			require.True(t, kvblock.SampledKey(requestKey, modulus))
 
 			require.NoError(t, idx.Add(ctx, []kvblock.BlockHash{engineKey}, []kvblock.BlockHash{requestKey}, []kvblock.PodEntry{pod}))
