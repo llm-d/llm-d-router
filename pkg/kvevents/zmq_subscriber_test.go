@@ -27,6 +27,7 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1172,4 +1173,45 @@ func TestZMQSubscriber_SnapshotFromAnotherPublisherIsNotApplied(t *testing.T) {
 		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && h.indexed(100) && h.indexed(300)
 	}, 5*time.Second, 50*time.Millisecond, "the restarted publisher's snapshot must replace the old blocks")
 	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func readCounterVec(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, vec.WithLabelValues(labels...).Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+func TestZMQSubscriber_GapAndCooldownDropMetrics(t *testing.T) {
+	h := newReplayHarness(t, nil, true)
+	const podID = "test-pod"
+	gapsBefore := readCounterVec(t, metrics.EventsSequenceGaps, podID)
+	missedBefore := readCounterVec(t, metrics.EventsMissed, podID)
+	droppedBefore := readCounterVec(t, metrics.EventsDropped, podID, "replay_cooldown")
+
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) },
+		5*time.Second, 50*time.Millisecond)
+
+	// Proactive replay on connect failed (replay fail=true), so cooldown is active.
+	// Sending seq 4 creates a gap of 3 missed events (seq 1, 2, 3).
+	h.send(t, 4, buildDistinctBlockStoredPayload(t, 400))
+	require.Eventually(t, func() bool {
+		return readCounterVec(t, metrics.EventsSequenceGaps, podID) >= gapsBefore+1
+	}, 5*time.Second, 50*time.Millisecond)
+
+	assert.Equal(t, missedBefore+3, readCounterVec(t, metrics.EventsMissed, podID))
+	assert.Equal(t, droppedBefore+1, readCounterVec(t, metrics.EventsDropped, podID, "replay_cooldown"))
+}
+
+func TestZMQSubscriber_MalformedFrameIncrementsDroppedMetric(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+	const podID = "test-pod"
+	droppedBefore := readCounterVec(t, metrics.EventsDropped, podID, "malformed_frame")
+
+	// Send a 2-frame message (missing payload frame) with the subscribed topic.
+	require.NoError(t, h.pub.Send(zmq4.NewMsgFrom(h.topic, seqFrame(0))))
+	require.Eventually(t, func() bool {
+		return readCounterVec(t, metrics.EventsDropped, podID, "malformed_frame") >= droppedBefore+1
+	}, 5*time.Second, 50*time.Millisecond)
 }

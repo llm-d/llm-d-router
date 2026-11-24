@@ -222,6 +222,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		metrics.MessagesReceived.WithLabelValues(z.podIdentifier).Inc()
 		topic, seq, payload, ok := parseEventFrame(msg.Frames)
 		if !ok {
+			metrics.EventsDropped.WithLabelValues(z.podIdentifier, "malformed_frame").Inc()
 			debugLogger.Error(nil, "Malformed event frame",
 				"frameCount", len(msg.Frames), "endpoint", z.endpoint)
 			continue
@@ -283,7 +284,10 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 
 		if z.hasLastSeq && seq > z.lastSeq+1 {
 			missed := seq - z.lastSeq - 1
+			metrics.EventsSequenceGaps.WithLabelValues(z.podIdentifier).Inc()
+			metrics.EventsMissed.WithLabelValues(z.podIdentifier).Add(float64(missed))
 			if !z.canAttemptReplay() {
+				metrics.EventsDropped.WithLabelValues(z.podIdentifier, "replay_cooldown").Inc()
 				debugLogger.Info("Dropping event while replay is in cooldown",
 					"lastSeq", z.lastSeq, "currentSeq", seq, "missed", missed,
 					"endpoint", z.endpoint)

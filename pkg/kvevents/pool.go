@@ -19,11 +19,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"go.opentelemetry.io/otel/codes"
@@ -501,6 +503,13 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 
 	podID, modelName, batch, err := p.decode(ctx, msg)
 	if err != nil {
+		// Attribute decode drops only to a subscriber-bound endpoint; wire topics
+		// on malformed frames are untrusted and not cleaned up by CleanupSubscriber.
+		dropPodID := msg.SourceEndpoint
+		if dropPodID == "" {
+			dropPodID = "unknown"
+		}
+		metrics.EventsDropped.WithLabelValues(dropPodID, "decode_error").Inc()
 		if tracingActive {
 			span.SetStatus(codes.Error, err.Error())
 		}
@@ -766,6 +775,15 @@ func (p *Pool) handleDeviceTierUpdate(
 
 // processEventBatch processes a batch of events using type switches.
 func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) {
+	if batch.Timestamp > 0 {
+		sec, nsec := math.Modf(batch.Timestamp)
+		eventTime := time.Unix(int64(sec), int64(nsec*float64(time.Second)))
+		lag := time.Since(eventTime).Seconds()
+		if lag < 0 {
+			lag = 0
+		}
+		metrics.EventsProcessingLag.Observe(lag)
+	}
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	log.FromContext(ctx).V(logging.TRACE).Info("Processing event batch",
 		"podID", podIdentifier,

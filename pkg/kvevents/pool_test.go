@@ -2780,3 +2780,91 @@ func TestBlockStoredEvent_SaltedMMExtraKeysMatchRequestKeys(t *testing.T) {
 		})
 	}
 }
+
+type failingParseAdapter struct{}
+
+func (failingParseAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "wire-pod-from-parse", "", EventBatch{}, fmt.Errorf("malformed msgpack")
+}
+
+func (failingParseAdapter) ShardingKey(*RawMessage) string { return "pod-shard" }
+
+func TestProcessRawMessage_DecodeErrorIncrementsDroppedMetric(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	pool.adapter = failingParseAdapter{}
+
+	const pod = "10.0.9.1:8000"
+	t.Cleanup(func() { metrics.CleanupSubscriber(pod) })
+	before := counterVecValue(t, metrics.EventsDropped, pod, "decode_error")
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:          "kv@10.0.9.1:8000@test-model",
+		Payload:        []byte{0xff},
+		SourceEndpoint: pod,
+	})
+	after := counterVecValue(t, metrics.EventsDropped, pod, "decode_error")
+	assert.Equal(t, before+1, after)
+
+	// Without a subscriber-bound SourceEndpoint, decode failures must fall back
+	// to "unknown" rather than minting series from untrusted wire topics.
+	unknownBefore := counterVecValue(t, metrics.EventsDropped, "unknown", "decode_error")
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:   "kv@untrusted-wire-pod:8000@test-model",
+		Payload: []byte{0xff},
+	})
+	assert.Equal(t, unknownBefore+1, counterVecValue(t, metrics.EventsDropped, "unknown", "decode_error"))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(metrics.EventsDropped)
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "pod_identifier" {
+					assert.NotEqual(t, "untrusted-wire-pod:8000", l.GetValue())
+					assert.NotEqual(t, "pod-shard", l.GetValue())
+					assert.NotEqual(t, "wire-pod-from-parse", l.GetValue())
+				}
+			}
+		}
+	}
+}
+
+func TestProcessEventBatch_ProcessingLagMetric(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+
+	readLagCount := func() (uint64, float64) {
+		var m dto.Metric
+		require.NoError(t, metrics.EventsProcessingLag.Write(&m))
+		return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+	}
+
+	countBefore, sumBefore := readLagCount()
+	// Timestamp == 0 must not observe processing lag.
+	pool.processEventBatch(ctx, &EventBatch{Timestamp: 0}, "10.0.9.2:8000", "test-model")
+	countZero, _ := readLagCount()
+	assert.Equal(t, countBefore, countZero)
+
+	// Positive past timestamp observes >= 0 lag.
+	pastTS := float64(time.Now().Add(-200*time.Millisecond).UnixNano()) / 1e9
+	pool.processEventBatch(ctx, &EventBatch{Timestamp: pastTS}, "10.0.9.2:8000", "test-model")
+	countAfter, sumAfter := readLagCount()
+	assert.Equal(t, countBefore+1, countAfter)
+	assert.GreaterOrEqual(t, sumAfter-sumBefore, 0.15)
+
+	// Future timestamp clamps observed lag at 0 rather than negative.
+	futureTS := float64(time.Now().Add(10*time.Second).UnixNano()) / 1e9
+	pool.processEventBatch(ctx, &EventBatch{Timestamp: futureTS}, "10.0.9.2:8000", "test-model")
+	countFuture, sumFuture := readLagCount()
+	assert.Equal(t, countAfter+1, countFuture)
+	assert.InDelta(t, sumAfter, sumFuture, 1e-9)
+}
+
+func counterVecValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, vec.WithLabelValues(labels...).Write(&m))
+	return m.GetCounter().GetValue()
+}
