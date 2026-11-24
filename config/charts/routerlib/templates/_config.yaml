@@ -15,17 +15,17 @@
   {{- if and (not (hasKey $pluginsCustomConfig "default-plugins.yaml")) (or (not $pluginsConfig) (ne $pluginsConfigFile "default-plugins.yaml")) }}
   default-plugins.yaml: |
     {{- $modelServers := .Values.router.modelServers | default dict }}
-    {{- $modelServerProtocol := $modelServers.protocol | default "http" }}
-    {{- $modelServerType := $modelServers.type | default "vllm" }}
+    {{- $modelServerProtocol := lower ($modelServers.protocol | default "http") }}
+    {{- $modelServerType := lower ($modelServers.type | default "vllm") }}
     {{- $parsers := list }}
     {{- if .Values.router.epp.parsers }}
       {{- $parsers = .Values.router.epp.parsers }}
-    {{- else if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
+    {{- else if and (eq $modelServerType "vllm") (eq $modelServerProtocol "grpc") }}
       {{- /* passthrough-parser claims no paths and terminates registration. Keep it last. */}}
       {{- $parsers = list "vllminference-parser" "vllmgrpc-parser" "passthrough-parser" }}
-    {{- else if and (eq (lower $modelServerType) "sglang") (eq (lower $modelServerProtocol) "grpc") }}
+    {{- else if and (eq $modelServerType "sglang") (eq $modelServerProtocol "grpc") }}
       {{- $parsers = list "sglanggrpc-parser" "passthrough-parser" }}
-    {{- else if eq (lower $modelServerType) "triton" }}
+    {{- else if eq $modelServerType "triton" }}
       {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
     apiVersion: llm-d.ai/v1

@@ -960,6 +960,37 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   done
 done
 
+echo "Verifying router.modelServers.type and protocol case normalization..."
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for engine_case in \
+    "vLLM:GRPC:absent:vllminference-parser,vllmgrpc-parser,passthrough-parser" \
+    "SGLang:GRPC:sglang:sglanggrpc-parser,passthrough-parser" \
+    "Triton:HTTP:triton:passthrough-parser"; do
+    IFS=: read -r engine_set protocol_set engine_want parsers_want <<< "${engine_case}"
+    engine_render_output="${TEMP_DIR}/${chart}-model-server-type-${engine_set}-${protocol_set}-render.yaml"
+    ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" \
+      --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set "router.modelServers.type=${engine_set}" \
+      --set "router.modelServers.protocol=${protocol_set}" > "${engine_render_output}" || exit 1
+    engine_config=$("${YQ}" -N 'select(.kind == "ConfigMap" and (.data | has("default-plugins.yaml"))) | .data."default-plugins.yaml"' "${engine_render_output}")
+    extractor_count=$(printf '%s\n' "${engine_config}" | "${YQ}" '[.plugins[] | select(.type == "core-metrics-extractor")] | length')
+    if [ "${extractor_count}" != "1" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected 1 core-metrics-extractor plugin, got ${extractor_count}"
+      exit 1
+    fi
+    default_engine=$(printf '%s\n' "${engine_config}" | "${YQ}" '.plugins[] | select(.type == "core-metrics-extractor") | .parameters.defaultEngine // "absent"')
+    if [ "${default_engine}" != "${engine_want}" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected core-metrics-extractor defaultEngine=${engine_want}, got ${default_engine}"
+      exit 1
+    fi
+    rendered_parsers=$(printf '%s\n' "${engine_config}" | "${YQ}" '.requestHandler.parsers // [] | map(.pluginRef) | join(",")')
+    if [ "${rendered_parsers}" != "${parsers_want}" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected requestHandler.parsers=${parsers_want}, got ${rendered_parsers}"
+      exit 1
+    fi
+  done
+done
+
 echo "Verifying GOMEMLIMIT follows router.epp.resources.limits.memory..."
 # Each case is name:GOMEMLIMIT entries:limits.memory references.
 for chart in llm-d-router-gateway llm-d-router-standalone; do
