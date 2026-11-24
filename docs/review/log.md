@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-21
+
+* **Update**: Added `Testing` guidelines and test review checks to [AGENTS.md](../../AGENTS.md#testing), clarified that `make presubmit` runs no Go tests, and updated [prepare_a_pull_request.md](playbooks/prepare_a_pull_request.md) to run targeted `-race` tests (including `make -f Makefile.coord.mk test-unit` for coordinator code) alongside `make presubmit`.
+
 ## 2026-11-07
 
 * **Update**: Added a first step to [review_a_pull_request.md](playbooks/review_a_pull_request.md) and a matching bullet to [AGENTS.md](../../AGENTS.md): a reviewer fetches the pull request's base branch and reads the instruction files and routed rule files from the base tip, because a checked-out pull request branch can carry a copy from before a refresh (`#4028` added routing for `pkg/common/grpc/**` and three rules that a review of `#4008` from its merge base did not see).
