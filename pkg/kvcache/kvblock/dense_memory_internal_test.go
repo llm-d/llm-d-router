@@ -18,6 +18,7 @@ package kvblock
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -310,4 +311,120 @@ func TestDenseIndexSweepFreesDeadSlots(t *testing.T) {
 	index.mu.RUnlock()
 	assert.Empty(t, deadWords, "no live word carries a dead pod after the sweep")
 	assert.Positive(t, survivors, "live entries survive the sweep")
+}
+
+// TestDenseIndexGetRequestKeyConcurrent races parallel parent resolutions.
+// GetRequestKey refreshes the engine map's recency stamp, which mutates the
+// map, so concurrent lookups must not share a read hold of the index lock.
+func TestDenseIndexGetRequestKeyConcurrent(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewDenseMemoryIndex(&DenseMemoryIndexConfig{Size: "1MiB"})
+	require.NoError(t, err)
+
+	const mappings = 64
+	engineKeys := make([]BlockHash, mappings)
+	requestKeys := make([]BlockHash, mappings)
+	pods := make([]PodEntry, mappings)
+	for i := range mappings {
+		engineKeys[i] = BlockHash(1000 + i)
+		requestKeys[i] = BlockHash(2000 + i)
+		pods[i] = PodEntry{PodIdentifier: fmt.Sprintf("pod-%02d", i), DeviceTier: "gpu"}
+	}
+	require.NoError(t, index.Add(ctx, engineKeys, requestKeys, pods))
+
+	const workers = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 500; i++ {
+				if _, err := index.GetRequestKey(ctx, engineKeys[(w+i)%mappings]); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(w)
+	}
+	close(start)
+	wg.Wait()
+}
+
+// TestDenseIndexEngineEvictKeepsMappingAddedConcurrently races one pod's
+// engine-key eviction of a block against another pod's store of the same
+// block, across the lock holds Add's entry loop releases. The surviving
+// entry must stay reachable through its engine key. The racing store carries
+// a large entry set so its first lock hold (interner plus mapping writes)
+// runs long enough for the evict to queue behind it and land between the
+// holds.
+func TestDenseIndexEngineEvictKeepsMappingAddedConcurrently(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	const (
+		engineKey  BlockHash = 9001
+		requestKey BlockHash = 1
+		trials               = 2000
+		fillerPods           = 500
+	)
+	podA := PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+	storePods := []PodEntry{{PodIdentifier: "10.0.0.2:8000", DeviceTier: "gpu"}}
+	for p := range fillerPods {
+		storePods = append(storePods, PodEntry{PodIdentifier: fmt.Sprintf("10.1.%d.%d:8000", p>>8, p&0xff), DeviceTier: "cpu"})
+	}
+
+	for i := range trials {
+		index, err := NewDenseMemoryIndex(&DenseMemoryIndexConfig{Size: "1MiB", PodCacheSize: denseMaxPodsPerKey})
+		require.NoError(t, err)
+		require.NoError(t, index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podA}))
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{podA})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, storePods)
+		}()
+		close(start)
+		wg.Wait()
+
+		got, err := index.GetRequestKey(ctx, engineKey)
+		require.NoError(t, err, "trial %d: engine key mapping removed while pod B's entry remains", i)
+		require.Equal(t, requestKey, got, "trial %d", i)
+	}
+}
+
+// TestDenseIndexClearReAddAtWordCap pins the word cap against dead words: a
+// cleared pod's word occupies the cap until the sweep reclaims it, so an
+// insert at the cap must strip dead words first rather than drop the head,
+// which can be a live pod's word.
+func TestDenseIndexClearReAddAtWordCap(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewDenseMemoryIndex(&DenseMemoryIndexConfig{Size: "1MiB", PodCacheSize: 5})
+	require.NoError(t, err)
+
+	pod := func(p int) PodEntry {
+		return PodEntry{PodIdentifier: fmt.Sprintf("pod-%02d", p), DeviceTier: "gpu"}
+	}
+	var entries []PodEntry
+	for p := 0; p < 5; p++ {
+		entries = append(entries, pod(p))
+	}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{1}, entries))
+	require.NoError(t, index.Clear(ctx, "pod-02"))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{1}, []PodEntry{pod(5)}))
+
+	hits, err := index.Lookup(ctx, []BlockHash{1}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Len(t, hits[1], 5, "the cap holds five live pods")
+	assert.NotContains(t, hits[1], pod(2), "the cleared pod is filtered")
+	for _, p := range []int{0, 1, 3, 4, 5} {
+		assert.Contains(t, hits[1], pod(p), "live pod %d evicted while a dead word survived", p)
+	}
 }

@@ -311,11 +311,6 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 		d.mu.Unlock()
 		return err
 	}
-	if engineKeys != nil {
-		for ek, rks := range engineToRequestMapping(engineKeys, requestKeys) {
-			d.engineToRequestKeys.set(ek, rks)
-		}
-	}
 	stamp := d.tick()
 	d.mu.Unlock()
 
@@ -326,6 +321,13 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 	for _, requestKey := range requestKeys {
 		d.mu.Lock()
 		slot := d.table[requestKey]
+		// Dead words occupy the cap until the sweep's sampled pass reclaims
+		// them; strip them before inserting at the cap so the head-drop
+		// cannot evict a live pod's word while a dead one survives.
+		if slotLen(&slot, &d.arena) == d.podCap {
+			d.stripDeadWordsLocked(requestKey, slot)
+			slot = d.table[requestKey]
+		}
 		for i := range records {
 			ref := &records[i]
 			if dropped := slotSetEntry(&slot, &d.arena, d.podCap, entryWordFor(ref)); dropped != 0 {
@@ -343,6 +345,19 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 		if traceLogger.Enabled() {
 			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
 		}
+	}
+
+	// The engine mappings land after the entries, under their own hold. An
+	// engine-key evict that runs between the two either misses the mapping,
+	// so its removal no-ops and this Add's set lands last, or sees it with
+	// the entries already in place, so the evict's all-empty check cannot
+	// drop a mapping whose entries have not landed yet.
+	if engineKeys != nil {
+		d.mu.Lock()
+		for ek, rks := range engineToRequestMapping(engineKeys, requestKeys) {
+			d.engineToRequestKeys.set(ek, rks)
+		}
+		d.mu.Unlock()
 	}
 
 	d.maybeSweep()
@@ -570,11 +585,13 @@ func (d *DenseMemoryIndex) Clear(ctx context.Context, podIdentifier string) erro
 }
 
 // GetRequestKey returns the last request key associated with the given
-// engineKey, the highest-index request key the engine key covers.
+// engineKey, the highest-index request key the engine key covers. It takes
+// the write lock: the engine map's get refreshes the slot's recency stamp,
+// which mutates the map, so concurrent lookups cannot share a read hold.
 func (d *DenseMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
-	d.mu.RLock()
+	d.mu.Lock()
 	rk, found := d.engineToRequestKeys.get(engineKey)
-	d.mu.RUnlock()
+	d.mu.Unlock()
 	if !found {
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
