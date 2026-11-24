@@ -148,7 +148,8 @@ type TimeoutAwareProducer interface {
 // handler forces when the stream ends early, is where the state is released.
 type RequestAbandoned interface {
 	// RequestAbandoned releases any per-request state written by RequestHeader or
-	// Produce for the given request. It must be safe to call when no state exists.
+	// Produce for the given request. It must be safe to call when no state exists,
+	// and may be called more than once for a request.
 	RequestAbandoned(ctx context.Context, request *fwksched.InferenceRequest)
 }
 
