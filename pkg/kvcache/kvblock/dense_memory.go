@@ -114,10 +114,6 @@ type DenseMemoryIndex struct {
 	tbl                 *denseTable
 	arena               denseArena
 	engineToRequestKeys *engineKeyMap
-	// epoch selects which readBits bit readers set; the sweep flips it and
-	// consumes the other bit, so evidence gathered while a sweep runs is
-	// never consumed by that same sweep.
-	epoch atomic.Uint32
 	// sweepCursor is the next table index the sweep samples; advancing it
 	// per burst gives round-robin coverage of the slots.
 	sweepCursor int
@@ -614,7 +610,6 @@ func (d *DenseMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 
 	podsPerKey := make(map[BlockHash][]PodEntry)
 	visited := 0
-	epochBit := uint32(1) << (d.epoch.Load() & 1)
 
 	for idx, requestKey := range requestKeys {
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
@@ -625,7 +620,7 @@ func (d *DenseMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 		found := false
 		if i, ok := d.tbl.find(requestKey); ok {
 			found = true
-			d.markRead(&d.tbl.slots[i], epochBit)
+			d.markRead(&d.tbl.slots[i])
 			filtered = d.materializeLocked(requestKey, &d.tbl.slots[i].slot, podIdentifierSet)
 		}
 		d.mu.RUnlock()
@@ -736,14 +731,13 @@ func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash
 		ws.found = ws.found[:0]
 		ws.bounds = ws.bounds[:0]
 		ws.entries = ws.entries[:0]
-		epochBit := uint32(1) << (d.epoch.Load() & 1)
 		d.mu.RLock()
 		for _, key := range keys {
 			b0 := len(ws.entries)
 			found := false
 			if i, ok := d.tbl.find(key); ok {
 				found = true
-				d.markRead(&d.tbl.slots[i], epochBit)
+				d.markRead(&d.tbl.slots[i])
 				d.decodeLocked(&d.tbl.slots[i].slot, ws, b0)
 			}
 			ws.found = append(ws.found, found)
@@ -800,17 +794,15 @@ func (d *DenseMemoryIndex) decodeLocked(slot *keySlot, ws *denseWalkState, from 
 	})
 }
 
-// markRead records read evidence in a slot, no write acquisition. The
-// epoch bit is loaded once per read call, not per key: the epoch word
-// shares the index struct's cache line with the mutex, and a per-key load
-// makes parallel readers ping-pong it. A slot already marked this epoch
-// skips the atomic OR, so a repeatedly walked key pays one atomic load
-// instead of a read-modify-write. The sweep flips the epoch before
-// consuming the other bit, so evidence gathered while a sweep runs
-// survives to the next one.
-func (d *DenseMemoryIndex) markRead(s *tableSlot, epochBit uint32) {
-	if atomic.LoadUint32(&s.readBits)&epochBit == 0 {
-		atomic.OrUint32(&s.readBits, epochBit)
+// markRead records read evidence in a slot, no write acquisition. Readers
+// hold the read lock and the sweep holds the write lock, so no read can
+// land mid-sweep: the bit means exactly "read since the sweep last sampled
+// this slot", and the sweep clears it when it spends the evidence. A slot
+// already marked skips the atomic OR, so a repeatedly walked key pays one
+// atomic load instead of a read-modify-write.
+func (d *DenseMemoryIndex) markRead(s *tableSlot) {
+	if atomic.LoadUint32(&s.readBits) == 0 {
+		atomic.OrUint32(&s.readBits, 1)
 	}
 }
 
@@ -843,12 +835,6 @@ func (d *DenseMemoryIndex) maybeSweep() {
 // sweepSampleSize keys or one full loop over the table. Called with mu held
 // for writing.
 func (d *DenseMemoryIndex) sweepBurstLocked() {
-	// Flip the epoch before sampling, then consume the previous epoch's
-	// bit: reads that land during this burst set the new bit and survive
-	// to the next burst.
-	consume := uint32(1) << (d.epoch.Load() & 1)
-	d.epoch.Store(d.epoch.Load() ^ 1)
-
 	type victim struct {
 		key     BlockHash
 		stamp   uint32
@@ -865,11 +851,13 @@ func (d *DenseMemoryIndex) sweepBurstLocked() {
 			continue
 		}
 		s := &d.tbl.slots[i]
-		if atomic.LoadUint32(&s.readBits)&consume != 0 {
+		if atomic.LoadUint32(&s.readBits) != 0 {
 			// Read since the last burst that sampled this slot: young
-			// again, and the evidence is spent.
+			// again, and the evidence is spent. Any set bit counts: the
+			// read lock excludes this burst, so every bit still standing
+			// was set before it began.
 			s.slot.stamp = stamp
-			atomic.AndUint32(&s.readBits, ^consume)
+			atomic.StoreUint32(&s.readBits, 0)
 		}
 		allDead := true
 		forEachSlotWord(&s.slot, &d.arena, func(w uint32) bool {

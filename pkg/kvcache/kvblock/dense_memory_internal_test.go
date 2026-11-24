@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -432,4 +433,56 @@ func TestDenseIndexClearReAddAtWordCap(t *testing.T) {
 	for _, p := range []int{0, 1, 3, 4, 5} {
 		assert.Contains(t, hits[1], pod(p), "live pod %d evicted while a dead word survived", p)
 	}
+}
+
+// TestDenseIndexSweepReadEvidence pins the sweep's read evidence across a
+// burst that does not sample the read key: a read is honored by whichever
+// burst next samples the slot, whatever bit it would have set. The first
+// burst below stops before the read key's slot (its sample fills at 128
+// victims, the key sits at the 160th occupied slot), the second starts at
+// it. Between the two, the key is read once.
+func TestDenseIndexSweepReadEvidence(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	// A budget far above residency keeps Add's sweeps off; the test drives
+	// bursts directly.
+	index, err := NewDenseMemoryIndex(&DenseMemoryIndexConfig{Size: "64MiB"})
+	require.NoError(t, err)
+
+	const numKeys = 200
+	pod := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	for k := 1; k <= numKeys; k++ {
+		require.NoError(t, index.Add(ctx, nil, []BlockHash{BlockHash(k)}, []PodEntry{pod}))
+	}
+
+	// Stamps a second below the sweep's refresh stamp, so an honored read is
+	// the only way the key's stamp can reach the current wall second.
+	base := uint32(time.Now().Unix())
+	index.mu.Lock()
+	var slots []int
+	for i := range index.tbl.slots {
+		if !index.tbl.empty(i) {
+			slots = append(slots, i)
+			index.tbl.slots[i].slot.stamp = base - 1000
+		}
+	}
+	require.Greater(t, len(slots), 170, "the table must hold more keys than one burst samples")
+	readKey := index.tbl.slots[slots[159]].key
+	index.mu.Unlock()
+
+	hits, err := index.Lookup(ctx, []BlockHash{readKey}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Contains(t, hits, readKey)
+
+	index.mu.Lock()
+	index.sweepCursor = 0
+	index.sweepBurstLocked()
+	i, ok := index.tbl.find(readKey)
+	require.True(t, ok, "the first burst must not sample the read key")
+	index.sweepCursor = i
+	index.sweepBurstLocked()
+	i, ok = index.tbl.find(readKey)
+	require.True(t, ok, "the read key was evicted as cold despite the read between the bursts")
+	require.GreaterOrEqual(t, index.tbl.slots[i].slot.stamp, base,
+		"the read between the bursts did not refresh the key's stamp")
+	index.mu.Unlock()
 }

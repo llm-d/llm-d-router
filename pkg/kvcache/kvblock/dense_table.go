@@ -38,13 +38,14 @@ const (
 // tableSlot is one addressed table entry. A slot is empty exactly when its
 // stamp is zero: stamps are wall seconds, nonzero for every occupied slot,
 // and deletion zeroes the whole slot. readBits holds the lock-free read
-// evidence (one bit per sweep epoch); readers set it with an atomic OR while
-// holding at most the read lock, and the sweep consumes it under the write
-// lock with atomic ops, so the word is always accessed atomically.
+// evidence: readers set it with an atomic OR while holding at most the read
+// lock, and the sweep consumes it under the write lock with atomic ops, so
+// the word is always accessed atomically.
 type tableSlot struct {
 	key  BlockHash
 	slot keySlot
-	// readBits bits 0 and 1 are the two sweep epochs' read evidence.
+	// readBits is nonzero while the key was read since the sweep last
+	// sampled its slot.
 	readBits uint32
 }
 
