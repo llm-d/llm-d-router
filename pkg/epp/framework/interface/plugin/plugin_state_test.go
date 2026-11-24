@@ -351,6 +351,47 @@ func TestPluginState_CleanupSkipsLiveRequests(t *testing.T) {
 	assert.Equal(t, key, data.evictedKey)
 }
 
+// TestPluginState_UnbindLiveness verifies that unbinding a request returns it
+// to staleness-based reaping even while the original ctx remains open.
+func TestPluginState_UnbindLiveness(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	requestID := "req-unbind"
+	key := StateKey("foo")
+	data := &evictableTestData{pluginTestData: pluginTestData{value: "bar"}}
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	t.Cleanup(reqCancel)
+
+	state.Write(requestID, key, data)
+	state.BindLiveness(reqCtx, requestID)
+
+	// Bound to a live ctx: janitor holds the request past staleness.
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.cleanStaleRequests()
+	_, err := state.Read(requestID, key)
+	assert.NoError(t, err)
+
+	// Hand liveness off to Touch: while fresh, the entry survives a sweep.
+	state.UnbindLiveness(requestID)
+	state.Touch(requestID)
+	state.cleanStaleRequests()
+	_, err = state.Read(requestID, key)
+	assert.NoError(t, err)
+
+	// Once stale again without further Touch calls, the janitor reaps the entry
+	// even though reqCtx is still open.
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.cleanStaleRequests()
+	assert.NoError(t, reqCtx.Err(), "reqCtx must still be open when the janitor reaps")
+	_, err = state.Read(requestID, key)
+	assert.Equal(t, ErrNotFound, err)
+	assert.Equal(t, requestID, data.evictedID)
+	assert.Equal(t, key, data.evictedKey)
+}
+
 // TestPluginState_DeleteClearsLiveness verifies that a liveness binding does not
 // survive Delete: entries written later under a reused request ID must not
 // inherit the previous request's liveness.
