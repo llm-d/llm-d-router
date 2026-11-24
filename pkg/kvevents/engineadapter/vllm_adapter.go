@@ -66,6 +66,7 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 		Timestamp:        vllmBatch.timestamp,
 		Events:           vllmBatch.events,
 		DataParallelRank: vllmBatch.dataParallelRank,
+		SkippedTags:      vllmBatch.skippedTags,
 	}, nil
 }
 

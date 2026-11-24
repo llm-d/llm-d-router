@@ -19,7 +19,6 @@ spec:
     checkIntervalSec: 2
     {{- $modelServers := .Values.router.modelServers | default dict }}
     {{- $modelServerProtocol := lower ($modelServers.protocol | default "http") }}
-    {{- $modelServerType := lower ($modelServers.type | default "vllm") }}
     {{- $port := $modelServers.targetPortNumber }}
     {{- if $modelServers.targetPorts }}
       {{- $port = (index $modelServers.targetPorts 0).number }}
@@ -30,7 +29,7 @@ spec:
       httpHealthCheck:
         requestPath: /health
         port: {{ $port }}
-    {{- else if and (eq $modelServerType "vllm") (eq $modelServerProtocol "grpc") }}
+    {{- else if eq $modelServerProtocol "grpc" }}
     config:
       type: GRPC
       grpcHealthCheck:

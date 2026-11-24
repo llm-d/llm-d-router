@@ -256,7 +256,7 @@ async function evaluateAndEnqueue({
     return { enqueued: true, entry };
   } catch (err) {
     const msg = String(err?.message || err);
-    if (/already in the merge queue|already queued/i.test(msg)) {
+    if (/already in the (merge )?queue|already queued/i.test(msg)) {
       console.log(`PR #${pull_number} was concurrently added to the merge queue.`);
       return { enqueued: false, reason: 'already_queued' };
     }

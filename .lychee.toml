@@ -13,8 +13,16 @@ exclude = [
 # ./CLAUDE.md). GitHub dereferences the symlink for display so relative
 # links resolve from AGENTS.md at the repo root; lychee reads the raw
 # path and breaks on otherwise-correct links. Skip the duplicate.
+# RELEASE-NOTES.md records the PR that introduced each change, and those links
+# are correct when the notes are assembled from the merged PR bodies at tag
+# time. A merged PR can be deleted afterwards, so a 404 there says nothing
+# about whether the entry is accurate. The file also grows with every release
+# and every entry is a GitHub URL, so re-checking all of them on each markdown
+# change adds an increasing request volume to GitHub from CI, which hits rate
+# limits and 502 responses.
 exclude_path = [
   ".github/copilot-instructions.md",
+  "RELEASE-NOTES.md",
 ]
 
 # Per-request timeout in seconds. Sized for slow upstream docs sites

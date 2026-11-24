@@ -2107,6 +2107,38 @@ func TestScanForcedResponse_TerminalMarker(t *testing.T) {
 	}
 }
 
+// TestScanForcedResponse_TerminalMarker_MultipleChoices checks that with n > 1 a
+// finish_reason on one choice does not mark the stream complete: a stream cut
+// before every declared choice finished is a truncation.
+func TestScanForcedResponse_TerminalMarker_MultipleChoices(t *testing.T) {
+	const (
+		c0Done = `data: {"id":"c","choices":[{"index":0,"delta":{"content":"a"},"finish_reason":"stop"}]}` + "\n\n"
+		c1Part = `data: {"id":"c","choices":[{"index":1,"delta":{"content":"b"}}]}` + "\n\n"
+		c1Done = `data: {"id":"c","choices":[{"index":1,"delta":{"content":"b"},"finish_reason":"stop"}]}` + "\n\n"
+	)
+	tests := []struct {
+		name      string
+		stream    string
+		truncated bool
+	}{
+		{name: "every choice finished", stream: c0Done + c1Done},
+		{name: "done marker", stream: c0Done + c1Part + "data: [DONE]\n\n"},
+		{name: "second choice cut mid-stream", stream: c1Part + c0Done, truncated: true},
+		{name: "second choice never started", stream: c0Done, truncated: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(sseShapeChat, 2)
+			err := scanForcedResponse(strings.NewReader(tc.stream), r, 1<<20, 0)
+			if tc.truncated {
+				require.ErrorIs(t, err, errForceStreamTruncated)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // TestForceStream_Truncated_BufferedPath_FallsBack covers the buffered path's
 // completeness gate end to end: a forced stream cut off (clean EOF) before [DONE]
 // and before a finish_reason reassembles into a complete-looking reply, so it

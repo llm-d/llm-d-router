@@ -37,8 +37,10 @@ permissions:
   contents: write
   pull-requests: write
 
+# The conclusion is part of the group so a non-success workflow_run, whose job is
+# skipped, cannot cancel a success run for the same head SHA.
 concurrency:
-  group: pr-merge-queue-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.event.issue.number || github.run_id }}
+  group: pr-merge-queue-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.event.issue.number || github.run_id }}-${{ github.event.workflow_run.conclusion || 'event' }}
   cancel-in-progress: true
 
 jobs:

@@ -328,7 +328,9 @@ func (fr *FlowRegistry) WithConnection(key flowcontrol.FlowKey, fn func(conn con
 	if state.initErr != nil {
 		// If provisioning failed, this state object is invalid.
 		// We remove it from the map so that subsequent requests will attempt to create a fresh state object.
-		fr.flowStates.Delete(key)
+		// Another holder of this state may already have removed it and a newer state may have taken its
+		// place, so remove only this one.
+		fr.flowStates.CompareAndDelete(key, state)
 
 		// Release the band lease if we created the flow.
 		if isNewFlow {
