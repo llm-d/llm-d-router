@@ -48,8 +48,9 @@ func makeGauge(values ...float64) *dto.MetricFamily {
 }
 
 type labeledSample struct {
-	pod   string
-	value float64
+	pod       string
+	value     float64
+	namespace string
 }
 
 func makeLabeledGauge(samples ...labeledSample) *dto.MetricFamily {
@@ -63,10 +64,16 @@ func makeLabeledGauge(samples ...labeledSample) *dto.MetricFamily {
 			Gauge: &dto.Gauge{Value: &s.value},
 		}
 		if s.pod != "" {
-			m.Label = []*dto.LabelPair{{
+			m.Label = append(m.Label, &dto.LabelPair{
 				Name:  proto.String(podLabelName),
 				Value: proto.String(s.pod),
-			}}
+			})
+		}
+		if s.namespace != "" {
+			m.Label = append(m.Label, &dto.LabelPair{
+				Name:  proto.String(namespaceLabelName),
+				Value: proto.String(s.namespace),
+			})
 		}
 		fam.Metric = append(fam.Metric, m)
 	}
@@ -93,13 +100,14 @@ func TestExtractorExtract(t *testing.T) {
 	gaugeType := dto.MetricType_GAUGE
 
 	tests := []struct {
-		name        string
-		podName     string
-		data        sourcemetrics.PrometheusMetricMap
-		wantErr     bool
-		errContains string
-		updated     bool
-		wantUtil    float64
+		name         string
+		podName      string
+		podNamespace string
+		data         sourcemetrics.PrometheusMetricMap
+		wantErr      bool
+		errContains  string
+		updated      bool
+		wantUtil     float64
 	}{
 		{
 			name:        "missing metric",
@@ -140,9 +148,9 @@ func TestExtractorExtract(t *testing.T) {
 			podName: "vllm-pod-2",
 			data: sourcemetrics.PrometheusMetricMap{
 				gpuUtilMetricName: makeLabeledGauge(
-					labeledSample{"vllm-pod-1", 25},
-					labeledSample{"vllm-pod-2", 80},
-					labeledSample{"vllm-pod-3", 10},
+					labeledSample{pod: "vllm-pod-1", value: 25},
+					labeledSample{pod: "vllm-pod-2", value: 80},
+					labeledSample{pod: "vllm-pod-3", value: 10},
 				),
 			},
 			updated:  true,
@@ -153,20 +161,58 @@ func TestExtractorExtract(t *testing.T) {
 			podName: "vllm-pod-1",
 			data: sourcemetrics.PrometheusMetricMap{
 				gpuUtilMetricName: makeLabeledGauge(
-					labeledSample{"vllm-pod-1", 40},
-					labeledSample{"vllm-pod-1", 70},
-					labeledSample{"vllm-pod-2", 99},
+					labeledSample{pod: "vllm-pod-1", value: 40},
+					labeledSample{pod: "vllm-pod-1", value: 70},
+					labeledSample{pod: "vllm-pod-2", value: 99},
 				),
 			},
 			updated:  true,
 			wantUtil: 0.70,
 		},
 		{
+			name:         "DaemonSet payload filters by pod namespace",
+			podName:      "vllm-0",
+			podNamespace: "team-a",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeLabeledGauge(
+					labeledSample{pod: "vllm-0", value: 95, namespace: "team-b"},
+					labeledSample{pod: "vllm-0", value: 10, namespace: "team-a"},
+				),
+			},
+			updated:  true,
+			wantUtil: 0.10,
+		},
+		{
+			name:         "samples without a namespace label match by pod",
+			podName:      "vllm-0",
+			podNamespace: "team-a",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeLabeledGauge(
+					labeledSample{pod: "vllm-0", value: 35},
+					labeledSample{pod: "vllm-1", value: 90},
+				),
+			},
+			updated:  true,
+			wantUtil: 0.35,
+		},
+		{
+			name:         "same pod name in another namespace only returns error",
+			podName:      "vllm-0",
+			podNamespace: "team-a",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeLabeledGauge(
+					labeledSample{pod: "vllm-0", value: 95, namespace: "team-b"},
+				),
+			},
+			wantErr:     true,
+			errContains: "vllm-0",
+		},
+		{
 			name:    "no matching pod label returns error",
 			podName: "missing-pod",
 			data: sourcemetrics.PrometheusMetricMap{
 				gpuUtilMetricName: makeLabeledGauge(
-					labeledSample{"vllm-pod-1", 50},
+					labeledSample{pod: "vllm-pod-1", value: 50},
 				),
 			},
 			wantErr:     true,
@@ -191,7 +237,10 @@ func TestExtractorExtract(t *testing.T) {
 				}
 			}()
 
-			meta := &fwkdl.EndpointMetadata{Name: tt.podName}
+			meta := &fwkdl.EndpointMetadata{
+				ID:   fwkdl.ID{Namespace: tt.podNamespace, Name: tt.podName},
+				Name: tt.podName,
+			}
 			ep := fwkdl.NewEndpoint(meta, nil)
 			attr := ep.GetAttributes()
 			before, _ := attr.Get(key)
