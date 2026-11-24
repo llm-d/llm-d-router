@@ -210,6 +210,11 @@ func TestEstimateOutputFromRequest_Images(t *testing.T) {
 		{name: "layer count is capped", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(100)), want: 57672},
 		{name: "zero layers use default", steps: ptr.To(int64(50)), layers: ptr.To(int64(0)), want: 10240},
 		{name: "layered images multiply", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(2)), layers: ptr.To(int64(4)), want: 52429},
+		{name: "resolution is capped", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(8192)), want: 419431},
+		{name: "oversized resolution does not overflow", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(2000000000)), want: 419431},
+		{name: "zero resolution uses layered default", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(0)), want: 10240},
+		{name: "negative resolution uses layered default", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(-1)), want: 10240},
+		{name: "auto size uses layered resolution", size: "auto", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(640)), want: 10240},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

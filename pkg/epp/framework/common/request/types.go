@@ -694,12 +694,47 @@ type ImagesGenerationsRequest struct {
 	InputImages []UploadedMedia `json:"-"`
 }
 
+// UnmarshalJSON accepts integer resolution and layer values and ignores other
+// representations, so requests for backends that use those fields differently
+// remain forwardable.
+func (i *ImagesGenerationsRequest) UnmarshalJSON(data []byte) error {
+	type imageRequest ImagesGenerationsRequest
+	aux := struct {
+		*imageRequest
+		Resolution json.RawMessage `json:"resolution"`
+		Layers     json.RawMessage `json:"layers"`
+	}{imageRequest: (*imageRequest)(i)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	i.Resolution = optionalInt64(aux.Resolution)
+	i.Layers = optionalInt64(aux.Layers)
+	return nil
+}
+
+func optionalInt64(raw json.RawMessage) *int64 {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return &n
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+			return &v
+		}
+	}
+	return nil
+}
+
 func (i *ImagesGenerationsRequest) String() string {
 	if i == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, NegativePromptLength: %d}",
-		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, len(i.NegativePrompt))
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, Layers: %v, Resolution: %v, NegativePromptLength: %d}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, derefInt(i.Layers), derefInt(i.Resolution), len(i.NegativePrompt))
 }
 
 // ParseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
