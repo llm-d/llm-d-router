@@ -223,7 +223,10 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 
 	now := p.now()
 	team.mu.Lock()
-	if day := dayNumber(now); day != team.dailyDay {
+	// The day only moves forward: a request whose now was read before midnight but takes the lock
+	// after one read after it is charged to the current day, as is one read after the wall clock
+	// stepped back.
+	if day := dayNumber(now); day > team.dailyDay {
 		team.dailyDay, team.dailyUsed = day, 0
 	}
 	budgetDay := team.dailyDay

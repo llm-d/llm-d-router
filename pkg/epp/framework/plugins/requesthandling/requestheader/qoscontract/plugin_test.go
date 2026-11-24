@@ -375,6 +375,28 @@ func TestSettlementAcrossMidnight(t *testing.T) {
 	})
 }
 
+// TestDayNeverMovesBack verifies that a request whose clock was read before midnight, but that
+// takes the team lock after a request read after it, is charged to the current day instead of
+// moving the day back and zeroing the new day's charges. Each request reserves 100 + 2*100 = 300.
+func TestDayNeverMovesBack(t *testing.T) {
+	p, clock := newTestPlugin(t, func(params *Parameters) { params.Teams[2].DailyTokens = 1000 })
+	clock.t = time.Date(2026, 10, 23, 0, 1, 0, 0, time.UTC)
+	b := newRequest("team-d", 100, 100)
+	require.NoError(t, p.RequestHeader(t.Context(), b))
+
+	clock.t = time.Date(2026, 10, 22, 23, 59, 0, 0, time.UTC) // a read the clock before b
+	a := newRequest("team-d", 100, 100)
+	require.NoError(t, p.RequestHeader(t.Context(), a))
+	_, daily := usage(p, "team-d")
+	require.InDelta(t, 600, daily, 1e-9, "a is charged to the current day, next to b")
+
+	complete(p, b, 100, 20)
+	complete(p, a, 100, 20)
+	inflight, daily := usage(p, "team-d")
+	assert.Equal(t, 0, inflight)
+	assert.InDelta(t, 280, daily, 1e-9, "both settle against the current day: 140 + 140")
+}
+
 func TestRequestHeader_LowestClassOverConcurrencyRejects(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 	first := newRequest("team-b", 10, 10)
