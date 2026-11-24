@@ -90,9 +90,11 @@ func IncUpstreamRequestTotal(upstream string) {
 	upstreamRequestTotal.WithLabelValues(upstream).Inc()
 }
 
-// RecordUpstreamRequestDuration observes the latency of one outbound call.
-func RecordUpstreamRequestDuration(upstream string, d time.Duration) {
-	upstreamRequestDuration.WithLabelValues(upstream).Observe(d.Seconds())
+// RecordUpstreamRequestDuration observes the latency of one outbound call and
+// attaches the calling step's trace as an exemplar, so a point on an upstream
+// latency graph links to the span that made the call.
+func RecordUpstreamRequestDuration(ctx context.Context, upstream string, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, upstreamRequestDuration.WithLabelValues(upstream), d.Seconds())
 }
 
 // RecordRequestInputTokens observes the render-derived prompt token count for

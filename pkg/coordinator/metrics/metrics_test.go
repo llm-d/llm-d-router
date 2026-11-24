@@ -158,7 +158,7 @@ func TestUpstreamFamily_Records(t *testing.T) {
 	IncUpstreamRequestTotal(UpstreamEncode)
 	IncUpstreamRequestTotal(UpstreamEncode)
 	IncUpstreamRequestTotal(UpstreamReplaceMediaURLs)
-	RecordUpstreamRequestDuration(UpstreamEncode, 10*time.Millisecond)
+	RecordUpstreamRequestDuration(context.Background(), UpstreamEncode, 10*time.Millisecond)
 
 	require.InDelta(t, 2.0, promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamEncode)), 1e-9)
 	require.InDelta(t, 1.0, promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamReplaceMediaURLs)), 1e-9)

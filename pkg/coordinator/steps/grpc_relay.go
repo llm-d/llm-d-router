@@ -224,7 +224,7 @@ func relayGRPCStream(
 func streamGRPCToGateway(ctx context.Context, gwClient *gateway.Client, upstream, path string, headers map[string]string, body ...[]byte) (*http.Response, error) {
 	call := coordmetrics.StartUpstreamCall(upstream)
 	resp, err := gwClient.StreamGRPC(ctx, path, headers, body...)
-	call.Done()
+	call.Done(ctx)
 	return resp, err
 }
 
