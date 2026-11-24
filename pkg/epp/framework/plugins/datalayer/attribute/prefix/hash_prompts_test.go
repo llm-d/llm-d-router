@@ -47,14 +47,15 @@ func TestHashPromptsMatchesSingleWrites(t *testing.T) {
 	for i := range long {
 		long[i] = uint64(i)
 	}
-	cases := [][][]uint64{
+	cases := make([][][]uint64, 0, 106)
+	cases = append(cases,
 		nil,
-		{},
-		{{}},
-		{{1}},
-		{{1, 2}, {}, {3}},
-		{long},
-	}
+		[][]uint64{},
+		[][]uint64{{}},
+		[][]uint64{{1}},
+		[][]uint64{{1, 2}, {}, {3}},
+		[][]uint64{long},
+	)
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 100 {
 		n := r.IntN(6)
