@@ -233,18 +233,22 @@ func sessionTurnInfo(id string, metrics *ProgramMetrics, headEnqueue time.Time, 
 // producedTurnInfo builds a flow for one session whose head request was observed
 // by producer after the session dispatched turns earlier requests.
 func producedTurnInfo(t *testing.T, producer *sessionstate.Producer, session string, turns int, headEnqueue time.Time) (string, QueueInfo) {
+	return producedTenantTurnInfo(t, producer, session, "", session, turns, headEnqueue)
+}
+
+func producedTenantTurnInfo(t *testing.T, producer *sessionstate.Producer, flowID, tenantID, session string, turns int, headEnqueue time.Time) (string, QueueInfo) {
 	t.Helper()
 	ctx := context.Background()
 	observe := func(requestID string) *fwksched.InferenceRequest {
-		req := &fwksched.InferenceRequest{RequestID: requestID, FairnessID: session}
+		req := &fwksched.InferenceRequest{RequestID: requestID, TenantID: tenantID, FairnessID: flowID}
 		req.PutAttribute(agentidentity.AgentIdentityKey, session)
 		require.NoError(t, producer.RequestHeader(ctx, req))
 		return req
 	}
 	for i := range turns {
-		require.NoError(t, producer.PreRequest(ctx, observe(fmt.Sprintf("%s-%d", session, i)), nil))
+		require.NoError(t, producer.PreRequest(ctx, observe(fmt.Sprintf("%s-%d", flowID, i)), nil))
 	}
-	return headTurnInfo(session, &ProgramMetrics{}, headEnqueue, observe(session+"-head"))
+	return headTurnInfo(flowID, &ProgramMetrics{}, headEnqueue, observe(flowID+"-head"))
 }
 
 func headTurnInfo(id string, metrics *ProgramMetrics, headEnqueue time.Time, req *fwksched.InferenceRequest) (string, QueueInfo) {
@@ -380,4 +384,20 @@ func TestTurnPriority_ReadsConfiguredSessionStateProducer(t *testing.T) {
 	got = unnamed.Pick(0, queues)
 	require.NotNil(t, got)
 	assert.Equal(t, "new", got.FlowKey().ID, "state from another producer instance is not read")
+}
+
+func TestTurnPriority_IsolatesSessionStateByTenant(t *testing.T) {
+	plg, err := sessionstate.Factory(sessionstate.SessionStateProducerType, nil, nil)
+	require.NoError(t, err)
+	producer := plg.(*sessionstate.Producer)
+	now := time.Now()
+
+	// t2/s waited longer, so it would win on tie-break if it shared t1/s's depth.
+	idA, qA := producedTenantTurnInfo(t, producer, "t1/s", "t1", "s", 5, now)
+	idB, qB := producedTenantTurnInfo(t, producer, "t2/s", "t2", "s", 0, now.Add(-time.Second))
+
+	s := turnPriorityFromConfig(t, `{"strategy":"turn-priority","turnPriorityTimeWeight":0}`)
+	got := s.Pick(0, map[string]QueueInfo{idA: qA, idB: qB})
+	require.NotNil(t, got)
+	assert.Equal(t, "t1/s", got.FlowKey().ID)
 }
