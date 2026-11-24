@@ -32,6 +32,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -449,9 +450,9 @@ func (p *Plugin) quotaHeaders(team *teamState) map[string]string {
 
 // isErrorStatus reports whether the response headers carry a non-2xx HTTP status.
 func isErrorStatus(headers map[string]string) bool {
-	status := headers[":status"]
+	status := headers[reqcommon.PseudoHeaderStatus]
 	if status == "" {
-		status = headers["status"]
+		status = headers[reqcommon.HeaderStatus]
 	}
 	code, err := strconv.Atoi(status)
 	return err == nil && (code < 200 || code >= 300)
