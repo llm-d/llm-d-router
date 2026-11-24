@@ -242,54 +242,42 @@ func (p *lateHeaderPlugin) Produce(_ context.Context, request *fwksched.Inferenc
 
 func (p *lateHeaderPlugin) Produces() map[fwkplugin.DataKey]any { return nil }
 
-func TestScopeProducers_ClonesHeadersPerInvocation(t *testing.T) {
-	request := &fwksched.InferenceRequest{Headers: map[string]string{"x-client": "v"}}
-	plugins := []fwkrh.DataProducer{
-		&executorMockDataProducerPlugin{name: "p1"},
-		&executorMockDataProducerPlugin{name: "p2"},
-	}
+func (p *lateHeaderPlugin) ProduceTimeout() time.Duration { return 20 * time.Millisecond }
 
-	invocations := scopeProducers(context.Background(), fwkrh.DataProducerExtensionPoint, plugins, request, nil)
-	require.Len(t, invocations, 2)
-
-	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
-	invocations[0].request.Headers["x-producer"] = "p1"
-
-	assert.Equal(t, map[string]string{"x-client": "v", "x-producer": "p1"}, invocations[0].request.Headers)
-	assert.Equal(t, map[string]string{"x-client": "v"}, invocations[1].request.Headers)
-	assert.NotContains(t, request.Headers, "x-producer")
-	assert.Equal(t, "10.0.0.1:5555", request.Headers[routing.KVCacheSourceHeader])
-}
-
-// A producer abandoned by the timeout path reads Headers while PreRequest
-// writes routing headers through its own scoped copy; -race reports the
-// overlap when the two share one map.
 func TestDataProducerPluginsWithTimeout_LateHeaderReadIsIsolated(t *testing.T) {
-	request := &fwksched.InferenceRequest{Headers: map[string]string{"x-client": "v"}}
+	originalHeaders := map[string]string{"x-client": "v"}
+	request := &fwksched.InferenceRequest{Headers: originalHeaders}
 	plugin := &lateHeaderPlugin{
 		header:   routing.KVCacheSourceHeader,
 		started:  make(chan struct{}),
 		release:  make(chan struct{}),
 		observed: make(chan string, 1),
 	}
+	defer func() {
+		close(plugin.release)
+		select {
+		case value := <-plugin.observed:
+			assert.Empty(t, value)
+		case <-time.After(time.Second):
+			t.Error("producer did not report its header")
+		}
+	}()
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
 		fwkrh.DataProducerExtensionPoint,
-		20*time.Millisecond,
+		plugin.ProduceTimeout(),
 		[]fwkrh.DataProducer{plugin},
 		request,
 		nil,
 	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "DataProducer execution timed out")
-	<-plugin.started
+	require.ErrorContains(t, err, "DataProducer execution timed out")
 
 	preRequest, _ := datalayer.ScopeRequest(logr.Discard(), fwkrh.PreRequestExtensionPoint, plugin, request)
-	close(plugin.release)
 	routing.SetRoutingHeader(preRequest.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
 
-	assert.Empty(t, <-plugin.observed)
+	assert.NotContains(t, originalHeaders, routing.KVCacheSourceHeader)
+	assert.Equal(t, "v", request.Headers["x-client"])
 	assert.Equal(t, "10.0.0.1:5555", request.Headers[routing.KVCacheSourceHeader])
 }
 

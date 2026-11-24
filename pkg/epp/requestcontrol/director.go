@@ -392,6 +392,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		logger.Error(err, "failed to prepare per request data")
 	}
 
+	// A producer timeout can detach the scheduling headers. Keep forwarding
+	// pointed at the map that PreRequest will update.
+	reqCtx.Request.Headers = reqCtx.SchedulingRequest.Headers
+
 	// Run admit request plugins
 	if denier, denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
 		// Preserve a typed errcommon.Error from the denying Admitter so the

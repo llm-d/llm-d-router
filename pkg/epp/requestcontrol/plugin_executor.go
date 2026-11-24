@@ -57,12 +57,6 @@ func scopeProducers(ctx context.Context, extensionPoint string, plugins []fwkrh.
 	invocations := make([]producerInvocation, len(plugins))
 	for i, plugin := range plugins {
 		scopedRequest, scopedEndpoints, violations := datalayer.ScopeInvocation(logger, extensionPoint, plugin, request, endpoints)
-		// A producer abandoned by the timeout path can still read Headers while
-		// PreRequest plugins write routing headers into the request's map, so
-		// each invocation reads its own copy.
-		if scopedRequest != nil {
-			scopedRequest.Headers = maps.Clone(request.Headers)
-		}
 		invocations[i] = producerInvocation{plugin: plugin, request: scopedRequest, endpoints: scopedEndpoints, violations: violations}
 	}
 	return invocations
@@ -118,6 +112,9 @@ func dataProducerPluginsWithTimeout(ctx context.Context, extensionPoint string, 
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		// A producer may still be reading its scoped headers. Give subsequent
+		// request stages a different map before they can change the headers.
+		request.Headers = maps.Clone(request.Headers)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("DataProducer execution timed out: %w", ctx.Err())
 		}
