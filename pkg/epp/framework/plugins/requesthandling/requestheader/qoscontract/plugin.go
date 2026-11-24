@@ -31,7 +31,6 @@ import (
 	"time"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
-	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -79,7 +78,6 @@ var (
 // teamState is the mutable accounting for one team contract.
 type teamState struct {
 	cfg        TeamConfig
-	label      string
 	classIndex int
 
 	mu        sync.Mutex
@@ -151,7 +149,7 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 		classIndex[c.Name] = i
 	}
 	newState := func(cfg TeamConfig) *teamState {
-		return &teamState{cfg: cfg, label: metricsutil.BoundFairnessID(cfg.ID), classIndex: classIndex[cfg.Class]}
+		return &teamState{cfg: cfg, classIndex: classIndex[cfg.Class]}
 	}
 	teams := make(map[string]*teamState, len(params.Teams))
 	for _, t := range params.Teams {
@@ -245,7 +243,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	case withinContract:
 		team.inflight++
 		team.dailyUsed += cost
-		inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
+		inflightRequests.WithLabelValues(team.cfg.ID).Set(float64(team.inflight))
 	case team.classIndex+1 < len(p.classes):
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
 	case overSize:
@@ -260,7 +258,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	}
 	team.mu.Unlock()
 
-	contractDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, reason, p.mode()).Inc()
+	contractDecisions.WithLabelValues(team.cfg.ID, committed.Name, served.Name, decision, reason, p.mode()).Inc()
 	rec := &hold{team: team, servedClass: served.Name, reserved: cost, prompt: float64(prompt), committed: withinContract, day: budgetDay}
 	// The hold is settled exactly once: by RequestAbandoned when the request leaves the director
 	// before dispatch, otherwise at end of stream, which the handler forces for every dispatched
@@ -388,11 +386,11 @@ func (p *Plugin) finish(requestID string, response *requesthandling.Response) {
 		if team.dailyDay == rec.day {
 			team.dailyUsed = math.Max(0, team.dailyUsed-(rec.reserved-actual))
 		}
-		inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
+		inflightRequests.WithLabelValues(team.cfg.ID).Set(float64(team.inflight))
 		team.mu.Unlock()
 	}
 	if actual > 0 {
-		chargedTokens.WithLabelValues(team.label, rec.servedClass).Add(actual)
+		chargedTokens.WithLabelValues(team.cfg.ID, rec.servedClass).Add(actual)
 	}
 }
 
@@ -405,7 +403,7 @@ func (p *Plugin) mode() string {
 
 // reject records a rejection and returns err. In report-only mode it returns nil instead.
 func (p *Plugin) reject(team *teamState, committed ClassConfig, decision, reason string, err errcommon.Error) error {
-	contractDecisions.WithLabelValues(team.label, committed.Name, "", decision, reason, p.mode()).Inc()
+	contractDecisions.WithLabelValues(team.cfg.ID, committed.Name, "", decision, reason, p.mode()).Inc()
 	if !p.reportOnly {
 		return err
 	}
