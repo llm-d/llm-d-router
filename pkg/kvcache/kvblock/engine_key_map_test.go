@@ -92,15 +92,17 @@ func TestEngineKeyMapStampSemantics(t *testing.T) {
 	m := newEngineKeyMap(0)
 	m.set(1, []BlockHash{10})
 	m.set(2, []BlockHash{20})
-	stamp1 := m.slots[1].stamp
-
-	_, ok := m.peek(1)
+	i1, ok := m.find(1)
 	require.True(t, ok)
-	assert.Equal(t, stamp1, m.slots[1].stamp, "peek must not refresh the stamp")
+	stamp1 := m.slots[i1].stamp
+
+	_, ok = m.peek(1)
+	require.True(t, ok)
+	assert.Equal(t, stamp1, m.slots[i1].stamp, "peek must not refresh the stamp")
 
 	_, ok = m.get(1)
 	require.True(t, ok)
-	assert.Greater(t, m.slots[1].stamp, stamp1, "get must refresh the stamp")
+	assert.Greater(t, m.slots[i1].stamp, stamp1, "get must refresh the stamp")
 }
 
 // The count cap evicts the coldest-stamped mapping. The sample covers the
@@ -189,7 +191,6 @@ func TestEngineKeyMapResidency(t *testing.T) {
 	const mappings = 1 << 20
 	before := readHeap(t)
 	m := newEngineKeyMap(0)
-	m.slots = make(map[BlockHash]engineSlot, mappings)
 	for i := 1; i <= mappings; i++ {
 		m.set(BlockHash(i), []BlockHash{BlockHash(i)})
 	}

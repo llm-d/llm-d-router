@@ -53,12 +53,13 @@ const (
 
 // Per-structure residency estimates. The table's per-key cost is the slot
 // array at the load bound (32 B/slot at 7/10 load); like a Go map's, the
-// real array oscillates with the doubling growth cycle. The sweep is a
-// safety valve against the budget, not the density gate, which measures
-// HeapAlloc directly.
+// real array oscillates with the doubling growth cycle, and the engine
+// entry's 48 B is that cycle's average for its 24 B slots, measured at the
+// 1:1 geometry. The sweep is a safety valve against the budget, not the
+// density gate, which measures HeapAlloc directly.
 const (
 	tableBytesPerKey    = 46
-	engineBytesPerEntry = 32
+	engineBytesPerEntry = 48
 	groupRowBytes       = 48
 )
 
@@ -1033,19 +1034,7 @@ func (d *DenseMemoryIndex) stripDeadWordsLocked(key BlockHash) {
 // sweepEngineLocked evicts the oldest quarter of an engine-map sample.
 // Called with mu held for writing.
 func (d *DenseMemoryIndex) sweepEngineLocked() {
-	type mapping struct {
-		key   BlockHash
-		stamp uint32
-	}
-	var mappings []mapping
-	n := 0
-	for ek, slot := range d.engineToRequestKeys.slots {
-		mappings = append(mappings, mapping{key: ek, stamp: slot.stamp})
-		n++
-		if n >= sweepSampleSize {
-			break
-		}
-	}
+	mappings := d.engineToRequestKeys.sampleMappings(sweepSampleSize)
 	if len(mappings) == 0 {
 		return
 	}
