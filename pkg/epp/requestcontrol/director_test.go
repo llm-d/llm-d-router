@@ -3943,6 +3943,98 @@ llm_d_epp_fairness_id_overflow_total{inference_pool="test-pool",source="header"}
 		"llm_d_epp_fairness_id_resolved_total", "llm_d_epp_fairness_id_overflow_total"))
 }
 
+// TestDirector_AgentIdentityPublishIdentity proves publishIdentity:false is
+// routing-neutral for fairness attribution: a request carrying a session
+// header but no fairness header resolves the same FairnessID and attribution
+// source as when agent-identity is not configured at all, while the default
+// (publishIdentity:true) keeps deriving the FairnessID from the agent id.
+func TestDirector_AgentIdentityPublishIdentity(t *testing.T) {
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		Address: "192.168.1.100",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	}, nil, fwkdl.NewAttributes())
+	dir, ctx := newSinglePodDirector(t, &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	})
+
+	newPlugin := func(name, params string) fwkrh.RequestHeaderProcessor {
+		pi, err := agentidentity.PluginFactory(name, fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
+		require.NoError(t, err)
+		rh, ok := pi.(fwkrh.RequestHeaderProcessor)
+		require.True(t, ok)
+		return rh
+	}
+
+	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name           string
+		plugin         fwkrh.RequestHeaderProcessor // nil = agent-identity not configured
+		wantFairnessID string
+		wantSource     string
+	}{
+		{name: "agent-identity not configured", wantFairnessID: reqcommon.DefaultFairnessID, wantSource: tracing.AttributionSourceDefault},
+		{name: "publishIdentity false", plugin: newPlugin("agent-identity-silent", `{"publishIdentity": false, "metrics": true}`), wantFairnessID: reqcommon.DefaultFairnessID, wantSource: tracing.AttributionSourceDefault},
+		{name: "publishIdentity true", plugin: newPlugin("agent-identity-publishing", `{}`), wantFairnessID: "session-abc", wantSource: tracing.AttributionSourceAgentIdentity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			previousProvider := otel.GetTracerProvider()
+			provider := sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+				sdktrace.WithSpanProcessor(recorder),
+			)
+			otel.SetTracerProvider(provider)
+			t.Cleanup(func() { otel.SetTracerProvider(previousProvider); _ = provider.Shutdown(context.Background()) })
+
+			cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
+			if tc.plugin != nil {
+				cfg = cfg.WithRequestHeaderPlugins(tc.plugin)
+			}
+			dir.requestControlPlugins = *cfg
+
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{
+					ID: "req-" + tc.name,
+					Headers: map[string]string{
+						":path":                               "/v1/completions",
+						agentidentity.ClaudeCodeSessionHeader: "session-abc",
+					},
+					RawBody: body,
+				},
+				Parser: openai.NewOpenAIParser(),
+			}
+			parseResult, parseErr := reqCtx.Parser.ParseRequest(ctx, body, reqCtx.Request.Headers)
+			require.NoError(t, parseErr)
+			reqTraceCtx := tracing.BeginRequestAttribution(ctx, "")
+			returned, err := dir.HandleRequest(reqTraceCtx, reqCtx, parseResult.Body)
+			require.NoError(t, err)
+			require.NotNil(t, returned.SchedulingRequest)
+			assert.Equal(t, tc.wantFairnessID, returned.SchedulingRequest.FairnessID, "FairnessID mismatch")
+
+			found := false
+			for _, span := range recorder.Ended() {
+				if span.Name() != "request_orchestration" {
+					continue
+				}
+				found = true
+				attrs := attribute.NewSet(span.Attributes()...)
+				id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+				source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
+				require.True(t, hasID && hasSource, "attribution must be paired")
+				assert.Equal(t, tc.wantFairnessID, id.AsString())
+				assert.Equal(t, tc.wantSource, source.AsString())
+			}
+			require.True(t, found, "request orchestration span must exist")
+		})
+	}
+}
+
 // TestRunPreRequestPlugins_NoPlugins verifies that runPreRequestPlugins returns
 // nil when no PreRequest plugins are registered.
 func TestRunPreRequestPlugins_NoPlugins(t *testing.T) {
