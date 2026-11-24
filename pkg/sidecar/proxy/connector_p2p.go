@@ -278,7 +278,11 @@ func (l *httpSequentialPDLeg) serveDecode(decodeCtx context.Context, decodeWrite
 }
 
 // prefillCachedTokens returns the cached-token count of a prefill response's
-// usage block, or nil when the body has no usage block or does not decode.
+// usage block, or nil when the body has no usage block, does not decode, or
+// carries no count. A count was measured only when the details object carries
+// a number: vLLM without --enable-prompt-tokens-details sends no details
+// however many tokens were cached, and the decode response is then relayed
+// unchanged.
 func prefillCachedTokens(logger logr.Logger, body []byte) *int {
 	var response map[string]any
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -290,7 +294,10 @@ func prefillCachedTokens(logger logr.Logger, body []byte) *int {
 	if block == nil {
 		return nil
 	}
-	n, _ := usage.CachedTokens(block)
+	n, ok := usage.CachedTokens(block)
+	if !ok {
+		return nil
+	}
 	return &n
 }
 

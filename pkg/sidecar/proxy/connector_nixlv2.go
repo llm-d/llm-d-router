@@ -170,12 +170,13 @@ func (l *httpNIXLSerialLeg) extractPrefill(w http.ResponseWriter, r *http.Reques
 	// measured the prompt cache and decode reuses the blocks it transferred.
 	// Without transfer params nothing moved, so decode recomputes the prompt and
 	// the count it reports is its own measurement. A usage block whose details
-	// are absent or null still measured the cache: vLLM reports zero hits that
-	// way.
+	// carry no number measured nothing: vLLM without
+	// --enable-prompt-tokens-details sends no details however many tokens were
+	// cached, so the decode response keeps the usage its worker sent.
 	pUsage := prefillerResponse[reqcommon.FieldUsage]
 	pKVParams, _ := pKVTransferParams.(map[string]any)
-	rewriteCachedTokens := pUsage != nil && len(pKVParams) > 0
 	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
+	rewriteCachedTokens := hasPCachedTokens && len(pKVParams) > 0
 
 	if trace := logger.V(logging.TRACE); trace.Enabled() {
 		// The count is logged only when it was measured, so a logged zero is a
@@ -544,8 +545,8 @@ func (l *httpNIXLParallelLeg) decodeWriter(w http.ResponseWriter, dreq *http.Req
 	}
 	pUsage := prefillerResponse[reqcommon.FieldUsage]
 	pKVParams, _ := prefillerResponse[reqcommon.FieldKVTransferParams].(map[string]any)
-	pCachedTokens, _ := usage.CachedTokens(pUsage)
-	return decodeResponseWriter(w, pCachedTokens, pUsage != nil && len(pKVParams) > 0, l.streaming)
+	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
+	return decodeResponseWriter(w, pCachedTokens, hasPCachedTokens && len(pKVParams) > 0, l.streaming)
 }
 
 func (l *httpNIXLParallelLeg) relayPrefillFailure(w http.ResponseWriter, r *http.Request, uuidStr string, prefillResp *bufferedResponseWriter, _ error) {
