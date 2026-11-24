@@ -429,17 +429,18 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	}
 
 	// Remove the pod's endpoints that were not created above: inactive ports, and ranks
-	// beyond a lowered rank count.
-	ds.pods.Range(func(k, v any) bool {
-		ep := v.(fwkdl.Endpoint)
-		md := ep.GetMetadata()
-		if md.Name == pod.Name && md.ID.Namespace == pod.Namespace && !existingEpSet.Has(md.ID) {
-			ds.pods.Delete(k)
-			ds.podsVersion.Add(1)
-			ds.epf.ReleaseEndpoint(ep)
+	// beyond a lowered rank count. The names of a pod's endpoints are known, so this looks
+	// them up and does not scan the endpoints of the other pods.
+	for idx := range max(len(pool.TargetPorts), maxDataParallelSizeLocal) {
+		id := createEndpointNamespacedName(pod, idx)
+		if existingEpSet.Has(id) {
+			continue
 		}
-		return true
-	})
+		if ep, ok := ds.pods.LoadAndDelete(id); ok {
+			ds.podsVersion.Add(1)
+			ds.epf.ReleaseEndpoint(ep.(fwkdl.Endpoint))
+		}
+	}
 
 	return errors.Join(errs...)
 }

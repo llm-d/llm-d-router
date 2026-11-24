@@ -4000,12 +4000,15 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 		result       *fwksched.SchedulingResult
 		wantEndpoint string
 		wantRank     string
+		// wantTargets lists the endpoints that the result holds for the PreRequest plugins.
+		wantTargets []string
 	}{
 		{
 			name:         "rank endpoint sets its data-parallel rank and drops fallbacks",
 			result:       result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2), endpoint("pod1-rank-0", "10.0.0.1", 0, 2), endpoint("pod2", "10.0.0.2", 0, 0)),
 			wantEndpoint: "10.0.0.1:8000",
 			wantRank:     "1",
+			wantTargets:  []string{"pod1-rank-1"},
 		},
 		{
 			// pod2 has a RankIndex, as one port of a multi-port pod has, but no marker.
@@ -4015,6 +4018,7 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 			// The EPP sets no rank here, so the rank endpoint must not get the client's.
 			wantEndpoint: "10.0.0.2:8000,10.0.0.3:8000",
 			wantRank:     "7",
+			wantTargets:  []string{"pod2", "pod3"},
 		},
 	}
 	for _, tt := range tests {
@@ -4031,6 +4035,32 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantEndpoint, got.TargetEndpoint)
 			assert.Equal(t, tt.wantRank, got.SchedulingRequest.Headers[routing.DataParallelRankHeader])
+			var targets []string
+			for _, target := range tt.result.ProfileResults["decode"].TargetEndpoints {
+				targets = append(targets, target.GetMetadata().ID.Name)
+			}
+			assert.Equal(t, tt.wantTargets, targets, "the result lists only the endpoints that get the request")
+		})
+	}
+
+	// A PreRequest plugin that writes or deletes the header, as endpoint-header-stamper
+	// can, must not change the rank of the endpoint that the scheduler picked.
+	for name, modify := range map[string]func(*fwksched.InferenceRequest){
+		"a plugin that replaces the header": func(r *fwksched.InferenceRequest) { r.Headers[routing.DataParallelRankHeader] = "9" },
+		"a plugin that deletes the header":  func(r *fwksched.InferenceRequest) { delete(r.Headers, routing.DataParallelRankHeader) },
+	} {
+		t.Run("rank endpoint keeps its rank after "+name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(&mockPreRequestPlugin{name: "stamper", modifyFn: modify})}
+			headers := map[string]string{}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req", Headers: headers},
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2)))
+
+			require.NoError(t, err)
+			assert.Equal(t, "1", got.Request.Headers[routing.DataParallelRankHeader])
 		})
 	}
 

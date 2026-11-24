@@ -26,7 +26,7 @@ endpoints:
 
 When the scheduler picks a rank endpoint, the EPP:
 
-- sets `x-data-parallel-rank` to the endpoint's data-parallel rank, replacing any value the client sent;
+- sets `x-data-parallel-rank` to the endpoint's data-parallel rank, replacing any value the client or a PreRequest plugin set;
 - sends the request to that endpoint's address only, without fallback destinations, because the header applies to every destination.
 
 Requests to endpoints without ranks keep their headers and their fallbacks without ranks. The EPP drops a rank endpoint from the fallbacks of such a request, because it sets no rank for it.

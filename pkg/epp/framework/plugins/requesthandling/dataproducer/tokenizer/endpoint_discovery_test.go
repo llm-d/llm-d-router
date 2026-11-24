@@ -236,6 +236,39 @@ func TestDiscoveredEndpointPicker_PortRulesShareRenderPortAcrossRanks(t *testing
 	}
 }
 
+// The ranks of a pod share one render URL. The picker lists it once, so the
+// round robin gives each pod one turn and not one turn for each rank.
+func TestDiscoveredEndpointPicker_RanksShareOneRoundRobinTurn(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+
+	for _, pod := range []struct{ name, address string }{{"decode-a", "10.0.0.2"}, {"decode-b", "10.0.0.3"}} {
+		for rank := range 2 {
+			require.NoError(t, picker.Upsert(&fwkdl.EndpointMetadata{
+				ID:           types.NamespacedName{Namespace: "default", Name: pod.name + "-rank-" + strconv.Itoa(rank)},
+				Address:      pod.address,
+				Port:         "8000",
+				RankIndex:    rank,
+				RankByHeader: true,
+			}))
+		}
+	}
+
+	for _, want := range []string{"http://10.0.0.2:8000", "http://10.0.0.3:8000", "http://10.0.0.2:8000", "http://10.0.0.3:8000"} {
+		got, pickErr := picker.Pick()
+		require.NoError(t, pickErr)
+		assert.Equal(t, want, got)
+	}
+
+	// The URL stays while one rank of the pod is left.
+	picker.Delete(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "decode-a-rank-0"}})
+	for _, want := range []string{"http://10.0.0.2:8000", "http://10.0.0.3:8000"} {
+		got, pickErr := picker.Pick()
+		require.NoError(t, pickErr)
+		assert.Equal(t, want, got)
+	}
+}
+
 func TestDiscoveredEndpointPicker_PortRulesRejectInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name    string

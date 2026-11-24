@@ -627,25 +627,24 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 
 	targets := primaryResult.TargetEndpoints
 	// A data-parallel rank endpoint is reached through its pod's shared port and
-	// the rank header. The header applies to every destination, so a fallback
-	// would run the request on a rank the scheduler did not pick.
-	primaryRankByHeader := len(targets) > 0 && targets[0].GetMetadata().RankByHeader
-	if primaryRankByHeader {
-		targets = targets[:1]
-		// The header mutation is built from Request.Headers. HandleRequest shares
-		// that map with SchedulingRequest.Headers.
-		if reqCtx.Request.Headers == nil {
-			reqCtx.Request.Headers = map[string]string{}
-		}
-		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(targets[0].GetMetadata().RankIndex)
-	}
-	for _, pod := range targets {
-		curMetadata := pod.GetMetadata()
+	// the rank header.
+	rankByHeader := func(endpoint fwksched.Endpoint) bool { return endpoint.GetMetadata().RankByHeader }
+	primaryRankByHeader := len(targets) > 0 && rankByHeader(targets[0])
+	switch {
+	case primaryRankByHeader:
+		// The header applies to every destination, so a fallback would run the
+		// request on a rank the scheduler did not pick.
+		targets = targets[:1:1]
+	case slices.ContainsFunc(targets, rankByHeader):
 		// Without a rank from the EPP, a rank endpoint as fallback would run the
 		// request on the rank the client named, or on a rank its server rejects.
-		if curMetadata.RankByHeader && !primaryRankByHeader {
-			continue
-		}
+		targets = slices.DeleteFunc(slices.Clone(targets), rankByHeader)
+	}
+	// PreRequest plugins and the response hooks read the result, so it lists
+	// only the endpoints that get the request.
+	primaryResult.TargetEndpoints = targets
+	for _, pod := range targets {
+		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
 		if !slices.Contains(targetEndpoints, curEndpoint) {
@@ -688,6 +687,17 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 			}
 		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: err.Error()}
+	}
+
+	if primaryRankByHeader {
+		// Set the rank after the PreRequest plugins, so that a plugin that stamps
+		// or deletes this header cannot change the rank the scheduler picked. The
+		// header mutation is built from Request.Headers. HandleRequest shares that
+		// map with SchedulingRequest.Headers.
+		if reqCtx.Request.Headers == nil {
+			reqCtx.Request.Headers = map[string]string{}
+		}
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(reqCtx.TargetPod.RankIndex)
 	}
 
 	// Default-deny for "Prefer: if-available" when no PreRequest plugin

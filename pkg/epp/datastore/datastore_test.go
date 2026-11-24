@@ -1002,6 +1002,18 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		assert.Equal(t, map[string]rank{"p-rank-0": {0, true}, "p-rank-1": {1, true}, "p-rank-2": {2, true}}, endpoints(ds))
 	})
 
+	t.Run("lowering the largest rank count removes every extra rank endpoint", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		largest := strconv.Itoa(maxDataParallelSizeLocal)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: largest})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("other", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", nil)))
+		assert.Equal(t, map[string]rank{
+			"p-rank-0":     {0, false},
+			"other-rank-0": {0, true}, "other-rank-1": {1, true},
+		}, endpoints(ds), "the cleanup of one pod leaves the endpoints of the other pods")
+	})
+
 	t.Run("lowering the rank count removes the extra rank endpoints", func(t *testing.T) {
 		ds := newDatastore(t, 8000)
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
