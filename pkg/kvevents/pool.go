@@ -24,11 +24,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	"golang.org/x/sync/semaphore"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -43,6 +45,7 @@ import (
 const (
 	defaultEventSourceDeviceTier = kvcache.GPUTier
 	defaultPodSelector           = ""
+	defaultMaxConcurrentReplays  = 8
 )
 
 // normalizeDeviceTier lowercases an event's device tier and defaults an empty
@@ -196,6 +199,11 @@ type PodDiscoveryConfig struct {
 	// offset by rank like SocketPort. A subscriber loads the snapshot in place
 	// of a full replay. Disabled when not set (0 or negative).
 	SnapshotSocketPort int `json:"snapshotSocketPort,omitempty"`
+	// MaxConcurrentReplays bounds the snapshot loads and replay requests in
+	// flight across the pool's subscribers. A snapshot's timeout starts once
+	// it holds a slot, so a load that waits for one does not fail.
+	// Default: 8.
+	MaxConcurrentReplays int `json:"maxConcurrentReplays,omitempty"`
 }
 
 // EffectiveReplayPort returns the replay socket port.
@@ -270,7 +278,11 @@ type Pool struct {
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
 	// span construction on the default path.
 	tracer trace.Tracer
-	wg     sync.WaitGroup
+	// replayLimiter is shared by every subscriber of the pool, so a burst of
+	// joining pods does not load all of their snapshots or replays at once.
+	replayLimiter   *semaphore.Weighted
+	snapshotTimeout time.Duration
+	wg              sync.WaitGroup
 	// queueDepth mirrors the number of tasks queued across all shards. It is
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
@@ -303,16 +315,27 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 			"which the EPP subscribes to by default, or set kvEventsConfig.allowUntrustedPublishers", cfg.ZMQEndpoint)
 	}
 
+	maxConcurrentReplays := defaultMaxConcurrentReplays
+	if pd := cfg.PodDiscoveryConfig; pd != nil && pd.MaxConcurrentReplays != 0 {
+		if pd.MaxConcurrentReplays < 0 {
+			return nil, fmt.Errorf("kvEventsConfig.podDiscoveryConfig.maxConcurrentReplays must not be negative, got %d",
+				pd.MaxConcurrentReplays)
+		}
+		maxConcurrentReplays = pd.MaxConcurrentReplays
+	}
+
 	p := &Pool{
-		queues:         make([]workqueue.TypedRateLimitingInterface[*RawMessage], cfg.Concurrency),
-		concurrency:    cfg.Concurrency,
-		index:          index,
-		tokenProcessor: tokenProcessor,
-		adapter:        adapter,
-		groupCatalog:   kvblock.NewGroupCatalog(),
-		cacheFormats:   kvblock.NewCacheFormatCatalog(),
-		dedup:          newEventDedupFilter(),
-		tracer:         newEventTracer(cfg.Tracing),
+		queues:          make([]workqueue.TypedRateLimitingInterface[*RawMessage], cfg.Concurrency),
+		concurrency:     cfg.Concurrency,
+		index:           index,
+		tokenProcessor:  tokenProcessor,
+		adapter:         adapter,
+		groupCatalog:    kvblock.NewGroupCatalog(),
+		cacheFormats:    kvblock.NewCacheFormatCatalog(),
+		dedup:           newEventDedupFilter(),
+		tracer:          newEventTracer(cfg.Tracing),
+		replayLimiter:   semaphore.NewWeighted(int64(maxConcurrentReplays)),
+		snapshotTimeout: snapshotTimeout,
 	}
 
 	for i := 0; i < p.concurrency; i++ {

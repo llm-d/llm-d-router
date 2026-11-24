@@ -26,7 +26,6 @@ import (
 	zmq4 "github.com/go-zeromq/zmq4"
 	"github.com/vmihailenco/msgpack/v5/msgpcode"
 	"go.opentelemetry.io/otel/attribute"
-	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -40,13 +39,10 @@ const (
 	replayAttemptIdleTimeout    = 2 * time.Second
 	replayRetryBackoff          = 100 * time.Millisecond
 	replayCooldown              = 30 * time.Second
-	maxConcurrentReplay         = 8
 	maxReplayNoProgressAttempts = 3
 	snapshotTimeout             = 30 * time.Second
 	publisherIDSize             = 16
 )
-
-var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
@@ -551,14 +547,16 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 // sequence cut, the 16-byte publisher identity and the event batches; a cut
 // below -1 means the publisher cannot serve one.
 func (z *zmqSubscriber) fetchSnapshot(ctx context.Context) (int64, []byte, [][]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-	defer cancel()
-	if err := processReplayLimiter.Acquire(ctx, 1); err != nil {
+	// The wait for a slot is bounded by the loads ahead of it, each of which
+	// holds its slot for at most snapshotTimeout.
+	if err := z.pool.replayLimiter.Acquire(ctx, 1); err != nil {
 		return 0, nil, nil, fmt.Errorf("waiting for capacity: %w", err)
 	}
-	defer processReplayLimiter.Release(1)
+	defer z.pool.replayLimiter.Release(1)
+	ctx, cancel := context.WithTimeout(ctx, z.pool.snapshotTimeout)
+	defer cancel()
 
-	req := zmq4.NewReq(ctx, zmq4.WithTimeout(snapshotTimeout), zmq4.WithDialerMaxRetries(0))
+	req := zmq4.NewReq(ctx, zmq4.WithTimeout(z.pool.snapshotTimeout), zmq4.WithDialerMaxRetries(0))
 	defer req.Close()
 	if err := req.Dial(z.snapshotEndpoint); err != nil {
 		return 0, nil, nil, err
@@ -618,7 +616,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			continue
 		}
 		waitStarted := time.Now()
-		if err := processReplayLimiter.Acquire(replayCtx, 1); err != nil {
+		if err := z.pool.replayLimiter.Acquire(replayCtx, 1); err != nil {
 			_ = dealer.Close()
 			attemptCancel()
 			z.invalidateReplay(z.topicFilter)
@@ -638,7 +636,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		if err := dealer.SendMulti(zmq4.NewMsgFrom([]byte{}, seqBytes)); err != nil {
 			_ = dealer.Close()
 			attemptCancel()
-			processReplayLimiter.Release(1)
+			z.pool.replayLimiter.Release(1)
 			z.invalidateReplay(z.topicFilter)
 			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-send").Inc()
 			logger.Error(err, "Failed to send replay request",
@@ -702,7 +700,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		idleTimer.Stop()
 		_ = dealer.Close()
 		attemptCancel()
-		processReplayLimiter.Release(1)
+		z.pool.replayLimiter.Release(1)
 		if terminalErr != nil {
 			z.invalidateReplay(z.topicFilter)
 			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-incomplete").Inc()

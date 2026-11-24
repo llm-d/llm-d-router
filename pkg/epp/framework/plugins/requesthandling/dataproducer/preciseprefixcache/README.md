@@ -83,6 +83,10 @@ another publisher identity, the pod is indexed from live events alone, as it
 is with neither port set, and the load is retried after the replay cooldown.
 A snapshot that loads replaces that state.
 
+`kvEventsConfig.podDiscoveryConfig.maxConcurrentReplays` (default 8) bounds
+the snapshot loads and replays in flight across all pods. Pods beyond it wait
+for a slot, and a snapshot's timeout starts once it holds one.
+
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.
 

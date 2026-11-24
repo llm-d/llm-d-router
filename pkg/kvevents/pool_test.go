@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-logr/logr/funcr"
+	zmq4 "github.com/go-zeromq/zmq4"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -2252,6 +2255,77 @@ func TestNewPool_RejectsNonPositiveConcurrency(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "concurrency")
 	}
+}
+
+func TestNewPool_MaxConcurrentReplays(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PodDiscoveryConfig.MaxConcurrentReplays = -1
+	_, err := NewPool(cfg, nil, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maxConcurrentReplays")
+
+	for _, tc := range []struct {
+		configured, slots int
+	}{{0, defaultMaxConcurrentReplays}, {3, 3}} {
+		cfg := DefaultConfig()
+		cfg.PodDiscoveryConfig.MaxConcurrentReplays = tc.configured
+		pool, err := NewPool(cfg, nil, nil, nil)
+		require.NoError(t, err)
+		assert.True(t, pool.replayLimiter.TryAcquire(int64(tc.slots)))
+		assert.False(t, pool.replayLimiter.TryAcquire(1), "configured %d", tc.configured)
+	}
+}
+
+// More subscribers than replay slots all fetch their snapshots when each
+// fetch fits the snapshot timeout and the wait for a slot does not.
+func TestFetchSnapshot_SlotWaitDoesNotCountAgainstTimeout(t *testing.T) {
+	const (
+		subscribers = 8
+		slots       = 2
+		loadTime    = 200 * time.Millisecond
+	)
+	cfg := DefaultConfig()
+	cfg.PodDiscoveryConfig.MaxConcurrentReplays = slots
+	p, err := NewPool(cfg, nil, nil, nil)
+	require.NoError(t, err)
+	// The fourth round of fetches waits longer than this for a slot.
+	p.snapshotTimeout = 500 * time.Millisecond
+
+	var inFlight, peak atomic.Int32
+	errs := make([]error, subscribers)
+	var wg sync.WaitGroup
+	for i := range subscribers {
+		rep := zmq4.NewRep(t.Context())
+		require.NoError(t, rep.Listen("tcp://127.0.0.1:0"))
+		t.Cleanup(func() { _ = rep.Close() })
+		go func() {
+			for {
+				if _, err := rep.Recv(); err != nil {
+					return
+				}
+				n := inFlight.Add(1)
+				for prev := peak.Load(); n > prev && !peak.CompareAndSwap(prev, n); prev = peak.Load() {
+				}
+				select {
+				case <-time.After(loadTime):
+				case <-t.Context().Done():
+					return
+				}
+				inFlight.Add(-1)
+				if err := rep.Send(zmq4.NewMsgFrom(make([]byte, 8), make([]byte, publisherIDSize))); err != nil {
+					return
+				}
+			}
+		}()
+		z := newZMQSubscriber(p, fmt.Sprintf("pod-%d", i), "", "", "", "tcp://"+rep.Addr().String(), "", true)
+		wg.Go(func() { _, _, _, errs[i] = z.fetchSnapshot(t.Context()) })
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		assert.NoError(t, err, "subscriber %d", i)
+	}
+	assert.Equal(t, int32(slots), peak.Load(), "loads in flight must not exceed the configured slots")
 }
 
 // TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
