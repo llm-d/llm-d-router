@@ -265,6 +265,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	pflag.Parse()
 
 	if err := opts.Complete(); err != nil {
+		setupLog.Error(err, "Failed to complete flags")
 		return err
 	}
 	if err := opts.Validate(); err != nil {
