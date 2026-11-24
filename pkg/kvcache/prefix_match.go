@@ -91,12 +91,20 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 		semconv.LLMDKVCachePrefixMatchWalked(k.keyWalker != nil),
 	)
 
+	// Under request-key sampling the match probes only the sampled keys, the
+	// ones the index can hold; positions carries each probed key's position
+	// in the request's full key list, so chain lengths stay in block units.
+	keys, positions := k.sampledQueryKeys(keys)
+	if len(keys) == 0 {
+		return map[string]PodMatch{}, nil
+	}
+
 	var matches map[string]PodMatch
 	var err error
 	if k.keyWalker != nil && k.ordinalResolver != nil {
-		matches, err = matchWalk(ctx, k.keyWalker, k.ordinalResolver, keys, k.tierScoring, podFilter)
+		matches, err = matchWalk(ctx, k.keyWalker, k.ordinalResolver, keys, positions, k.tierScoring, podFilter)
 	} else {
-		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierScoring, podFilter)
+		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, positions, k.tierScoring, podFilter)
 	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -126,16 +134,35 @@ func maxMatchedBlocks(matches map[string]PodMatch) int {
 	return longest
 }
 
+// sampledQueryKeys filters keys to those passing the index's sampling test,
+// returning them with their positions in keys. With sampling off it returns
+// keys unfiltered with a nil positions slice.
+func (k *Indexer) sampledQueryKeys(keys []kvblock.BlockHash) ([]kvblock.BlockHash, []int) {
+	if k.sampleModulus <= 1 {
+		return keys, nil
+	}
+	var sampled []kvblock.BlockHash
+	var positions []int
+	for i, key := range keys {
+		if kvblock.SampledKey(key, k.sampleModulus) {
+			sampled = append(sampled, key)
+			positions = append(positions, i)
+		}
+	}
+	return sampled, positions
+}
+
 // matchWalk feeds the accumulator from an ordered index walk. The walk ends
 // at the first key without entries or once no chain is alive. The resolver
 // inverts the pod filter and the configured tier weights into ordinal space
 // once, so the per-entry loop compares integers only; pod and tier names are
 // resolved back at result time.
 func matchWalk(ctx context.Context, walker kvblock.KeyWalker, resolver kvblock.OrdinalResolver,
-	keys []kvblock.BlockHash, ts tierScoring, filter sets.Set[string],
+	keys []kvblock.BlockHash, positions []int, ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
 	acc := acquireAccumulator(ts, filter)
 	defer releaseAccumulator(acc)
+	acc.setPositions(positions)
 	acc.startWalk(resolver)
 
 	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.WalkEntry) bool {
@@ -150,25 +177,26 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, resolver kvblock.O
 // matchLookup feeds the accumulator from a materialized Lookup result, for
 // backends without the walk capability.
 func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockHash,
-	ts tierScoring, filter sets.Set[string],
+	positions []int, ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
 	keyToPods, err := index.Lookup(ctx, keys, filter)
 	if err != nil {
 		return nil, err
 	}
-	return matchMaterialized(ctx, keys, keyToPods, ts, filter)
+	return matchMaterialized(ctx, keys, positions, keyToPods, ts, filter)
 }
 
 // matchMaterialized feeds the accumulator from a Lookup result, walking keys
 // in order and stopping at the first key without entries. Pod and tier
 // ordinals are assigned per call, since materialized entries carry none; the
 // filter and tier weights stay name-keyed on this path.
-func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
+func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash, positions []int,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 	ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
 	acc := acquireAccumulator(ts, filter)
 	defer releaseAccumulator(acc)
+	acc.setPositions(positions)
 
 	refs := acc.scratch[:0]
 	names := acc.names[:0]
@@ -198,7 +226,7 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 			}
 		}
 		if same {
-			acc.pendingRun++
+			acc.batchKey()
 			continue
 		}
 		refs, names = refs[:j], names[:j]
@@ -410,6 +438,15 @@ type prefixAccumulator struct {
 	prev       []entrySig
 	pendingRun int
 
+	// positions holds each folded key's position in the request's full key
+	// list; nil when the match probes every key. keyCount counts folded keys
+	// and lastPos is the position of the last key whose increments were
+	// applied, so a run of keys advances chain lengths by the original-position
+	// distance it covers.
+	positions []int
+	keyCount  int
+	lastPos   int
+
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
@@ -430,6 +467,9 @@ func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumula
 	a.weightCache = a.weightCache[:0]
 	a.prev = a.prev[:0]
 	a.pendingRun = 0
+	a.positions = nil
+	a.keyCount = 0
+	a.lastPos = -1
 	if a.pods != nil {
 		clear(a.pods)
 	}
@@ -440,6 +480,7 @@ func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumula
 func releaseAccumulator(a *prefixAccumulator) {
 	a.weights, a.tailOnly, a.filter = nil, nil, nil
 	a.resolver = nil
+	a.positions = nil
 	clear(a.filterOrdinals)
 	a.filterOrdinals = nil
 	a.ordinalWeights = nil
@@ -455,6 +496,31 @@ func releaseAccumulator(a *prefixAccumulator) {
 	clear(a.tierOrdinals)
 	a.tierOrdinals = a.tierOrdinals[:0]
 	accumulatorPool.Put(a)
+}
+
+// setPositions records the probed keys' positions in the request's full key
+// list and resets the folded-key counters. A nil positions slice probes every
+// key, so folded index i means position i.
+func (a *prefixAccumulator) setPositions(positions []int) {
+	a.positions = positions
+	a.keyCount = 0
+	a.lastPos = -1
+}
+
+// batchKey counts one key whose entries repeat the previous key's, folding it
+// directly into the pending run. The materialized feeder detects the repeat
+// itself and skips rebuilding the entry refs.
+func (a *prefixAccumulator) batchKey() {
+	a.keyCount++
+	a.pendingRun++
+}
+
+// posOf returns the folded key's position in the request's full key list.
+func (a *prefixAccumulator) posOf(i int) int {
+	if i < len(a.positions) {
+		return a.positions[i]
+	}
+	return i
 }
 
 // startWalk moves the accumulator to ordinal-keyed request state: the pod
@@ -496,24 +562,28 @@ func (a *prefixAccumulator) tierOrdinal(name string) uint32 {
 	return id
 }
 
-// flushRun applies deferred increments from consecutive identical keys.
-func (a *prefixAccumulator) flushRun() {
+// flushRun applies deferred increments from consecutive identical keys. end is
+// the folded index of the run's last key; the run advances every live chain
+// by the original-position distance from the last applied key to end.
+func (a *prefixAccumulator) flushRun(end int) {
 	if a.pendingRun == 0 {
 		return
 	}
-	n := a.pendingRun
 	a.pendingRun = 0
-	fn := float64(n)
+	endPos := a.posOf(end)
+	span := endPos - a.lastPos
+	a.lastPos = endPos
+	fn := float64(span)
 	for _, i := range a.active {
 		s := &a.slots[i]
-		s.matched += n
+		s.matched = endPos + 1
 		s.score += fn * s.weight
 		if s.confirmedAlive {
-			s.confirmed += n
+			s.confirmed += span
 		}
 		for t := range s.tiers {
 			if s.tiers[t].alive {
-				s.tiers[t].count += n
+				s.tiers[t].count += span
 			}
 		}
 	}
@@ -522,13 +592,15 @@ func (a *prefixAccumulator) flushRun() {
 // key folds one key's entries into the chains and reports whether any chain
 // is still alive. entries is borrowed for the duration of the call.
 func (a *prefixAccumulator) key(entries []kvblock.WalkEntry) bool {
+	a.keyCount++
 	// When entries match the previous key, every live slot holds this key in
 	// the same tiers; batch the increments until the run ends.
 	if !a.first && a.samePrev(entries) {
 		a.pendingRun++
 		return len(a.active) > 0
 	}
-	a.flushRun()
+	// The current key ends any pending run; the run's keys precede it.
+	a.flushRun(a.keyCount - 2)
 	a.keyStamp++
 	if a.first {
 		a.table.reset(len(entries))
@@ -667,8 +739,12 @@ func (a *prefixAccumulator) stampTier(slot *matchSlot, tierOrdinal uint32) bool 
 }
 
 // endKey closes the current key and reports whether any chain is still
-// alive.
+// alive. Chain lengths advance by the original-position distance from the
+// last applied key, and matched holds the current key's position plus one.
 func (a *prefixAccumulator) endKey() bool {
+	endPos := a.posOf(a.keyCount - 1)
+	span := endPos - a.lastPos
+	a.lastPos = endPos
 	if a.first {
 		a.first = false
 		othersScore := true
@@ -683,12 +759,12 @@ func (a *prefixAccumulator) endKey() bool {
 			s := &a.slots[i]
 			s.alive = true
 			s.weight = s.keyWeight(a.keyStamp, othersScore)
-			s.matched, s.score = 1, s.weight
+			s.matched, s.score = endPos+1, s.weight*float64(span)
 			if s.confirmedSeen == a.keyStamp {
-				s.confirmed, s.confirmedAlive = 1, true
+				s.confirmed, s.confirmedAlive = span, true
 			}
 			for t := range s.tiers {
-				s.tiers[t].count = 1
+				s.tiers[t].count = span
 			}
 			a.active = append(a.active, int32(i))
 		}
@@ -712,12 +788,12 @@ func (a *prefixAccumulator) endKey() bool {
 			continue // the chain ends at the first key the pod does not hold
 		}
 		s.weight = s.keyWeight(a.keyStamp, othersScore)
-		s.matched++
-		s.score += s.weight
+		s.matched = endPos + 1
+		s.score += s.weight * float64(span)
 		switch {
 		case !s.confirmedAlive:
 		case s.confirmedSeen == a.keyStamp:
-			s.confirmed++
+			s.confirmed += span
 		default:
 			s.confirmedAlive = false
 		}
@@ -726,7 +802,7 @@ func (a *prefixAccumulator) endKey() bool {
 			switch {
 			case !tc.alive:
 			case tc.seen == a.keyStamp:
-				tc.count++
+				tc.count += span
 			default:
 				tc.alive = false
 			}
@@ -756,7 +832,7 @@ func (s *matchSlot) keyWeight(keyStamp uint32, othersScore bool) float64 {
 // result materializes the accumulated matches, resolving pod and tier names
 // from ordinals on the walk path.
 func (a *prefixAccumulator) result() map[string]PodMatch {
-	a.flushRun()
+	a.flushRun(a.keyCount - 1)
 	out := make(map[string]PodMatch, len(a.slots))
 	for i := range a.slots {
 		s := &a.slots[i]

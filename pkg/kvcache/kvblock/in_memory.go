@@ -57,6 +57,11 @@ type InMemoryIndexConfig struct {
 	// PodCacheSize is the maximum number of pod entries per key.
 	// A non-positive value selects defaultPodsPerKey.
 	PodCacheSize int `json:"podCacheSize"`
+	// SampleModulus is the power-of-two modulus the index samples request
+	// keys at: 0 or 1 keeps every key, 16 keeps roughly one key in 16. The
+	// engine-key map is not sampled; it keeps every pair. Match results
+	// keep block granularity with a resolution of up to modulus-1 blocks.
+	SampleModulus int `json:"sampleModulus,omitempty"`
 }
 
 // DefaultInMemoryIndexConfig returns a default configuration for the InMemoryIndex.
@@ -76,10 +81,14 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 	if podCacheSize <= 0 {
 		podCacheSize = defaultPodsPerKey
 	}
+	if !validSampleModulus(cfg.SampleModulus) {
+		return nil, fmt.Errorf("sampleModulus must be 0, 1, or a power of two, got %d", cfg.SampleModulus)
+	}
 
 	m := &InMemoryIndex{
 		engineToRequestKeys: newEngineKeyMap(cfg.Size),
 		podCacheSize:        podCacheSize,
+		sampleModulus:       cfg.SampleModulus,
 		pods:                newInterner(maxInternedPods),
 		tiers:               newInterner(maxInternedTiers),
 	}
@@ -120,6 +129,9 @@ type InMemoryIndex struct {
 	engineToRequestKeys *engineKeyMap
 	// podCacheSize is the maximum number of pod entries per key.
 	podCacheSize int
+	// sampleModulus is the power-of-two request-key sampling modulus; 0 or
+	// 1 keeps every key.
+	sampleModulus int
 	// pods and tiers assign the ordinals EntryRef carries. Neither is
 	// reclaimed when entries leave the index: pod identifiers are endpoint
 	// address:port values, bounded by the pod network's address space, and
@@ -423,15 +435,18 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
-		mappings := engineToRequestMapping(engineKeys, requestKeys)
-		for ek, rks := range mappings {
+		for ek, rks := range engineToRequestMapping(engineKeys, requestKeys) {
 			m.engineToRequestKeys.set(ek, rks)
 		}
 	}
 
-	// Store requestKey -> PodCache mappings for all request keys.
+	// Store requestKey -> PodCache mappings for the sampled request keys.
 
-	for _, requestKey := range requestKeys {
+	sampledKeys := requestKeys
+	if m.sampleModulus > 1 {
+		sampledKeys = filterSampledKeys(requestKeys, m.sampleModulus)
+	}
+	for _, requestKey := range sampledKeys {
 		podCache, found := m.data.Get(requestKey)
 		if !found {
 			newPodCache := &PodCache{capacity: m.podCacheSize}

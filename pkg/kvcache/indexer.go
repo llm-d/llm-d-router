@@ -58,8 +58,13 @@ type Indexer struct {
 	// alongside the walk: the walk payload carries ordinals, so matching on
 	// it requires resolving them.
 	ordinalResolver kvblock.OrdinalResolver
-	tierScoring     tierScoring // device tier weights for the prefix matcher
-	cacheFormats    *kvblock.CacheFormatCatalog
+	// sampleModulus is the request-key sampling modulus configured on the
+	// kv-block index. The match filters query keys by the same test the index
+	// applied on Add, so the keys it probes are exactly the keys the index
+	// can hold.
+	sampleModulus int
+	tierScoring   tierScoring // device tier weights for the prefix matcher
+	cacheFormats  *kvblock.CacheFormatCatalog
 	// recordHits enables the contiguous-chain hit metrics, under the same
 	// option that instruments the index.
 	recordHits bool
@@ -88,6 +93,7 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 	recordHits := config.KVBlockIndexConfig != nil && config.KVBlockIndexConfig.EnableMetrics
 	indexer := newIndexer(tokenProcessor, kvBlockIndex, config.BackendConfigs, recordHits)
 	indexer.config = config
+	indexer.sampleModulus = kvblock.ConfigSampleModulus(config.KVBlockIndexConfig)
 	return indexer, nil
 }
 

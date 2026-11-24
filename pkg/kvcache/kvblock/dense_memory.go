@@ -79,6 +79,11 @@ type DenseMemoryIndexConfig struct {
 	// that is not 3 plus a multiple of 3 wastes trailing chunk slots.
 	// A non-positive value selects 15.
 	PodCacheSize int `json:"podCacheSize,omitempty"`
+	// SampleModulus is the power-of-two modulus the index samples request
+	// keys at: 0 or 1 keeps every key, 16 keeps roughly one key in 16. The
+	// engine-key map is not sampled; it keeps every pair. Match results
+	// keep block granularity with a resolution of up to modulus-1 blocks.
+	SampleModulus int `json:"sampleModulus,omitempty"`
 }
 
 // DefaultDenseMemoryIndexConfig returns a default configuration for the
@@ -130,7 +135,10 @@ type DenseMemoryIndex struct {
 	budget    int64
 	watermark int64
 	podCap    int
-	truncated int64
+	// sampleModulus is the power-of-two request-key sampling modulus; 0 or
+	// 1 keeps every key.
+	sampleModulus int
+	truncated     int64
 }
 
 var _ Index = &DenseMemoryIndex{}
@@ -158,6 +166,10 @@ func NewDenseMemoryIndex(cfg *DenseMemoryIndexConfig) (*DenseMemoryIndex, error)
 		return nil, fmt.Errorf("failed to initialize dense memory index: podCacheSize %d exceeds %d",
 			podCap, denseMaxPodsPerKey)
 	}
+	if !validSampleModulus(cfg.SampleModulus) {
+		return nil, fmt.Errorf("failed to initialize dense memory index: sampleModulus must be 0, 1, or a power of two, got %d",
+			cfg.SampleModulus)
+	}
 	return &DenseMemoryIndex{
 		tbl:                 newDenseTable(),
 		engineToRequestKeys: newEngineKeyMap(0), // the byte budget governs
@@ -167,6 +179,7 @@ func NewDenseMemoryIndex(cfg *DenseMemoryIndexConfig) (*DenseMemoryIndex, error)
 		budget:              int64(budget),                                         //#nosec G115 -- ParseBytes is bounded by int64
 		watermark:           int64(budget) / denseWatermarkDen * denseWatermarkNum, //#nosec G115 -- bounded by budget
 		podCap:              podCap,
+		sampleModulus:       cfg.SampleModulus,
 	}, nil
 }
 
@@ -317,7 +330,11 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 	// new readers behind a waiting writer, so a whole-batch hold would make
 	// every concurrent match wait out the batch. No cross-key invariant spans
 	// the loop, so releasing between keys is safe.
-	for _, requestKey := range requestKeys {
+	sampledKeys := requestKeys
+	if d.sampleModulus > 1 {
+		sampledKeys = filterSampledKeys(requestKeys, d.sampleModulus)
+	}
+	for _, requestKey := range sampledKeys {
 		d.mu.Lock()
 		// Dead words occupy the cap until the sweep's sampled pass reclaims
 		// them; strip them before inserting at the cap so the head-drop
