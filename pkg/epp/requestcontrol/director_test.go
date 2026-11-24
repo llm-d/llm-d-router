@@ -2231,6 +2231,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					ObjectiveKey:    test.inferenceObjectiveName,
 					TargetModelName: test.initialTargetModelName,
 				}
+				reqCtx.RequestReceivedTimestamp = time.Unix(100, 0)
 				var err error
 				reqCtx.Request.RawBody, err = json.Marshal(test.reqBodyMap)
 				if err != nil {
@@ -2313,6 +2314,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if returnedReqCtx.SchedulingRequest != nil {
 					assert.Equal(t, reqCtx.Request.ID, returnedReqCtx.SchedulingRequest.RequestID,
 						"SchedulingRequest.RequestID should be the EPP request ID, not the x-request-id header")
+					assert.Equal(t, time.Unix(100, 0), returnedReqCtx.SchedulingRequest.ReceivedTimestamp)
 				}
 
 				if test.wantReqCtx != nil {
