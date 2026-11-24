@@ -41,6 +41,12 @@ const defaultDenseMemoryBudget = "2GiB"
 // sized for years of clears at fleet scale.
 const maxDensePodOrdinals = 1 << 20
 
+// denseShardCount is the number of independent write domains the table is
+// split into. Request keys hash uniformly over the shards, so each shard
+// carries an equal share of the keys and its own lock; writers to different
+// shards proceed in parallel.
+const denseShardCount = 16
+
 // The sweep watermark sits below the budget so a sweep evicts past the
 // trigger point and the next additions land inside the budget without
 // retriggering immediately.
@@ -105,23 +111,13 @@ type denseGroupKey struct {
 	group GroupID
 }
 
-// DenseMemoryIndex is a memory-bound Index implementation with a dense
-// in-memory representation: one open-addressed table whose value-type slots
-// hold three inline entry words each, a shared overflow arena, and the
-// engine-key map, all under one RWMutex. Slot addressability lets reads
-// record recency evidence with one atomic OR and no write acquisition.
-// Clear is O(1) through a dead-pod bitmap whose ordinals revive on re-Add;
-// residency is bounded by a byte budget enforced through sampled eviction.
-type DenseMemoryIndex struct {
-	// mu guards every mutable field below and the internals of
-	// engineToRequestKeys, which is itself lock-free. The interners' own
-	// locks are nested inside mu, never the other way around.
-	mu                  sync.RWMutex
-	tbl                 *denseTable
-	arena               denseArena
-	engineToRequestKeys *engineKeyMap
-	// sweepCursor is the next table index the sweep samples; advancing it
-	// per burst gives round-robin coverage of the slots.
+// denseShard is one independent share of the table: its own lock, slot
+// array, arena, group rows, and sweep cursor. A request key belongs to
+// exactly one shard, chosen by its hash.
+type denseShard struct {
+	mu          sync.RWMutex
+	tbl         *denseTable
+	arena       denseArena
 	sweepCursor int
 	// groups holds the group side table: one row per live group-announced
 	// copy, keyed per request key. A row exists while the copy is stored;
@@ -130,16 +126,40 @@ type DenseMemoryIndex struct {
 	// and tier coexist exactly as full-PodEntry equality keeps them apart.
 	groups    map[BlockHash]map[denseGroupKey]struct{}
 	groupRows int
-	pods      *interner
-	tiers     *interner
-	dead      []uint64
-	budget    int64
-	watermark int64
-	podCap    int
-	// sampleModulus is the power-of-two request-key sampling modulus; 0 or
-	// 1 keeps every key.
+	truncated int64
+}
+
+// DenseMemoryIndex is a memory-bound Index implementation with a dense
+// in-memory representation: the request-key table is split into
+// power-of-two shards, each an open-addressed slot array whose value-type
+// slots hold three inline entry words each plus a shared overflow arena.
+// The engine-key map, the pod and tier interners, and the dead-pod bitmap
+// are shared; the lock order is shard locks in index order, then the engine
+// map's lock, then the interners' locks. Slot addressability lets reads
+// record recency evidence with one atomic OR and no write acquisition.
+// Clear is O(1) through the dead-pod bitmap whose ordinals revive on
+// re-Add; residency is bounded by a byte budget enforced through sampled
+// eviction, each shard against its share of the budget.
+type DenseMemoryIndex struct {
+	shards    []denseShard
+	shardMask int
+	// engineMu guards engineToRequestKeys, which is itself lock-free.
+	engineMu            sync.Mutex
+	engineToRequestKeys *engineKeyMap
+	pods                *interner
+	tiers               *interner
+	// dead is the cleared-pod bitmap, one bit per pod ordinal, accessed
+	// with atomics. It is pre-sized to the ordinal supply, so bits are
+	// only ever set, never grown into. The pool dispatches one pod's
+	// events to one worker, so an Add cannot race the Clear of its own
+	// pod. deadEpoch counts Clears, retiring the walk's decoded-entry
+	// reuse when the dead set changes mid-batch.
+	dead          []uint64
+	deadEpoch     atomic.Uint64
+	budget        int64
+	watermark     int64
+	podCap        int
 	sampleModulus int
-	truncated     int64
 }
 
 var _ Index = &DenseMemoryIndex{}
@@ -171,17 +191,30 @@ func NewDenseMemoryIndex(cfg *DenseMemoryIndexConfig) (*DenseMemoryIndex, error)
 		return nil, fmt.Errorf("failed to initialize dense memory index: sampleModulus must be 0, 1, or a power of two, got %d",
 			cfg.SampleModulus)
 	}
-	return &DenseMemoryIndex{
-		tbl:                 newDenseTable(),
+	d := &DenseMemoryIndex{
+		shards:              make([]denseShard, denseShardCount),
+		shardMask:           denseShardCount - 1,
 		engineToRequestKeys: newEngineKeyMap(0), // the byte budget governs
-		groups:              make(map[BlockHash]map[denseGroupKey]struct{}),
 		pods:                newInterner(maxDensePodOrdinals),
 		tiers:               newInterner(maxDenseTierOrdinal + 1),
+		dead:                make([]uint64, maxDensePodOrdinals/64),
 		budget:              int64(budget),                                         //#nosec G115 -- ParseBytes is bounded by int64
 		watermark:           int64(budget) / denseWatermarkDen * denseWatermarkNum, //#nosec G115 -- bounded by budget
 		podCap:              podCap,
 		sampleModulus:       cfg.SampleModulus,
-	}, nil
+	}
+	for i := range d.shards {
+		s := &d.shards[i]
+		s.tbl = newDenseTable(tableInitialSlots / denseShardCount)
+		s.groups = make(map[BlockHash]map[denseGroupKey]struct{})
+	}
+	return d, nil
+}
+
+// shardOf returns the shard a request key belongs to. It reuses the table's
+// hash: the shard mask and the per-shard table mask are independent.
+func (d *DenseMemoryIndex) shardOf(key BlockHash) *denseShard {
+	return &d.shards[int(tableHash(key))&d.shardMask] //#nosec G115 -- the hash is masked to the shard count
 }
 
 // PodOrdinal returns the ordinal assigned to the pod identifier, and whether
@@ -208,44 +241,44 @@ func (d *DenseMemoryIndex) TierName(ordinal uint32) (string, bool) {
 
 // Stats returns a snapshot of the index's residency and occupancy.
 func (d *DenseMemoryIndex) Stats() MemoryIndexStats {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.statsLocked()
-}
-
-func (d *DenseMemoryIndex) statsLocked() MemoryIndexStats {
-	return MemoryIndexStats{
-		ResidentKeys:     d.tbl.used,
-		ResidentBytes:    d.residencyLocked(),
-		EngineMappings:   d.engineToRequestKeys.len(),
-		GroupRows:        d.groupRows,
-		TruncatedEntries: d.truncated,
+	var stats MemoryIndexStats
+	for i := range d.shards {
+		s := &d.shards[i]
+		s.mu.RLock()
+		stats.ResidentKeys += s.tbl.used
+		stats.ResidentBytes += s.residencyLocked()
+		stats.GroupRows += s.groupRows
+		stats.TruncatedEntries += s.truncated
+		s.mu.RUnlock()
 	}
+	stats.EngineMappings = d.engineToRequestKeys.len()
+	return stats
 }
 
-// residencyLocked estimates the resident bytes of every structure. Called
-// with mu held.
-func (d *DenseMemoryIndex) residencyLocked() int64 {
-	bytes := int64(d.tbl.used) * tableBytesPerKey
-	bytes += int64(len(d.arena.words)) * 4
-	bytes += int64(d.engineToRequestKeys.len()) * engineBytesPerEntry
-	bytes += int64(len(d.engineToRequestKeys.arena)) * 16
-	bytes += int64(d.groupRows) * groupRowBytes
+// residencyLocked estimates the shard's resident bytes. Called with the
+// shard's mu held.
+func (s *denseShard) residencyLocked() int64 {
+	bytes := int64(s.tbl.used) * tableBytesPerKey
+	bytes += int64(len(s.arena.words)) * 4
+	bytes += int64(s.groupRows) * groupRowBytes
 	return bytes
 }
 
-// isDead reports whether the pod ordinal was cleared. Called with mu held.
+// engineResidency estimates the engine map's resident bytes.
+func (d *DenseMemoryIndex) engineResidency() int64 {
+	return int64(d.engineToRequestKeys.len())*engineBytesPerEntry +
+		int64(len(d.engineToRequestKeys.arena))*16
+}
+
+// isDead reports whether the pod ordinal was cleared.
 func (d *DenseMemoryIndex) isDead(pod uint32) bool {
 	i, j := int(pod/64), int(pod%64)
-	return i < len(d.dead) && d.dead[i]&(1<<j) != 0
+	return atomic.LoadUint64(&d.dead[i])&(1<<j) != 0
 }
 
 func (d *DenseMemoryIndex) setDead(pod uint32) {
-	i := int(pod / 64)
-	for len(d.dead) <= i {
-		d.dead = append(d.dead, 0)
-	}
-	d.dead[i] |= 1 << (pod % 64)
+	i, j := int(pod/64), int(pod%64)
+	atomic.OrUint64(&d.dead[i], 1<<j)
 }
 
 // tick returns the current stamp: wall-clock seconds. Ties within a second
@@ -254,11 +287,12 @@ func (d *DenseMemoryIndex) tick() uint32 {
 	return uint32(time.Now().Unix()) //#nosec G115 -- unix seconds fit uint32 past 2106
 }
 
-// internBatchLocked pairs each entry with its pod and tier ordinals, reviving
-// a pod name whose current ordinal is dead. The batch is assigned all or
+// internBatch pairs each entry with its pod and tier ordinals, reviving a
+// pod name whose current ordinal is dead. The batch is assigned all or
 // nothing: when its new ordinals would exceed a cap, nothing is interned and
-// the error names the cap. Called with mu held for writing.
-func (d *DenseMemoryIndex) internBatchLocked(entries []PodEntry) ([]EntryRef, error) {
+// the error names the cap. The interners' own locks serialize the batch; no
+// shard lock is held, so interning runs in parallel with any shard.
+func (d *DenseMemoryIndex) internBatch(entries []PodEntry) ([]EntryRef, error) {
 	d.pods.mu.Lock()
 	defer d.pods.mu.Unlock()
 	d.tiers.mu.Lock()
@@ -318,46 +352,46 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 	}
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.DenseMemoryIndex.Add")
 
-	d.mu.Lock()
-	records, err := d.internBatchLocked(entries)
+	records, err := d.internBatch(entries)
 	if err != nil {
-		d.mu.Unlock()
 		return err
 	}
 	stamp := d.tick()
-	d.mu.Unlock()
 
-	// Each key's slot updates under its own acquisition: the RWMutex blocks
-	// new readers behind a waiting writer, so a whole-batch hold would make
-	// every concurrent match wait out the batch. No cross-key invariant spans
-	// the loop, so releasing between keys is safe.
+	// Each key's slot updates under its own shard's acquisition: no
+	// cross-key invariant spans the loop, so releasing between keys is
+	// safe, and distinct keys' shards proceed in parallel.
 	sampledKeys := requestKeys
 	if d.sampleModulus > 1 {
 		sampledKeys = filterSampledKeys(requestKeys, d.sampleModulus)
 	}
+	touched := 0
 	for _, requestKey := range sampledKeys {
-		d.mu.Lock()
+		si := int(tableHash(requestKey)) & d.shardMask //#nosec G115 -- masked to the shard count
+		s := &d.shards[si]
+		s.mu.Lock()
 		// Dead words occupy the cap until the sweep's sampled pass reclaims
 		// them; strip them before inserting at the cap so the head-drop
 		// cannot evict a live pod's word while a dead one survives.
-		if i, ok := d.tbl.find(requestKey); ok && slotLen(&d.tbl.slots[i].slot, &d.arena) == d.podCap {
-			d.stripDeadWordsLocked(requestKey)
+		if i, ok := s.tbl.find(requestKey); ok && slotLen(&s.tbl.slots[i].slot, &s.arena) == d.podCap {
+			d.stripDeadWordsLocked(s, requestKey)
 		}
-		i := d.tbl.slotForInsert(requestKey)
-		slot := &d.tbl.slots[i].slot
+		i := s.tbl.slotForInsert(requestKey)
+		slot := &s.tbl.slots[i].slot
 		for r := range records {
 			ref := &records[r]
-			if dropped := slotSetEntry(slot, &d.arena, d.podCap, entryWordFor(ref)); dropped != 0 {
-				d.truncated++
+			if dropped := slotSetEntry(slot, &s.arena, d.podCap, entryWordFor(ref)); dropped != 0 {
+				s.truncated++
 				metrics.IndexTruncatedEntries.Add(1)
-				d.purgeWordRowsLocked(requestKey, dropped)
+				d.purgeWordRowsLocked(s, requestKey, dropped)
 			}
 			if ref.HasGroup {
-				d.groupAddLocked(requestKey, ref)
+				d.groupAddLocked(s, requestKey, ref)
 			}
 		}
 		slot.stamp = stamp
-		d.mu.Unlock()
+		s.mu.Unlock()
+		touched |= 1 << si
 		if traceLogger.Enabled() {
 			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
 		}
@@ -369,12 +403,16 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 	// the entries already in place, so the evict's all-empty check cannot
 	// drop a mapping whose entries have not landed yet.
 	if engineKeys != nil {
-		d.mu.Lock()
+		d.engineMu.Lock()
 		d.setEngineMappingsLocked(engineKeys, requestKeys)
-		d.mu.Unlock()
+		d.engineMu.Unlock()
 	}
 
-	d.maybeSweep()
+	for si := range d.shards {
+		if touched&(1<<si) != 0 {
+			d.maybeSweepShard(si)
+		}
+	}
 	return nil
 }
 
@@ -384,7 +422,7 @@ func (d *DenseMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Bl
 // i, so each engine key's request keys are one contiguous subslice of
 // requestKeys and the walk allocates nothing. Engine keys within one Add are
 // distinct (per-event block hashes are chained); a repeated engine key would
-// keep only its last run. Called with mu held for writing.
+// keep only its last run. Called with engineMu held.
 func (d *DenseMemoryIndex) setEngineMappingsLocked(engineKeys, requestKeys []BlockHash) {
 	e, r := len(engineKeys), len(requestKeys)
 	if e == 0 || r == 0 {
@@ -405,17 +443,18 @@ func (d *DenseMemoryIndex) setEngineMappingsLocked(engineKeys, requestKeys []Blo
 
 // groupAddLocked records a group-announced copy. A re-announcement of a live
 // row keeps one row, matching the replace-on-equal insert the non-dense
-// backends apply to identical entries.
-func (d *DenseMemoryIndex) groupAddLocked(key BlockHash, ref *EntryRef) {
-	rows := d.groups[key]
+// backends apply to identical entries. Called with the shard's mu held for
+// writing.
+func (d *DenseMemoryIndex) groupAddLocked(s *denseShard, key BlockHash, ref *EntryRef) {
+	rows := s.groups[key]
 	if rows == nil {
 		rows = make(map[denseGroupKey]struct{})
-		d.groups[key] = rows
+		s.groups[key] = rows
 	}
 	gk := denseGroupKey{pod: ref.PodOrdinal, tier: denseRowTier(ref), spec: ref.Speculative, group: ref.GroupIdx}
 	if _, ok := rows[gk]; !ok {
 		rows[gk] = struct{}{}
-		d.groupRows++
+		s.groupRows++
 	}
 }
 
@@ -430,12 +469,13 @@ func denseRowTier(ref *EntryRef) uint8 {
 
 // purgeWordRowsLocked removes the group rows a dropped word owned, keeping
 // the side table in step with the entry list: rows exist exactly while the
-// word carrying their tier bit does. Called with mu held for writing.
-func (d *DenseMemoryIndex) purgeWordRowsLocked(key BlockHash, w uint32) {
+// word carrying their tier bit does. Called with the shard's mu held for
+// writing.
+func (d *DenseMemoryIndex) purgeWordRowsLocked(s *denseShard, key BlockHash, w uint32) {
 	if w&entryGroupedBit == 0 {
 		return
 	}
-	rows := d.groups[key]
+	rows := s.groups[key]
 	if rows == nil {
 		return
 	}
@@ -448,18 +488,18 @@ func (d *DenseMemoryIndex) purgeWordRowsLocked(key BlockHash, w uint32) {
 			continue
 		}
 		delete(rows, gk)
-		d.groupRows--
+		s.groupRows--
 	}
 	if len(rows) == 0 {
-		delete(d.groups, key)
+		delete(s.groups, key)
 	}
 }
 
 // groupRemoveLocked deletes the row and reports whether the (pod, tier,
 // speculative) pair it named has no rows left, which releases the entry
-// word's bit.
-func (d *DenseMemoryIndex) groupRemoveLocked(key BlockHash, gk denseGroupKey) (existed, drained bool) {
-	rows := d.groups[key]
+// word's bit. Called with the shard's mu held for writing.
+func (d *DenseMemoryIndex) groupRemoveLocked(s *denseShard, key BlockHash, gk denseGroupKey) (existed, drained bool) {
+	rows := s.groups[key]
 	if rows == nil {
 		return false, false
 	}
@@ -467,9 +507,9 @@ func (d *DenseMemoryIndex) groupRemoveLocked(key BlockHash, gk denseGroupKey) (e
 		return false, false
 	}
 	delete(rows, gk)
-	d.groupRows--
+	s.groupRows--
 	if len(rows) == 0 {
-		delete(d.groups, key)
+		delete(s.groups, key)
 	}
 	for other := range rows {
 		if other.pod == gk.pod && other.tier == gk.tier && other.spec == gk.spec {
@@ -487,13 +527,14 @@ func (d *DenseMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Bl
 	}
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.DenseMemoryIndex.Evict")
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	switch keyType {
 	case EngineKey:
-		// One lock hold covers the resolution, the entry removal, and the
-		// all-empty mapping removal, closing the Add-versus-Evict race.
+		// Phase one removes the entries under each request key's own shard
+		// lock; phase two re-examines the chains under every shard lock
+		// and the engine lock together, so the mapping-removal decision is
+		// atomic against Adds, which insert entries before setting the
+		// mapping.
+		d.engineMu.Lock()
 		chains := make([][]BlockHash, len(keys))
 		for i, key := range keys {
 			rks, found := d.engineToRequestKeys.peek(key)
@@ -502,16 +543,27 @@ func (d *DenseMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Bl
 				continue
 			}
 			chains[i] = rks
-			for _, rk := range rks {
-				d.evictFromKeyLocked(rk, entries)
+		}
+		d.engineMu.Unlock()
+		for i := range keys {
+			for _, rk := range chains[i] {
+				s := d.shardOf(rk)
+				s.mu.Lock()
+				d.evictFromKeyLocked(s, rk, entries)
+				s.mu.Unlock()
 			}
 		}
-		for i, key := range keys {
-			if chains[i] == nil {
+		for si := range d.shards {
+			d.shards[si].mu.Lock()
+		}
+		d.engineMu.Lock()
+		for _, key := range keys {
+			rks, found := d.engineToRequestKeys.peek(key)
+			if !found {
 				continue
 			}
 			removable := true
-			for _, rk := range chains[i] {
+			for _, rk := range rks {
 				if !SampledKey(rk, d.sampleModulus) {
 					// An unsampled request key never has a slot, so its
 					// emptiness cannot be checked. The mapping stays for
@@ -520,7 +572,7 @@ func (d *DenseMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Bl
 					removable = false
 					break
 				}
-				if j, ok := d.tbl.find(rk); ok && slotLen(&d.tbl.slots[j].slot, &d.arena) > 0 {
+				if j, ok := d.shardOf(rk).tbl.find(rk); ok && slotLen(&d.shardOf(rk).tbl.slots[j].slot, &d.shardOf(rk).arena) > 0 {
 					removable = false
 					break
 				}
@@ -529,10 +581,17 @@ func (d *DenseMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Bl
 				d.engineToRequestKeys.remove(key)
 			}
 		}
+		d.engineMu.Unlock()
+		for i := len(d.shards) - 1; i >= 0; i-- {
+			d.shards[i].mu.Unlock()
+		}
 		return nil
 	case RequestKey:
 		for _, key := range keys {
-			d.evictFromKeyLocked(key, entries)
+			s := d.shardOf(key)
+			s.mu.Lock()
+			d.evictFromKeyLocked(s, key, entries)
+			s.mu.Unlock()
 		}
 		return nil
 	default:
@@ -541,14 +600,14 @@ func (d *DenseMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Bl
 }
 
 // evictFromKeyLocked removes the matching entries from one request key,
-// deleting the key when its last word clears. Called with mu held for
-// writing.
-func (d *DenseMemoryIndex) evictFromKeyLocked(requestKey BlockHash, entries []PodEntry) {
-	i, ok := d.tbl.find(requestKey)
+// deleting the key when its last word clears. Called with the shard's mu
+// held for writing.
+func (d *DenseMemoryIndex) evictFromKeyLocked(s *denseShard, requestKey BlockHash, entries []PodEntry) {
+	i, ok := s.tbl.find(requestKey)
 	if !ok {
 		return
 	}
-	slot := &d.tbl.slots[i].slot
+	slot := &s.tbl.slots[i].slot
 	changed := false
 	for _, e := range entries {
 		pod, ok := d.pods.ordinalOf(e.PodIdentifier)
@@ -567,18 +626,18 @@ func (d *DenseMemoryIndex) evictFromKeyLocked(requestKey BlockHash, entries []Po
 				tiers = 1 << tier
 			}
 			gk := denseGroupKey{pod: pod, tier: rowTier, spec: e.Speculative, group: e.GroupIdx}
-			existed, drained := d.groupRemoveLocked(requestKey, gk)
+			existed, drained := d.groupRemoveLocked(s, requestKey, gk)
 			if !existed {
 				continue
 			}
 			changed = true
 			if drained {
-				slotClearEntry(slot, &d.arena, packEntry(pod, tiers, e.Speculative, true))
+				slotClearEntry(slot, &s.arena, packEntry(pod, tiers, e.Speculative, true))
 			}
 			continue
 		}
 		if e.Speculative {
-			if slotClearEntry(slot, &d.arena, packEntry(pod, 0, true, false)) {
+			if slotClearEntry(slot, &s.arena, packEntry(pod, 0, true, false)) {
 				changed = true
 			}
 			continue
@@ -587,27 +646,28 @@ func (d *DenseMemoryIndex) evictFromKeyLocked(requestKey BlockHash, entries []Po
 		if !found {
 			continue
 		}
-		if slotClearEntry(slot, &d.arena, packEntry(pod, 1<<tier, false, false)) {
+		if slotClearEntry(slot, &s.arena, packEntry(pod, 1<<tier, false, false)) {
 			changed = true
 		}
 	}
-	if changed && slotLen(slot, &d.arena) == 0 {
-		d.deleteKeyLocked(i, "empty")
+	if changed && slotLen(slot, &s.arena) == 0 {
+		d.deleteKeyLocked(s, i, "empty")
 	}
 }
 
-// deleteKeyLocked frees a key's arena chunks and removes it from the table.
-func (d *DenseMemoryIndex) deleteKeyLocked(i int, cause string) {
-	key := d.tbl.slots[i].key
-	for h := d.tbl.slots[i].slot.chain; h != 0; {
-		next := d.arena.words[(int(h)-1)*denseChunkWords+denseChunkLink]
-		d.arena.freeChunk(h)
+// deleteKeyLocked frees a key's arena chunks and removes it from the shard's
+// table. Called with the shard's mu held for writing.
+func (d *DenseMemoryIndex) deleteKeyLocked(s *denseShard, i int, cause string) {
+	key := s.tbl.slots[i].key
+	for h := s.tbl.slots[i].slot.chain; h != 0; {
+		next := s.arena.words[(int(h)-1)*denseChunkWords+denseChunkLink]
+		s.arena.freeChunk(h)
 		h = next
 	}
-	d.tbl.deleteAt(i)
-	if rows := d.groups[key]; rows != nil {
-		d.groupRows -= len(rows)
-		delete(d.groups, key)
+	s.tbl.deleteAt(i)
+	if rows := s.groups[key]; rows != nil {
+		s.groupRows -= len(rows)
+		delete(s.groups, key)
 	}
 	metrics.IndexEvictions.WithLabelValues(cause).Add(1)
 }
@@ -618,11 +678,19 @@ func (d *DenseMemoryIndex) deleteKeyLocked(i int, cause string) {
 // the name under a fresh ordinal.
 func (d *DenseMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	start := time.Now()
-	d.mu.Lock()
 	if pod, ok := d.pods.ordinalOf(podIdentifier); ok {
+		// Every shard's write lock, so no decode is mid-word when the bit
+		// lands; the epoch bump retires the walk's decoded-entry reuse
+		// across a batch's per-shard acquisitions.
+		for si := range d.shards {
+			d.shards[si].mu.Lock()
+		}
 		d.setDead(pod)
+		d.deadEpoch.Add(1)
+		for si := len(d.shards) - 1; si >= 0; si-- {
+			d.shards[si].mu.Unlock()
+		}
 	}
-	d.mu.Unlock()
 	metrics.IndexClearDuration.Observe(time.Since(start).Seconds())
 	log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.DenseMemoryIndex.Clear").
 		Info("cleared pod from index", "pod", podIdentifier)
@@ -631,12 +699,12 @@ func (d *DenseMemoryIndex) Clear(ctx context.Context, podIdentifier string) erro
 
 // GetRequestKey returns the last request key associated with the given
 // engineKey, the highest-index request key the engine key covers. It takes
-// the write lock: the engine map's get refreshes the slot's recency stamp,
-// which mutates the map, so concurrent lookups cannot share a read hold.
+// the engine map's lock: the map's get refreshes the slot's recency stamp,
+// which mutates the map, so concurrent lookups cannot share it lock-free.
 func (d *DenseMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
-	d.mu.Lock()
+	d.engineMu.Lock()
 	rk, found := d.engineToRequestKeys.get(engineKey)
-	d.mu.Unlock()
+	d.engineMu.Unlock()
 	if !found {
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
@@ -645,10 +713,10 @@ func (d *DenseMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHas
 
 // Lookup receives a list of requestKeys and a set of pod identifiers, and
 // retrieves the filtered pods associated with those keys, stopping at the
-// first missing or filtered-empty key like InMemoryIndex.Lookup. Names are
-// resolved through the interners while the table read lock is held; the
-// interner write path is always nested inside the table write lock, so the
-// read-read nesting cannot deadlock.
+// first missing or filtered-empty key like InMemoryIndex.Lookup. Each key is
+// read under its own shard's read lock, held only for that key; the prefix
+// chain's stop-at-first-missing order is unaffected because a key lives in
+// exactly one shard.
 func (d *DenseMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {
@@ -664,15 +732,16 @@ func (d *DenseMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		d.mu.RLock()
+		s := d.shardOf(requestKey)
+		s.mu.RLock()
 		var filtered []PodEntry
 		found := false
-		if i, ok := d.tbl.find(requestKey); ok {
+		if i, ok := s.tbl.find(requestKey); ok {
 			found = true
-			d.markRead(&d.tbl.slots[i])
-			filtered = d.materializeLocked(requestKey, &d.tbl.slots[i].slot, podIdentifierSet)
+			d.markRead(&s.tbl.slots[i])
+			filtered = d.materializeLocked(s, requestKey, &s.tbl.slots[i].slot, podIdentifierSet)
 		}
-		d.mu.RUnlock()
+		s.mu.RUnlock()
 		if !found {
 			break
 		}
@@ -693,10 +762,11 @@ func (d *DenseMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 }
 
 // materializeLocked decodes a key's entries into PodEntries, skipping dead
-// pods and entries outside the filter. Called with mu held for reading.
-func (d *DenseMemoryIndex) materializeLocked(key BlockHash, slot *keySlot, filter sets.Set[string]) []PodEntry {
+// pods and entries outside the filter. Called with the shard's mu held for
+// reading.
+func (d *DenseMemoryIndex) materializeLocked(s *denseShard, key BlockHash, slot *keySlot, filter sets.Set[string]) []PodEntry {
 	var out []PodEntry
-	forEachSlotWord(slot, &d.arena, func(w uint32) bool {
+	forEachSlotWord(slot, &s.arena, func(w uint32) bool {
 		pod := entryPod(w)
 		if d.isDead(pod) {
 			return true
@@ -710,7 +780,7 @@ func (d *DenseMemoryIndex) materializeLocked(key BlockHash, slot *keySlot, filte
 		}
 		spec := w&entrySpecBit != 0
 		if w&entryGroupedBit != 0 {
-			for gk := range d.groups[key] {
+			for gk := range s.groups[key] {
 				if gk.pod != pod || gk.spec != spec {
 					continue
 				}
@@ -751,24 +821,29 @@ func (d *DenseMemoryIndex) rowTierNameLocked(tier uint8) string {
 // found flags and entry ranges of the current batch, and the decoded entries.
 // runWords holds the last decoded key's entry words and runBounds its decoded
 // entry range, so a key whose words repeat the last one reuses that range
-// instead of decoding again.
+// instead of decoding again. pos groups the batch's key positions by shard
+// for the per-shard read acquisitions.
 type denseWalkState struct {
 	found     []bool
 	bounds    [][2]int
 	entries   []WalkEntry
 	runWords  []uint32
 	runBounds [2]int
+	runEpoch  uint64
+	pos       [denseShardCount][]int
 }
 
 var walkStatePool = sync.Pool{New: func() any { return &denseWalkState{} }}
 
 // WalkKeys implements KeyWalker. Batches of keys are copied out under one
-// read acquisition, decoding the packed words into WalkEntries (dead pods
-// filtered, one entry per pod and tier pair), and the visits run after the
-// lock is released, so no lock is held across a visit callback. A key whose
-// words repeat the previously decoded key's reuses that key's decoded
-// entries instead of decoding again. Each found key's slot records read
-// evidence with one atomic OR; the read path takes no write acquisition.
+// read acquisition per shard the batch touches, decoding the packed words
+// into WalkEntries (dead pods filtered, one entry per pod and tier pair),
+// and the visits run after the locks are released, so no lock is held
+// across a visit callback. A key whose words repeat the previously decoded
+// key's reuses that key's decoded entries instead of decoding again; the
+// comparison holds within one shard's pass. Each found key's slot records
+// read evidence with one atomic OR; the read path takes no write
+// acquisition.
 func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []WalkEntry) bool,
 ) error {
@@ -786,29 +861,46 @@ func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash
 		ws.found = ws.found[:0]
 		ws.bounds = ws.bounds[:0]
 		ws.entries = ws.entries[:0]
-		runValid := false
-		d.mu.RLock()
-		for _, key := range keys {
-			b0 := len(ws.entries)
-			found := false
-			if i, ok := d.tbl.find(key); ok {
-				found = true
-				d.markRead(&d.tbl.slots[i])
-				slot := &d.tbl.slots[i].slot
-				if runValid && d.matchRunWords(slot, ws) {
-					ws.found = append(ws.found, found)
-					ws.bounds = append(ws.bounds, ws.runBounds)
-					continue
-				}
-				ws.runWords = ws.runWords[:0]
-				d.decodeLocked(slot, ws, b0)
-				ws.runBounds = [2]int{b0, len(ws.entries)}
-				runValid = true
-			}
-			ws.found = append(ws.found, found)
-			ws.bounds = append(ws.bounds, [2]int{b0, len(ws.entries)})
+		for si := range ws.pos {
+			ws.pos[si] = ws.pos[si][:0]
 		}
-		d.mu.RUnlock()
+		for i, key := range keys {
+			ws.found = append(ws.found, false)
+			ws.bounds = append(ws.bounds, [2]int{0, 0})
+			si := int(tableHash(key)) & d.shardMask //#nosec G115 -- masked to the shard count
+			ws.pos[si] = append(ws.pos[si], i)
+		}
+		runValid := false
+		for si := range d.shards {
+			if len(ws.pos[si]) == 0 {
+				continue
+			}
+			s := &d.shards[si]
+			s.mu.RLock()
+			for _, i := range ws.pos[si] {
+				key := keys[i]
+				b0 := len(ws.entries)
+				found := false
+				if j, ok := s.tbl.find(key); ok {
+					found = true
+					d.markRead(&s.tbl.slots[j])
+					slot := &s.tbl.slots[j].slot
+					if runValid && d.deadEpoch.Load() == ws.runEpoch && d.matchRunWords(s, slot, ws) {
+						ws.found[i] = found
+						ws.bounds[i] = ws.runBounds
+						continue
+					}
+					ws.runWords = ws.runWords[:0]
+					d.decodeLocked(s, slot, ws, b0)
+					ws.runBounds = [2]int{b0, len(ws.entries)}
+					ws.runEpoch = d.deadEpoch.Load()
+					runValid = true
+				}
+				ws.found[i] = found
+				ws.bounds[i] = [2]int{b0, len(ws.entries)}
+			}
+			s.mu.RUnlock()
+		}
 
 		for i := range keys {
 			pos := start + i
@@ -829,11 +921,11 @@ func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash
 // the words of the last decoded key, in which case that key's decoded
 // entries are also this key's. Equal word streams decode equally: the dead
 // set cannot change under the read acquisition the caller holds. Called
-// with mu held for reading.
-func (d *DenseMemoryIndex) matchRunWords(slot *keySlot, ws *denseWalkState) bool {
+// with the shard's mu held for reading.
+func (d *DenseMemoryIndex) matchRunWords(s *denseShard, slot *keySlot, ws *denseWalkState) bool {
 	n := 0
 	equal := true
-	forEachSlotWord(slot, &d.arena, func(w uint32) bool {
+	forEachSlotWord(slot, &s.arena, func(w uint32) bool {
 		if n >= len(ws.runWords) || ws.runWords[n] != w {
 			equal = false
 			return false
@@ -850,11 +942,11 @@ func (d *DenseMemoryIndex) matchRunWords(slot *keySlot, ws *denseWalkState) bool
 // key's own entries, which start at ws.entries[from]. Duplicate triples
 // require a grouped word (same-identity words merge at insert), so the
 // dedup scan runs only once the key has shown one. The slot's words are
-// recorded in ws.runWords for the next key's run comparison. Called with mu
-// held for reading.
-func (d *DenseMemoryIndex) decodeLocked(slot *keySlot, ws *denseWalkState, from int) {
+// recorded in ws.runWords for the next key's run comparison. Called with
+// the shard's mu held for reading.
+func (d *DenseMemoryIndex) decodeLocked(s *denseShard, slot *keySlot, ws *denseWalkState, from int) {
 	grouped := false
-	forEachSlotWord(slot, &d.arena, func(w uint32) bool {
+	forEachSlotWord(slot, &s.arena, func(w uint32) bool {
 		ws.runWords = append(ws.runWords, w)
 		pod := entryPod(w)
 		if d.isDead(pod) {
@@ -889,46 +981,51 @@ func (d *DenseMemoryIndex) decodeLocked(slot *keySlot, ws *denseWalkState, from 
 }
 
 // markRead records read evidence in a slot, no write acquisition. Readers
-// hold the read lock and the sweep holds the write lock, so no read can
-// land mid-sweep: the bit means exactly "read since the sweep last sampled
-// this slot", and the sweep clears it when it spends the evidence. A slot
-// already marked skips the atomic OR, so a repeatedly walked key pays one
-// atomic load instead of a read-modify-write.
+// hold the shard's read lock and the sweep holds the shard's write lock, so
+// no read can land mid-sweep: the bit means exactly "read since the sweep
+// last sampled this slot", and the sweep clears it when it spends the
+// evidence. A slot already marked skips the atomic OR, so a repeatedly
+// walked key pays one atomic load instead of a read-modify-write.
 func (d *DenseMemoryIndex) markRead(s *tableSlot) {
 	if atomic.LoadUint32(&s.readBits) == 0 {
 		atomic.OrUint32(&s.readBits, 1)
 	}
 }
 
-// maybeSweep runs the sampled eviction when residency crosses the budget.
-// Each burst samples and evicts under its own write acquisition, so no burst
-// holds the whole table for long.
-func (d *DenseMemoryIndex) maybeSweep() {
-	d.mu.RLock()
-	over := d.residencyLocked() > d.budget
-	d.mu.RUnlock()
+// maybeSweepShard runs the sampled eviction for one shard when its share of
+// residency crosses its share of the budget. Each burst samples and evicts
+// under the shard's own write acquisition, so no burst holds the shard for
+// long. The engine map sweeps when its residency crosses a quarter of the
+// whole budget, matching the single-table heuristic at steady state.
+func (d *DenseMemoryIndex) maybeSweepShard(si int) {
+	s := &d.shards[si]
+	shardBudget := d.budget / int64(len(d.shards))
+	shardWatermark := d.watermark / int64(len(d.shards))
+	s.mu.RLock()
+	over := s.residencyLocked() > shardBudget
+	s.mu.RUnlock()
 	if !over {
 		return
 	}
 	for range sweepMaxBursts {
-		d.mu.Lock()
-		if d.residencyLocked() <= d.watermark {
-			d.updateGaugesLocked()
-			d.mu.Unlock()
+		s.mu.Lock()
+		if s.residencyLocked() <= shardWatermark {
+			d.updateGauges(s)
+			s.mu.Unlock()
 			return
 		}
-		d.sweepBurstLocked()
-		d.mu.Unlock()
+		d.sweepBurstLocked(s)
+		s.mu.Unlock()
 	}
 }
 
-// sweepBurstLocked evicts from a sample of the table: every sampled slot
-// whose entries are all dead, plus the oldest quarter by stamp, and the same
-// from the engine map when it holds a quarter or more of residency. The
-// sample is the occupied slots from the sweep cursor onward, up to
-// sweepSampleSize keys or one full loop over the table. Called with mu held
-// for writing.
-func (d *DenseMemoryIndex) sweepBurstLocked() {
+// sweepBurstLocked evicts from a sample of the shard's table: every sampled
+// slot whose entries are all dead, plus the oldest quarter by stamp, and
+// the same from the engine map when it holds a quarter or more of the
+// budget. The sample is the occupied slots from the sweep cursor onward, up
+// to sweepSampleSize keys or one full loop over the table. Called with the
+// shard's mu held for writing.
+func (d *DenseMemoryIndex) sweepBurstLocked(s *denseShard) {
 	type victim struct {
 		key     BlockHash
 		stamp   uint32
@@ -936,34 +1033,34 @@ func (d *DenseMemoryIndex) sweepBurstLocked() {
 	}
 	var victims []victim
 	stamp := d.tick()
-	tableLen := len(d.tbl.slots)
+	tableLen := len(s.tbl.slots)
 	scanned := 0
 	for len(victims) < sweepSampleSize && scanned < tableLen {
-		i := (d.sweepCursor + scanned) % tableLen
+		i := (s.sweepCursor + scanned) % tableLen
 		scanned++
-		if d.tbl.empty(i) {
+		if s.tbl.empty(i) {
 			continue
 		}
-		s := &d.tbl.slots[i]
-		if atomic.LoadUint32(&s.readBits) != 0 {
+		sl := &s.tbl.slots[i]
+		if atomic.LoadUint32(&sl.readBits) != 0 {
 			// Read since the last burst that sampled this slot: young
 			// again, and the evidence is spent. Any set bit counts: the
 			// read lock excludes this burst, so every bit still standing
 			// was set before it began.
-			s.slot.stamp = stamp
-			atomic.StoreUint32(&s.readBits, 0)
+			sl.slot.stamp = stamp
+			atomic.StoreUint32(&sl.readBits, 0)
 		}
 		allDead := true
-		forEachSlotWord(&s.slot, &d.arena, func(w uint32) bool {
+		forEachSlotWord(&sl.slot, &s.arena, func(w uint32) bool {
 			if !d.isDead(entryPod(w)) {
 				allDead = false
 				return false
 			}
 			return true
 		})
-		victims = append(victims, victim{key: s.key, stamp: s.slot.stamp, allDead: allDead})
+		victims = append(victims, victim{key: sl.key, stamp: sl.slot.stamp, allDead: allDead})
 	}
-	d.sweepCursor = (d.sweepCursor + scanned) % tableLen
+	s.sweepCursor = (s.sweepCursor + scanned) % tableLen
 
 	live := make([]victim, 0, len(victims))
 	for i := range victims {
@@ -977,21 +1074,20 @@ func (d *DenseMemoryIndex) sweepBurstLocked() {
 		// victim at the boundary, not a quarter of the sample.
 		sort.SliceStable(live, func(i, j int) bool { return live[i].stamp < live[j].stamp })
 		for _, v := range live[:oldestQuarter(len(live))] {
-			d.deleteFoundKeyLocked(v.key, "budget")
+			d.deleteFoundKeyLocked(s, v.key, "budget")
 		}
 	}
 	for i := range victims {
 		if victims[i].allDead {
-			d.deleteFoundKeyLocked(victims[i].key, "dead")
+			d.deleteFoundKeyLocked(s, victims[i].key, "dead")
 			continue
 		}
 		// A mixed slot keeps its dead words filtered at read time; strip
 		// them here so the sampled pass reclaims their storage.
-		d.stripDeadWordsLocked(victims[i].key)
+		d.stripDeadWordsLocked(s, victims[i].key)
 	}
 
-	engineBytes := int64(d.engineToRequestKeys.len()) * engineBytesPerEntry
-	if engineBytes*4 > d.residencyLocked() {
+	if d.engineResidency()*4 > d.budget {
 		d.sweepEngineLocked()
 	}
 }
@@ -999,40 +1095,40 @@ func (d *DenseMemoryIndex) sweepBurstLocked() {
 // deleteFoundKeyLocked removes the key if it is still resident. The sweep
 // acts on sampled keys after other victims were deleted, and a deletion
 // shifts the probe cluster, so the slot is located by key again here.
-// Called with mu held for writing.
-func (d *DenseMemoryIndex) deleteFoundKeyLocked(key BlockHash, cause string) {
-	if i, ok := d.tbl.find(key); ok {
-		d.deleteKeyLocked(i, cause)
+// Called with the shard's mu held for writing.
+func (d *DenseMemoryIndex) deleteFoundKeyLocked(s *denseShard, key BlockHash, cause string) {
+	if i, ok := s.tbl.find(key); ok {
+		d.deleteKeyLocked(s, i, cause)
 	}
 }
 
 // stripDeadWordsLocked removes the dead pods' words from a sampled key's
-// slot, deleting the key when nothing live remains. Called with mu held for
-// writing.
-func (d *DenseMemoryIndex) stripDeadWordsLocked(key BlockHash) {
-	i, ok := d.tbl.find(key)
+// slot, deleting the key when nothing live remains. Called with the shard's
+// mu held for writing.
+func (d *DenseMemoryIndex) stripDeadWordsLocked(s *denseShard, key BlockHash) {
+	i, ok := s.tbl.find(key)
 	if !ok {
 		return
 	}
-	slot := &d.tbl.slots[i].slot
-	n := slotLen(slot, &d.arena)
+	slot := &s.tbl.slots[i].slot
+	n := slotLen(slot, &s.arena)
 	for j := 0; j < n; {
-		w := slotWord(slot, &d.arena, j)
+		w := slotWord(slot, &s.arena, j)
 		if d.isDead(entryPod(w)) {
-			d.purgeWordRowsLocked(key, w)
-			slotRemoveAt(slot, &d.arena, j, n)
+			d.purgeWordRowsLocked(s, key, w)
+			slotRemoveAt(slot, &s.arena, j, n)
 			n--
 			continue
 		}
 		j++
 	}
 	if n == 0 {
-		d.deleteKeyLocked(i, "dead")
+		d.deleteKeyLocked(s, i, "dead")
 	}
 }
 
 // sweepEngineLocked evicts the oldest quarter of an engine-map sample.
-// Called with mu held for writing.
+// Called with engineMu held.
 func (d *DenseMemoryIndex) sweepEngineLocked() {
 	mappings := d.engineToRequestKeys.sampleMappings(sweepSampleSize)
 	if len(mappings) == 0 {
@@ -1054,9 +1150,26 @@ func oldestQuarter(n int) int {
 	return (n + 3) / 4
 }
 
-// updateGaugesLocked refreshes the residency gauges. Called with mu held.
-func (d *DenseMemoryIndex) updateGaugesLocked() {
-	stats := d.statsLocked()
-	metrics.IndexResidentKeys.Set(float64(stats.ResidentKeys))
-	metrics.IndexResidentBytes.Set(float64(stats.ResidentBytes))
+// updateGaugesLocked refreshes the residency gauges. The calling shard is
+// held for writing; the others are read under their own locks. Called with
+// the held shard's mu held for writing.
+func (d *DenseMemoryIndex) updateGauges(held *denseShard) {
+	keys := held.tbl.used
+	bytes := held.residencyLocked()
+	rows := held.groupRows
+	truncated := held.truncated
+	for i := range d.shards {
+		s := &d.shards[i]
+		if s == held {
+			continue
+		}
+		s.mu.RLock()
+		keys += s.tbl.used
+		bytes += s.residencyLocked()
+		rows += s.groupRows
+		truncated += s.truncated
+		s.mu.RUnlock()
+	}
+	metrics.IndexResidentKeys.Set(float64(keys))
+	metrics.IndexResidentBytes.Set(float64(bytes + d.engineResidency()))
 }

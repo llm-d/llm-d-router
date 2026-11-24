@@ -290,31 +290,35 @@ func TestDenseIndexSweepFreesDeadSlots(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, hits[120], 1, "the cleared pod's entries are filtered immediately")
 
-	// Push residency over the budget and trigger the sweep.
-	for k := 1000; k <= 1015; k++ {
+	// Push residency over the budget and trigger every shard's sweep: keys
+	// hash over the shards, so enough additions touch each one.
+	for k := 1000; k <= 1255; k++ {
 		require.NoError(t, index.Add(ctx, nil, []BlockHash{BlockHash(k)}, []PodEntry{{PodIdentifier: "pod-c", DeviceTier: "gpu"}}))
 	}
 
-	index.mu.RLock()
 	var deadWords []uint32
 	survivors := 0
-	for i := range index.tbl.slots {
-		if index.tbl.empty(i) {
-			continue
-		}
-		key := index.tbl.slots[i].key
-		slot := index.tbl.slots[i].slot
-		forEachSlotWord(&slot, &index.arena, func(w uint32) bool {
-			if index.isDead(entryPod(w)) {
-				deadWords = append(deadWords, uint32(key))
+	for sh := range index.shards {
+		s := &index.shards[sh]
+		s.mu.RLock()
+		for i := range s.tbl.slots {
+			if s.tbl.empty(i) {
+				continue
 			}
-			return true
-		})
-		if slotLen(&slot, &index.arena) > 0 {
-			survivors++
+			key := s.tbl.slots[i].key
+			slot := s.tbl.slots[i].slot
+			forEachSlotWord(&slot, &s.arena, func(w uint32) bool {
+				if index.isDead(entryPod(w)) {
+					deadWords = append(deadWords, uint32(key))
+				}
+				return true
+			})
+			if slotLen(&slot, &s.arena) > 0 {
+				survivors++
+			}
 		}
+		s.mu.RUnlock()
 	}
-	index.mu.RUnlock()
 	assert.Empty(t, deadWords, "no live word carries a dead pod after the sweep")
 	assert.Positive(t, survivors, "live entries survive the sweep")
 }
@@ -448,7 +452,7 @@ func TestDenseIndexSweepReadEvidence(t *testing.T) {
 	index, err := NewDenseMemoryIndex(&DenseMemoryIndexConfig{Size: "64MiB"})
 	require.NoError(t, err)
 
-	const numKeys = 200
+	const numKeys = 4800
 	pod := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
 	for k := 1; k <= numKeys; k++ {
 		require.NoError(t, index.Add(ctx, nil, []BlockHash{BlockHash(k)}, []PodEntry{pod}))
@@ -457,32 +461,33 @@ func TestDenseIndexSweepReadEvidence(t *testing.T) {
 	// Stamps a second below the sweep's refresh stamp, so an honored read is
 	// the only way the key's stamp can reach the current wall second.
 	base := uint32(time.Now().Unix())
-	index.mu.Lock()
+	shard := &index.shards[0]
+	shard.mu.Lock()
 	var slots []int
-	for i := range index.tbl.slots {
-		if !index.tbl.empty(i) {
+	for i := range shard.tbl.slots {
+		if !shard.tbl.empty(i) {
 			slots = append(slots, i)
-			index.tbl.slots[i].slot.stamp = base - 1000
+			shard.tbl.slots[i].slot.stamp = base - 1000
 		}
 	}
-	require.Greater(t, len(slots), 170, "the table must hold more keys than one burst samples")
-	readKey := index.tbl.slots[slots[159]].key
-	index.mu.Unlock()
+	require.Greater(t, len(slots), 170, "the shard must hold more keys than one burst samples")
+	readKey := shard.tbl.slots[slots[159]].key
+	shard.mu.Unlock()
 
 	hits, err := index.Lookup(ctx, []BlockHash{readKey}, sets.Set[string]{})
 	require.NoError(t, err)
 	require.Contains(t, hits, readKey)
 
-	index.mu.Lock()
-	index.sweepCursor = 0
-	index.sweepBurstLocked()
-	i, ok := index.tbl.find(readKey)
+	shard.mu.Lock()
+	shard.sweepCursor = 0
+	index.sweepBurstLocked(shard)
+	i, ok := shard.tbl.find(readKey)
 	require.True(t, ok, "the first burst must not sample the read key")
-	index.sweepCursor = i
-	index.sweepBurstLocked()
-	i, ok = index.tbl.find(readKey)
+	shard.sweepCursor = i
+	index.sweepBurstLocked(shard)
+	i, ok = shard.tbl.find(readKey)
 	require.True(t, ok, "the read key was evicted as cold despite the read between the bursts")
-	require.GreaterOrEqual(t, index.tbl.slots[i].slot.stamp, base,
+	require.GreaterOrEqual(t, shard.tbl.slots[i].slot.stamp, base,
 		"the read between the bursts did not refresh the key's stamp")
-	index.mu.Unlock()
+	shard.mu.Unlock()
 }

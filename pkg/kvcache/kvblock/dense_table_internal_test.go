@@ -26,7 +26,7 @@ import (
 // fillTable inserts keys 1..n with the given stamp and returns the table.
 func fillTable(t *testing.T, n int, stamp uint32) *denseTable {
 	t.Helper()
-	tbl := newDenseTable()
+	tbl := newDenseTable(tableInitialSlots)
 	for k := 1; k <= n; k++ {
 		i := tbl.slotForInsert(BlockHash(k))
 		tbl.slots[i].slot.stamp = stamp
@@ -100,7 +100,7 @@ func TestDenseTableGrowthPreservesKeys(t *testing.T) {
 func TestDenseTableZeroKeyIsStorable(t *testing.T) {
 	// The empty marker is the stamp, not the key: BlockHash(0) is a legal
 	// key that must round-trip.
-	tbl := newDenseTable()
+	tbl := newDenseTable(tableInitialSlots)
 	i := tbl.slotForInsert(0)
 	tbl.slots[i].slot.stamp = 1
 	j, ok := tbl.find(0)

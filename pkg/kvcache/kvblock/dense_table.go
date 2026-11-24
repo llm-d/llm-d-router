@@ -58,8 +58,8 @@ type denseTable struct {
 	used  int
 }
 
-func newDenseTable() *denseTable {
-	t := &denseTable{slots: make([]tableSlot, tableInitialSlots)}
+func newDenseTable(initialSlots int) *denseTable {
+	t := &denseTable{slots: make([]tableSlot, initialSlots)}
 	t.mask = len(t.slots) - 1
 	return t
 }
