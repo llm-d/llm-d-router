@@ -202,6 +202,20 @@ the discovery or EPP Service FQDN in service mode.
 ext_proc cluster discovery type. STATIC for the loopback sidecar; STRICT_DNS so
 the proxy resolves the EPP Service FQDN in service mode.
 */}}
+{{/*
+Envoy dns_lookup_family for the proxy's DNS-resolved clusters, from
+router.proxy.dnsLookupFamily. Empty renders nothing, leaving Envoy's default.
+*/}}
+{{- define "llm-d-router.proxy.dnsLookupFamily" -}}
+{{- $family := toString ((.Values.router.proxy | default dict).dnsLookupFamily | default "") -}}
+{{- if $family -}}
+{{- if not (has $family (list "AUTO" "V4_ONLY" "V6_ONLY" "V4_PREFERRED" "ALL")) -}}
+{{- fail (printf "router.proxy.dnsLookupFamily must be one of AUTO, V4_ONLY, V6_ONLY, V4_PREFERRED, ALL; got %q" $family) -}}
+{{- end -}}
+{{- $family -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "llm-d-router.proxy.extProcClusterType" -}}
 {{- if eq (include "llm-d-router.proxyMode" .) "service" -}}
 STRICT_DNS

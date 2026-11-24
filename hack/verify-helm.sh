@@ -1480,6 +1480,34 @@ if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_age
   exit 1
 fi
 
+echo "Verifying llm-d-router-standalone Envoy dns_lookup_family follows router.proxy.dnsLookupFamily..."
+dns_family_default_output="${TEMP_DIR}/llm-d-router-standalone-dns-family-default-render.yaml"
+${HELM} template proxy-dns ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint=http://otel-collector.obs.svc:4317 > "${dns_family_default_output}"
+if grep -q -- 'dns_lookup_family' "${dns_family_default_output}"; then
+  echo "Envoy dns_lookup_family rendered without router.proxy.dnsLookupFamily"
+  exit 1
+fi
+dns_family_output="${TEMP_DIR}/llm-d-router-standalone-dns-family-render.yaml"
+${HELM} template proxy-dns ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint=http://otel-collector.obs.svc:4317 --set router.proxy.dnsLookupFamily=V4_ONLY > "${dns_family_output}"
+# One per DNS-resolved cluster: ext_proc, inference_pool_fallback (fail-open is the default) and otel_collector.
+dns_family_count="$(grep -c -- 'dns_lookup_family: V4_ONLY' "${dns_family_output}")"
+if [ "${dns_family_count}" != "3" ]; then
+  echo "Envoy dns_lookup_family: V4_ONLY rendered on ${dns_family_count} clusters, expected 3 (ext_proc, inference_pool_fallback, otel_collector)"
+  exit 1
+fi
+# In sidecar mode ext_proc is STATIC (loopback), so with fail-open only the fallback cluster resolves DNS.
+dns_family_sidecar_output="${TEMP_DIR}/llm-d-router-standalone-dns-family-sidecar-render.yaml"
+${HELM} template proxy-dns ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=sidecar --set router.proxy.failOpen=true --set router.proxy.dnsLookupFamily=V4_ONLY > "${dns_family_sidecar_output}"
+dns_family_sidecar_count="$(grep -c -- 'dns_lookup_family: V4_ONLY' "${dns_family_sidecar_output}")"
+if [ "${dns_family_sidecar_count}" != "1" ]; then
+  echo "Envoy dns_lookup_family in sidecar mode rendered on ${dns_family_sidecar_count} clusters, expected 1 (inference_pool_fallback)"
+  exit 1
+fi
+if ${HELM} template proxy-dns ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.dnsLookupFamily=IPV4 >/dev/null 2>&1; then
+  echo "Helm template unexpectedly succeeded with an invalid router.proxy.dnsLookupFamily"
+  exit 1
+fi
+
 echo "Verifying standalone proxy autoscaling (HPA) rendering and validations..."
 proxy_hpa_out="${TEMP_DIR}/proxy-hpa-render.yaml"
 proxy_hpa_deploy="${TEMP_DIR}/proxy-hpa-deployment.yaml"

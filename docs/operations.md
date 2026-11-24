@@ -332,6 +332,7 @@ router:
 | `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
 | `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
 | `router.proxy.healthCheckNoTrafficInterval` | `healthCheckInterval` | Probe interval while the `ext_proc` cluster has not carried traffic, such as after an EPP pod starts. |
+| `router.proxy.dnsLookupFamily` | `""` (Envoy's `AUTO`) | Envoy `dns_lookup_family` for the `ext_proc` cluster in service mode (and the fail-open fallback and tracing collector). `V4_ONLY` on IPv4-only clusters avoids envoyproxy/envoy#47494 on Envoy before 1.40. |
 | `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
 
 ### GKE Preferred Backends (Gateway Mode)

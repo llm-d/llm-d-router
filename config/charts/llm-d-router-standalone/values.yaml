@@ -125,6 +125,14 @@ router:
     # healthCheckInterval.
     healthCheckNoTrafficInterval: ""
 
+    # Envoy dns_lookup_family for the proxy's DNS-resolved clusters: ext_proc in
+    # service mode, the fail-open fallback and the OpenTelemetry collector. Empty
+    # keeps Envoy's default (AUTO). One of AUTO, V4_ONLY, V6_ONLY, V4_PREFERRED,
+    # ALL. V4_ONLY on IPv4-only clusters halves the DNS lookups and avoids
+    # envoyproxy/envoy#47494 (Envoy before 1.40 drops a cluster's hosts when an
+    # A lookup times out after an empty AAAA answer). Envoy only.
+    dnsLookupFamily: ""
+
     # OpenTelemetry tracing for the Envoy proxy. When enabled, Envoy creates a
     # span per request and propagates the trace context on the ext_proc gRPC
     # stream, so EPP spans join the request trace. Envoy only.
@@ -412,6 +420,9 @@ router:
                   # skips EPP. STRICT_DNS resolves every ready pod IP (refreshed every 5s by default).
                   - name: inference_pool_fallback
                     type: STRICT_DNS
+                    {{- with include "llm-d-router.proxy.dnsLookupFamily" . }}
+                    dns_lookup_family: {{ . }}
+                    {{- end }}
                     connect_timeout: 10s
                     lb_policy: LEAST_REQUEST
                     circuit_breakers:
@@ -445,6 +456,9 @@ router:
                   {{- $collector := include "llm-d-router.proxy.tracing.collector" . | fromYaml }}
                   - name: otel_collector
                     type: STRICT_DNS
+                    {{- with include "llm-d-router.proxy.dnsLookupFamily" . }}
+                    dns_lookup_family: {{ . }}
+                    {{- end }}
                     connect_timeout: 1s
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -463,6 +477,11 @@ router:
                   {{- end }}
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
+                    {{- if eq (include "llm-d-router.proxy.extProcClusterType" .) "STRICT_DNS" }}
+                    {{- with include "llm-d-router.proxy.dnsLookupFamily" . }}
+                    dns_lookup_family: {{ . }}
+                    {{- end }}
+                    {{- end }}
                     {{- if $isPriorityRouting }}
                     # Short connection timeout allows Envoy to quickly detect unreachable primary pods and trigger failover.
                     connect_timeout: {{ .Values.router.proxy.priorityRouting.connectTimeout }}
