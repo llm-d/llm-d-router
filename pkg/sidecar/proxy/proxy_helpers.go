@@ -312,6 +312,83 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	return raw, parsed, true
 }
 
+// deleteCallerPDFlags removes kv_transfer_params.do_remote_prefill and
+// do_remote_decode, keeping the other keys as raw bytes, and reports whether
+// either was present. The P/D connectors set both flags themselves. A caller's
+// do_remote_prefill on a decoder-only request makes vLLM's NIXL scheduler assert.
+func deleteCallerPDFlags(body map[string]any) bool {
+	rawParams, _ := body[reqcommon.FieldKVTransferParams].(json.RawMessage)
+	var params map[string]json.RawMessage
+	if json.Unmarshal(rawParams, &params) != nil {
+		return false
+	}
+	_, hasPrefill := params[reqcommon.FieldDoRemotePrefill]
+	_, hasDecode := params[reqcommon.FieldDoRemoteDecode]
+	if !hasPrefill && !hasDecode {
+		return false
+	}
+	delete(params, reqcommon.FieldDoRemotePrefill)
+	delete(params, reqcommon.FieldDoRemoteDecode)
+	if len(params) == 0 {
+		delete(body, reqcommon.FieldKVTransferParams)
+	} else if cleaned, err := json.Marshal(params); err == nil {
+		body[reqcommon.FieldKVTransferParams] = json.RawMessage(cleaned)
+	}
+	return true
+}
+
+// decoderOnlyRequest returns r with deleteCallerPDFlags applied,
+// re-encoding the body only when it changed. Responses bodies go through
+// readJSONBody's guards. Any other body that is not a JSON object is forwarded
+// as sent, for the engine to reject, unless it holds NaN or Infinity: Python's
+// parser accepts those literals, so the engine would read the flags.
+func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p p2pRouting, apiType reqcommon.APIType) (*http.Request, bool) {
+	body := p2p.body
+	if body == nil {
+		switch {
+		case apiType == reqcommon.APITypeResponses:
+			raw, parsed, ok := s.readJSONBody(r, w)
+			if !ok {
+				return r, false
+			}
+			r, body = cloneRequestWithBody(r.Context(), r, raw), parsed
+		case r.Body == nil:
+			return r, true
+		default:
+			raw, err := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			if err != nil {
+				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("failed to read request body: %w", err)); writeErr != nil {
+					log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
+				}
+				return r, false
+			}
+			r = cloneRequestWithBody(r.Context(), r, raw)
+			// No inspected fields, so a number Go cannot hold does not hide the flags.
+			if body, err = reqcommon.DecodeRequestBody(raw, nil); err != nil {
+				if !bytes.Contains(raw, []byte("NaN")) && !bytes.Contains(raw, []byte("Infinity")) {
+					return r, true
+				}
+				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("%w: %w", errInvalidJSON, err)); writeErr != nil {
+					log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
+				}
+				return r, false
+			}
+		}
+	}
+	if !deleteCallerPDFlags(body) {
+		return r, true
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
+		}
+		return r, false
+	}
+	return cloneRequestWithBody(r.Context(), r, raw), true
+}
+
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
 	cloned := r.Clone(ctx)
 	cloned.Body = io.NopCloser(bytes.NewReader(body))

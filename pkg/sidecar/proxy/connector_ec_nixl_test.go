@@ -876,6 +876,45 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 	assert.Equal(t, float64(0), threshold)
 }
 
+// The direct encoder-to-decoder branch is a decoder-only forward too, so a
+// caller's do_remote_prefill must not reach the decoder from it either.
+func TestHandleECNIXLDecoderDirectDropsCallerPDFlags(t *testing.T) {
+	var decoderBody []byte
+	decoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decoderBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer decoderBackend.Close()
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}],"ec_transfer_params":{"hash-0":{"peer_host":"10.0.0.1"}}}`))
+	}))
+	defer encoderBackend.Close()
+	decoderURL, err := url.Parse(decoderBackend.URL)
+	assert.NoError(t, err)
+	encoderURL, err := url.Parse(encoderBackend.URL)
+	assert.NoError(t, err)
+
+	srv := NewProxy(Config{Port: "0", DecoderURL: decoderURL})
+	srv.logger = log.Log
+	srv.decoderProxy = httputil.NewSingleHostReverseProxy(decoderURL)
+
+	request := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
+	request[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldDoRemotePrefill: true}
+	reqBody, _ := json.Marshal(request)
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
+
+	srv.handleECNIXL(httptest.NewRecorder(), httpReq, "", []string{encoderURL.Host}, p2pRouting{}, reqcommon.APITypeChatCompletions)
+
+	var parsed map[string]any
+	if !assert.NoError(t, json.Unmarshal(decoderBody, &parsed)) {
+		return
+	}
+	assert.NotContains(t, parsed, reqcommon.FieldKVTransferParams)
+}
+
 // TestECEPDDecodeBody verifies where ec_transfer_params lands once the real
 // NIXLv2 connector runs behind handleECNIXL: the prefill stage consumes the
 // encoder cache, so it keeps the field; decode behind a prefiller has no
