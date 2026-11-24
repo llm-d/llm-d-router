@@ -27,6 +27,7 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // ttsRequest builds a request whose body carries a text-to-speech payload.
@@ -40,6 +41,17 @@ func ttsRequest(input, instructions, refText string, maxOut *int64) *fwksched.In
 			},
 			MaxOutputTokens: maxOut,
 		},
+	}
+}
+
+// transcriptionRequest builds a request whose body carries an audio
+// transcription payload and the audio duration header.
+func transcriptionRequest(duration string) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			Transcriptions: &fwkrequest.TranscriptionRequest{Prompt: "transcript"},
+		},
+		Headers: map[string]string{metadata.AudioDurationHeaderKey: duration},
 	}
 }
 
@@ -162,6 +174,53 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	t.Run("missing attribute, untokenized -> UNKNOWN 1000", func(t *testing.T) {
 		req := &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}}
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
+	})
+}
+
+func TestEstimateOutputFromRequest_Transcriptions(t *testing.T) {
+	e := NewSimpleTokenEstimator(nil)
+
+	t.Run("ten seconds", func(t *testing.T) {
+		require.Equal(t, int64(40), e.EstimateOutputFromRequest(transcriptionRequest("10")))
+	})
+	t.Run("fractional duration", func(t *testing.T) {
+		require.Equal(t, int64(10), e.EstimateOutputFromRequest(transcriptionRequest("2.5")))
+	})
+	t.Run("missing duration uses the audio default", func(t *testing.T) {
+		require.Equal(t, int64(40), e.EstimateOutputFromRequest(transcriptionRequest("")))
+	})
+	t.Run("duration estimate ignores the text bucket", func(t *testing.T) {
+		req := transcriptionRequest("10")
+		req.PutAttribute(outlenbucket.AttributeKey, outlenbucket.Long)
+		require.Equal(t, int64(40), e.EstimateOutputFromRequest(req))
+	})
+	t.Run("duration estimate is capped", func(t *testing.T) {
+		require.Equal(t, asrMaxOutputTokens, e.EstimateOutputFromRequest(transcriptionRequest("1000000")))
+	})
+	t.Run("operator cap applies", func(t *testing.T) {
+		capped := NewSimpleTokenEstimator(ptr.To(int64(10)))
+		require.Equal(t, int64(10), capped.EstimateOutputFromRequest(transcriptionRequest("10")))
+	})
+	t.Run("client max_completion_tokens applies", func(t *testing.T) {
+		req := transcriptionRequest("10")
+		req.Body.MaxOutputTokens = ptr.To(int64(5))
+		require.Equal(t, int64(5), e.EstimateOutputFromRequest(req))
+	})
+	t.Run("long audio applies max_completion_tokens per chunk", func(t *testing.T) {
+		req := transcriptionRequest("60")
+		req.Body.MaxOutputTokens = ptr.To(int64(10))
+		require.Equal(t, int64(30), e.EstimateOutputFromRequest(req))
+	})
+	t.Run("very long audio still applies max_completion_tokens per chunk", func(t *testing.T) {
+		req := transcriptionRequest("7200")
+		req.Body.MaxOutputTokens = ptr.To(int64(1))
+		require.Equal(t, int64(249), e.EstimateOutputFromRequest(req))
+	})
+	t.Run("uploaded file without the header uses its byte rate", func(t *testing.T) {
+		req := transcriptionRequest("")
+		// 480000 bytes at the default 16000 B/s is 30s.
+		req.Body.Transcriptions.Audio = fwkrequest.UploadedMedia{SizeBytes: 480000, Head: []byte("ID3")}
+		require.Equal(t, int64(120), e.EstimateOutputFromRequest(req))
 	})
 }
 

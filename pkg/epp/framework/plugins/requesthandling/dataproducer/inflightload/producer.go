@@ -649,9 +649,9 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
-		// TTS completion tokens are codec frames, not text output-length
+		// TTS and transcription completion counts are not text output-length
 		// samples; they must not train the text UNKNOWN average.
-		if request.Body != nil && !isTextToSpeech(request) &&
+		if request.Body != nil && !isTextToSpeech(request) && request.Body.Transcriptions == nil &&
 			resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
 			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))

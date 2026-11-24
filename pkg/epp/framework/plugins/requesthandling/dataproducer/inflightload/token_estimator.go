@@ -24,6 +24,7 @@ import (
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 )
 
@@ -31,9 +32,7 @@ import (
 type TokenEstimator interface {
 	// EstimateInput returns the estimated input token count for the request.
 	EstimateInput(request *fwksched.InferenceRequest) int64
-	// EstimateOutputFromRequest returns the estimated output token count for a
-	// request from the output-length bucket published by the outlen-bucket plugin, bounded by
-	// the client-requested cap and the estimator's operator cap.
+	// EstimateOutputFromRequest returns the estimated output work for a request.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 	// ObserveOutput records the completion tokens a finished request produced.
 	ObserveOutput(bucket outlenbucket.Bucket, completionTokens int64)
@@ -62,10 +61,22 @@ const (
 	// keeps non-ASCII text proportional to its speech duration.
 	ttsFramesPerSpokenByte = 1.0
 	ttsMaxFrames           = 4096
+
+	// ASR output is text, but its length follows the audio duration rather than
+	// a text prompt. Four tokens per second covers typical speech and
+	// punctuation; model-specific rates belong in per-pool configuration.
+	asrOutputTokensPerSecond       = 4.0
+	asrMaxOutputTokens       int64 = 16_384
+	// vLLM chunks long audio at 30s with a 1s split search window and applies
+	// max_completion_tokens per chunk. These are its defaults; model-specific
+	// values belong in per-pool configuration.
+	asrDefaultClipSeconds    = 30.0
+	asrDefaultOverlapSeconds = 1.0
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
-// output-length bucket published by the outlen-bucket plugin to an output-token estimate,
+// output-length bucket published by the outlen-bucket plugin or an audio duration
+// for transcriptions and translations to an output estimate. The estimate is
 // bounded by the client-requested cap and an optional operator cap.
 type SimpleTokenEstimator struct {
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens
@@ -95,12 +106,15 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 	return int64(request.Body.TokenizedRequest.TokenCount())
 }
 
-// EstimateOutputFromRequest returns the estimated output token count for a request
-// from the output-length bucket published by the outlen-bucket plugin: LONG (reasoning) maps to
-// a flat 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to the running average
-// of observed UNKNOWN completion tokens (1000 before the first one), kept within
-// [SHORT, LONG] to preserve the ranking SHORT <= UNKNOWN <= LONG. The estimate is bounded
-// by the client-requested cap and the estimator's operator cap.
+// EstimateOutputFromRequest returns the estimated output work for a request.
+// Transcriptions and translations follow the uploaded audio duration; otherwise
+// the text estimate comes from the output-length bucket published by the
+// outlen-bucket plugin. The text estimate maps LONG (reasoning) to a flat
+// 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to the running
+// average of observed UNKNOWN completion tokens (1000 before the first one),
+// kept within [SHORT, LONG] to preserve the ranking SHORT <= UNKNOWN <= LONG.
+// The estimate is bounded by the client-requested cap and the estimator's
+// operator cap.
 //
 // Ordering dependency: the bucket comes from an attribute that the outlen-bucket
 // plugin publishes in its RequestHeader hook, which this method reads. The read is
@@ -120,6 +134,12 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 	// speech).
 	if tts := request.Body.TextToSpeech; tts != nil {
 		return e.clampOutput(ttsOutputFrames(tts, request.Body.MaxOutputTokens), request.Body.MaxOutputTokens)
+	}
+
+	// Transcription and translation output length follows the uploaded audio,
+	// not a text prompt.
+	if tr := request.Body.Transcriptions; tr != nil {
+		return e.clampOutput(transcriptionOutputTokens(tr, request.Body.MaxOutputTokens, request.Headers), nil)
 	}
 
 	// An absent attribute reads as the zero value (Unknown) and is handled by the
@@ -165,6 +185,41 @@ func ttsOutputFrames(tts *fwkrequest.TextToSpeechRequest, clientCap *int64) int6
 		expected = *clientCap
 	}
 	expected = min(expected, ttsMaxFrames)
+	return max(expected, 1)
+}
+
+// transcriptionOutputTokens estimates transcript or translation output length
+// from the uploaded audio duration. vLLM applies max_completion_tokens per
+// audio chunk, so the client cap scales with the estimated chunk count.
+func transcriptionOutputTokens(tr *fwkrequest.TranscriptionRequest, maxCompletionTokens *int64, headers map[string]string) int64 {
+	duration := tokenproducer.AudioDurationSeconds(tr.Audio.Head, tr.Audio.SizeBytes, headers)
+
+	expected := asrMaxOutputTokens
+	if duration <= float64(asrMaxOutputTokens)/asrOutputTokensPerSecond {
+		expected = int64(math.Ceil(duration * asrOutputTokensPerSecond))
+	}
+	if maxCompletionTokens == nil || *maxCompletionTokens <= 0 {
+		return max(expected, 1)
+	}
+
+	chunks := int64(1)
+	if duration > asrDefaultClipSeconds {
+		estimatedChunks := math.Ceil(duration / (asrDefaultClipSeconds - asrDefaultOverlapSeconds))
+		if estimatedChunks > float64(asrMaxOutputTokens) {
+			chunks = asrMaxOutputTokens
+		} else {
+			chunks = int64(estimatedChunks)
+		}
+	}
+	cap := *maxCompletionTokens
+	if chunks > 1 {
+		if cap > asrMaxOutputTokens/chunks {
+			cap = asrMaxOutputTokens
+		} else {
+			cap *= chunks
+		}
+	}
+	expected = min(expected, cap)
 	return max(expected, 1)
 }
 

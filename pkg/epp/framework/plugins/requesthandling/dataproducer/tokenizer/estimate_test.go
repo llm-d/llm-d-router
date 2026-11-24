@@ -1324,6 +1324,20 @@ func TestTranscriptionsEstimator_WAVDuration(t *testing.T) {
 	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
 }
 
+// TestTranscriptionsEstimator_Hotwords asserts hotwords contribute input text
+// ahead of the audio placeholder, as the engine includes them in the ASR prompt.
+func TestTranscriptionsEstimator_Hotwords(t *testing.T) {
+	media := uploadedWAV(t, 16000, 1, 48000)
+	body := transcriptionsBody("hint", media)
+	body.Transcriptions.Hotwords = "llm-d router"
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, len(PackBytes([]byte("hint\nllm-d router"))), features[0].Offset)
+}
+
 // TestTranscriptionsEstimator_NonWAVUsesByteRate asserts an uploaded file that
 // is not a WAV converts through the byte rate: 48000 bytes at the default
 // 16000 B/s is 3s.

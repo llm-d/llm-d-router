@@ -103,6 +103,10 @@ func EstimateOutlen(body *fwkrequest.InferenceRequestBody) Bucket {
 	if body.TextToSpeech != nil {
 		return Unknown
 	}
+	// Transcription and translation output length follows the audio duration.
+	if body.Transcriptions != nil {
+		return Unknown
+	}
 
 	var enableThinking *bool
 	var thinkingBudget *int64

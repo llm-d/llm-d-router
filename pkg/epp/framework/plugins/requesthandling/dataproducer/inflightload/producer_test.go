@@ -805,6 +805,27 @@ func TestInFlightLoadProducer_TTSCompletionAfterBodyReleaseDoesNotTrainTextEstim
 	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(textReq))
 }
 
+func TestInFlightLoadProducer_TranscriptionCompletionDoesNotTrainTextEstimate(t *testing.T) {
+	producer := newTestProducer(t)
+	body := &fwkrequest.InferenceRequestBody{
+		Transcriptions: &fwkrequest.TranscriptionRequest{Prompt: "transcript"},
+	}
+	req := &fwksched.InferenceRequest{
+		RequestID:        "req-transcription",
+		Body:             body.ResponsePhaseView(),
+		SchedulingResult: &fwksched.SchedulingResult{},
+	}
+
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Usage:            fwkrequest.Usage{CompletionTokens: 4096},
+	}, nil)
+
+	textReq := makeTokenRequest("req-text", 4)
+	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(textReq))
+}
+
 // makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
 // which is what the estimator reads to derive the input token count. No outlen-bucket
 // attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --

@@ -46,6 +46,11 @@ by the output-length bucket published by the `outlen-bucket` plugin:
 The estimate is then bounded by the client-requested cap (`max_output_tokens` / `max_tokens`)
 and `maxEstimatedOutputTokens`. The UNKNOWN average is kept within [100, 4 096], so
 SHORT <= UNKNOWN <= LONG.
+Transcription and translation requests are estimated from the uploaded audio
+duration at four output tokens per second, capped at 16,384, and do not use the
+bucket. Their prompt and hotwords contribute input tokens, and
+`max_completion_tokens` is applied per 30-second audio chunk with a 1-second
+split window, matching vLLM's chunking.
 When the `outlen-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
 logs a one-time warning.
 
