@@ -119,6 +119,37 @@ func TestWalkKeysVisitsEveryPositionAcrossBatches(t *testing.T) {
 	}
 }
 
+// A run of dense keys holding identical entry words reuses the run head's
+// decoded entries, across batch boundaries and around a key that breaks the
+// run, with each position still visiting its own entry set.
+func TestWalkKeysDenseRunReuse(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewDenseMemoryIndex(nil)
+	require.NoError(t, err)
+	podA := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "pod-b", DeviceTier: "cpu"}
+	// One peek batch caps at 256 keys, so a 600-key run spans batches.
+	keys := make([]BlockHash, 600)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+	require.NoError(t, index.Add(ctx, nil, keys[:300], []PodEntry{podA, podB}))
+	require.NoError(t, index.Add(ctx, nil, keys[300:301], []PodEntry{podA}))
+	require.NoError(t, index.Add(ctx, nil, keys[301:], []PodEntry{podA, podB}))
+
+	visits := walkAll(t, index, keys)
+
+	require.Len(t, visits, len(keys))
+	for i, v := range visits {
+		require.True(t, v.found, "position %d", i)
+		want := []string{"pod-a@gpu", "pod-b@cpu"}
+		if i == 300 {
+			want = []string{"pod-a@gpu"}
+		}
+		assert.ElementsMatch(t, want, entryLabels(t, index, v.entries), "position %d", i)
+	}
+}
+
 // A key listed twice is visited at both positions.
 func TestWalkKeysVisitsDuplicatePositions(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())

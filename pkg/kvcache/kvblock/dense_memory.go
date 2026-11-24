@@ -725,10 +725,15 @@ func (d *DenseMemoryIndex) rowTierNameLocked(tier uint8) string {
 
 // denseWalkState is the reusable copy-out buffer for walks: the per-key
 // found flags and entry ranges of the current batch, and the decoded entries.
+// runWords holds the last decoded key's entry words and runBounds its decoded
+// entry range, so a key whose words repeat the last one reuses that range
+// instead of decoding again.
 type denseWalkState struct {
-	found   []bool
-	bounds  [][2]int
-	entries []WalkEntry
+	found     []bool
+	bounds    [][2]int
+	entries   []WalkEntry
+	runWords  []uint32
+	runBounds [2]int
 }
 
 var walkStatePool = sync.Pool{New: func() any { return &denseWalkState{} }}
@@ -736,9 +741,10 @@ var walkStatePool = sync.Pool{New: func() any { return &denseWalkState{} }}
 // WalkKeys implements KeyWalker. Batches of keys are copied out under one
 // read acquisition, decoding the packed words into WalkEntries (dead pods
 // filtered, one entry per pod and tier pair), and the visits run after the
-// lock is released, so no lock is held across a visit callback. Each found
-// key's slot records read evidence with one atomic OR; the read path takes
-// no write acquisition.
+// lock is released, so no lock is held across a visit callback. A key whose
+// words repeat the previously decoded key's reuses that key's decoded
+// entries instead of decoding again. Each found key's slot records read
+// evidence with one atomic OR; the read path takes no write acquisition.
 func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []WalkEntry) bool,
 ) error {
@@ -756,6 +762,7 @@ func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash
 		ws.found = ws.found[:0]
 		ws.bounds = ws.bounds[:0]
 		ws.entries = ws.entries[:0]
+		runValid := false
 		d.mu.RLock()
 		for _, key := range keys {
 			b0 := len(ws.entries)
@@ -763,7 +770,16 @@ func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash
 			if i, ok := d.tbl.find(key); ok {
 				found = true
 				d.markRead(&d.tbl.slots[i])
-				d.decodeLocked(&d.tbl.slots[i].slot, ws, b0)
+				slot := &d.tbl.slots[i].slot
+				if runValid && d.matchRunWords(slot, ws) {
+					ws.found = append(ws.found, found)
+					ws.bounds = append(ws.bounds, ws.runBounds)
+					continue
+				}
+				ws.runWords = ws.runWords[:0]
+				d.decodeLocked(slot, ws, b0)
+				ws.runBounds = [2]int{b0, len(ws.entries)}
+				runValid = true
 			}
 			ws.found = append(ws.found, found)
 			ws.bounds = append(ws.bounds, [2]int{b0, len(ws.entries)})
@@ -785,21 +801,50 @@ func (d *DenseMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash
 	return ctx.Err()
 }
 
+// matchRunWords reports whether slot's entry words are exactly ws.runWords,
+// the words of the last decoded key, in which case that key's decoded
+// entries are also this key's. Equal word streams decode equally: the dead
+// set cannot change under the read acquisition the caller holds. Called
+// with mu held for reading.
+func (d *DenseMemoryIndex) matchRunWords(slot *keySlot, ws *denseWalkState) bool {
+	n := 0
+	equal := true
+	forEachSlotWord(slot, &d.arena, func(w uint32) bool {
+		if n >= len(ws.runWords) || ws.runWords[n] != w {
+			equal = false
+			return false
+		}
+		n++
+		return true
+	})
+	return equal && n == len(ws.runWords)
+}
+
 // decodeLocked appends the slot's walk entries to ws.entries, skipping dead
 // pods and folding duplicate (pod, tier, speculative) triples that grouped
 // and ungrouped words of one pod can both carry. The fold is scoped to the
-// key's own entries, which start at ws.entries[from]. Called with mu held
-// for reading.
+// key's own entries, which start at ws.entries[from]. Duplicate triples
+// require a grouped word (same-identity words merge at insert), so the
+// dedup scan runs only once the key has shown one. The slot's words are
+// recorded in ws.runWords for the next key's run comparison. Called with mu
+// held for reading.
 func (d *DenseMemoryIndex) decodeLocked(slot *keySlot, ws *denseWalkState, from int) {
+	grouped := false
 	forEachSlotWord(slot, &d.arena, func(w uint32) bool {
+		ws.runWords = append(ws.runWords, w)
 		pod := entryPod(w)
 		if d.isDead(pod) {
 			return true
 		}
+		if w&entryGroupedBit != 0 {
+			grouped = true
+		}
 		emit := func(e WalkEntry) {
-			for i := from; i < len(ws.entries); i++ {
-				if ws.entries[i] == e {
-					return
+			if grouped {
+				for i := from; i < len(ws.entries); i++ {
+					if ws.entries[i] == e {
+						return
+					}
 				}
 			}
 			ws.entries = append(ws.entries, e)
