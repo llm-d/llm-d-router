@@ -584,6 +584,43 @@ func TestPreRequest_P2PPortAddsRankIndex(t *testing.T) {
 	assertPrefillHeader(t, req, "10.0.0.2", 8002)
 }
 
+func TestPreRequest_SamePodDifferentRankEndpointPullsFromPeerRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 8000})
+
+	source := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-1-rank-0"}, Address: "10.0.0.2", Port: "8080",
+		RankIndex: 2, RankByHeader: true,
+	}, nil, nil)
+	source.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(4, 4, testBlockSize).WithCachedBlockCount(4))
+	computing := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-1-rank-1"}, Address: "10.0.0.2", Port: "8080",
+		RankIndex: 3, RankByHeader: true,
+	}, nil, nil)
+	computing.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(0, 4, testBlockSize).WithCachedBlockCount(0))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-same-pod-rank", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source, computing}))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
+
+	assertSource(t, req, "10.0.0.2", 8002)
+}
+
+func TestPreRequest_RankEndpointGlobalPortOverflowReportsGlobalRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 65530})
+	prefill := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-p-rank-1"}, Address: "10.0.0.2", Port: "8080",
+		RankIndex: 9, RankByHeader: true,
+	}, nil, nil)
+	req := &scheduling.InferenceRequest{RequestID: "req-global-overflow", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+
+	err := p.PreRequest(ctx, req, prefillOnly(prefill))
+	require.ErrorContains(t, err, "plus rank 9 is outside 1-65535")
+}
+
 // p2pConnectorPort plus the rank must stay a TCP port. A prefill endpoint
 // beyond it fails the request at the EPP with the misconfiguration named,
 // instead of a sidecar 500 on a malformed header.

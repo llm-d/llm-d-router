@@ -371,6 +371,7 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 // chosen peer's own count, which may be one block below the pool maximum.
 type bestMatchPeer struct {
 	hostPort     string
+	rankIndex    int
 	address      string
 	p2pPort      int
 	cachedTokens int
@@ -490,6 +491,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			md := candidates[chosen].ep.GetMetadata()
 			best = bestMatchPeer{
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
+				rankIndex:    md.GetRankIndex(),
 				address:      md.Address,
 				p2pPort:      candidates[chosen].p2pPort,
 				cachedTokens: candidates[chosen].cached,
@@ -644,7 +646,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	// delta check below only covers the first endpoint; with
 	// maxNumOfEndpoints > 1 the routing layer receives every selected
 	// endpoint and may serve the request from any of them.
-	if isSelected(best.hostPort, computing.TargetEndpoints) {
+	if isSelected(best, computing.TargetEndpoints) {
 		outcome = "self"
 		return nil
 	}
@@ -692,10 +694,14 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	return nil
 }
 
-// isSelected reports whether hostPort names one of the selected endpoints.
-func isSelected(hostPort string, endpoints []scheduling.Endpoint) bool {
+// isSelected reports whether best names one of the selected endpoints. Another
+// rank endpoint behind the same serving host:port has its own P2P tier port and
+// is a valid source peer.
+func isSelected(best *bestMatchPeer, endpoints []scheduling.Endpoint) bool {
 	for _, ep := range endpoints {
-		if md := ep.GetMetadata(); md != nil && net.JoinHostPort(md.Address, md.Port) == hostPort {
+		if md := ep.GetMetadata(); md != nil &&
+			net.JoinHostPort(md.Address, md.Port) == best.hostPort &&
+			md.GetRankIndex() == best.rankIndex {
 			return true
 		}
 	}
