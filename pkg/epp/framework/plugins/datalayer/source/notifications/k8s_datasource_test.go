@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -40,6 +41,16 @@ func TestNewK8sNotificationSource(t *testing.T) {
 	assert.Equal(t, "test-type", src.TypedName().Type)
 	assert.Equal(t, "test-name", src.TypedName().Name)
 	assert.Equal(t, testGVK, src.GVK())
+	assert.Empty(t, src.Namespace())
+	assert.Nil(t, src.LabelSelector())
+}
+
+func TestNewK8sNotificationSourceScoped(t *testing.T) {
+	sel := labels.SelectorFromSet(labels.Set{"app": "model"})
+	src := NewK8sNotificationSource("test-type", "test-name", testGVK,
+		WithNamespace("ns"), WithLabelSelector(sel))
+	assert.Equal(t, "ns", src.Namespace())
+	assert.Equal(t, sel, src.LabelSelector())
 }
 
 func TestNotifyReturnsEvent(t *testing.T) {
