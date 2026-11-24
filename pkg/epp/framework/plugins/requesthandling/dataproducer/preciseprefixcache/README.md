@@ -108,6 +108,10 @@ correlate.
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
 
+A prompt that ends on a block boundary is matched without its last block:
+vLLM caps a prefix hit at `prompt_len - 1` tokens because it computes the last
+prompt token's logits, so it never serves that block from cache.
+
 ### Shared event input
 
 Set `kvEventsSourceRef` to the name of a

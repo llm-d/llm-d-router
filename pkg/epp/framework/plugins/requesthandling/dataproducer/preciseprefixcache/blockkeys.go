@@ -58,34 +58,55 @@ type mmPromptContent struct {
 // KV-block keys, folding CacheSalt into each prompt's first block. The second
 // return value holds one MM content value per returned prompt (nil for
 // text-only prompts), aligned positionally with the keys.
+//
+// The third return value holds, per returned prompt, how many leading keys an
+// engine can serve from cache. vLLM caps a prefix hit at prompt_len - 1 tokens
+// because it must compute the last prompt token's logits, so a prompt that ends
+// on a block boundary never gets its last block from cache. Bigram keys already
+// stop before the last token, so all of them count.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, format kvblock.CacheFormat,
-) ([][]kvblock.BlockHash, []*mmPromptContent, error) {
+) ([][]kvblock.BlockHash, []*mmPromptContent, []int, error) {
 	if request == nil || request.Body == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	tp := request.Body.TokenizedRequest
 	if tp == nil || len(tp.Prompts) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	result := make([][]kvblock.BlockHash, 0, len(tp.Prompts))
 	mmContent := make([]*mmPromptContent, 0, len(tp.Prompts))
+	servable := make([]int, 0, len(tp.Prompts))
 	for _, p := range tp.Prompts {
 		if len(p.TokenIDs) == 0 {
 			continue
 		}
 		keys, mm, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, format)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(keys) == 0 {
 			continue
 		}
 		result = append(result, keys)
 		mmContent = append(mmContent, mm)
+		servable = append(servable, servableBlockKeys(len(keys), len(p.TokenIDs), format))
 	}
-	return result, mmContent, nil
+	return result, mmContent, servable, nil
+}
+
+// servableBlockKeys returns how many of a prompt's numKeys leading block keys
+// an engine can serve from cache. When the prompt is exactly numKeys whole
+// blocks, the last block holds the last prompt token and is recomputed.
+func servableBlockKeys(numKeys, numTokens int, format kvblock.CacheFormat) int {
+	if format.Bigram || format.BlockSize <= 0 || numKeys == 0 {
+		return numKeys
+	}
+	if numTokens == numKeys*format.BlockSize {
+		return numKeys - 1
+	}
+	return numKeys
 }
 
 func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,
