@@ -320,25 +320,34 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 }
 
 // settledCost returns the weighted tokens a dispatched request is charged at end of stream:
-//   - reported usage is charged as reported, however the stream ended;
 //   - an error status from the model server with no usage is charged nothing;
-//   - a stream cut short (client disconnect, eviction, error) with no usage is charged the prompt
-//     estimate plus the streamed events as output tokens, or nothing when nothing was streamed;
-//   - a natural end with no usage, or a request whose response the EPP does not observe, keeps
+//   - a request with usage or streamed events is charged its prompt (the reported input tokens,
+//     else the estimate) plus its output (the reported output tokens, else the streamed events),
+//     however the stream ended. Usage can be partial: an Anthropic stream reports input tokens in
+//     message_start and output tokens only in the final message_delta, so a stream cut between
+//     them falls back to the streamed events for its output;
+//   - a stream cut short (client disconnect, eviction, error) with neither is charged nothing;
+//   - a natural end with neither, or a request whose response the EPP does not observe, keeps
 //     the reservation, the only estimate available.
 func (p *Plugin) settledCost(rec *hold, response *requesthandling.Response) float64 {
 	usage := response.Usage
+	hasUsage := usage.PromptTokens > 0 || usage.CompletionTokens > 0
 	switch {
-	case usage.PromptTokens > 0 || usage.CompletionTokens > 0:
-		return float64(usage.PromptTokens) + p.outputWeight*float64(usage.CompletionTokens)
-	case rec.errorStatus.Load():
+	case !hasUsage && rec.errorStatus.Load():
 		return 0
+	case hasUsage || response.StreamedEvents > 0:
+		prompt := rec.prompt
+		if usage.PromptTokens > 0 {
+			prompt = float64(usage.PromptTokens)
+		}
+		output := usage.CompletionTokens
+		if output <= 0 {
+			output = response.StreamedEvents
+		}
+		return prompt + p.outputWeight*float64(output)
 	case response.TerminationCause == requesthandling.TerminationCauseClientDisconnect,
 		response.TerminationCause == requesthandling.TerminationCauseEvicted,
 		response.TerminationCause == requesthandling.TerminationCauseError:
-		if response.StreamedEvents > 0 {
-			return rec.prompt + p.outputWeight*float64(response.StreamedEvents)
-		}
 		return 0
 	default:
 		return rec.reserved

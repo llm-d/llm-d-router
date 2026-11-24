@@ -19,13 +19,13 @@ A request that leaves before it is dispatched (a flow-control rejection, a clien
 
 | How the request ended | Charge |
 |---|---|
-| Usage reported, however the stream ended | `promptTokens + outputTokenWeight * completionTokens` |
 | Error status (non-2xx) from the model server, no usage | Nothing |
-| Stream cut short (`client-disconnect`, `evicted`, `error`), no usage | The prompt estimate plus `outputTokenWeight` per streamed event, or nothing when nothing was streamed |
-| Natural end, no usage | The reservation |
+| Usage reported or events streamed, however the stream ended | `input + outputTokenWeight * output`: `input` is `promptTokens`, else the prompt estimate; `output` is `completionTokens`, else the streamed events |
+| Stream cut short (`client-disconnect`, `evicted`, `error`), no usage and nothing streamed | Nothing |
+| Natural end, no usage and nothing streamed | The reservation |
 | Response not observed (the route skips response processing) | The reservation |
 
-A streamed event approximates one output token. A streaming response carries usage only when the request sets `stream_options.include_usage` or the model server forces it (vLLM: `--enable-force-include-usage`).
+A streamed event approximates one output token. Usage can be partial: an Anthropic stream reports input tokens in `message_start` and output tokens only in the final `message_delta`, so a stream cut between them is charged its streamed events as output. A streaming response carries usage only when the request sets `stream_options.include_usage` or the model server forces it (vLLM: `--enable-force-include-usage`).
 
 Until settlement, output is charged at its cap, not at a running estimate, because usage is reported only at end of stream. Reserving the cap keeps requests that stay within their caps from together spending more than the budget. The cost is that in-flight requests hold more of the budget than they will use, so near the end of the budget a request can be downgraded while reservations that will be partly refunded hold the rest.
 

@@ -427,12 +427,18 @@ func TestSettlementByTerminationCause(t *testing.T) {
 		wantNote string
 	}{
 		{name: "natural with usage", status: "200", cause: fwkrh.TerminationCauseNatural, prompt: 100, output: 20, want: 140, wantNote: "the reported usage"},
-		{name: "natural without usage", status: "200", cause: fwkrh.TerminationCauseNatural, events: 50, want: 300, wantNote: "the reservation"},
+		{name: "natural without usage", status: "200", cause: fwkrh.TerminationCauseNatural, events: 50, want: 200, wantNote: "the prompt plus the streamed events"},
+		{name: "natural without usage or events", status: "200", cause: fwkrh.TerminationCauseNatural, want: 300, wantNote: "the reservation"},
+		{name: "natural with prompt-only usage", status: "200", cause: fwkrh.TerminationCauseNatural, prompt: 80, events: 20, want: 120, wantNote: "the reported prompt plus the streamed events"},
 		{name: "upstream error status", status: "503", cause: fwkrh.TerminationCauseNatural, want: 0, wantNote: "nothing for an error that reports no usage"},
 		{name: "upstream error status with usage", status: "400", cause: fwkrh.TerminationCauseNatural, prompt: 100, want: 100, wantNote: "the reported usage"},
 		{name: "client disconnect mid-stream", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, events: 10, want: 120, wantNote: "the prompt plus the streamed events"},
 		{name: "client disconnect before output", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, want: 0, wantNote: "nothing when nothing was streamed"},
 		{name: "client disconnect with usage", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, prompt: 100, output: 90, events: 10, want: 280, wantNote: "the reported usage"},
+		// Anthropic reports input tokens in message_start; output arrives only in the final message_delta.
+		{name: "client disconnect after prompt-only usage", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, prompt: 80, events: 20, want: 120, wantNote: "the reported prompt plus the streamed events"},
+		{name: "error after prompt-only usage", status: "200", cause: fwkrh.TerminationCauseError, prompt: 80, events: 20, want: 120, wantNote: "the reported prompt plus the streamed events"},
+		{name: "upstream error status with usage cut", status: "500", cause: fwkrh.TerminationCauseError, prompt: 80, events: 20, want: 120, wantNote: "the reported prompt plus the streamed events"},
 		{name: "evicted before output", cause: fwkrh.TerminationCauseEvicted, want: 0, wantNote: "nothing when nothing was streamed"},
 		{name: "evicted mid-stream", status: "200", cause: fwkrh.TerminationCauseEvicted, events: 5, want: 110, wantNote: "the prompt plus the streamed events"},
 		{name: "error before output", cause: fwkrh.TerminationCauseError, want: 0, wantNote: "nothing when nothing was streamed"},
