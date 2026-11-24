@@ -149,7 +149,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		if rank := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.PrefillDataParallelRankHeader)); rank != "" {
-			if n, err := strconv.Atoi(rank); err != nil || n < 0 {
+			if rank == routing.NoDataParallelRank {
+				r = r.WithContext(context.WithValue(r.Context(), prefillDPRankKey, ""))
+			} else if n, err := strconv.Atoi(rank); err != nil || n < 0 {
 				logger.Info("ignoring malformed prefill data-parallel rank header", "value", rank)
 			} else {
 				r = r.WithContext(context.WithValue(r.Context(), prefillDPRankKey, rank))

@@ -1648,18 +1648,24 @@ func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 func TestHandler_PreRequest_PrefillDataParallelRank(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	h := NewDisaggProfileHandler("decode", "prefill", "", nil, nil)
-	resultWith := func(md *fwkdl.EndpointMetadata) *scheduling.SchedulingResult {
+	resultWith := func(decodeMD, prefillMD *fwkdl.EndpointMetadata) *scheduling.SchedulingResult {
+		results := map[string]*scheduling.ProfileRunResult{
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{scheduling.NewEndpoint(prefillMD, nil, nil)}},
+		}
+		if decodeMD != nil {
+			results["decode"] = &scheduling.ProfileRunResult{
+				TargetEndpoints: []scheduling.Endpoint{scheduling.NewEndpoint(decodeMD, nil, nil)},
+			}
+		}
 		return &scheduling.SchedulingResult{
 			PrimaryProfileName: "decode",
-			ProfileResults: map[string]*scheduling.ProfileRunResult{
-				"prefill": {TargetEndpoints: []scheduling.Endpoint{scheduling.NewEndpoint(md, nil, nil)}},
-			},
+			ProfileResults:     results,
 		}
 	}
 
 	t.Run("rank endpoint sends its rank", func(t *testing.T) {
 		request := &scheduling.InferenceRequest{Headers: map[string]string{}}
-		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{
+		_ = h.PreRequest(ctx, request, resultWith(nil, &fwkdl.EndpointMetadata{
 			Address: "10.0.0.1", Port: "8000", RankIndex: 1, RankByHeader: true,
 		}))
 		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
@@ -1668,15 +1674,28 @@ func TestHandler_PreRequest_PrefillDataParallelRank(t *testing.T) {
 
 	t.Run("rank endpoint of a group spanning pods sends its global rank", func(t *testing.T) {
 		request := &scheduling.InferenceRequest{Headers: map[string]string{}}
-		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{
+		_ = h.PreRequest(ctx, request, resultWith(nil, &fwkdl.EndpointMetadata{
 			Address: "10.0.0.2", Port: "8000", RankIndex: 3, RankByHeader: true,
 		}))
 		assert.Equal(t, "3", request.Headers[routing.PrefillDataParallelRankHeader])
 	})
 
-	t.Run("endpoint with one rank per port sends no rank and drops a client value", func(t *testing.T) {
+	t.Run("decode rank endpoint with non-rank prefill sends none", func(t *testing.T) {
+		request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+		_ = h.PreRequest(ctx, request, resultWith(
+			&fwkdl.EndpointMetadata{Address: "10.0.0.3", Port: "8000", RankIndex: 1, RankByHeader: true},
+			&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"},
+		))
+		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
+		assert.Equal(t, routing.NoDataParallelRank, request.Headers[routing.PrefillDataParallelRankHeader])
+	})
+
+	t.Run("non-rank decode and prefill endpoints send no rank and drop a client value", func(t *testing.T) {
 		request := &scheduling.InferenceRequest{Headers: map[string]string{routing.PrefillDataParallelRankHeader: "3"}}
-		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"}))
+		_ = h.PreRequest(ctx, request, resultWith(
+			&fwkdl.EndpointMetadata{Address: "10.0.0.3", Port: "8000"},
+			&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"},
+		))
 		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
 		assert.NotContains(t, request.Headers, routing.PrefillDataParallelRankHeader)
 	})

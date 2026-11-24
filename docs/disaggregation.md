@@ -65,11 +65,16 @@ only then.
 When the Prefill Worker serves several data-parallel ranks behind its port (see [Data-parallel ranks behind one port](data-parallel-ranks.md)), EPP also sends
 `x-llm-d-prefiller-data-parallel-rank` with the data-parallel rank it picked on
 the Prefill Worker. The sidecar sends that rank to the Prefill Worker as
-`x-data-parallel-rank`. Without the header, the sidecar removes
-`x-data-parallel-rank` from the prefill request, so the decode rank does not
-reach the Prefill Worker and vLLM picks the prefill rank itself. With
-`--moriio-dp-size` above 1, the sidecar picks both ranks itself and ignores the
-header.
+`x-data-parallel-rank`. When only the Decode Worker is a rank endpoint, EPP
+sends `x-llm-d-prefiller-data-parallel-rank: none`, and the sidecar removes
+`x-data-parallel-rank` from the prefill request so the decode rank does not
+reach the Prefill Worker. When neither worker is a rank endpoint, EPP omits the
+header and the sidecar leaves any client or gateway `x-data-parallel-rank`
+header unchanged on both legs. With `--moriio-dp-size` above 1, the sidecar
+picks both ranks itself and ignores the header.
+
+The sidecar sends no `x-data-parallel-rank` to Encode Workers. The header on
+the client request is the rank of the Decode Worker.
 
 The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are

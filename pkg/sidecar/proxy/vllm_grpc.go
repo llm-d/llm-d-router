@@ -699,6 +699,7 @@ func (l *vllmSequentialPDLeg) runPrefill(
 	_ trace.Span,
 ) error {
 	preq := r.Clone(prefillCtx)
+	setPrefillDPRank(preq)
 	setUnaryGeneratePath(preq)
 	grpcframe.SetSegmentedBody(preq, l.psegs)
 	return servePrefill(prefillHandler, pw, preq)
@@ -958,6 +959,8 @@ func (s *Server) fanoutVLLMEncoder(
 			return fmt.Errorf("build raw media encoder frame: %w", err)
 		}
 		subReq := baseReq.Clone(ctx)
+		// The rank header of the client request names a rank of the decode worker.
+		subReq.Header.Del(routing.DataParallelRankHeader)
 		setUnaryGeneratePath(subReq)
 		grpcframe.SetSegmentedBody(subReq, segs)
 		subReq.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -1008,6 +1011,7 @@ func (s *Server) fanoutVLLMEncoder(
 			}
 
 			subReq := cloneRequestWithBody(grpCtx, baseReq, frame)
+			subReq.Header.Del(routing.DataParallelRankHeader)
 			setUnaryGeneratePath(subReq)
 			subReq.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 			subReq.Header.Set(reqcommon.RequestIDHeaderKey, subReqID)

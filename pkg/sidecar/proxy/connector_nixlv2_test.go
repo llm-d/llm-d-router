@@ -1595,12 +1595,23 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(decodeHeaders.Get(routing.PrefillDataParallelRankHeader)).To(BeEmpty())
 	})
 
-	It("does not send the decode rank to the prefill worker when the EPP picked no prefill rank", func() {
+	It("does not send the decode rank to the prefill worker when the EPP sent none", func() {
 		proxyBaseAddr := startProxy()
-		sendWithRankHeaders(proxyBaseAddr, map[string]string{routing.DataParallelRankHeader: "1"})
+		sendWithRankHeaders(proxyBaseAddr, map[string]string{
+			routing.DataParallelRankHeader:        "1",
+			routing.PrefillDataParallelRankHeader: routing.NoDataParallelRank,
+		})
 
 		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
 		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(Equal("1"))
+	})
+
+	It("preserves a gateway-pinned rank on both legs when neither pool uses rank endpoints", func() {
+		proxyBaseAddr := startProxy()
+		sendWithRankHeaders(proxyBaseAddr, map[string]string{routing.DataParallelRankHeader: "3"})
+
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(Equal("3"))
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(Equal("3"))
 	})
 
 	It("ignores a prefill rank that is not a non-negative integer", func() {

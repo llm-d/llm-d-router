@@ -39,14 +39,18 @@ const (
 )
 
 // setPrefillDPRank sets the prefill request's data-parallel rank to the one the
-// EPP picked on the prefill worker, or removes it. The prefill request is
-// cloned from the decode request, whose rank names a decode engine.
+// EPP picked on the prefill worker, removes it when only the decode worker is a
+// rank endpoint, or leaves it unchanged when neither pool uses rank endpoints.
 func setPrefillDPRank(preq *http.Request) {
-	if rank, _ := preq.Context().Value(prefillDPRankKey).(string); rank != "" {
-		preq.Header.Set(routing.DataParallelRankHeader, rank)
+	rank, ok := preq.Context().Value(prefillDPRankKey).(string)
+	if !ok {
 		return
 	}
-	preq.Header.Del(routing.DataParallelRankHeader)
+	if rank == "" {
+		preq.Header.Del(routing.DataParallelRankHeader)
+		return
+	}
+	preq.Header.Set(routing.DataParallelRankHeader, rank)
 }
 
 // concurrentPrefillGrace limits how long prefill may continue after a
