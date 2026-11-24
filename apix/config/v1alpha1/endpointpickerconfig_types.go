@@ -594,6 +594,11 @@ type PriorityBandConfig struct {
 	MaxRequestsPerFlow *resource.Quantity `json:"maxRequestsPerFlow,omitempty"`
 
 	// +optional
+	// FairAdmission admits a request refused only by this band's request-count limit by evicting the newest queued
+	// request of the longest other flow, if that flow leads the request's flow by at least two. Defaults to false.
+	FairAdmission bool `json:"fairAdmission,omitempty"`
+
+	// +optional
 	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
 	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
 	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
@@ -629,6 +634,10 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequestsPerFlow != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequestsPerFlow: %d", pbc.MaxRequestsPerFlow.Value()))
+	}
+
+	if pbc.FairAdmission {
+		parts = append(parts, "FairAdmission: true")
 	}
 
 	if pbc.DefaultRequestTTL != nil {

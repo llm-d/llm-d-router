@@ -65,6 +65,7 @@ type realFlowControlOpts struct {
 	requestTTL      time.Duration // Defaults to one minute (effectively "never" for these tests).
 	bandMaxRequests uint64        // Zero means unbounded.
 	flowMaxRequests uint64        // Zero means unbounded.
+	fairAdmission   bool
 }
 
 func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlowControlHarness {
@@ -88,6 +89,9 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	}
 	if opts.flowMaxRequests > 0 {
 		bandOpts = append(bandOpts, fcregistry.WithBandMaxRequestsPerFlow(opts.flowMaxRequests))
+	}
+	if opts.fairAdmission {
+		bandOpts = append(bandOpts, fcregistry.WithBandFairAdmission(true))
 	}
 	band, err := fcregistry.NewPriorityBandConfig(0, defaults, bandOpts...)
 	require.NoError(t, err)
@@ -141,8 +145,15 @@ func newSeamRequestContext(id string) *handlers.RequestContext {
 // admitAsync runs Admit in a goroutine so the test can drive queue state (e.g. cancel a context
 // or submit an overflow request) while the call blocks inside EnqueueAndWait.
 func admitAsync(ctx context.Context, ac *FlowControlAdmissionController, id string) <-chan error {
+	return admitAsyncAs(ctx, ac, id, "seam-flow")
+}
+
+// admitAsyncAs is admitAsync for the flow of the given fairness ID.
+func admitAsyncAs(ctx context.Context, ac *FlowControlAdmissionController, id, fairnessID string) <-chan error {
+	reqCtx := newSeamRequestContext(id)
+	reqCtx.SchedulingRequest.FairnessID = fairnessID
 	result := make(chan error, 1)
-	go func() { result <- ac.Admit(ctx, newSeamRequestContext(id), 0) }()
+	go func() { result <- ac.Admit(ctx, reqCtx, 0) }()
 	return result
 }
 
@@ -235,6 +246,34 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 
 		h.cancel()
 		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
+	})
+
+	t.Run("evicted_fair_admission_returns_429_fair_admission", func(t *testing.T) {
+		t.Parallel()
+		// One flow fills a fair-admission band; a request from another flow takes the slot of the full flow's last-added
+		// request, whose waiter receives the fair-admission 429.
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation:      1.0,
+			candidates:      nonEmptyEndpoints(),
+			bandMaxRequests: 2,
+			fairAdmission:   true,
+		})
+
+		first := admitAsync(ctx, h.ac, "first-req")
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
+			time.Second, time.Millisecond, "the first request should be queued before the second")
+		last := admitAsync(ctx, h.ac, "last-req")
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 2 },
+			time.Second, time.Millisecond, "the band should be full before the other flow's request")
+		other := admitAsyncAs(ctx, h.ac, "other-req", "other-flow")
+
+		requireDropped(t, waitAdmit(t, last), errcommon.ResourceExhausted, errcommon.RequestDroppedReasonFairAdmission)
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 2 },
+			time.Second, time.Millisecond, "the other flow's request should hold the freed slot")
+
+		h.cancel()
+		require.Error(t, waitAdmit(t, first), "queued request should be evicted on shutdown")
+		require.Error(t, waitAdmit(t, other), "queued request should be evicted on shutdown")
 	})
 
 	t.Run("rejected_no_endpoints_returns_503_no_endpoints", func(t *testing.T) {

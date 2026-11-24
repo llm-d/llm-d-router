@@ -122,6 +122,16 @@ type FlowRegistryDataPlane interface {
 	//
 	// Returns an error wrapping ErrPriorityBandNotFound if the priority level is not configured.
 	CapacitySnapshot(priority int) (CapacitySnapshot, error)
+
+	// LongestQueue returns the queue holding the most items in the given priority band, or nil if the band is not
+	// configured, does not enable fair admission, or holds no items. Implementations MUST make it O(1) in the number of
+	// flows: it runs on the admission path of every request that finds a fair-admission band full.
+	LongestQueue(priority int) ManagedQueue
+
+	// LastAdded returns the last-added item still queued in the flow's queue, without removing it, or nil if the flow
+	// has no queue, its queue is empty, or its band does not enable fair admission. Implementations MUST make it O(1):
+	// it runs on the same admission path as LongestQueue.
+	LastAdded(key flowcontrol.FlowKey) flowcontrol.QueueItemAccessor
 }
 
 // CapacityDimension pairs current occupancy with its configured limits for one aggregation scope (a priority band or
@@ -147,6 +157,8 @@ type CapacitySnapshot struct {
 	// MaxBytesPerFlow and MaxRequestsPerFlow are the band's per-flow queue limits. Zero disables a limit.
 	MaxBytesPerFlow    uint64
 	MaxRequestsPerFlow uint64
+	// FairAdmission reports that the band relieves its request-count limit by evicting from its longest flow.
+	FairAdmission bool
 }
 
 // ActiveFlowConnection represents a handle to a scoped, leased session on a flow.
