@@ -938,18 +938,21 @@ func TestFallbackToEndpoint_DataParallelRankHeader(t *testing.T) {
 		{
 			name: "rank endpoint sets x-data-parallel-rank",
 			endpoint: &datalayer.EndpointMetadata{
-				Address:    "10.0.0.1",
-				Port:       "8000",
-				Attributes: map[string]string{datalayer.DataParallelRankAttribute: "3"},
+				Address:      "10.0.0.1",
+				Port:         "8000",
+				RankIndex:    3,
+				RankByHeader: true,
 			},
 			wantRank: "3",
 			wantSet:  true,
 		},
 		{
-			name: "endpoint without ranks leaves x-data-parallel-rank unset",
+			// A port of a multi-port pod has a RankIndex and no marker.
+			name: "endpoint without the marker leaves x-data-parallel-rank unset",
 			endpoint: &datalayer.EndpointMetadata{
-				Address: "10.0.0.1",
-				Port:    "8000",
+				Address:   "10.0.0.1",
+				Port:      "8001",
+				RankIndex: 1,
 			},
 			wantSet: false,
 		},

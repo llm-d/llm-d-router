@@ -362,7 +362,7 @@ func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadat
 		}
 		// Data-parallel ranks behind one port share that port's render listener.
 		rankIndex := meta.RankIndex
-		if _, hasRank := meta.DataParallelRank(); hasRank {
+		if meta.RankByHeader {
 			rankIndex = 0
 		}
 		port, ok := routing.RankPort(rule.basePort, rankIndex)

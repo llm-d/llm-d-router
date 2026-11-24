@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -628,25 +629,21 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	// A data-parallel rank endpoint is reached through its pod's shared port and
 	// the rank header. The header applies to every destination, so a fallback
 	// would run the request on a rank the scheduler did not pick.
-	var primaryRank string
-	var primaryHasRank bool
-	if len(targets) > 0 {
-		primaryRank, primaryHasRank = targets[0].GetMetadata().DataParallelRank()
-	}
-	if primaryHasRank {
+	primaryRankByHeader := len(targets) > 0 && targets[0].GetMetadata().RankByHeader
+	if primaryRankByHeader {
 		targets = targets[:1]
 		// The header mutation is built from Request.Headers. HandleRequest shares
 		// that map with SchedulingRequest.Headers.
 		if reqCtx.Request.Headers == nil {
 			reqCtx.Request.Headers = map[string]string{}
 		}
-		reqCtx.Request.Headers[routing.DataParallelRankHeader] = primaryRank
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(targets[0].GetMetadata().RankIndex)
 	}
 	for _, pod := range targets {
 		curMetadata := pod.GetMetadata()
 		// Without a rank from the EPP, a rank endpoint as fallback would run the
 		// request on the rank the client named, or on a rank its server rejects.
-		if _, hasRank := curMetadata.DataParallelRank(); hasRank && !primaryHasRank {
+		if curMetadata.RankByHeader && !primaryRankByHeader {
 			continue
 		}
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())

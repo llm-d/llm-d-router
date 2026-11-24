@@ -62,7 +62,7 @@ const (
 
 	// dataParallelSizeLocalAnnotation sets the number of data-parallel ranks a pod serves
 	// behind its single target port. The pod then becomes one endpoint per rank, each with
-	// its rank in the fwkdl.DataParallelRankAttribute attribute.
+	// its rank in RankIndex and with RankByHeader set.
 	// Example: "4"
 	dataParallelSizeLocalAnnotation = "llm-d.ai/data-parallel-size-local"
 
@@ -394,9 +394,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				Labels:      labels,
 				RankIndex:   idx,
 			}
-			if ranksPerPort > 1 {
-				meta.Attributes = map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(idx)}
-			}
+			meta.RankByHeader = ranksPerPort > 1
 			pods = append(pods, meta)
 		}
 	}

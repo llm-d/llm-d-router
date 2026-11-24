@@ -20,17 +20,9 @@ package datalayer
 import (
 	"fmt"
 	"maps"
-	"strconv"
 
 	"k8s.io/apimachinery/pkg/types"
 )
-
-// DataParallelRankAttribute is the Attributes key that holds the data-parallel
-// rank of an endpoint whose model server serves several ranks behind one port.
-// Discovery sets it: pod discovery from the pod's rank count, file discovery
-// from the entry's attributes section. The EPP sends the value in the
-// x-data-parallel-rank request header.
-const DataParallelRankAttribute = "dataParallelRank"
 
 // ID uniquely identifies an endpoint. It aliases types.NamespacedName so the identity
 // can later move off the Kubernetes-specific type without churning datastore keys.
@@ -60,29 +52,16 @@ type EndpointMetadata struct {
 	// selector key — and selector labels are never stamped onto requests.
 	Attributes map[string]string
 	// RankIndex is the pod-local rank of this endpoint: its position in the
-	// pool's TargetPorts, or its data-parallel rank when the pod serves
-	// several ranks behind one target port.
+	// pool's TargetPorts, or its data-parallel rank when RankByHeader is set.
 	RankIndex int
+	// RankByHeader reports that the model server serves several data-parallel
+	// ranks behind Port and runs a request on the rank that the
+	// x-data-parallel-rank request header names. The EPP sends RankIndex in
+	// that header.
+	RankByHeader bool
 	// ZMQPort is the exact KV-events socket port, overriding the
 	// configured socket port plus RankIndex. Zero means unset.
 	ZMQPort int
-}
-
-// DataParallelRank returns the rank to send to the model server for this
-// endpoint, and false for an endpoint without the DataParallelRankAttribute or
-// with a value that is not a rank.
-func (epm *EndpointMetadata) DataParallelRank() (string, bool) {
-	if epm == nil {
-		return "", false
-	}
-	rank, ok := epm.Attributes[DataParallelRankAttribute]
-	if !ok {
-		return "", false
-	}
-	if _, err := strconv.ParseUint(rank, 10, 32); err != nil {
-		return "", false
-	}
-	return rank, true
 }
 
 // String returns a string representation of the endpoint.
@@ -108,15 +87,16 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 			Name:      epm.ID.Name,
 			Namespace: epm.ID.Namespace,
 		},
-		Name:        epm.Name,
-		Address:     epm.Address,
-		NodeAddress: epm.NodeAddress,
-		Port:        epm.Port,
-		MetricsHost: epm.MetricsHost,
-		Labels:      clonedLabels,
-		Attributes:  clonedAttributes,
-		RankIndex:   epm.RankIndex,
-		ZMQPort:     epm.ZMQPort,
+		Name:         epm.Name,
+		Address:      epm.Address,
+		NodeAddress:  epm.NodeAddress,
+		Port:         epm.Port,
+		MetricsHost:  epm.MetricsHost,
+		Labels:       clonedLabels,
+		Attributes:   clonedAttributes,
+		RankIndex:    epm.RankIndex,
+		RankByHeader: epm.RankByHeader,
+		ZMQPort:      epm.ZMQPort,
 	}
 }
 
@@ -133,6 +113,7 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		epm.Port == other.Port &&
 		epm.MetricsHost == other.MetricsHost &&
 		epm.RankIndex == other.RankIndex &&
+		epm.RankByHeader == other.RankByHeader &&
 		epm.ZMQPort == other.ZMQPort &&
 		maps.Equal(epm.Labels, other.Labels) &&
 		maps.Equal(epm.Attributes, other.Attributes)

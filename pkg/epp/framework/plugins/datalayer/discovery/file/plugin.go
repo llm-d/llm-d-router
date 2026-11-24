@@ -57,6 +57,11 @@ type EndpointEntry struct {
 	// ports (for example the KV-events socket) when multiple engines are
 	// co-located on the same address. Defaults to 0.
 	RankIndex int `json:"rankIndex,omitempty" yaml:"rankIndex,omitempty"`
+	// RankByHeader marks an endpoint whose model server serves several
+	// data-parallel ranks behind this address and port. List one entry for
+	// each rank, with the rank in RankIndex. The EPP then sends RankIndex in
+	// the x-data-parallel-rank request header.
+	RankByHeader bool `json:"rankByHeader,omitempty" yaml:"rankByHeader,omitempty"`
 	// ZMQPort is the endpoint's KV-events socket port, used as-is instead of
 	// the producer's socketPort + rankIndex. Optional; when set, 1-65535.
 	ZMQPort *int `json:"zmqPort,omitempty" yaml:"zmqPort,omitempty"`
@@ -303,15 +308,16 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			continue
 		}
 		meta := &fwkdl.EndpointMetadata{
-			ID:          id,
-			Name:        e.Name,
-			Address:     e.Address,
-			Port:        e.Port,
-			MetricsHost: net.JoinHostPort(e.Address, e.Port),
-			Labels:      e.Labels,
-			Attributes:  e.Attributes,
-			RankIndex:   e.RankIndex,
-			ZMQPort:     zmqPort,
+			ID:           id,
+			Name:         e.Name,
+			Address:      e.Address,
+			Port:         e.Port,
+			MetricsHost:  net.JoinHostPort(e.Address, e.Port),
+			Labels:       e.Labels,
+			Attributes:   e.Attributes,
+			RankIndex:    e.RankIndex,
+			RankByHeader: e.RankByHeader,
+			ZMQPort:      zmqPort,
 		}
 		incoming[meta.ID] = struct{}{}
 		notifier.Upsert(meta)

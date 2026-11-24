@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -864,12 +863,12 @@ func TestDirector_HandleRequest(t *testing.T) {
 	rankEndpoint := func(rank int, score float64) *fwksched.ScoredEndpoint {
 		return &fwksched.ScoredEndpoint{
 			Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-				Address:     "192.168.5.100",
-				Port:        "8000",
-				MetricsHost: "192.168.5.100:8000",
-				ID:          types.NamespacedName{Name: fmt.Sprintf("pod5-rank-%d", rank), Namespace: "default"},
-				RankIndex:   rank,
-				Attributes:  map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank)},
+				Address:      "192.168.5.100",
+				Port:         "8000",
+				MetricsHost:  "192.168.5.100:8000",
+				ID:           types.NamespacedName{Name: fmt.Sprintf("pod5-rank-%d", rank), Namespace: "default"},
+				RankIndex:    rank,
+				RankByHeader: true,
 			}, nil, nil),
 			Score: score,
 		}
@@ -3981,14 +3980,11 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	endpoint := func(name, address string, rank, ranksPerPort int) fwksched.Endpoint {
 		meta := &fwkdl.EndpointMetadata{
-			ID:        types.NamespacedName{Name: name, Namespace: "default"},
-			Address:   address,
-			Port:      "8000",
-			RankIndex: rank,
-		}
-		if ranksPerPort > 1 {
-			// The rank to send differs from RankIndex, so the test shows which one the director reads.
-			meta.Attributes = map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank + 2)}
+			ID:           types.NamespacedName{Name: name, Namespace: "default"},
+			Address:      address,
+			Port:         "8000",
+			RankIndex:    rank,
+			RankByHeader: ranksPerPort > 1,
 		}
 		return &fwksched.ScoredEndpoint{Endpoint: fwksched.NewEndpoint(meta, nil, nil)}
 	}
@@ -4009,11 +4005,12 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 			name:         "rank endpoint sets its data-parallel rank and drops fallbacks",
 			result:       result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2), endpoint("pod1-rank-0", "10.0.0.1", 0, 2), endpoint("pod2", "10.0.0.2", 0, 0)),
 			wantEndpoint: "10.0.0.1:8000",
-			wantRank:     "3",
+			wantRank:     "1",
 		},
 		{
-			name: "endpoint without ranks keeps the client's header and its fallbacks without ranks",
-			result: result(endpoint("pod2", "10.0.0.2", 0, 0), endpoint("pod1-rank-1", "10.0.0.1", 1, 2),
+			// pod2 has a RankIndex, as one port of a multi-port pod has, but no marker.
+			name: "endpoint without the marker keeps the client's header and its fallbacks without ranks",
+			result: result(endpoint("pod2", "10.0.0.2", 1, 0), endpoint("pod1-rank-1", "10.0.0.1", 1, 2),
 				endpoint("pod3", "10.0.0.3", 0, 0)),
 			// The EPP sets no rank here, so the rank endpoint must not get the client's.
 			wantEndpoint: "10.0.0.2:8000,10.0.0.3:8000",
@@ -4049,6 +4046,6 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 		got, err := dir.prepareRequest(ctx, reqCtx, result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2)))
 
 		require.NoError(t, err)
-		assert.Equal(t, "3", got.Request.Headers[routing.DataParallelRankHeader])
+		assert.Equal(t, "1", got.Request.Headers[routing.DataParallelRankHeader])
 	})
 }

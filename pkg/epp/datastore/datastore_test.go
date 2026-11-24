@@ -865,15 +865,15 @@ func TestDataParallelSizeLocal(t *testing.T) {
 	}
 	rankEndpoint := func(name string, port string, rank int) *fwkdl.EndpointMetadata {
 		return &fwkdl.EndpointMetadata{
-			ID:          types.NamespacedName{Name: name, Namespace: "default"},
-			Name:        "pod1",
-			Address:     "10.0.0.1",
-			NodeAddress: "192.168.1.10",
-			Port:        port,
-			MetricsHost: net.JoinHostPort("10.0.0.1", port),
-			Labels:      map[string]string{"app": "vllm"},
-			RankIndex:   rank,
-			Attributes:  map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank)},
+			ID:           types.NamespacedName{Name: name, Namespace: "default"},
+			Name:         "pod1",
+			Address:      "10.0.0.1",
+			NodeAddress:  "192.168.1.10",
+			Port:         port,
+			MetricsHost:  net.JoinHostPort("10.0.0.1", port),
+			Labels:       map[string]string{"app": "vllm"},
+			RankIndex:    rank,
+			RankByHeader: true,
 		}
 	}
 	sortByName := cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.ID.Name < b.ID.Name })
@@ -925,10 +925,10 @@ func TestDataParallelSizeLocal(t *testing.T) {
 // The llm-d.ai/data-parallel-size-local pod annotation sets a pod's rank count,
 // so prefill and decode pods in one pool can run different DP sizes.
 func TestDataParallelSizeLocalAnnotation(t *testing.T) {
-	// rank is the RankIndex of an endpoint and its data-parallel rank attribute.
+	// rank is the RankIndex of an endpoint and its RankByHeader marker.
 	type rank struct {
 		rankIndex int
-		dpRank    string
+		byHeader  bool
 	}
 	pod := func(name string, annotations map[string]string) *corev1.Pod {
 		return &corev1.Pod{
@@ -940,7 +940,7 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		got := map[string]rank{}
 		for _, ep := range ds.PodList(AllPodsPredicate) {
 			md := ep.GetMetadata()
-			got[md.ID.Name] = rank{md.RankIndex, md.Attributes[fwkdl.DataParallelRankAttribute]}
+			got[md.ID.Name] = rank{md.RankIndex, md.RankByHeader}
 		}
 		return got
 	}
@@ -962,8 +962,8 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("prefill", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("decode", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
 		assert.Equal(t, map[string]rank{
-			"prefill-rank-0": {0, "0"}, "prefill-rank-1": {1, "1"},
-			"decode-rank-0": {0, "0"}, "decode-rank-1": {1, "1"}, "decode-rank-2": {2, "2"}, "decode-rank-3": {3, "3"},
+			"prefill-rank-0": {0, true}, "prefill-rank-1": {1, true},
+			"decode-rank-0": {0, true}, "decode-rank-1": {1, true}, "decode-rank-2": {2, true}, "decode-rank-3": {3, true},
 		}, endpoints(ds))
 	})
 
@@ -971,7 +971,7 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		ds := newDatastore(t, 8000)
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("one", map[string]string{dataParallelSizeLocalAnnotation: "1"})))
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("plain", nil)))
-		assert.Equal(t, map[string]rank{"one-rank-0": {0, ""}, "plain-rank-0": {0, ""}}, endpoints(ds))
+		assert.Equal(t, map[string]rank{"one-rank-0": {0, false}, "plain-rank-0": {0, false}}, endpoints(ds))
 	})
 
 	aboveMax := strconv.Itoa(maxDataParallelSizeLocal + 1)
@@ -999,7 +999,7 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		ds := newDatastore(t, 8000)
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "3"})))
-		assert.Equal(t, map[string]rank{"p-rank-0": {0, "0"}, "p-rank-1": {1, "1"}, "p-rank-2": {2, "2"}}, endpoints(ds))
+		assert.Equal(t, map[string]rank{"p-rank-0": {0, true}, "p-rank-1": {1, true}, "p-rank-2": {2, true}}, endpoints(ds))
 	})
 
 	t.Run("lowering the rank count removes the extra rank endpoints", func(t *testing.T) {
@@ -1007,7 +1007,7 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
 		require.Len(t, endpoints(ds), 4)
 		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
-		assert.Equal(t, map[string]rank{"p-rank-0": {0, "0"}, "p-rank-1": {1, "1"}}, endpoints(ds))
+		assert.Equal(t, map[string]rank{"p-rank-0": {0, true}, "p-rank-1": {1, true}}, endpoints(ds))
 	})
 }
 

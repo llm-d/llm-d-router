@@ -4,29 +4,29 @@ vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ra
 
 ## Rank endpoints
 
-The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation. Pods in one pool can thus run different DP sizes (for example prefill with 2 ranks and decode with 4). The pool must have exactly one target port. N is at most 64, and a pod with a larger or malformed value gets no endpoints. The endpoints are named `<pod>-rank-<i>` and share the pod's address and port. Each endpoint carries its rank in the `dataParallelRank` endpoint attribute.
+The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation. Pods in one pool can thus run different DP sizes (for example prefill with 2 ranks and decode with 4). The pool must have exactly one target port. N is at most 64, and a pod with a larger or malformed value gets no endpoints. The endpoints are named `<pod>-rank-<i>`, where `i` is the rank, and share the pod's address and port.
 
-With file discovery, list one endpoint for each rank. Give all of them the address and port of the model server, and set the `dataParallelRank` attribute of each entry:
+With file discovery, list one endpoint for each rank. Give all of them the address and port of the model server. In each entry, set `rankIndex` to the rank and `rankByHeader` to `true`:
 
 ```yaml
 endpoints:
   - name: decode-0-rank-0
     address: 10.0.0.2
     port: "8000"
-    attributes:
-      dataParallelRank: "0"
+    rankIndex: 0
+    rankByHeader: true
   - name: decode-0-rank-1
     address: 10.0.0.2
     port: "8000"
-    attributes:
-      dataParallelRank: "1"
+    rankIndex: 1
+    rankByHeader: true
 ```
 
-An endpoint is a rank endpoint when its `dataParallelRank` attribute is a non-negative integer.
+`rankIndex` alone does not make a rank endpoint. The ports of a multi-port model server also have a `rankIndex`, and they get no rank header.
 
 When the scheduler picks a rank endpoint, the EPP:
 
-- sets `x-data-parallel-rank` to the endpoint's `dataParallelRank` attribute, replacing any value the client sent;
+- sets `x-data-parallel-rank` to the endpoint's data-parallel rank, replacing any value the client sent;
 - sends the request to that endpoint's address only, without fallback destinations, because the header applies to every destination.
 
 Requests to endpoints without ranks keep their headers and their fallbacks without ranks. The EPP drops a rank endpoint from the fallbacks of such a request, because it sets no rank for it.
@@ -47,7 +47,7 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 - **Precise prefix cache.** KV events are keyed by the pod's address, so the ranks of a pod share one index entry.
 - **P/D through the sidecar.** The sidecar sends the decode rank to the prefill worker.
 - **Ranks are per pod.** Each pod's ranks run from 0 to N-1, so a data-parallel group that spans pods is not addressed correctly.
-- **Rank count is configured, not discovered.** The EPP does not check the annotation or the attribute against the model server. A rank count above the server's sends requests to ranks the server rejects; a count below it leaves engines unscheduled.
+- **Rank count is configured, not discovered.** The EPP does not check the annotation or the file entries against the model server. A rank count above the server's sends requests to ranks the server rejects; a count below it leaves engines unscheduled.
 - **No failover for rank endpoints.** A request to a rank endpoint has one destination, so when the pod fails the proxy does not retry it on another pod.
 - **Health is per pod.** Pod readiness covers all of a pod's ranks. vLLM's Rust frontend reports one `/health` state for all its engines: it turns `503` after a fatal error in the frontend, and stays `200` while an engine that is still connected stops making progress. The [endpoint health filter](../pkg/epp/framework/plugins/scheduling/filter/endpointhealth/README.md) tracks each rank endpoint on its own, but its poll health does not see a stalled engine, because the frontend serves `/metrics`, and its response health counts only the configured failure statuses (`502` and `503` by default).
 - **One scrape per rank.** Each rank endpoint scrapes its pod's `/metrics` on its own, so a pod with N ranks is scraped N times per interval, each time for every engine's series.

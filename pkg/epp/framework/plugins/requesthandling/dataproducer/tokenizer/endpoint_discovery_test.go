@@ -221,11 +221,11 @@ func TestDiscoveredEndpointPicker_PortRulesShareRenderPortAcrossRanks(t *testing
 
 	for rank := range 2 {
 		require.NoError(t, picker.Upsert(&fwkdl.EndpointMetadata{
-			ID:         types.NamespacedName{Namespace: "default", Name: "decode-rank-" + strconv.Itoa(rank)},
-			Address:    "10.0.0.2",
-			Port:       "8000",
-			RankIndex:  rank,
-			Attributes: map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank)},
+			ID:           types.NamespacedName{Namespace: "default", Name: "decode-rank-" + strconv.Itoa(rank)},
+			Address:      "10.0.0.2",
+			Port:         "8000",
+			RankIndex:    rank,
+			RankByHeader: true,
 		}))
 	}
 
