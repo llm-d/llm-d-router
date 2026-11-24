@@ -16,11 +16,15 @@ limitations under the License.
 
 package kvblock
 
+import "sync/atomic"
+
 // engineKeyMap holds the engine-to-request key mappings with value-type
 // slots: each mapping's first request key sits inline in its map slot and
 // longer chains continue into a shared arena, so a mapping costs no heap
 // object of its own. The structure is internally lock-free; every caller
-// holds the enclosing index's lock across all of its methods.
+// holds the enclosing index's lock across all of its methods, except len,
+// which reads an atomic count and is safe without it: the in-memory index
+// reports residency gauges after releasing its lock.
 //
 // Preserved from the previous lru.Cache-backed map: get returns the last
 // element of the request-key chain and refreshes recency; peek resolves
@@ -41,6 +45,9 @@ type engineKeyMap struct {
 	limit int
 	// clock is the last-visit stamp source, incremented per refresh.
 	clock uint32
+	// count is the live mapping count, maintained atomically so len can be
+	// called without the enclosing index's lock.
+	count atomic.Int64
 }
 
 // engineSlot is one mapping's map value. Chains of one request key (the
@@ -79,8 +86,11 @@ func (m *engineKeyMap) set(ek BlockHash, rks []BlockHash) {
 	old, exists := m.slots[ek]
 	if exists {
 		m.freeChain(old.next)
-	} else if m.limit > 0 && len(m.slots) >= m.limit {
-		m.evictOne()
+	} else {
+		m.count.Add(1)
+		if m.limit > 0 && len(m.slots) >= m.limit {
+			m.evictOne()
+		}
 	}
 	// Link the arena nodes tail-first so each node points at the element
 	// after it.
@@ -118,8 +128,7 @@ func (m *engineKeyMap) peek(ek BlockHash) ([]BlockHash, bool) {
 	if !ok {
 		return nil, false
 	}
-	rks := make([]BlockHash, 1, 1)
-	rks[0] = slot.first
+	rks := []BlockHash{slot.first}
 	for h := slot.next; h != 0; h = m.arena[h-1].next {
 		rks = append(rks, m.arena[h-1].key)
 	}
@@ -131,6 +140,7 @@ func (m *engineKeyMap) remove(ek BlockHash) {
 	if slot, ok := m.slots[ek]; ok {
 		m.freeChain(slot.next)
 		delete(m.slots, ek)
+		m.count.Add(-1)
 	}
 }
 
@@ -140,9 +150,10 @@ func (m *engineKeyMap) contains(ek BlockHash) bool {
 	return ok
 }
 
-// len returns the mapping count.
+// len returns the mapping count. It is the one method safe to call without
+// the enclosing index's lock.
 func (m *engineKeyMap) len() int {
-	return len(m.slots)
+	return int(m.count.Load())
 }
 
 // tick advances and returns the stamp clock. The uint32 wraps after 2^32
@@ -171,6 +182,7 @@ func (m *engineKeyMap) evictOne() {
 	if found {
 		m.freeChain(m.slots[victim].next)
 		delete(m.slots, victim)
+		m.count.Add(-1)
 	}
 }
 
