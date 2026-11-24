@@ -938,10 +938,9 @@ func TestFallbackToEndpoint_DataParallelRankHeader(t *testing.T) {
 		{
 			name: "rank endpoint sets x-data-parallel-rank",
 			endpoint: &datalayer.EndpointMetadata{
-				Address:          "10.0.0.1",
-				Port:             "8000",
-				RanksPerPort:     4,
-				DataParallelRank: 3,
+				Address:    "10.0.0.1",
+				Port:       "8000",
+				Attributes: map[string]string{datalayer.DataParallelRankAttribute: "3"},
 			},
 			wantRank: "3",
 			wantSet:  true,
@@ -949,9 +948,8 @@ func TestFallbackToEndpoint_DataParallelRankHeader(t *testing.T) {
 		{
 			name: "endpoint without ranks leaves x-data-parallel-rank unset",
 			endpoint: &datalayer.EndpointMetadata{
-				Address:      "10.0.0.1",
-				Port:         "8000",
-				RanksPerPort: 1,
+				Address: "10.0.0.1",
+				Port:    "8000",
 			},
 			wantSet: false,
 		},

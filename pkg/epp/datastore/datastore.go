@@ -61,13 +61,14 @@ const (
 	activePortsAnnotation = "llm-d.ai/active-ports"
 
 	// dataParallelSizeLocalAnnotation sets the number of data-parallel ranks a pod serves
-	// behind its target port, overriding --data-parallel-size-local for that pod.
+	// behind its single target port. The pod then becomes one endpoint per rank, each with
+	// its rank in the fwkdl.DataParallelRankAttribute attribute.
 	// Example: "4"
 	dataParallelSizeLocalAnnotation = "llm-d.ai/data-parallel-size-local"
 
-	// MaxDataParallelSizeLocal is the largest rank count of a pod. Each rank is an endpoint
+	// maxDataParallelSizeLocal is the largest rank count of a pod. Each rank is an endpoint
 	// with its own metrics collector, so a mistyped value must not create thousands of them.
-	MaxDataParallelSizeLocal = 64
+	maxDataParallelSizeLocal = 64
 )
 
 // The datastore is a local cache of relevant data for the given InferencePool (currently all pulled from k8s-api)
@@ -81,10 +82,6 @@ type Datastore interface {
 	PoolHasSynced() bool
 	PoolLabelsMatch(podLabels map[string]string) bool
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
-	// WithDataParallelSizeLocal expands the single target port of a pod into n rank endpoints
-	// sharing that port. Values below 2 keep one endpoint per port. Above 1, PoolSet rejects a
-	// pool with more than one target port.
-	WithDataParallelSizeLocal(n int) Datastore
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *apixv1.InferenceObjective)
@@ -136,7 +133,6 @@ func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory
 		modelRewrites: newModelRewriteStore(),
 		pods:          &sync.Map{},
 		epf:           epFactory,
-		ranksPerPort:  1,
 	}
 }
 
@@ -166,33 +162,11 @@ type datastore struct {
 	// resync failure would compare the incoming pool against the already-stored identical pool
 	// and skip the resync. Guarded by mu.
 	needsResync bool
-	// ranksPerPort is the number of rank endpoints per pod target port. Set once at startup.
-	ranksPerPort int
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
 	ds.pool = pool
 	return ds
-}
-
-func (ds *datastore) WithDataParallelSizeLocal(n int) Datastore {
-	ds.ranksPerPort = max(n, 1)
-	return ds
-}
-
-// podRanksPerPort returns the number of data-parallel ranks the pod serves behind its
-// target port: the pod's dataParallelSizeLocalAnnotation, or the configured default.
-func (ds *datastore) podRanksPerPort(pod *corev1.Pod) (int, error) {
-	value, ok := pod.GetAnnotations()[dataParallelSizeLocalAnnotation]
-	if !ok {
-		return ds.ranksPerPort, nil
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || n < 1 || n > MaxDataParallelSizeLocal {
-		return 0, fmt.Errorf("pod annotation %q is %q, not an integer from 1 to %d",
-			dataParallelSizeLocalAnnotation, value, MaxDataParallelSizeLocal)
-	}
-	return n, nil
 }
 
 func (ds *datastore) Clear() {
@@ -214,10 +188,6 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 	if endpointPool == nil {
 		ds.Clear()
 		return nil
-	}
-	if ds.ranksPerPort > 1 && len(endpointPool.TargetPorts) != 1 {
-		return fmt.Errorf("data-parallel-size-local is %d, which requires exactly one target port, got %d",
-			ds.ranksPerPort, len(endpointPool.TargetPorts))
 	}
 	logger := log.FromContext(ctx)
 	ds.mu.Lock()
@@ -403,7 +373,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 
 	pods := []*fwkdl.EndpointMetadata{}
 	activePorts := extractActivePorts(pod, pool.TargetPorts)
-	ranksPerPort, err := ds.podRanks(pod, pool)
+	ranksPerPort, err := podRanks(pod, pool)
 	if err != nil {
 		// The pod's ranks cannot be addressed; drop all of its endpoints.
 		log.FromContext(ctx).Error(err, "Pod will not receive traffic", "pod", pod.Name, "namespace", pod.Namespace)
@@ -425,8 +395,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				RankIndex:   idx,
 			}
 			if ranksPerPort > 1 {
-				meta.RanksPerPort = ranksPerPort
-				meta.DataParallelRank = idx
+				meta.Attributes = map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(idx)}
 			}
 			pods = append(pods, meta)
 		}
@@ -557,7 +526,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 			continue
 		}
 		// Calculate expected endpoint names based on current targetPorts.
-		ranksPerPort, err := ds.podRanks(&pod, ds.pool)
+		ranksPerPort, err := podRanks(&pod, ds.pool)
 		if err != nil {
 			ranksPerPort = 1
 		}
@@ -609,17 +578,23 @@ func extractActivePorts(pod *corev1.Pod, targetPorts []int) sets.Set[int] {
 	return activePorts
 }
 
-// podRanks returns the pod's rank count.
-func (ds *datastore) podRanks(pod *corev1.Pod, pool *datalayer.EndpointPool) (int, error) {
-	ranksPerPort, err := ds.podRanksPerPort(pod)
-	if err != nil {
-		return 0, err
+// podRanks returns the number of data-parallel ranks the pod serves behind its target port,
+// from dataParallelSizeLocalAnnotation. A pod without the annotation has one.
+func podRanks(pod *corev1.Pod, pool *datalayer.EndpointPool) (int, error) {
+	value, ok := pod.GetAnnotations()[dataParallelSizeLocalAnnotation]
+	if !ok {
+		return 1, nil
 	}
-	if ranksPerPort > 1 && len(pool.TargetPorts) != 1 {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 || n > maxDataParallelSizeLocal {
+		return 0, fmt.Errorf("pod annotation %q is %q, not an integer from 1 to %d",
+			dataParallelSizeLocalAnnotation, value, maxDataParallelSizeLocal)
+	}
+	if n > 1 && len(pool.TargetPorts) != 1 {
 		return 0, fmt.Errorf("pod serves %d data-parallel ranks per port, which requires exactly one target port, got %d",
-			ranksPerPort, len(pool.TargetPorts))
+			n, len(pool.TargetPorts))
 	}
-	return ranksPerPort, nil
+	return n, nil
 }
 
 // rankIndexes returns the RankIndex values of the endpoints served on the target port at portIdx.

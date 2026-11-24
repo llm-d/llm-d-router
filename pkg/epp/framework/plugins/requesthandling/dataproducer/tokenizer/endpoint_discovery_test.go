@@ -212,7 +212,7 @@ func TestDiscoveredEndpointPicker_PortRules(t *testing.T) {
 }
 
 // Data-parallel ranks behind one port share that port's render listener, so
-// every rank resolves to basePort plus the port's position, not its rank.
+// every rank resolves to basePort, not to basePort plus its rank.
 func TestDiscoveredEndpointPicker_PortRulesShareRenderPortAcrossRanks(t *testing.T) {
 	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{
 		PortRules: []endpointPortRule{{BasePort: 8200}},
@@ -221,11 +221,11 @@ func TestDiscoveredEndpointPicker_PortRulesShareRenderPortAcrossRanks(t *testing
 
 	for rank := range 2 {
 		require.NoError(t, picker.Upsert(&fwkdl.EndpointMetadata{
-			ID:           types.NamespacedName{Namespace: "default", Name: "decode-rank-" + strconv.Itoa(rank)},
-			Address:      "10.0.0.2",
-			Port:         "8000",
-			RankIndex:    rank,
-			RanksPerPort: 2,
+			ID:         types.NamespacedName{Namespace: "default", Name: "decode-rank-" + strconv.Itoa(rank)},
+			Address:    "10.0.0.2",
+			Port:       "8000",
+			RankIndex:  rank,
+			Attributes: map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank)},
 		}))
 	}
 

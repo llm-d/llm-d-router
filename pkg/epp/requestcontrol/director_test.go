@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -863,12 +864,12 @@ func TestDirector_HandleRequest(t *testing.T) {
 	rankEndpoint := func(rank int, score float64) *fwksched.ScoredEndpoint {
 		return &fwksched.ScoredEndpoint{
 			Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-				Address:      "192.168.5.100",
-				Port:         "8000",
-				MetricsHost:  "192.168.5.100:8000",
-				ID:           types.NamespacedName{Name: fmt.Sprintf("pod5-rank-%d", rank), Namespace: "default"},
-				RankIndex:    rank,
-				RanksPerPort: 2,
+				Address:     "192.168.5.100",
+				Port:        "8000",
+				MetricsHost: "192.168.5.100:8000",
+				ID:          types.NamespacedName{Name: fmt.Sprintf("pod5-rank-%d", rank), Namespace: "default"},
+				RankIndex:   rank,
+				Attributes:  map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank)},
 			}, nil, nil),
 			Score: score,
 		}
@@ -3979,14 +3980,17 @@ func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
 func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	endpoint := func(name, address string, rank, ranksPerPort int) fwksched.Endpoint {
-		return &fwksched.ScoredEndpoint{Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-			ID:               types.NamespacedName{Name: name, Namespace: "default"},
-			Address:          address,
-			Port:             "8000",
-			RankIndex:        rank,
-			RanksPerPort:     ranksPerPort,
-			DataParallelRank: rank + 2,
-		}, nil, nil)}
+		meta := &fwkdl.EndpointMetadata{
+			ID:        types.NamespacedName{Name: name, Namespace: "default"},
+			Address:   address,
+			Port:      "8000",
+			RankIndex: rank,
+		}
+		if ranksPerPort > 1 {
+			// The rank to send differs from RankIndex, so the test shows which one the director reads.
+			meta.Attributes = map[string]string{fwkdl.DataParallelRankAttribute: strconv.Itoa(rank + 2)}
+		}
+		return &fwksched.ScoredEndpoint{Endpoint: fwksched.NewEndpoint(meta, nil, nil)}
 	}
 	result := func(targets ...fwksched.Endpoint) *fwksched.SchedulingResult {
 		return &fwksched.SchedulingResult{

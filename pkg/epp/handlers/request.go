@@ -134,11 +134,11 @@ func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *Reques
 			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
-	if endpoint.RanksPerPort > 1 {
+	if rank, ok := endpoint.DataParallelRank(); ok {
 		if reqCtx.Request.Headers == nil {
 			reqCtx.Request.Headers = map[string]string{}
 		}
-		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(endpoint.DataParallelRank)
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = rank
 	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize

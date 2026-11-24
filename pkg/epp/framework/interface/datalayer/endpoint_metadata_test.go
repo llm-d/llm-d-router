@@ -70,16 +70,14 @@ func TestEndpointMetadataClone(t *testing.T) {
 
 func TestEndpointMetadataEqual(t *testing.T) {
 	base := &EndpointMetadata{
-		ID:               types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
-		Name:             "pod-a",
-		Address:          "10.0.0.1",
-		Port:             "8000",
-		MetricsHost:      "10.0.0.1:9000",
-		Labels:           map[string]string{"app": "vllm"},
-		RankIndex:        1,
-		ZMQPort:          6001,
-		RanksPerPort:     2,
-		DataParallelRank: 3,
+		ID:          types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
+		Name:        "pod-a",
+		Address:     "10.0.0.1",
+		Port:        "8000",
+		MetricsHost: "10.0.0.1:9000",
+		Labels:      map[string]string{"app": "vllm"},
+		RankIndex:   1,
+		ZMQPort:     6001,
 	}
 
 	assert.True(t, base.Equal(base.Clone()))
@@ -145,18 +143,6 @@ func TestEndpointMetadataEqual(t *testing.T) {
 				meta.ZMQPort = 7002
 			},
 		},
-		{
-			name: "ranks per port",
-			mutate: func(meta *EndpointMetadata) {
-				meta.RanksPerPort = 4
-			},
-		},
-		{
-			name: "data-parallel rank",
-			mutate: func(meta *EndpointMetadata) {
-				meta.DataParallelRank = 5
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -185,4 +171,30 @@ func TestEndpointMetadataString(t *testing.T) {
 	assert.Contains(t, s, name)
 	assert.Contains(t, s, namespace)
 	assert.Contains(t, s, podip)
+}
+
+func TestEndpointMetadataDataParallelRank(t *testing.T) {
+	tests := []struct {
+		name     string
+		meta     *EndpointMetadata
+		wantRank string
+		wantOK   bool
+	}{
+		{name: "nil metadata"},
+		{name: "no attributes", meta: &EndpointMetadata{}},
+		{name: "other attributes", meta: &EndpointMetadata{Attributes: map[string]string{"pathPrefix": "/lane"}}},
+		{name: "rank", meta: &EndpointMetadata{Attributes: map[string]string{DataParallelRankAttribute: "3"}}, wantRank: "3", wantOK: true},
+		{name: "rank zero", meta: &EndpointMetadata{Attributes: map[string]string{DataParallelRankAttribute: "0"}}, wantRank: "0", wantOK: true},
+		{name: "empty value", meta: &EndpointMetadata{Attributes: map[string]string{DataParallelRankAttribute: ""}}},
+		{name: "negative value", meta: &EndpointMetadata{Attributes: map[string]string{DataParallelRankAttribute: "-1"}}},
+		{name: "value that is not a number", meta: &EndpointMetadata{Attributes: map[string]string{DataParallelRankAttribute: "1\r\nx-injected: 1"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rank, ok := tt.meta.DataParallelRank()
+			if rank != tt.wantRank || ok != tt.wantOK {
+				t.Errorf("DataParallelRank() = %q, %v, want %q, %v", rank, ok, tt.wantRank, tt.wantOK)
+			}
+		})
+	}
 }

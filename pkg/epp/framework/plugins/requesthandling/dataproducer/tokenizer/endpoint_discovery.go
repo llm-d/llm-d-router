@@ -360,8 +360,12 @@ func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadat
 		if meta.RankIndex < 0 {
 			return "", fmt.Errorf("discovered endpoint %s has invalid rank index %d", meta.ID, meta.RankIndex)
 		}
-		// Ranks behind one port share that port's render listener.
-		port, ok := routing.RankPort(rule.basePort, meta.RankIndex/max(meta.RanksPerPort, 1))
+		// Data-parallel ranks behind one port share that port's render listener.
+		rankIndex := meta.RankIndex
+		if _, hasRank := meta.DataParallelRank(); hasRank {
+			rankIndex = 0
+		}
+		port, ok := routing.RankPort(rule.basePort, rankIndex)
 		if !ok {
 			return "", fmt.Errorf("discovered endpoint %s resolved render port outside 1-65535", meta.ID)
 		}
