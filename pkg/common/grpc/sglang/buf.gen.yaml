@@ -1,0 +1,20 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package
+      path: sglang/api/v1
+      value: github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1
+    - file_option: go_package
+      path: sglang/json/v1
+      value: github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/jsonv1
+plugins:
+  - local: protoc-gen-go
+    out: pkg/common/grpc/sglang/gen
+    opt:
+      - module=github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen
+  - local: protoc-gen-go-grpc
+    out: pkg/common/grpc/sglang/gen
+    opt:
+      - module=github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen

@@ -21,13 +21,19 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 var errInvalidJSON = errors.New("invalid JSON")
 
-// errDecodeAborted reports a decode request that aborted before relaying any of
-// its response, leaving the caller to write a status on its behalf.
-var errDecodeAborted = errors.New("decode aborted before sending a response")
+// errPrefillAborted reports a prefill response whose body failed to arrive
+// after its status did.
+var errPrefillAborted = errors.New("prefill response interrupted")
 
 // JSON errors can contain payload values and client-supplied field paths.
 func jsonErrorForLog(err error) error {
@@ -42,65 +48,60 @@ func jsonErrorForLog(err error) error {
 	return err
 }
 
-// vLLM error response
-type errorResponse struct {
-	Object  string `json:"object"`
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Param   string `json:"param"`
-	Code    int    `json:"code"`
+func errorJSONInvalid(w http.ResponseWriter, r *http.Request, err error) error {
+	return sendError(w, r, http.StatusBadRequest, err.Error())
 }
 
-var decoderServiceUnavailableResponseJSON []byte
-
-func init() {
-	response := errorResponse{
-		Object:  "error",
-		Message: "The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct.",
-		Type:    "ServiceUnavailable",
-		Code:    http.StatusServiceUnavailable,
+// errorBadGateway answers a failed call to another pod (prefill, decoder,
+// encoder, bootstrap). The raw error can carry internal routing details such
+// as dial addresses, so callers log it and the client gets the fixed message
+// the coordinator answers upstream connection failures with.
+func errorBadGateway(w http.ResponseWriter, r *http.Request) error {
+	reqID := ""
+	if r != nil {
+		reqID = r.Header.Get(reqcommon.RequestIDHeaderKey)
 	}
-	decoderServiceUnavailableResponseJSON, _ = json.Marshal(response)
+	return sendError(w, r, http.StatusBadGateway, reqcommon.InternalErrorMessage(reqID))
 }
 
-func errorJSONInvalid(err error, w http.ResponseWriter) error {
-	return sendError(err, "BadRequestError", http.StatusBadRequest, w)
+func errorInternalServerError(w http.ResponseWriter, r *http.Request, err error) error {
+	return sendError(w, r, http.StatusInternalServerError, err.Error())
 }
 
-func errorBadGateway(err error, w http.ResponseWriter) error {
-	return sendError(err, "BadGateway", http.StatusBadGateway, w)
-}
-
-func errorInternalServerError(err error, w http.ResponseWriter) error {
-	return sendError(err, "InternalServerError", http.StatusInternalServerError, w)
-}
-
-// sendError simulates vLLM errors
-//
-// Example:
-//
-//	 {
-//		  "object": "error",
-//		  "message": "[{'type': 'json_invalid', 'loc': ('body', 167), 'msg': 'JSON decode error', 'input': {}, 'ctx': {'error': 'Invalid control character at'}}]",
-//		  "type": "BadRequestError",
-//		  "param": null,
-//		  "code": 400
-//	 }
-func sendError(err error, errorType string, code int, w http.ResponseWriter) error {
-	er := errorResponse{
-		Object:  "error",
-		Message: err.Error(),
-		Type:    errorType,
-		Code:    code,
+// sendError writes msg in the error envelope of the API r was sent to. A path
+// that is not an inference route, which only the decoder catch-all serves, and
+// a request or URL net/http never produces both get the OpenAI envelope. gRPC
+// requests receive a trailers-only gRPC status response.
+func sendError(w http.ResponseWriter, r *http.Request, status int, msg string) error {
+	if isGRPCRequest(r) {
+		grpcframe.WriteError(w, grpcframe.LocalHTTPStatusToCode(status), msg)
+		return nil
 	}
-
-	b, err := json.Marshal(er)
-	if err != nil {
-		return err
+	path := ""
+	if r != nil && r.URL != nil {
+		path = r.URL.Path
 	}
+	return reqcommon.WriteAPIError(w, reqcommon.DetectAPIType(path), status, msg)
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_, err = w.Write(b)
-	return err
+func isVLLMGRPCPath(p string) bool {
+	_, ok := routing.PDVLLMGRPCMethods[strings.TrimSuffix(p, "/")]
+	return ok
+}
+
+func isVLLMGRPCRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && isVLLMGRPCPath(r.URL.Path)
+}
+
+func isGRPCRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+		return true
+	}
+	if r.URL != nil && strings.TrimSuffix(r.URL.Path, "/") == sglangapiv1.SglangService_Generate_FullMethodName {
+		return true
+	}
+	return isVLLMGRPCRequest(r)
 }

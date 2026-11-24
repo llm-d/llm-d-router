@@ -24,6 +24,8 @@ provider:
   # GKE-specific configuration.
   # This block is only used if name is "gke".
   gke:
+    # timeoutSec of the GCPBackendPolicy.
+    backendTimeoutSec: 300
     preferredBackends:
       enabled: false
       # Number of primary active pod instances pinned to the PREFERRED load balancing tier.

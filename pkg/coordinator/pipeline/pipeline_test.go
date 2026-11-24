@@ -172,6 +172,7 @@ func TestNewWithForwardResponseHeaders_RejectsInvalidNames(t *testing.T) {
 		{""},
 		{"x-llm-d-disagg-revision", "X-LLM-D-Disagg-Revision"},
 		{"Content-Type"},
+		{"Accept-Encoding"},
 	} {
 		if _, err := NewWithForwardResponseHeaders(nil, headers); err == nil {
 			t.Fatalf("NewWithForwardResponseHeaders(%v) expected error", headers)

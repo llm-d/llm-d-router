@@ -19,7 +19,10 @@ package latency
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -35,6 +38,7 @@ func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningR
 			KVCacheUsagePercent: kvCache,
 			WaitingQueueSize:    queueSize,
 			RunningRequestsSize: runningReqs,
+			UpdateTime:          time.Now(),
 		},
 		nil,
 	)
@@ -208,6 +212,59 @@ func TestScoreCompositeFallback(t *testing.T) {
 	t.Logf("pod1 score=%f, pod2 score=%f", s1, s2)
 }
 
+func TestScoreCompositeFallbackOmitsUnwrittenMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		metrics *fwkdl.Metrics
+	}{
+		{name: "never-scraped", metrics: &fwkdl.Metrics{}},
+		{name: "unwritten-queue", metrics: &fwkdl.Metrics{WaitingQueueSize: 100}},
+		{name: "nil-metrics"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scorer := NewPlugin(noExploreConfig())
+			busy := makeLatencyScorerEndpoint("busy", 0.5, 10, 5)
+			idle := makeLatencyScorerEndpoint("idle", 0, 0, 0)
+			unwritten := fwksched.NewEndpoint(
+				&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "unwritten"}},
+				tc.metrics,
+				nil,
+			)
+
+			scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{busy, idle, unwritten})
+			if _, ok := scores[unwritten]; ok {
+				t.Errorf("endpoint with unwritten metrics should be unscored, got %f", scores[unwritten])
+			}
+			if len(scores) != 2 {
+				t.Errorf("expected two scored endpoints, got %d", len(scores))
+			}
+			if scores[busy] != 0.17 || scores[idle] != 0.67 {
+				t.Errorf("written metrics should keep their scores: busy=%f, idle=%f", scores[busy], scores[idle])
+			}
+
+			scores = scorer.Score(context.Background(), nil, []fwksched.Endpoint{unwritten})
+			if len(scores) != 0 {
+				t.Errorf("expected no scores when all metrics are unwritten, got %v", scores)
+			}
+		})
+	}
+}
+
+func TestScorePredictionWithoutMetrics(t *testing.T) {
+	scorer := NewPlugin(noExploreConfig())
+	ep := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod"}},
+		nil,
+		nil,
+	)
+	setLatencyPrediction(ep, true, true, 100, 20, 50, 10)
+
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{ep})
+	if scores[ep] <= 0 {
+		t.Errorf("endpoint with a prediction should be scored without metrics, got %f", scores[ep])
+	}
+}
+
 func TestScoreConstantHeadroomPreservesDisabledWeights(t *testing.T) {
 	for _, strategy := range []HeadroomSelectionStrategy{StrategyLeast, StrategyMost} {
 		t.Run(string(strategy), func(t *testing.T) {
@@ -277,3 +334,118 @@ func TestScoreConstantHeadroomPreservesDisabledWeights(t *testing.T) {
 
 // Note: EpsilonExploreNeg (tier selection) is now handled by the
 // slo-headroom-tier-filter, not the scorer. See filter tests.
+
+func TestScoreHeadroomWithinUnitInterval(t *testing.T) {
+	for _, strategy := range []HeadroomSelectionStrategy{StrategyLeast, StrategyMost} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cfg := DefaultConfig
+			cfg.TTFTWeight, cfg.TPOTWeight = 1, 0
+			cfg.HeadroomSelectionStrategy = strategy
+			scorer := NewPlugin(cfg)
+
+			// The best endpoint and one 0.005 behind it on the normalized headroom.
+			ttft := []float64{10, 10.5, 110}
+			if strategy == StrategyMost {
+				ttft = []float64{110, 109.5, 10}
+			}
+			endpoints := make([]fwksched.Endpoint, len(ttft))
+			for i, headroom := range ttft {
+				endpoints[i] = makeLatencyScorerEndpoint(string(rune('a'+i)), 0.5, 0, 1)
+				setLatencyPrediction(endpoints[i], true, true, headroom, 5, 0, 0)
+			}
+			scores := scorer.Score(context.Background(), nil, endpoints)
+
+			for _, ep := range endpoints {
+				if s := scores[ep]; s < 0 || s > 1 {
+					t.Errorf("score of %s = %f, want it in [0, 1]", ep.GetMetadata().ID.Name, s)
+				}
+			}
+			if best, next := scores[endpoints[0]], scores[endpoints[1]]; best <= next {
+				t.Errorf("best endpoint should outscore the runner-up: best=%f, runner-up=%f", best, next)
+			}
+		})
+	}
+}
+
+func TestFactoryValidatesConfig(t *testing.T) {
+	valid := []string{
+		`{}`,
+		`{"headroomSelectionStrategy": "most"}`,
+		`{"headroomSelectionStrategy": "least", "ttftWeight": 1, "tpotWeight": 0}`,
+		`{"compositeKVWeight": 0, "compositeQueueWeight": 2, "compositePrefixWeight": 0}`,
+	}
+	for _, raw := range valid {
+		if _, err := Factory("latency", json.NewDecoder(strings.NewReader(raw)), nil); err != nil {
+			t.Errorf("Factory(%s) returned error %v, want nil", raw, err)
+		}
+	}
+
+	invalid := []string{
+		`{"headroomSelectionStrategy": "Most"}`,
+		`{"headroomSelectionStrategy": "fastest"}`,
+		`{"ttftWeight": -1}`,
+		`{"tpotWeight": -0.5}`,
+		`{"compositeKVWeight": -1}`,
+		`{"compositeQueueWeight": -1}`,
+		`{"compositePrefixWeight": -1}`,
+	}
+	for _, raw := range invalid {
+		if _, err := Factory("latency", json.NewDecoder(strings.NewReader(raw)), nil); err == nil {
+			t.Errorf("Factory(%s) returned nil error, want an invalid-parameter error", raw)
+		}
+	}
+}
+
+func TestScoreEndpointWithoutPredictionDoesNotOutscorePredicted(t *testing.T) {
+	scorer := NewPlugin(noExploreConfig()) // default strategy: "least"
+
+	epTight := makeLatencyScorerEndpoint("tight", 0.3, 0, 5)
+	epLoose := makeLatencyScorerEndpoint("loose", 0.3, 0, 5)
+	epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+
+	setLatencyPrediction(epTight, true, true, 10, 2, 90, 18)
+	setLatencyPrediction(epLoose, true, true, 100, 20, 50, 10)
+	// epNoPred has no LatencyPredictionInfo attribute.
+
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epTight, epLoose, epNoPred})
+
+	if scores[epNoPred] != 0 {
+		t.Errorf("endpoint without a prediction should score 0 when others have positive headroom: tight=%f loose=%f no-prediction=%f",
+			scores[epTight], scores[epLoose], scores[epNoPred])
+	}
+	if scores[epTight] <= scores[epLoose] {
+		t.Errorf("least strategy should prefer the tighter headroom: tight=%f loose=%f", scores[epTight], scores[epLoose])
+	}
+}
+
+func TestScoreEndpointWithoutPredictionDoesNotOutscoreNegative(t *testing.T) {
+	tests := []struct {
+		name                       string
+		ttftHeadroom, tpotHeadroom float64
+	}{
+		{name: "tpot only negative", ttftHeadroom: 10, tpotHeadroom: -8},
+		{name: "ttft only negative", ttftHeadroom: -10, tpotHeadroom: 8},
+		{name: "both negative", ttftHeadroom: -10, tpotHeadroom: -8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scorer := NewPlugin(noExploreConfig())
+
+			epNeg := makeLatencyScorerEndpoint("negative", 0.3, 0, 5)
+			epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+
+			// One dispatched request skips the idle preference, so scoring reaches deficit bucketing.
+			epNeg.Put(attrlatency.LatencyPredictionInfoDataKey,
+				attrlatency.NewLatencyPredictionInfo(tt.ttftHeadroom >= 0, tt.tpotHeadroom >= 0,
+					tt.ttftHeadroom, tt.tpotHeadroom, 90, 38, 1))
+			// epNoPred has no LatencyPredictionInfo attribute.
+
+			scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epNeg, epNoPred})
+
+			if scores[epNoPred] != 0 || scores[epNeg] == 0 {
+				t.Errorf("endpoint without a prediction should score below an endpoint with a known deficit: negative=%f no-prediction=%f",
+					scores[epNeg], scores[epNoPred])
+			}
+		})
+	}
+}

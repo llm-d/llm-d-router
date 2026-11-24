@@ -53,12 +53,12 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
-	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // fakeServer stands in for a gRPC server runnable. Like GracefulStop, it returns
@@ -768,7 +768,7 @@ func sendDrainTestRequest(t *testing.T, listener net.Listener, id string) (extPr
 	t.Cleanup(cancel)
 	stream, err := extProcPb.NewExternalProcessorClient(conn).Process(ctx)
 	require.NoError(t, err)
-	for _, request := range integration.ReqRaw(map[string]string{
+	for _, request := range fwkepp.ReqRaw(map[string]string{
 		":path":                      "/v1/chat/completions",
 		"content-type":               "application/json",
 		reqcommon.RequestIDHeaderKey: id,

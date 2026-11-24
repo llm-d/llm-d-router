@@ -1,4 +1,30 @@
 router:
+  # Internal marker read by the templates this chart shares with
+  # llm-d-router-gateway. They cannot rely on the chart name, which Helm
+  # replaces with the alias when the chart is a dependency. Do not modify.
+  chartKind: standalone
+
+  # Base of the names of the resources this chart creates, used in place of the
+  # release name. With fullnameOverride: qwen, the chart creates qwen-epp,
+  # qwen-envoy, qwen-proxy and so on. Where the chart documentation writes
+  # <release> in a resource name, it stands for this value when it is set.
+  # The value is lowercased, and truncated to 40 characters before suffixes
+  # such as -epp.
+  #
+  # Leave it empty for a single installation. Set it when an umbrella chart
+  # declares this chart several times under different aliases: the instances
+  # share the release name, so each one needs a distinct value, for example
+  # router-qwen.router.fullnameOverride=qwen. See "Several Standalone Routers
+  # in One Umbrella Chart" in config/charts/README.md.
+  #
+  # Changing it on an installed release renames its resources: Helm deletes the
+  # old objects and creates new ones, which interrupts traffic.
+  #
+  # The InferencePool created with router.inferencePool.create=true, and the
+  # pool name EPP watches, keep the release name. Aliased instances in one
+  # release therefore need router.inferencePool.create=false.
+  fullnameOverride: ""
+
   modelServers:
     # matchLabels: # REQUIRED
     #   app: vllm-qwen3-32b
@@ -26,6 +52,39 @@ router:
     # draining window time to complete and allows in-flight connections to drain.
     terminationGracePeriodSeconds: 70
 
+    # Rollout settings for the proxy Deployment when mode=service. deploymentStrategy
+    # overrides spec.strategy (unset = the Kubernetes default of RollingUpdate with 25%
+    # maxUnavailable, which can drop serving proxies before their replacements are
+    # Ready); minReadySeconds is how long a new pod must stay Ready before it counts
+    # as available, and must be a whole number from 0 to 599: the Deployment's
+    # progressDeadlineSeconds (the Kubernetes default of 600) has to exceed it,
+    # and the API server rejects anything else, so the render fails fast on
+    # out-of-range values. Both ignored in sidecar mode (router.epp.
+    # deploymentStrategy and router.epp.minReadySeconds govern the shared pod).
+    # deploymentStrategy:
+    #   type: RollingUpdate
+    #   rollingUpdate:
+    #     maxUnavailable: 0
+    #     maxSurge: 1
+    # minReadySeconds: 10
+
+    # Pod scheduling for the proxy Deployment when mode=service. In sidecar mode
+    # the proxy shares the EPP pod and follows router.epp.nodeSelector, affinity and tolerations.
+    nodeSelector: {}
+    affinity: {}
+    tolerations: []
+    # Each constraint needs a labelSelector matching the proxy pods: llm-d-router-proxy: <release>-proxy.
+    topologySpreadConstraints: []
+    priorityClassName: ""
+    # Extra labels added to the proxy pod template. Chart-owned label keys are rejected.
+    podLabels: {}
+
+    # Annotations and pod-level securityContext for the proxy Deployment when
+    # mode=service. In sidecar mode router.epp.podAnnotations and
+    # router.epp.podSecurityContext apply instead.
+    podAnnotations: {}
+    podSecurityContext: {}
+
     # Autoscaling configuration for the proxy Deployment (when mode=service).
     # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the proxy Deployment.
     # router.proxy.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
@@ -42,6 +101,9 @@ router:
     # unreachable, for active/passive resiliency.
     failOpen: true
 
+    # Envoy ext_proc message_timeout: how long Envoy waits for each EPP response.
+    extProcMessageTimeout: "1000s"
+
     # Priority Routing configuration for Envoy ext_proc cluster (only supported in mode: service).
     priorityRouting:
       enabled: false
@@ -49,6 +111,8 @@ router:
       standbyReplicas: 1
       connectTimeout: "0.250s"
       dnsRefreshRate: "5s"
+      # Ignored with failOpen: true, where the ext_proc cluster never enters panic mode
+      # so requests fail open with their body when no EPP host is healthy.
       healthyPanicThreshold: 10.0
 
     # Active gRPC health check configuration for the ext_proc cluster.
@@ -56,6 +120,22 @@ router:
     healthCheckTimeout: "2s"
     healthCheckUnhealthyThreshold: 3
     healthCheckHealthyThreshold: 2
+    # Probe interval while the ext_proc cluster has not carried traffic, which
+    # includes every EPP pod start. Envoy defaults it to 60s; empty uses
+    # healthCheckInterval.
+    healthCheckNoTrafficInterval: ""
+
+    # OpenTelemetry tracing for the Envoy proxy. When enabled, Envoy creates a
+    # span per request and propagates the trace context on the ext_proc gRPC
+    # stream, so EPP spans join the request trace. Envoy only.
+    tracing:
+      enabled: false
+      # OTLP gRPC collector endpoint (host:port, scheme optional). Defaults to
+      # router.tracing.otelExporterEndpoint when empty.
+      collectorEndpoint: ""
+      serviceName: envoy-proxy
+      # Percentage of requests without an incoming sampling decision to trace.
+      samplingPercentage: 10
 
     resources:
       requests:
@@ -71,11 +151,28 @@ router:
     presets:
       envoy:
         configMap:
-          name: envoy
+          # Empty means <release>-envoy. Set a name to override it.
+          name: ""
           data:
             envoy.yaml: |
               {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
               {{- $fallback := eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
+              {{- $tracing := .Values.router.proxy.tracing | default dict -}}
+              {{- $accessLogFormat := dict
+                "start_time" "%START_TIME%"
+                "method" "%REQ(:METHOD)%"
+                "status" "%RESPONSE_CODE%"
+                "flags" "%RESPONSE_FLAGS%"
+                "details" "%RESPONSE_CODE_DETAILS%"
+                "termination" "%CONNECTION_TERMINATION_DETAILS%"
+                "duration_ms" "%DURATION%"
+                "bytes_sent" "%BYTES_SENT%"
+                "cluster" "%UPSTREAM_CLUSTER%"
+                "upstream" "%UPSTREAM_HOST%"
+                "upstream_failure" "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
+              -}}
+              {{- $eppHealthPortCheck := eq (include "llm-d-router.proxy.eppHealthPortCheck" .) "true" -}}
+              {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
               admin:
                 address:
                   socket_address:
@@ -146,8 +243,9 @@ router:
                           "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                           path: /dev/stdout
                           log_format:
-                            text_format_source:
-                              inline_string: "{\"start_time\":\"%START_TIME%\",\"method\":\"%REQ(:METHOD)%\",...}\n"
+                            omit_empty_values: true
+                            json_format:
+                              {{- $accessLogFormat | toYaml | nindent 16 }}
                     filter_chains:
                       - name: vllm
                         filters:
@@ -155,6 +253,22 @@ router:
                             typed_config:
                               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                               stat_prefix: http-8081
+                              {{- if $tracing.enabled }}
+                              # Envoy propagates trace context on the ext_proc gRPC stream only when the
+                              # connection manager has a tracer.
+                              tracing:
+                                random_sampling:
+                                  value: {{ $tracing.samplingPercentage }}
+                                provider:
+                                  name: envoy.tracers.opentelemetry
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                                    grpc_service:
+                                      envoy_grpc:
+                                        cluster_name: otel_collector
+                                      timeout: 1s
+                                    service_name: {{ $tracing.serviceName | default "envoy-proxy" | quote }}
+                              {{- end }}
                               # Only EPP may set the destination header. Removing any client-supplied value
                               # before route selection keeps clients from picking the backend themselves.
                               early_header_mutation_extensions:
@@ -209,6 +323,8 @@ router:
                                           - x-llm-d-encoder-hosts-ports
                                           - x-encoder-hosts-ports
                                           - x-data-parallel-host-port
+                                          - x-llm-d-kv-cache-prefill-p2p-host-port
+                                          - x-llm-d-kv-cache-source-p2p-host-port
                                           - x-llm-d-kv-cache-source-host-port
                                           - x-kv-cache-source-host-port
                                           - x-llm-d-pin-host-port
@@ -234,7 +350,7 @@ router:
                                       response_body_mode: FULL_DUPLEX_STREAMED
                                       request_trailer_mode: SEND
                                       response_trailer_mode: SEND
-                                    message_timeout: 1000s
+                                    message_timeout: {{ .Values.router.proxy.extProcMessageTimeout }}
                                 - name: envoy.filters.http.router
                                   typed_config:
                                     "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -256,8 +372,9 @@ router:
                                     "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                                     path: /dev/stdout
                                     log_format:
-                                      text_format_source:
-                                        inline_string: "{\"start_time\":\"%START_TIME%\",\"method\":\"%REQ(:METHOD)%\",...}\n"
+                                      omit_empty_values: true
+                                      json_format:
+                                        {{- $accessLogFormat | toYaml | nindent 26 }}
                 clusters:
                   - name: prometheus_stats
                     type: STATIC
@@ -280,6 +397,13 @@ router:
                         - max_connections: 40000
                           max_pending_requests: 40000
                           max_requests: 40000
+                    {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    {{- end }}
                     original_dst_lb_config:
                       use_http_header: true
                       http_header_name: x-gateway-destination-endpoint
@@ -295,6 +419,13 @@ router:
                         - max_connections: 40000
                           max_pending_requests: 40000
                           max_requests: 40000
+                    {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    {{- end }}
                     outlier_detection:
                       split_external_local_origin_errors: true
                       consecutive_local_origin_failure: 5
@@ -310,6 +441,26 @@ router:
                                     address: {{ printf "%s.%s.svc.%s" (include "llm-d-router.proxy.fallbackServiceName" .) .Release.Namespace (.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: {{ include "llm-d-router.proxy.fallbackPort" . }}
                   {{- end }}
+                  {{- if $tracing.enabled }}
+                  {{- $collector := include "llm-d-router.proxy.tracing.collector" . | fromYaml }}
+                  - name: otel_collector
+                    type: STRICT_DNS
+                    connect_timeout: 1s
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    load_assignment:
+                      cluster_name: otel_collector
+                      endpoints:
+                        - lb_endpoints:
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ $collector.host | quote }}
+                                    port_value: {{ $collector.port }}
+                  {{- end }}
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
                     {{- if $isPriorityRouting }}
@@ -322,8 +473,9 @@ router:
                       # Avoid routing traffic to newly started hosts until their first health check passes.
                       ignore_new_hosts_until_first_hc: true
                       # Prevent Envoy from entering panic mode (broadcasting to all priorities) during primary ejection.
+                      # With fail-open, never enter panic mode; see the fail-open comment below.
                       healthy_panic_threshold:
-                        value: {{ .Values.router.proxy.priorityRouting.healthyPanicThreshold }}
+                        value: {{ if $fallback }}0{{ else }}{{ .Values.router.proxy.priorityRouting.healthyPanicThreshold }}{{ end }}
                     outlier_detection:
                       # Treat local origin (connection/TCP) failures separately from HTTP errors for immediate failover.
                       split_external_local_origin_errors: true
@@ -342,6 +494,16 @@ router:
                     connect_timeout: 86400s
                     lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
                     {{- end }}
+                    {{- if and $fallback (not $isPriorityRouting) }}
+                    common_lb_config:
+                      # Fail-open: once health checks mark every EPP host unhealthy, the cluster has no
+                      # host to pick, the ext_proc stream fails before any body chunk is sent, and Envoy
+                      # forwards the request with its body through the fallback route. In panic mode
+                      # Envoy would keep connecting to an unhealthy host after handing it the body,
+                      # and the request would lose its body.
+                      healthy_panic_threshold:
+                        value: 0
+                    {{- end }}
                     circuit_breakers:
                       thresholds:
                         - max_connections: 40000
@@ -352,12 +514,27 @@ router:
                       # Active gRPC health checking for the ext_proc cluster.
                       - timeout: {{ .Values.router.proxy.healthCheckTimeout }}
                         interval: {{ .Values.router.proxy.healthCheckInterval }}
+                        no_traffic_interval: {{ .Values.router.proxy.healthCheckNoTrafficInterval | default .Values.router.proxy.healthCheckInterval }}
                         unhealthy_threshold: {{ .Values.router.proxy.healthCheckUnhealthyThreshold }}
                         healthy_threshold: {{ .Values.router.proxy.healthCheckHealthyThreshold }}
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
+                        {{- if not $eppHealthPortCheck }}
               {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
+                        {{- else if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" }}
+                        # EPP's gRPC health port is plaintext even when ext_proc serves TLS.
+                        transport_socket_match_criteria:
+                          health: plaintext
+                    transport_socket_matches:
+                      - name: plaintext-health
+                        match:
+                          health: plaintext
+                        transport_socket:
+                          name: envoy.transport_sockets.raw_buffer
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+                        {{- end }}
               {{ include "llm-d-router.proxy.envoyExtProcTransportSocket" . | indent 6 }}
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -366,6 +543,13 @@ router:
                           http2_protocol_options:
                             initial_stream_window_size: 65536
                             initial_connection_window_size: 1048576
+                            # PING keepalive detects an EPP that died without closing its connection;
+                            # otherwise in-flight streamed responses hang until message_timeout.
+                            # The interval must stay above the EPP's 10s keepalive MinTime, or EPP
+                            # answers with GOAWAY too_many_pings and fails the requests on that connection.
+                            connection_keepalive:
+                              interval: 15s
+                              timeout: 3s
                     load_assignment:
                       cluster_name: ext_proc
                       {{- if $isPriorityRouting }}
@@ -390,6 +574,10 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                             {{- end }}
                         - locality:
@@ -405,6 +593,10 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                             {{- end }}
                         {{- else }}
@@ -416,17 +608,22 @@ router:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                         {{- end }}
         name: envoy-proxy
-        image: docker.io/envoyproxy/envoy:distroless-v1.33.2
+        image: docker.io/envoyproxy/envoy:distroless-v1.40.2
         command: "envoy"
         args:
           - "--service-node"
           - "envoy-proxy"
           - "--log-level"
           - "warn"
-          - "--cpuset-threads"
+          - "--concurrency"
+          - "8"
           - "--drain-strategy"
           - "immediate"
           - "--drain-time-s"
@@ -463,13 +660,14 @@ router:
         volumes:
           - name: config
             configMap:
-              name: '{{ .Values.router.proxy.presets.envoy.configMap.name }}'
+              name: '{{ include "llm-d-router.proxyConfigMapName" . }}'
               items:
                 - key: envoy.yaml
                   path: envoy.yaml
       agentgateway:
         configMap:
-          name: agentgateway
+          # Empty means <release>-agentgateway. Set a name to override it.
+          name: ""
         name: agentgateway-proxy
         # Keep main on latest-dev; release tooling rewrites this to a stable tag.
         image: cr.agentgateway.dev/agentgateway:latest-dev

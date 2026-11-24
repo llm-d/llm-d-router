@@ -47,6 +47,8 @@ HTTP/1.1 200 OK                    # the model's response, upstream status mirro
 # cancelled while queued:  499 once the AP drops it, until the result TTL expires
 ```
 
+If the client disconnects before the 202, the step cancels the request pre-dispatch, including when `X-Request-Id` was supplied. A client holding its id recovers by re-submitting the POST, since fetching by id returns 499 once the AP drops the request.
+
 After a successful fetch delivery the result's TTL is shrunk to a grace window (`fetch_grace_seconds`), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
 
 **Wait** returns the model's response on the original connection with the upstream status mirrored, exactly as if the model server had answered directly, and the delivered result is deleted eagerly. Wake-up is a Redis keyspace notification on the result key, with a polling fallback when notifications are unavailable. The hold runs to the request deadline and answers 504 there, or ends early at `wait_cap_seconds` with the 202 response, leaving the request fetchable. If the client disconnects, the step cancels the request pre-dispatch.
@@ -141,6 +143,7 @@ The three lifecycle clocks hand off without overlap: the deadline ends where the
 - `redis_url` must point at a standalone Redis endpoint, or a proxy presenting one. The step's client does not follow Cluster redirects or Sentinel failovers.
 - Set `maxmemory` together with `maxmemory-policy noeviction` on that Redis, with headroom below the container's memory limit. An evicted marker, counter, or mailbox silently corrupts request state, while `noeviction` turns overflow into write errors the step reports.
 - A restricted Redis user needs `@scripting` and `@pubsub`. The `wakeup_mode: auto` probe also reads CONFIG, and setting `notify` explicitly avoids it.
+- Each reserved passthrough classification and each release also writes a `quota-call:<counter key>:<token>` guard that expires after 2 minutes. These keys sit outside the quota `prefix`, so a Redis ACL scoped by key pattern must allow them.
 - Wait mode holds one gateway to coordinator connection per waiting client, so the gateway's circuit breaker limits on the coordinator cluster must be sized for held connections, not request rate. Envoy defaults are far too low.
 - `preserve_external_request_id` should be set on the gateway so client supplied request ids survive the hop for retry and fetch by id.
 - Delivery is at most once at any replica count. A message popped by an AP that then crashes is lost, and the client holds a pending id until its deadline expires. Delivery guarantees beyond this belong to client retries by id.

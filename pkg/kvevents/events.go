@@ -57,6 +57,9 @@ type EventBatch struct {
 	Timestamp        float64
 	Events           []GenericEvent
 	DataParallelRank *int
+	// SkippedTags holds the tag of each event the adapter dropped because it
+	// does not know the tag.
+	SkippedTags []string
 }
 
 // RawMessage holds the raw transport-level data from a received pub/sub message.
@@ -74,6 +77,10 @@ type RawMessage struct {
 	reset bool
 	// retire marks a final reset: the source endpoint has no subscribers left.
 	retire bool
+	// resync limits a reset or batch to the consumers that requested a resync.
+	resync bool
+	// resyncAbort marks a resync reset that drops a partial rebuild.
+	resyncAbort bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and
@@ -100,14 +107,20 @@ type EngineAdapter interface {
 
 // BlockStoredEvent represents blocks being added to the cache.
 type BlockStoredEvent struct {
+	// SessionID identifies the request context that reported these blocks, which may be shared.
+	SessionID   *string
+	Locality    string
+	Ownership   string
 	BlockHashes []uint64
 	Tokens      []uint32
-	ParentHash  uint64
-	BlockSize   int
-	DeviceTier  string
-	LoraID      *int
-	LoraName    *string
-	ExtraKeys   [][]any
+	// LookaheadToken completes the last bigram. Tokens contains only cached positions.
+	LookaheadToken *uint32
+	ParentHash     uint64
+	BlockSize      int
+	DeviceTier     string
+	LoraID         *int
+	LoraName       *string
+	ExtraKeys      [][]any
 	// GroupIdx identifies the vLLM KV cache group that emitted this event.
 	GroupIdx *int
 	// KVCacheSpecKind carries vLLM's semantic cache type for the group.
@@ -123,6 +136,8 @@ func (e *BlockStoredEvent) Type() EventType {
 
 // BlockRemovedEvent represents blocks being evicted from the cache.
 type BlockRemovedEvent struct {
+	Locality    string
+	Ownership   string
 	BlockHashes []uint64
 	DeviceTier  string
 	// GroupIdx identifies the vLLM KV cache group that removed this block.

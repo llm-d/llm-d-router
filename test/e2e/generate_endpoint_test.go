@@ -199,11 +199,16 @@ func prefillBody(modality string, tokenIDs []int, items []mmSpec) []byte {
 // doRequest POSTs body to <gateway><path>. Always sets Content-Type and a
 // fresh X-Request-ID. Returns the live *http.Response (its body is already
 // drained) and the raw response body.
-func doRequest(path string, body []byte) (*http.Response, []byte) {
+func doRequest(path string, body []byte, extraHeaders ...map[string]string) (*http.Response, []byte) {
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d%s", getPort(), path), bytes.NewReader(body))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "build POST request")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", uuid.NewString())
+	for _, headers := range extraHeaders {
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+	}
 
 	client := &http.Client{Timeout: requestTimeout}
 	resp, err := client.Do(req)

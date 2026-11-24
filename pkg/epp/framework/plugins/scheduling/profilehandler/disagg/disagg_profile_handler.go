@@ -32,12 +32,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
@@ -47,9 +48,11 @@ const (
 	// DisaggProfileHandlerType is the canonical type for the unified disaggregation profile handler.
 	DisaggProfileHandlerType = "disagg-profile-handler"
 
-	defaultDecodeProfile  = "decode"
-	defaultPrefillProfile = "prefill"
-	defaultEncodeProfile  = "encode"
+	// DefaultPrefillProfile is the prefill scheduling profile name used when none is configured.
+	DefaultPrefillProfile = "prefill"
+
+	defaultDecodeProfile = "decode"
+	defaultEncodeProfile = "encode"
 )
 
 // StageOrder defines the execution order of stages in the disaggregation profile handler.
@@ -193,7 +196,7 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Hand
 		parameters.Profiles.Decode = defaultDecodeProfile
 	}
 	if parameters.Profiles.Prefill == "" {
-		parameters.Profiles.Prefill = defaultPrefillProfile
+		parameters.Profiles.Prefill = DefaultPrefillProfile
 	}
 	if parameters.Profiles.Encode == "" {
 		parameters.Profiles.Encode = defaultEncodeProfile
@@ -217,7 +220,7 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 // compile-time assertions
 var (
 	_ scheduling.ProfileHandler = &Handler{}
-	_ requestcontrol.PreRequest = &Handler{}
+	_ fwkrh.PreRequest          = &Handler{}
 	_ plugin.ProducerPlugin     = &Handler{}
 	_ plugin.ConsumerPlugin     = &Handler{}
 )
@@ -299,7 +302,7 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 	consumed := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
 		},
 		Optional: map[plugin.DataKey]any{},
 	}
@@ -407,7 +410,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	// ── Stage 3: Prefill (optional) ────────────────────────────────────────
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
-			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
+			if h.pdDecider != nil && hasPDRoute(request) && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
 				// Publish the decode pick so plugins in the prefill profile (e.g.
 				// topology affinity) can compare candidates against it.
 				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
@@ -446,8 +449,9 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	}
 
 	// ── Stage 1: Prefill (optional) ────────────────────────────────────────
-	// In prefill-first mode, prefill runs whenever the prefill profile is configured.
-	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
+	// In prefill-first mode, prefill runs whenever the prefill profile is
+	// configured and the request has a P/D route.
+	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile && hasPDRoute(request) {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
 			return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
@@ -482,6 +486,12 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 
 	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_decode"))
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
+}
+
+// hasPDRoute reports whether the sidecar serves the request's path with
+// disaggregated prefill.
+func hasPDRoute(request *scheduling.InferenceRequest) bool {
+	return routing.HasPDRoute(fwkrequest.GetRequestPath(request.Headers))
 }
 
 // prefillRequiredButFailed reports whether the prefill profile was picked to

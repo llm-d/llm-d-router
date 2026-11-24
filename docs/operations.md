@@ -49,10 +49,12 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
   | 3 | 2.7x |
   | 4 | 3.5x |
 
-  - **Note (Flow Control)**: Flow control queues and fairness accounting are per replica.
-    In Active-Active mode, priority and fairness are enforced
-    only within each replica's share of the traffic, and per-band capacity limits apply per
-    replica, so the fleet-wide queued volume scales with the replica count.
+  - **Note (Flow Control)**: Flow control queues and fairness accounting are per replica. In
+    Active-Active mode, priority and fairness are enforced only within each replica's share of the
+    traffic, and the queue capacity limits apply per replica, so the fleet-wide queued volume scales
+    with the replica count. Whether the dispatch limit covers all replicas depends on the saturation
+    detector and the cross-replica syncer; see
+    [Multiple active replicas](../pkg/epp/flowcontrol/README.md#multiple-active-replicas).
   - **Plugin Compatibility**: EPP replicas do not share routing state by default. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix routing (`approx-prefix-cache-producer`) is supported in Active-Active when a `CrossReplicaSyncer` (for example `redis-syncer`) is configured and `syncCrossReplicaState` is left enabled (the default); without that sync path, each replica only learns prefixes from traffic it routed, so approximate hit rate drops under Active-Active.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
@@ -84,9 +86,10 @@ before receiving each other's updates; this does not provide an atomic
 cluster-wide admission quota. Request-level `GetOrSet` coordination does not
 reserve capacity across different requests.
 
-During a Redis outage, EPP can start and continue scheduling with cached peer
-state until it expires, then with local load only. Request-level coordination
-calls return Redis errors. Set `stateTTL` above the observed interval between
+During a Redis outage, EPP can start, and it keeps scheduling with the last peer
+state it read, plus its own live load, until Redis is reachable again. An EPP
+that has not read peer state yet uses local load only. Request-level
+coordination calls return Redis errors. Set `stateTTL` above the observed interval between
 successful endpoint refreshes, including latency variation; see the
 [Redis syncer README](../pkg/epp/framework/plugins/datalayer/cross_plugin/redis/README.md)
 for transport restrictions and publisher timing.
@@ -119,7 +122,7 @@ Novel prompts (window slides) pay snapshot, prompt-key, and indexer `Add` work.
 Reproduce with:
 
 ```bash
-go test ./pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ \
+go test ./pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix/ \
   -run='^$' -bench=BenchmarkProduceCrossSync -benchmem -count=5
 ```
 
@@ -298,9 +301,9 @@ Priority Routing is the recommended Active-Passive configuration in standalone s
 #### Architecture and Failover Mechanics
 
 1. **Deterministic Endpoint Discovery**: EPP pods run as a StatefulSet with a headless Service (`publishNotReadyAddresses: true`). Envoy targets individual pod DNS entries (`<release>-epp-0`, `<release>-epp-1`, etc.) mapped to distinct priority levels.
-2. **Active Health Probing**: Envoy actively probes EPP Port 9002 via gRPC health check (`grpc.health.v1.Health`).
+2. **Active Health Probing**: Envoy actively probes each EPP pod's gRPC health port (`router.epp.grpcHealthPort`, 9003 by default) via gRPC health check (`grpc.health.v1.Health`), in plaintext even when ext_proc uses TLS. Unlike the ext_proc port 9002, this port reports `NOT_SERVING` while EPP drains and until its datastore is synced. The same applies in sidecar mode and in all-active service mode; ClusterIP service mode (single-EPP or leader-elected) keeps probing port 9002 because the EPP Service exposes only that port. There the Kubernetes readiness probe only stops new connections to a draining pod; Envoy's existing HTTP/2 connection stays on it until EPP exits.
 3. **Outlier Detection Failover**: When priority routing is enabled, if a primary pod fails or crashes, Envoy's passive Outlier Detection (`connectTimeout: 0.250s`, `consecutive_local_origin_failure: 2`) detects TCP connection failure and ejects the primary host, shifting traffic to warm Priority 1 standbys in **sub-second time** (`< 1s`, `0.00s–0.08s` fail window in `1P1S` benchmarks) without lease expiration delays.
-4. **Graceful Pod Termination**: EPP pods include a native `lifecycle.preStop.sleep` hook (5 seconds) during planned deletion or rollout on Kubernetes 1.30+ with `PodLifecycleSleepAction` enabled. This gives Envoy active health checks time to detect pod shutdown and redirect new traffic to standby endpoints before SIGTERM, allowing in-flight gRPC streams to drain.
+4. **Graceful Pod Termination**: EPP pods include a native `lifecycle.preStop.sleep` hook (5 seconds) during planned deletion or rollout on Kubernetes 1.30+ with `PodLifecycleSleepAction` enabled. EPP starts draining at SIGTERM: its gRPC health port reports `NOT_SERVING` while ext_proc keeps serving for `--drain-timeout`. That drain window is what Envoy uses to detect the drain and move new streams to standby endpoints, which takes up to `healthCheckInterval` x `healthCheckUnhealthyThreshold` (30s by default). Wherever Envoy health-checks the gRPC health port, the chart sets `--drain-timeout=45s` unless `router.epp.flags.drain-timeout` is set; raise it if you raise those health check values.
 5. **Safe Failback**: When a replacement primary pod is rescheduled, the health check `healthy_threshold` requires consecutive passing health probes before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
 
 #### Helm Configuration
@@ -328,6 +331,7 @@ router:
 | `router.proxy.healthCheckTimeout` | `2s` | Health check probe timeout. |
 | `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
 | `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
+| `router.proxy.healthCheckNoTrafficInterval` | `healthCheckInterval` | Probe interval while the `ext_proc` cluster has not carried traffic, such as after an EPP pod starts. |
 | `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
 
 ### GKE Preferred Backends (Gateway Mode)
@@ -374,7 +378,7 @@ In multi-replica deployments without priority routing or GKE preferred backends,
 - **Leader Coordination**: EPP replicas contend for a `coordination.k8s.io/Lease`. Helm enables leader election for fixed `router.epp.replicas > 1` unless explicitly disabled, `router.epp.haMode: all-active` or cross-replica synchronization is selected, or priority routing or GKE preferred backends is enabled. The elected leader responds to active gRPC extension requests on Port 9002, while standby replicas do not serve external processing traffic until acquiring the lease. See [Active-Active Mode](#active-active-mode) to disable leader election for concurrent active-active replicas.
 - **Fail-Open Behavior (Gateway vs. Standalone)**:
   - **Gateway Mode (`llm-d-router-gateway`)**: With `router.inferencePool.failureMode: FailOpen` (the default), the Gateway bypasses an unreachable EPP during a leader transition and routes requests directly to healthy model-server backends in the `InferencePool` to preserve request availability.
-  - **Standalone Mode (`llm-d-router-standalone`)**: With `router.proxy.failOpen: true` (the default) and `proxyType: envoy`, the chart sets `failure_mode_allow: true` on Envoy's `ext_proc` filter and adds a fallback route. Requests that EPP schedules carry the `x-gateway-destination-endpoint` header and go to `original_destination_cluster`; requests that pass the filter because EPP is unreachable carry no header and go to the `inference_pool_fallback` cluster, which load-balances (`LEAST_REQUEST`) across the ready pods of a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry. Envoy removes any client-supplied `x-gateway-destination-endpoint` header before routing, so only EPP picks the endpoint. Agentgateway has no fail-open setting and rejects requests while EPP is unreachable.
+  - **Standalone Mode (`llm-d-router-standalone`)**: With `router.proxy.failOpen: true` (the default) and `proxyType: envoy`, the chart sets `failure_mode_allow: true` on Envoy's `ext_proc` filter and adds a fallback route. Requests that EPP schedules carry the `x-gateway-destination-endpoint` header and go to `original_destination_cluster`; requests that pass the filter because EPP is unreachable carry no header and go to the `inference_pool_fallback` cluster, which load-balances (`LEAST_REQUEST`) across the ready pods of a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry. Envoy removes any client-supplied `x-gateway-destination-endpoint` header before routing, so only EPP picks the endpoint. With fail-open the `ext_proc` cluster never enters panic mode: Envoy fails open with the full request body only once its active health checks mark every EPP host unhealthy (up to `router.proxy.healthCheckInterval` × `router.proxy.healthCheckUnhealthyThreshold`, 30s by default). Until then, a request whose `ext_proc` stream fails after Envoy sent it the body fails with `500` rather than reaching a model server without its body. Agentgateway has no fail-open setting and rejects requests while EPP is unreachable.
 - **Switchover Disadvantage (10-30s EPP Unavailability Window)**: When the active leader fails, Kubernetes lease expiration (`--ha-lease-duration`, default `15s`), standby readiness probe transition, and Service endpoint propagation take **10 to 30 seconds** before a standby replica begins serving traffic. During this window, EPP is unavailable: in Gateway mode with `FailOpen` and in standalone Envoy mode with `router.proxy.failOpen: true`, **routing is purely unoptimized** (requests bypass KV-cache affinity, prefix-cache scoring, load-aware scheduling, and flow control). Use [Priority Routing](#priority-routing-standalone-service-mode) or [GKE Preferred Backends](#gke-preferred-backends-gateway-mode) as the recommended Active-Passive setup.
 
 #### Helm Configuration

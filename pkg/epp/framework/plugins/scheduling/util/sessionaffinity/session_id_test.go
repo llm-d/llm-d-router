@@ -18,6 +18,8 @@ package sessionaffinity
 
 import (
 	"context"
+	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -188,6 +190,31 @@ func TestSessionIDHeader_PreRequest_HoldsPinWhenPresentButOutvoted(t *testing.T)
 
 	if got, want := s.boundPod("s1"), podKey("pod-a"); got != want {
 		t.Errorf("boundPod(s1) = %q, want %q (pin should hold)", got, want)
+	}
+}
+
+func TestSessionIDHeader_PreRequest_StaleAbsenceDoesNotMoveMigratedBinding(t *testing.T) {
+	s := newTestSessionIDHeader(t, nil)
+	endpointA := newTestEndpoint("pod-a")
+	endpointB := newTestEndpoint("pod-b")
+	endpointC := newTestEndpoint("pod-c")
+
+	// Bind s1 to pod-a.
+	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
+
+	// Two concurrent requests of s1 both run Choose while pod-a is absent.
+	req1 := requestWithSession("s1")
+	req2 := &scheduling.InferenceRequest{RequestID: "req-s1-2", Headers: req1.Headers}
+	s.Choose(context.Background(), req1, []scheduling.Endpoint{endpointB, endpointC})
+	s.Choose(context.Background(), req2, []scheduling.Endpoint{endpointB, endpointC})
+
+	// req1 migrates the session to pod-c. req2's absence record is about pod-a,
+	// so it must not move the binding off pod-c.
+	s.PreRequest(context.Background(), req1, schedulingResultFor(endpointC))
+	s.PreRequest(context.Background(), req2, schedulingResultFor(endpointB))
+
+	if got, want := s.boundPod("s1"), podKey("pod-c"); got != want {
+		t.Errorf("boundPod(s1) = %q, want %q (binding should stay where it migrated)", got, want)
 	}
 }
 
@@ -515,9 +542,10 @@ func TestSessionIDConfig_ApplyDefaults(t *testing.T) {
 
 func TestSessionIDConfig_Validate(t *testing.T) {
 	tests := []struct {
-		name      string
-		config    SessionIDConfig
-		expectErr bool
+		name        string
+		config      SessionIDConfig
+		expectErr   bool
+		errContains string
 	}{
 		{
 			name: "single header source is valid",
@@ -563,6 +591,54 @@ func TestSessionIDConfig_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			name: "sweep shorter than 1ns rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 1e-10,
+			},
+			expectErr:   true,
+			errContains: "evictionSweepSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
+			name: "ttl shorter than 1ns rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   1e-10,
+				EvictionSweepSeconds: 10,
+			},
+			expectErr:   true,
+			errContains: "evictionTtlSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
+			name: "sweep beyond the duration range rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 1e10,
+			},
+			expectErr:   true,
+			errContains: "evictionSweepSeconds 1e+10 exceeds the representable duration",
+		},
+		{
+			name: "sweep at the duration range bound rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: float64(math.MaxInt64) / float64(time.Second),
+			},
+			expectErr:   true,
+			errContains: "exceeds the representable duration",
+		},
+		{
+			name: "1ns sweep and 9e9 second ttl accepted",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   9e9,
+				EvictionSweepSeconds: 1e-9,
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -573,6 +649,9 @@ func TestSessionIDConfig_Validate(t *testing.T) {
 			}
 			if !test.expectErr && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+			if test.errContains != "" && (err == nil || !strings.Contains(err.Error(), test.errContains)) {
+				t.Errorf("expected error containing %q, got %v", test.errContains, err)
 			}
 		})
 	}

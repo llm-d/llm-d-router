@@ -32,6 +32,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -297,4 +298,66 @@ func TestClient_BaseURLAndTransport(t *testing.T) {
 	if c.Transport() == nil {
 		t.Error("Transport must not be nil")
 	}
+}
+
+// A plaintext gateway client must send gRPC over h2c, which gRPC requires,
+// and keep JSON calls on HTTP/1.1 for upstreams that do not speak HTTP/2.
+func TestClient_PlaintextGRPCUsesH2CAndJSONStaysHTTP1(t *testing.T) {
+	protos := make(chan int, 2)
+	srv := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protos <- r.ProtoMajor
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	c := New(config.GatewayConfig{Address: srv.URL})
+
+	resp, err := c.Post(context.Background(), "/v1/completions", []byte(`{}`), nil)
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := <-protos; got != 1 {
+		t.Errorf("JSON request used HTTP/%d, want HTTP/1", got)
+	}
+
+	resp, err = c.StreamGRPC(context.Background(), "/sglang.api.v1.SglangService/Generate", nil, []byte{0, 0, 0, 0, 0})
+	if err != nil {
+		t.Fatalf("StreamGRPC: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := <-protos; got != 2 {
+		t.Errorf("gRPC request used HTTP/%d, want HTTP/2 (h2c)", got)
+	}
+}
+
+// StreamGRPC sends its segments in order as one body, with the total length,
+// as grpcframe.SetSegmentedBody installs it.
+func TestClient_StreamGRPCSegmentedBody(t *testing.T) {
+	type got struct {
+		body          []byte
+		contentLength int64
+	}
+	gotCh := make(chan got, 1)
+	srv := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotCh <- got{body: body, contentLength: r.ContentLength}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	c := New(config.GatewayConfig{Address: srv.URL})
+	head, payload, tail := []byte{0, 0, 0, 0, 7}, []byte("payload"), []byte(nil)
+	resp, err := c.StreamGRPC(context.Background(), "/x", nil, head, nil, payload, tail)
+	if err != nil {
+		t.Fatalf("StreamGRPC: %v", err)
+	}
+	_ = resp.Body.Close()
+	g := <-gotCh
+	if want := append(append([]byte{}, head...), payload...); !bytes.Equal(g.body, want) {
+		t.Fatalf("body = %q, want %q", g.body, want)
+	}
+	if g.contentLength != int64(len(head)+len(payload)) {
+		t.Fatalf("Content-Length = %d, want %d", g.contentLength, len(head)+len(payload))
+	}
+
+	// grpcframe.TestSetSegmentedBody covers GetBody replay and the empty body.
 }

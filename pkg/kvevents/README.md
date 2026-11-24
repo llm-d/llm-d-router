@@ -26,6 +26,10 @@ engines.
 - **Worker pool.** `Pool` fans messages out to workers keyed by a sharding key
   so events for the same block are processed in order, then applies them to the
   index.
+- **Engine keys.** The index stores each engine block hash under a hash of the
+  model in the pod's KV-events topic and the engine hash, so pods of different
+  models keep separate mappings even when their engines report the same block
+  hashes.
 - **Reference-count dedup.** A dedup filter reference-counts block hashes so a
   removal is forwarded to the index only once no remaining announcement
   references the block, preventing premature eviction of blocks that multiple

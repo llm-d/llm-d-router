@@ -17,11 +17,14 @@ limitations under the License.
 package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // TestParseTopic_Valid tests topic parsing with valid format.
@@ -45,8 +48,29 @@ func TestParseTopic_Plain(t *testing.T) {
 	assert.Equal(t, "", modelName)
 }
 
-// TestGetHashAsUint64 tests hash format conversions.
-func TestGetHashAsUint64(t *testing.T) {
+// TestTopicIdentity tests that a per-pod subscription takes the model from a
+// topic that names no pod.
+func TestTopicIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, topic, source, wantPod, wantModel string
+	}{
+		{"model only, per pod", "kv@Qwen/Qwen3-32B", "10.0.0.5:5556", "10.0.0.5:5556", "Qwen/Qwen3-32B"},
+		{"pod and model, per pod", "kv@pod-1@Qwen/Qwen3-32B", "10.0.0.5:5556", "pod-1", "Qwen/Qwen3-32B"},
+		{"model only, bound socket", "kv@Qwen/Qwen3-32B", "", "kv@Qwen/Qwen3-32B", ""},
+		{"empty model, per pod", "kv@", "10.0.0.5:5556", "kv@", ""},
+		{"no separator, per pod", "fallback", "10.0.0.5:5556", "fallback", ""},
+		{"four parts, per pod", "kv@a@b@c", "10.0.0.5:5556", "kv@a@b@c", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			podID, modelName := topicIdentity(&kvevents.RawMessage{Topic: tc.topic, SourceEndpoint: tc.source})
+			assert.Equal(t, tc.wantPod, podID)
+			assert.Equal(t, tc.wantModel, modelName)
+		})
+	}
+}
+
+// TestDecodeHash tests hash format conversions.
+func TestDecodeHash(t *testing.T) {
 	positiveIntegers := []struct {
 		name string
 		raw  any
@@ -63,7 +87,7 @@ func TestGetHashAsUint64(t *testing.T) {
 	}
 	for _, tt := range positiveIntegers {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := getHashAsUint64(tt.raw)
+			result, err := decodeTestHash(tt.raw)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, result)
 		})
@@ -81,7 +105,7 @@ func TestGetHashAsUint64(t *testing.T) {
 	}
 	for _, tt := range signedIntegers {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := getHashAsUint64(tt.raw)
+			result, err := decodeTestHash(tt.raw)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, result)
 		})
@@ -90,18 +114,26 @@ func TestGetHashAsUint64(t *testing.T) {
 	t.Run("bytes_8", func(t *testing.T) {
 		b := make([]byte, 8)
 		binary.BigEndian.PutUint64(b, 12345)
-		result, err := getHashAsUint64(b)
+		result, err := decodeTestHash(b)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(12345), result)
 	})
 
 	t.Run("bytes_empty", func(t *testing.T) {
-		_, err := getHashAsUint64([]byte{})
+		_, err := decodeTestHash([]byte{})
 		assert.Error(t, err)
 	})
 
 	t.Run("unsupported_type", func(t *testing.T) {
-		_, err := getHashAsUint64("not a hash")
+		_, err := decodeTestHash("not a hash")
 		assert.Error(t, err)
 	})
+}
+
+func decodeTestHash(raw any) (uint64, error) {
+	payload, err := msgpack.Marshal(raw)
+	if err != nil {
+		return 0, err
+	}
+	return decodeHash(msgpack.NewDecoder(bytes.NewReader(payload)))
 }

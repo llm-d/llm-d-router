@@ -85,6 +85,52 @@ func TestExtractMMItems(t *testing.T) {
 			expected: 1,
 		},
 		{
+			name: "untyped image object",
+			request: map[string]any{
+				"messages": json.RawMessage(`[{"role":"user","content":[{"image_url":{"url":"https://example.com/image.jpg"}}]}]`),
+			},
+			expected: 1,
+			wantURLs: []string{"https://example.com/image.jpg"},
+		},
+		{
+			name: "untyped image string",
+			request: map[string]any{
+				"messages": json.RawMessage(`[{"role":"user","content":[{"image_url":"https://example.com/image.jpg"}]}]`),
+			},
+			expected: 1,
+			wantURLs: []string{"https://example.com/image.jpg"},
+		},
+		{
+			name: "null image type",
+			request: map[string]any{
+				"messages": json.RawMessage(`[{"role":"user","content":[{"type":null,"image_url":"https://example.com/image.jpg"}]}]`),
+			},
+			expected: 1,
+			wantURLs: []string{"https://example.com/image.jpg"},
+		},
+		{
+			name: "untyped audio and video",
+			request: map[string]any{
+				"messages": json.RawMessage(`[{"role":"user","content":[{"audio_url":"https://example.com/audio.wav"},{"input_audio":{"data":"AA==","format":"wav"}},{"video_url":"https://example.com/video.mp4"}]}]`),
+			},
+			expected: 3,
+			wantURLs: []string{"https://example.com/audio.wav", "", "https://example.com/video.mp4"},
+		},
+		{
+			name: "responses untyped image is not extracted",
+			request: map[string]any{
+				"input": json.RawMessage(`[{"role":"user","content":[{"image_url":"https://example.com/image.jpg"}]}]`),
+			},
+			apiType: reqcommon.APITypeResponses,
+		},
+		{
+			name: "messages untyped image is not extracted",
+			request: map[string]any{
+				"messages": json.RawMessage(`[{"role":"user","content":[{"image_url":"https://example.com/image.jpg"}]}]`),
+			},
+			apiType: reqcommon.APITypeMessages,
+		},
+		{
 			name: "multiple multimodal items",
 			request: map[string]any{
 				"messages": []any{
@@ -697,7 +743,7 @@ func TestMMItemsForFanoutLogsRequestID(t *testing.T) {
 		logged = append(logged, args)
 	}, funcr.Options{Verbosity: logging.DEBUG})
 
-	srv.mmItemsForFanout(parsed, "req-42", reqcommon.APITypeResponses)
+	srv.mmItemsForFanout(log.IntoContext(context.Background(), srv.logger), parsed, "req-42", reqcommon.APITypeResponses)
 
 	idx := slices.IndexFunc(logged, func(e string) bool {
 		return strings.Contains(e, "skipped multimodal content parts")

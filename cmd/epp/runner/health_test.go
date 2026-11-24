@@ -20,14 +20,24 @@ package runner
 import (
 	"context"
 	"errors"
+	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -388,5 +398,112 @@ func TestHealthServer_Check(t *testing.T) {
 				t.Errorf("Check() status = %v, want %v", resp.Status, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestHealthServer_StandbyLogging(t *testing.T) {
+	for _, service := range []string{ReadinessCheckService, "", extProcPb.ExternalProcessor_ServiceDesc.ServiceName} {
+		t.Run(service, func(t *testing.T) {
+			for _, tt := range []struct {
+				name          string
+				notSynced     bool
+				protocol      v1.AppProtocol
+				pluginErr     error
+				draining      bool
+				verbosity     int
+				wantErrorLogs int
+				wantInfoLogs  int
+			}{
+				{name: "healthy standby at trace", verbosity: logutil.TRACE, wantInfoLogs: 1},
+				{name: "healthy standby below trace", verbosity: logutil.DEBUG},
+				{name: "datastore not synced", notSynced: true, wantErrorLogs: 1},
+				{name: "plugin not ready", pluginErr: errors.New("initial sync pending"), wantErrorLogs: 1},
+				{name: "protocol mismatch", protocol: v1.AppProtocolH2C, wantErrorLogs: 2},
+				{name: "draining", draining: true, wantErrorLogs: 1},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					var errorLines []string
+					var infoLines []string
+					capture := funcr.New(func(prefix, args string) {
+						if strings.Contains(args, `"error"=`) {
+							errorLines = append(errorLines, prefix+" "+args)
+						} else {
+							infoLines = append(infoLines, prefix+" "+args)
+						}
+					}, funcr.Options{Verbosity: tt.verbosity})
+					var isLeader, draining atomic.Bool
+					draining.Store(tt.draining)
+					s := &healthServer{
+						logger: capture,
+						datastore: &mockDatastore{
+							hasSynced: !tt.notSynced,
+							pool:      &datalayer.EndpointPool{AppProtocol: tt.protocol},
+						},
+						isLeader:              &isLeader,
+						leaderElectionEnabled: true,
+						supporters:            []appProtocolSupporter{&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}}},
+						readinessCheckers:     []fwkplugin.ReadinessChecker{&mockReadinessChecker{name: "test", err: tt.pluginErr}},
+						draining:              &draining,
+					}
+
+					resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: service})
+					if err != nil {
+						t.Fatalf("Check failed: %v", err)
+					}
+					if resp.Status != healthPb.HealthCheckResponse_NOT_SERVING {
+						t.Errorf("Check() status = %v, want NOT_SERVING", resp.Status)
+					}
+					if len(errorLines) != tt.wantErrorLogs {
+						t.Errorf("got %d error logs, want %d: %v", len(errorLines), tt.wantErrorLogs, errorLines)
+					}
+					if len(infoLines) != tt.wantInfoLogs {
+						t.Errorf("got %d info logs, want %d: %v", len(infoLines), tt.wantInfoLogs, infoLines)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Envoy health-checks on a reused connection and sends keepalive pings every 15s with no
+// active stream, so the server must accept pings that frequent without sending GOAWAY.
+func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
+	t.Parallel()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var isLeader atomic.Bool
+	isLeader.Store(true)
+	srv := newHealthGRPCServer(testr.New(t), &mockDatastore{}, &isLeader, nil, false, nil, nil)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer checkCancel()
+	if _, err := healthPb.NewHealthClient(conn).Check(checkCtx, &healthPb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
+		t.Fatalf("Check failed: %v (code %v)", err, status.Code(err))
+	}
+	if state := conn.GetState(); state != connectivity.Ready {
+		t.Fatalf("connection state after Check = %v, want Ready", state)
+	}
+
+	// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 70*time.Second)
+	defer waitCancel()
+	start := time.Now()
+	if conn.WaitForStateChange(waitCtx, connectivity.Ready) {
+		t.Fatalf("idle connection left Ready after %v (state %v): server rejected 15s keepalive pings with GOAWAY too_many_pings",
+			time.Since(start).Round(time.Second), conn.GetState())
 	}
 }

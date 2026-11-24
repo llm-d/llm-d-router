@@ -54,6 +54,9 @@ type EndpointMetadata struct {
 	// RankIndex is this endpoint's position in the pool's TargetPorts,
 	// identifying the pod-local rank in multi-port deployments.
 	RankIndex int
+	// ZMQPort is the exact KV-events socket port, overriding the
+	// configured socket port plus RankIndex. Zero means unset.
+	ZMQPort int
 }
 
 // String returns a string representation of the endpoint.
@@ -87,6 +90,7 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 		Labels:      clonedLabels,
 		Attributes:  clonedAttributes,
 		RankIndex:   epm.RankIndex,
+		ZMQPort:     epm.ZMQPort,
 	}
 }
 
@@ -103,6 +107,7 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		epm.Port == other.Port &&
 		epm.MetricsHost == other.MetricsHost &&
 		epm.RankIndex == other.RankIndex &&
+		epm.ZMQPort == other.ZMQPort &&
 		maps.Equal(epm.Labels, other.Labels) &&
 		maps.Equal(epm.Attributes, other.Attributes)
 }

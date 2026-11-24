@@ -22,14 +22,22 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/sglangwire"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -50,7 +58,14 @@ func init() {
 }
 
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
-	s.logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
+	if (r.URL != nil && r.URL.Path == sglangapiv1.SglangService_Generate_FullMethodName) ||
+		grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+		s.handleSGLangGRPC(w, r, prefillPodHostPort)
+		return
+	}
+
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
 	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -63,12 +78,12 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	// Inject bootstrap info for both prefill and decode
-	bootstrapInfo := s.addSGLangBootstrapInfo(requestData, prefillPodHostPort, roomID)
+	bootstrapInfo := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
 
 	body, err := json.Marshal(bootstrapInfo)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		if err := errorJSONInvalid(w, r, err); err != nil {
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -77,18 +92,58 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
 }
 
-func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
+func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running SGLang gRPC protocol", "url", prefillPodHostPort)
+
+	frame, code, err := grpcframe.ReadUnaryRequest(r, grpcframe.MaxPayloadLen)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("invalid gRPC request frame", "error", err)
+		grpcframe.WriteError(w, code, grpcframe.ReadErrorMessage(err))
+		return
+	}
+	scanned, err := sglangwire.ScanGenerateRequest(frame[grpcframe.HeaderLen:])
+	if err != nil {
+		logger.V(logging.DEBUG).Info("invalid GenerateRequest protobuf", "error", err)
+		grpcframe.WriteError(w, codes.InvalidArgument, "invalid GenerateRequest")
+		return
+	}
+
+	roomID := s.generateSGLangRoomID()
+	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
+
+	bootstrapHost := routing.ExtractHost(prefillPodHostPort)
+	head, tail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
+		Host: bootstrapHost,
+		Port: int64(sglangBootstrapPort),
+		Room: roomID,
+	})
+	if err != nil {
+		logger.Error(err, "failed to encode GenerateRequest")
+		grpcframe.WriteError(w, codes.ResourceExhausted, err.Error())
+		return
+	}
+	logger.V(logging.TRACE).Info("bootstrap info added",
+		"bootstrap_host", bootstrapHost,
+		"bootstrap_port", sglangBootstrapPort,
+		"bootstrap_room", roomID)
+
+	body := slices.Concat(head, scanned.Payload, tail)
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, nil)
+}
+
+func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
 	modifiedRequest := maps.Clone(requestData)
 
 	// Generate bootstrap host from prefill host
-	bootstrapHost := extractHost(prefillHostPort)
+	bootstrapHost := routing.ExtractHost(prefillHostPort)
 
 	// Add bootstrap information
 	modifiedRequest[reqcommon.FieldBootstrapHost] = bootstrapHost
 	modifiedRequest[reqcommon.FieldBootstrapPort] = sglangBootstrapPort
 	modifiedRequest[reqcommon.FieldBootstrapRoom] = roomID
 
-	s.logger.V(logging.TRACE).Info("bootstrap info added",
+	logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)

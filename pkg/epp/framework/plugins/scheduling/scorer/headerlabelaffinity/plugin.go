@@ -27,7 +27,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -80,7 +80,7 @@ type Scorer struct {
 
 var (
 	_ fwksched.Scorer               = (*Scorer)(nil)
-	_ fwkrc.ResponseHeaderProcessor = (*Scorer)(nil)
+	_ fwkrh.ResponseHeaderProcessor = (*Scorer)(nil)
 )
 
 func (s *Scorer) TypedName() fwkplugin.TypedName { return s.typedName }
@@ -109,7 +109,7 @@ func (s *Scorer) Score(_ context.Context, request *fwksched.InferenceRequest, en
 // coordinator can copy into a later request. This deliberately does not depend
 // on whether the current request carried the header: affinity is soft, so the
 // endpoint that won can have a different label from the requested preference.
-func (s *Scorer) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, response *fwkrc.Response, endpoint *fwkdl.EndpointMetadata) {
+func (s *Scorer) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, response *fwkrh.Response, endpoint *fwkdl.EndpointMetadata) {
 	if !s.stampResponseHeader || endpoint == nil || response == nil || response.Headers == nil {
 		return
 	}

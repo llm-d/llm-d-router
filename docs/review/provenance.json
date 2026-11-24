@@ -1,0 +1,781 @@
+{
+  "corpus": {
+    "window_start": "2026-04-26",
+    "window_end": "2026-10-30",
+    "pull_requests": 1868,
+    "maintainer_pr_items": 6909,
+    "issues": 1125,
+    "maintainer_issue_items": 1641,
+    "mined_through_pr": 3534,
+    "mined_through_issue": 3744,
+    "mined_through_date": "2026-10-30"
+  },
+  "sections": {
+    "external_wire_and_engine_contracts": {
+      "title": "External wire and engine contracts",
+      "kind": "failure-class",
+      "stale_after": "2027-04-26T00:00:00Z",
+      "description": "External API token semantics, engine streaming and render wire contracts, HTTP header invariants, router-built P/D transfer params, and ZMQ KV-event sequence recovery not visible in router Go structs."
+    },
+    "unencoded_runtime_hazards": {
+      "title": "Unencoded runtime hazards",
+      "kind": "failure-class",
+      "stale_after": "2027-04-26T00:00:00Z",
+      "description": "Non-local concurrency, Envoy ext_proc skip-path, SSE chunk-boundary accumulation, ResponseWriter wrapper, multi-worker DP endpoint-key, metric cardinality, and lock-across-network hazards not visible in local function signatures."
+    },
+    "governance_and_compatibility_policy": {
+      "title": "Governance and compatibility policy",
+      "kind": "process",
+      "stale_after": "2027-04-26T00:00:00Z",
+      "description": "Release deprecation policy, plugin graduation tiers and frozen Stable v1 fixtures, upstream engine and GIE CRD coupling rules, and shipped Helm vs local Kustomize boundaries."
+    },
+    "settled_architectural_boundaries": {
+      "title": "Settled architectural boundaries",
+      "kind": "direction",
+      "stale_after": "2027-04-26T00:00:00Z",
+      "description": "Maintainer-settled subsystem boundaries across overload shedding, pool homogeneity, session state, coordinator vs sidecar responsibilities, and ingress trust boundaries."
+    }
+  },
+  "rules": {
+    "external_wire_and_engine_contracts#anthropic-split-prompt-tokens-and-vllm-streaming-usage-flags": {
+      "applies_to": [
+        "pkg/epp/framework/plugins/requesthandling/**",
+        "pkg/epp/handlers/**",
+        "pkg/common/usage/**"
+      ],
+      "consequence": "Ignoring Anthropic cache token fields undercounts prompt tokens, and injecting include_usage alongside continuous_usage_stats duplicates or corrupts streaming usage.",
+      "observed_prs": 63,
+      "examples": [
+        {
+          "id": "issue-848",
+          "url": "https://github.com/llm-d/llm-d-router/issues/848",
+          "author": "human:elevran",
+          "last_modified": "2026-04-20T09:27:44Z"
+        },
+        {
+          "id": "pr-932-r3178050269",
+          "url": "https://github.com/llm-d/llm-d-router/pull/932#discussion_r3178050269",
+          "author": "human:ahg-g",
+          "last_modified": "2026-05-03T11:37:43Z"
+        },
+        {
+          "id": "pr-2391-r3798712574",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2391#discussion_r3798712574",
+          "author": "human:sagearc",
+          "last_modified": "2026-08-17T20:51:12Z"
+        }
+      ]
+    },
+    "external_wire_and_engine_contracts#client-json-passthrough-content-length-and-connection-upgrade": {
+      "applies_to": [
+        "pkg/common/request/**",
+        "pkg/epp/handlers/**",
+        "pkg/coordinator/server/**",
+        "pkg/sidecar/proxy/**"
+      ],
+      "consequence": "Full-struct JSON re-serialization drops unknown client fields, stale Content-Length headers truncate or hang streams after body rewrites, single-line Connection checks miss RFC 9110 upgrades, and a forwarded client Accept-Encoding lets upstreams return gzip the router then fails to decode.",
+      "observed_prs": 52,
+      "examples": [
+        {
+          "id": "issue-1045",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1045",
+          "author": "human:yankay",
+          "last_modified": "2026-05-11T04:56:45Z"
+        },
+        {
+          "id": "issue-1092",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1092",
+          "author": "human:ahg-g",
+          "last_modified": "2026-05-13T18:36:03Z"
+        },
+        {
+          "id": "pr-3638-rev-5665600572",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3638#pullrequestreview-5665600572",
+          "author": "human:blacksoxx",
+          "last_modified": "2026-10-27T10:29:20Z"
+        }
+      ],
+      "decisions": [
+        "decisions/opt_in_backend_priority_rewrite.md"
+      ]
+    },
+    "external_wire_and_engine_contracts#native-engine-render-passthrough-and-stateful-responses-rejection": {
+      "applies_to": [
+        "pkg/coordinator/steps/**",
+        "pkg/epp/framework/plugins/requesthandling/**",
+        "pkg/epp/framework/plugins/requestcontrol/dataproducer/**"
+      ],
+      "consequence": "Router-side prompt translation drifts from backend tokenizer templates, and silently ignoring previous_response_id or conversation fields drops prior multi-turn context.",
+      "observed_prs": 23,
+      "examples": [
+        {
+          "id": "issue-850",
+          "url": "https://github.com/llm-d/llm-d-router/issues/850",
+          "author": "human:vMaroon",
+          "last_modified": "2026-04-20T11:00:58Z"
+        },
+        {
+          "id": "pr-860-r3279332668",
+          "url": "https://github.com/llm-d/llm-d-router/pull/860#discussion_r3279332668",
+          "author": "human:ahg-g",
+          "last_modified": "2026-05-21T07:16:29Z"
+        },
+        {
+          "id": "issue-1364-ic-4587275492",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1364#issuecomment-4587275492",
+          "author": "human:elevran",
+          "last_modified": "2026-05-31T16:17:22Z"
+        }
+      ],
+      "accept_examples": [
+        {
+          "id": "pr-1896-ic-4924616643",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1896#issuecomment-4924616643",
+          "author": "human:vMaroon",
+          "last_modified": "2026-07-09T11:33:43Z"
+        },
+        {
+          "id": "pr-1896-rev-4657668118",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1896#pullrequestreview-4657668118",
+          "author": "human:sagearc",
+          "last_modified": "2026-07-08T20:25:23Z"
+        }
+      ]
+    },
+    "external_wire_and_engine_contracts#zmq-kv-events-sequence-gaps-and-worker-epoch-resets": {
+      "applies_to": [
+        "pkg/kvevents/**",
+        "pkg/kvcache/**"
+      ],
+      "consequence": "Applying KV-event deltas across dropped packets or worker restarts leaves stale block hashes in the prefix-cache index and misroutes requests.",
+      "observed_prs": 27,
+      "examples": [
+        {
+          "id": "issue-1737",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1737",
+          "author": "human:RishabhSaini",
+          "last_modified": "2026-06-24T15:48:04Z"
+        },
+        {
+          "id": "pr-1887-r3684757376",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1887#discussion_r3684757376",
+          "author": "human:bongwoobak",
+          "last_modified": "2026-07-30T17:10:47Z"
+        },
+        {
+          "id": "pr-2946-rev-5438730630",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2946#pullrequestreview-5438730630",
+          "author": "human:ahg-g",
+          "last_modified": "2026-10-07T06:59:11Z"
+        }
+      ]
+    },
+    "unencoded_runtime_hazards#unjoined-timed-out-dataproducer-goroutines-and-buffer-lifetimes": {
+      "applies_to": [
+        "pkg/epp/requestcontrol/**",
+        "pkg/epp/framework/plugins/requestcontrol/dataproducer/**"
+      ],
+      "consequence": "Unjoined producer goroutines that outlive timeout mutate request bodies or recycled sync.Pool buffers concurrently with downstream scheduling.",
+      "observed_prs": 44,
+      "examples": [
+        {
+          "id": "pr-822-r3182740756",
+          "url": "https://github.com/llm-d/llm-d-router/pull/822#discussion_r3182740756",
+          "author": "human:elevran",
+          "last_modified": "2026-05-04T15:46:55Z"
+        },
+        {
+          "id": "pr-890-r3149928582",
+          "url": "https://github.com/llm-d/llm-d-router/pull/890#discussion_r3149928582",
+          "author": "human:hexfusion",
+          "last_modified": "2026-04-27T20:16:05Z"
+        },
+        {
+          "id": "pr-1002-r3403097625",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1002#discussion_r3403097625",
+          "author": "human:ahg-g",
+          "last_modified": "2026-06-12T11:48:40Z"
+        }
+      ],
+      "open_question": {
+        "file": "open_questions/plugin_panic_isolation.md",
+        "citations": [
+          {
+            "id": "issue-2105",
+            "url": "https://github.com/llm-d/llm-d-router/issues/2105",
+            "author": "human:LukeAVanDrie",
+            "last_modified": "2026-07-21T00:25:41Z"
+          },
+          {
+            "id": "issue-2098-ic-5032265086",
+            "url": "https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5032265086",
+            "author": "human:shmuelk",
+            "last_modified": "2026-07-21T09:21:03Z"
+          },
+          {
+            "id": "issue-2098-ic-5028980468",
+            "url": "https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5028980468",
+            "author": "human:LukeAVanDrie",
+            "last_modified": "2026-07-21T00:57:58Z"
+          }
+        ]
+      }
+    },
+    "unencoded_runtime_hazards#envoy-ext_proc-early-header-skip-metrics-and-decode-pod-filtering": {
+      "applies_to": [
+        "pkg/epp/handlers/**",
+        "pkg/epp/requestcontrol/**"
+      ],
+      "consequence": "Skipping latency recording on header-only exit branches skews request histograms, and unfiltered fallback selection can route client traffic to prefill-only pods.",
+      "observed_prs": 37,
+      "examples": [
+        {
+          "id": "issue-1553",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1553",
+          "author": "human:liu-cong",
+          "last_modified": "2026-06-08T23:54:33Z"
+        },
+        {
+          "id": "pr-1658-r3618566988",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1658#discussion_r3618566988",
+          "author": "human:liu-cong",
+          "last_modified": "2026-07-21T00:39:19Z"
+        },
+        {
+          "id": "pr-1444-r3346561765",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1444#discussion_r3346561765",
+          "author": "human:shmuelk",
+          "last_modified": "2026-06-03T07:05:32Z"
+        }
+      ]
+    },
+    "unencoded_runtime_hazards#sse-chunk-boundaries-usage-folding-and-responsewriter-unwrap": {
+      "applies_to": [
+        "pkg/epp/handlers/**",
+        "pkg/epp/framework/plugins/requesthandling/**",
+        "pkg/coordinator/server/**",
+        "pkg/sidecar/proxy/**"
+      ],
+      "consequence": "SSE events split across ext_proc chunks or several usage events in one chunk record zero or stale token usage, unbounded carry buffers grow on malformed streams, and missing Unwrap breaks SSE flushing.",
+      "observed_prs": 17,
+      "examples": [
+        {
+          "id": "pr-3650-r4402061735",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3650#discussion_r4402061735",
+          "author": "human:elevran",
+          "last_modified": "2026-10-28T17:52:55Z"
+        },
+        {
+          "id": "pr-3650-r4402061747",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3650#discussion_r4402061747",
+          "author": "human:elevran",
+          "last_modified": "2026-10-28T17:52:57Z"
+        },
+        {
+          "id": "pr-822-r3182740743",
+          "url": "https://github.com/llm-d/llm-d-router/pull/822#discussion_r3182740743",
+          "author": "human:elevran",
+          "last_modified": "2026-05-04T15:46:55Z"
+        }
+      ]
+    },
+    "unencoded_runtime_hazards#multi-worker-dp-endpoint-keys-by-host-port-and-rank": {
+      "applies_to": [
+        "pkg/epp/datastore/**",
+        "pkg/epp/datalayer/**",
+        "pkg/kvcache/**",
+        "pkg/kvevents/**",
+        "pkg/sidecar/proxy/**"
+      ],
+      "consequence": "Keying endpoint state by pod IP alone collides across multi-worker data-parallel ranks sharing one pod network namespace.",
+      "observed_prs": 13,
+      "examples": [
+        {
+          "id": "issue-841",
+          "url": "https://github.com/llm-d/llm-d-router/issues/841",
+          "author": "human:zetxqx",
+          "last_modified": "2026-04-18T01:21:08Z"
+        },
+        {
+          "id": "pr-1112-r3242332547",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1112#discussion_r3242332547",
+          "author": "human:bongwoobak",
+          "last_modified": "2026-05-14T15:15:07Z"
+        },
+        {
+          "id": "pr-2831-r4033597903",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2831#discussion_r4033597903",
+          "author": "human:nilig",
+          "last_modified": "2026-09-17T05:49:10Z"
+        }
+      ]
+    },
+    "governance_and_compatibility_policy#n2-deprecation-for-shipped-surfaces-and-zero-shims-for-unshipped-surfaces": {
+      "applies_to": [
+        "cmd/**",
+        "pkg/epp/config/**",
+        "pkg/coordinator/config/**",
+        "config/charts/**"
+      ],
+      "consequence": "Removing shipped flags or config fields without a two-release shim breaks upgrades, while keeping shims for unshipped surfaces leaves dead compatibility code.",
+      "observed_prs": 68,
+      "examples": [
+        {
+          "id": "pr-820-ic-4395649694",
+          "url": "https://github.com/llm-d/llm-d-router/pull/820#issuecomment-4395649694",
+          "author": "human:elevran",
+          "last_modified": "2026-05-07T08:56:21Z"
+        },
+        {
+          "id": "pr-842-r3180806498",
+          "url": "https://github.com/llm-d/llm-d-router/pull/842#discussion_r3180806498",
+          "author": "human:ahg-g",
+          "last_modified": "2026-05-04T10:14:01Z"
+        },
+        {
+          "id": "pr-894-r3151838341",
+          "url": "https://github.com/llm-d/llm-d-router/pull/894#discussion_r3151838341",
+          "author": "human:ahg-g",
+          "last_modified": "2026-04-28T05:49:19Z"
+        }
+      ],
+      "decisions": [
+        "decisions/two_release_deprecation_shims_for_pre_v1_config.md",
+        "decisions/delete_stranded_deprecation_helpers_immediately.md"
+      ]
+    },
+    "governance_and_compatibility_policy#plugin-alpha-beta-and-stable-graduation-and-frozen-v1-fixtures": {
+      "applies_to": [
+        "pkg/epp/framework/plugins/**",
+        "test/testdata/plugins/stable/**"
+      ],
+      "consequence": "Graduating plugins without tier gates or editing frozen Stable v1 fixtures silently breaks production EndpointPickerConfig manifests.",
+      "observed_prs": 12,
+      "examples": [
+        {
+          "id": "pr-905-ic-4351689606",
+          "url": "https://github.com/llm-d/llm-d-router/pull/905#issuecomment-4351689606",
+          "author": "human:elevran",
+          "last_modified": "2026-04-30T10:29:29Z"
+        },
+        {
+          "id": "pr-2365-r4241052101",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2365#discussion_r4241052101",
+          "author": "human:roytman",
+          "last_modified": "2026-10-11T09:26:35Z"
+        },
+        {
+          "id": "pr-3511-r4379506333",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3511#discussion_r4379506333",
+          "author": "human:sagearc",
+          "last_modified": "2026-10-26T16:04:27Z"
+        }
+      ],
+      "decisions": [
+        "decisions/plugin_graduation_tiers.md"
+      ]
+    },
+    "governance_and_compatibility_policy#unmerged-upstream-engine-contracts-and-versioned-gie-crds": {
+      "applies_to": [
+        "apix/**",
+        "client-go/**",
+        "config/crd/**",
+        "go.mod",
+        "pkg/coordinator/**",
+        "pkg/sidecar/**"
+      ],
+      "consequence": "Merging router support against unmerged engine flags or vendored upstream CRDs strands incompatible wire shapes when upstream lands differently.",
+      "observed_prs": 20,
+      "examples": [
+        {
+          "id": "pr-3359-r4361817276",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3359#discussion_r4361817276",
+          "author": "human:liu-cong",
+          "last_modified": "2026-10-23T16:26:24Z"
+        },
+        {
+          "id": "issue-968-ic-4602495714",
+          "url": "https://github.com/llm-d/llm-d-router/issues/968#issuecomment-4602495714",
+          "author": "human:elevran",
+          "last_modified": "2026-06-02T12:44:42Z"
+        },
+        {
+          "id": "pr-1035-r3244818645",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1035#discussion_r3244818645",
+          "author": "human:zetxqx",
+          "last_modified": "2026-05-14T23:08:33Z"
+        }
+      ],
+      "open_question": {
+        "file": "open_questions/upstream_test_crd_caching.md",
+        "citations": [
+          {
+            "id": "pr-1482-ic-4633716490",
+            "url": "https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4633716490",
+            "author": "human:liu-cong",
+            "last_modified": "2026-06-05T16:59:52Z"
+          },
+          {
+            "id": "pr-1482-ic-4661288603",
+            "url": "https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4661288603",
+            "author": "human:elevran",
+            "last_modified": "2026-06-09T15:23:11Z"
+          }
+        ]
+      }
+    },
+    "governance_and_compatibility_policy#helm-charts-in-configcharts-and-local-kustomize-in-teste2eartifacts": {
+      "applies_to": [
+        "config/charts/**",
+        "config/manifests/**",
+        "test/e2e/artifacts/**"
+      ],
+      "consequence": "Shipping production flags only in test/e2e/artifacts/ Kustomize overlays leaves Helm chart installations missing supported configuration.",
+      "observed_prs": 30,
+      "examples": [
+        {
+          "id": "issue-634",
+          "url": "https://github.com/llm-d/llm-d-router/issues/634",
+          "author": "human:elevran",
+          "last_modified": "2026-02-19T17:30:46Z"
+        },
+        {
+          "id": "pr-930-ic-4366069128",
+          "url": "https://github.com/llm-d/llm-d-router/pull/930#issuecomment-4366069128",
+          "author": "human:ahg-g",
+          "last_modified": "2026-05-03T11:34:24Z"
+        },
+        {
+          "id": "pr-1550-ic-4656209920",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1550#issuecomment-4656209920",
+          "author": "human:ahg-g",
+          "last_modified": "2026-06-09T04:43:18Z"
+        }
+      ],
+      "accept_decisions": [
+        "decisions/helm_release_charts_with_dev_kustomize_manifests.md"
+      ],
+      "accept_examples": [
+        {
+          "id": "issue-1177-ic-4478503514",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1177#issuecomment-4478503514",
+          "author": "human:shmuelk",
+          "last_modified": "2026-05-18T14:08:19Z"
+        },
+        {
+          "id": "pr-2048-r3596786577",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2048#discussion_r3596786577",
+          "author": "human:shmuelk",
+          "last_modified": "2026-07-16T15:28:50Z"
+        }
+      ]
+    },
+    "settled_architectural_boundaries#capacity-shedding-in-saturationdetector-or-admissionplugin": {
+      "applies_to": [
+        "pkg/epp/flowcontrol/**",
+        "pkg/epp/scheduling/**",
+        "pkg/epp/framework/plugins/scheduling/**",
+        "pkg/epp/framework/plugins/requestcontrol/admitter/**"
+      ],
+      "consequence": "Shedding load inside scheduling Filter plugins bypasses flow-control queuing, priority fairness, and admission metrics.",
+      "observed_prs": 37,
+      "examples": [
+        {
+          "id": "issue-545-ic-5194281537",
+          "url": "https://github.com/llm-d/llm-d-router/issues/545#issuecomment-5194281537",
+          "author": "human:ahg-g",
+          "last_modified": "2026-08-05T16:11:12Z"
+        },
+        {
+          "id": "issue-837",
+          "url": "https://github.com/llm-d/llm-d-router/issues/837",
+          "author": "human:elevran",
+          "last_modified": "2026-04-16T16:22:26Z"
+        },
+        {
+          "id": "issue-977",
+          "url": "https://github.com/llm-d/llm-d-router/issues/977",
+          "author": "human:liu-cong",
+          "last_modified": "2026-05-03T18:45:41Z"
+        }
+      ],
+      "decisions": [
+        "decisions/scorer_internal_fallback_over_fallback_profiles.md",
+        "decisions/request_header_extractor_before_admission.md"
+      ]
+    },
+    "settled_architectural_boundaries#homogeneous-base-model-and-role-per-inferencepool": {
+      "applies_to": [
+        "pkg/epp/datastore/**",
+        "pkg/epp/scheduling/**",
+        "pkg/epp/framework/plugins/requestcontrol/responder/**"
+      ],
+      "consequence": "Mixing heterogeneous base models or roles in one InferencePool breaks capacity accounting, KV-cache compatibility, and scheduling assumptions.",
+      "observed_prs": 7,
+      "examples": [
+        {
+          "id": "issue-1878-ic-4864624197",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1878#issuecomment-4864624197",
+          "author": "human:shmuelk",
+          "last_modified": "2026-07-02T10:16:39Z"
+        },
+        {
+          "id": "pr-2333-ic-5935642884",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2333#issuecomment-5935642884",
+          "author": "human:ahg-g",
+          "last_modified": "2026-10-01T16:20:46Z"
+        },
+        {
+          "id": "pr-2692-ic-5626620151",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2692#issuecomment-5626620151",
+          "author": "human:zetxqx",
+          "last_modified": "2026-09-10T23:06:02Z"
+        }
+      ],
+      "accept_decisions": [
+        "decisions/models_responder_generic_extension_point.md"
+      ],
+      "accept_examples": [
+        {
+          "id": "pr-2308-rev-5453802061",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2308#pullrequestreview-5453802061",
+          "author": "human:elevran",
+          "last_modified": "2026-10-08T09:12:13Z"
+        },
+        {
+          "id": "pr-2308-rev-5483618104",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2308#pullrequestreview-5483618104",
+          "author": "human:ahg-g",
+          "last_modified": "2026-10-11T14:20:56Z"
+        }
+      ],
+      "open_question": {
+        "file": "open_questions/non_kubernetes_objectives_schema.md",
+        "citations": [
+          {
+            "id": "pr-3502",
+            "url": "https://github.com/llm-d/llm-d-router/pull/3502",
+            "author": "human:aistackdev",
+            "last_modified": "2026-10-19T04:45:22Z"
+          },
+          {
+            "id": "pr-3502-rev-5649007338",
+            "url": "https://github.com/llm-d/llm-d-router/pull/3502#pullrequestreview-5649007338",
+            "author": "human:elevran",
+            "last_modified": "2026-10-26T08:45:37Z"
+          }
+        ]
+      }
+    },
+    "settled_architectural_boundaries#external-conversation-history-vs-bounded-routing-state": {
+      "applies_to": [
+        "pkg/epp/framework/plugins/**",
+        "pkg/epp/statesync/**",
+        "pkg/coordinator/**"
+      ],
+      "consequence": "Storing client conversation history turns the stateless router into a stateful data store, while unbounded routing caches leak memory on pod churn.",
+      "observed_prs": 27,
+      "examples": [
+        {
+          "id": "issue-896-ic-5923079423",
+          "url": "https://github.com/llm-d/llm-d-router/issues/896#issuecomment-5923079423",
+          "author": "human:liu-cong",
+          "last_modified": "2026-10-01T01:47:27Z"
+        },
+        {
+          "id": "pr-707-r3190233226",
+          "url": "https://github.com/llm-d/llm-d-router/pull/707#discussion_r3190233226",
+          "author": "human:roytman",
+          "last_modified": "2026-05-05T17:07:35Z"
+        },
+        {
+          "id": "pr-1004-r3202130559",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1004#discussion_r3202130559",
+          "author": "human:shmuelk",
+          "last_modified": "2026-05-07T14:20:00Z"
+        }
+      ],
+      "decisions": [
+        "decisions/session_affinity_shared_helper.md"
+      ]
+    },
+    "settled_architectural_boundaries#cluster-orchestration-in-pkgcoordinator-and-pod-proxy-in-pkgsidecar": {
+      "applies_to": [
+        "cmd/coordinator/**",
+        "pkg/coordinator/**",
+        "cmd/pd-sidecar/**",
+        "pkg/sidecar/**"
+      ],
+      "consequence": "Placing cluster-wide stage orchestration inside the pod-local sidecar couples worker proxies to cluster routing state and control-plane watches.",
+      "observed_prs": 14,
+      "examples": [
+        {
+          "id": "issue-1104-ic-4449848790",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1104#issuecomment-4449848790",
+          "author": "human:elevran",
+          "last_modified": "2026-05-14T10:29:32Z"
+        },
+        {
+          "id": "pr-1145-ic-4489027953",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4489027953",
+          "author": "human:ahg-g",
+          "last_modified": "2026-05-19T14:55:39Z"
+        },
+        {
+          "id": "pr-1653-r3412845630",
+          "url": "https://github.com/llm-d/llm-d-router/pull/1653#discussion_r3412845630",
+          "author": "human:roytman",
+          "last_modified": "2026-06-15T10:44:51Z"
+        }
+      ],
+      "open_question": {
+        "file": "open_questions/sidecar_ssrf_allowlist_watches.md",
+        "citations": [
+          {
+            "id": "pr-1145-ic-4479522771",
+            "url": "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4479522771",
+            "author": "human:elevran",
+            "last_modified": "2026-05-18T16:05:58Z"
+          },
+          {
+            "id": "pr-1145-ic-4489027953",
+            "url": "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4489027953",
+            "author": "human:ahg-g",
+            "last_modified": "2026-05-19T14:55:39Z"
+          }
+        ]
+      }
+    },
+    "settled_architectural_boundaries#ingress-only-header-stripping": {
+      "applies_to": [
+        "pkg/epp/handlers/**",
+        "pkg/common/request/**",
+        "pkg/common/routing/**",
+        "pkg/coordinator/**",
+        "pkg/sidecar/proxy/**"
+      ],
+      "consequence": "Failing to strip internal headers at client ingress enables routing spoofing, while stripping kv_transfer_params on internal hops breaks disaggregated KV transfer.",
+      "observed_prs": 35,
+      "examples": [
+        {
+          "id": "pr-3523-rev-5584533523",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3523#pullrequestreview-5584533523",
+          "author": "human:roytman",
+          "last_modified": "2026-10-20T11:45:13Z"
+        },
+        {
+          "id": "issue-979-ic-5944114560",
+          "url": "https://github.com/llm-d/llm-d-router/issues/979#issuecomment-5944114560",
+          "author": "human:LukeAVanDrie",
+          "last_modified": "2026-10-02T01:52:22Z"
+        },
+        {
+          "id": "pr-2319-r3758140767",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2319#discussion_r3758140767",
+          "author": "human:roytman",
+          "last_modified": "2026-08-11T12:58:38Z"
+        }
+      ],
+      "open_question": {
+        "file": "open_questions/session_affinity_cookie_vs_header.md",
+        "citations": [
+          {
+            "id": "issue-28",
+            "url": "https://github.com/llm-d/llm-d-router/issues/28",
+            "author": "human:elevran",
+            "last_modified": "2025-05-07T17:56:35Z"
+          },
+          {
+            "id": "pr-600-r3156539950",
+            "url": "https://github.com/llm-d/llm-d-router/pull/600#discussion_r3156539950",
+            "author": "human:zetxqx",
+            "last_modified": "2026-04-28T19:04:29Z"
+          }
+        ]
+      }
+    },
+    "external_wire_and_engine_contracts#router-built-pd-transfer-params": {
+      "applies_to": [
+        "pkg/sidecar/proxy/**",
+        "pkg/coordinator/connectors/**",
+        "pkg/coordinator/steps/**"
+      ],
+      "consequence": "Router-built decode params that omit a key the engine connector reads unconditionally, or carry another engine's keys, crash the decode engine or break its KV transfer, and forwarded encoder ec_transfer_params trigger connector errors on decode workers.",
+      "observed_prs": 2,
+      "examples": [
+        {
+          "id": "issue-3607",
+          "url": "https://github.com/llm-d/llm-d-router/issues/3607",
+          "author": "human:xintin",
+          "last_modified": "2026-10-25T07:34:00Z"
+        },
+        {
+          "id": "pr-3608-rev-5627567379",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3608#pullrequestreview-5627567379",
+          "author": "human:blacksoxx",
+          "last_modified": "2026-10-23T11:25:51Z"
+        },
+        {
+          "id": "pr-3732-rev-5701261477",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3732#pullrequestreview-5701261477",
+          "author": "human:liu-cong",
+          "last_modified": "2026-10-29T16:26:49Z"
+        }
+      ]
+    },
+    "unencoded_runtime_hazards#bounded-metric-labels-and-series-cleanup": {
+      "applies_to": [
+        "pkg/*/metrics/**",
+        "pkg/common/observability/**",
+        "pkg/epp/framework/plugins/**",
+        "pkg/epp/flowcontrol/**"
+      ],
+      "consequence": "Caller-controlled label values, series never deleted after endpoint or flow removal, and unbounded configurable buckets grow Prometheus series without limit and freeze stale values in aggregates.",
+      "observed_prs": 4,
+      "examples": [
+        {
+          "id": "issue-2106",
+          "url": "https://github.com/llm-d/llm-d-router/issues/2106",
+          "author": "human:LukeAVanDrie",
+          "last_modified": "2026-07-21T21:48:37Z"
+        },
+        {
+          "id": "issue-2529",
+          "url": "https://github.com/llm-d/llm-d-router/issues/2529",
+          "author": "human:asm582",
+          "last_modified": "2026-08-27T14:29:33Z"
+        },
+        {
+          "id": "pr-3539-r4347141065",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3539#discussion_r4347141065",
+          "author": "human:elevran",
+          "last_modified": "2026-10-22T10:54:41Z"
+        }
+      ]
+    },
+    "unencoded_runtime_hazards#no-locks-held-across-network-calls": {
+      "applies_to": [
+        "pkg/epp/datalayer/**",
+        "pkg/epp/framework/plugins/datalayer/**",
+        "pkg/epp/statesync/**",
+        "pkg/kvcache/**"
+      ],
+      "consequence": "Holding a scheduling-path mutex across a Redis or network round trip queues every reader behind a waiting writer and turns backend latency or outages into request latency.",
+      "observed_prs": 1,
+      "examples": [
+        {
+          "id": "pr-2837-r4225473471",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2837#discussion_r4225473471",
+          "author": "human:kaushikmitr",
+          "last_modified": "2026-10-09T00:24:56Z"
+        },
+        {
+          "id": "pr-2837-r4225473477",
+          "url": "https://github.com/llm-d/llm-d-router/pull/2837#discussion_r4225473477",
+          "author": "human:kaushikmitr",
+          "last_modified": "2026-10-09T00:24:56Z"
+        }
+      ]
+    }
+  }
+}

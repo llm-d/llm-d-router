@@ -44,6 +44,10 @@ const (
 	defaultMetricsInsecureSkipVerify = true
 )
 
+// maxResponseBytes caps the metrics payload read from one scrape, so a hostile or broken
+// model server cannot exhaust memory in the parser.
+const maxResponseBytes = 8 << 20 // 8 MiB
+
 // metricsDatasourceParams holds the configuration parameters for the metrics data source plugin.
 // These values can be specified in the EndpointPickerConfig under the plugin's `parameters` field.
 type metricsDatasourceParams struct {
@@ -65,6 +69,9 @@ type metricsDatasourceParams struct {
 	// target authenticates this scraper by certificate instead of a bearer token. Both set together.
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
+	// ProxyURL sends scrapes through this HTTP proxy instead of dialing the endpoint,
+	// for model servers reachable only through a proxy, such as a sidecar that adds mTLS.
+	ProxyURL string `json:"proxyURL,omitempty"`
 	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
 	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
@@ -79,7 +86,7 @@ type metricsDatasourceParams struct {
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
-	parser, observer := newMetricsParser(nil, 0)
+	parser, observer := newMetricsParser(nil)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
 		MetricsDataSourceType, name, parser, observer)
 }
@@ -104,12 +111,17 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	opts := []http.Option{intervalOpt}
+	proxyOpt, err := http.ParseProxyURLOption(cfg.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []http.Option{intervalOpt, proxyOpt}
 	if cfg.Port != nil {
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
-	parser, observer := newMetricsParser(cfg.Families, 0)
+	parser, observer := newMetricsParser(cfg.Families)
 	opts = append(opts, observer)
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
@@ -143,8 +155,8 @@ type FamilyReader interface {
 // newMetricsParser returns the source's parser and the option that feeds it the bound
 // extractors. The parser keeps the configured families and those the bound extractors declare.
 // Without configured families, it parses the whole response while any bound extractor is not a
-// FamilyReader. A positive maxBytes caps the bytes read from a response.
-func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
+// FamilyReader. The parser reads at most maxResponseBytes from a response.
+func newMetricsParser(families []string) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
 	var (
 		filter   atomic.Pointer[familyFilter]
 		declared = slices.Clone(families)
@@ -154,9 +166,7 @@ func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (Prome
 		filter.Store(newFamilyFilter(declared))
 	}
 	parser := func(data io.Reader) (PrometheusMetricMap, error) {
-		if maxBytes > 0 {
-			data = io.LimitReader(data, maxBytes)
-		}
+		data = io.LimitReader(data, maxResponseBytes)
 		if f := filter.Load(); f != nil {
 			return f.parse(data)
 		}

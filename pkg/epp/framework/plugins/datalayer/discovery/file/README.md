@@ -102,8 +102,13 @@ endpoints:
   and `InferenceObjective` reconcilers do not run, and any
   `k8s-notification-source` plugin in the data layer config will not bind.
   The runner emits a startup log naming the inactive features.
+  Objectives (name, priority) can be loaded with `--objectives-file` (see
+  [docs/discovery.md](../../../../../../../docs/discovery.md)).
 - A single bad entry on initial load is logged and skipped, not fatal. If
   the entire file is not readable or fails to parse, startup fails.
+- On Docker Desktop for macOS, replacing a bind-mounted endpoints file from
+  the host with an atomic rename stops reloads until the EPP restarts. Edit
+  the file in place instead.
 
 ## Related Documentation
 
@@ -133,4 +138,4 @@ endpoints:
       pathPrefix: "/model-b"
 ```
 
-See the [`endpoint-header-stamper` README](../../../requestcontrol/headerstamp/README.md) for stamp configuration (`:path` prepend and header `set` variants, proxy support notes).
+See the [`endpoint-header-stamper` README](../../../requesthandling/headerstamp/README.md) for stamp configuration (`:path` prepend and header `set` variants, proxy support notes).

@@ -23,6 +23,7 @@ import (
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
@@ -63,14 +64,13 @@ func (s *KVCacheUtilizationScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes declares that the scorer reads the KV-cache utilization field
-// from the endpoint's Metrics struct. The DataKey names the field the
-// core-metrics-extractor publishes; the registry validates the consumer's
-// declared type against the producer's declaration.
+// Consumes declares that the scorer reads KV-cache utilization published by
+// the core-metrics-extractor; the registry validates the consumer's declared
+// type against the producer's declaration.
 func (s *KVCacheUtilizationScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			fwkplugin.NewDataKey(metrics.KVCacheUsagePercentKey, metrics.MetricsExtractorType): float64(0),
+			attrmetrics.ScalarMetricDataKey(metrics.KVCacheUsagePercentKey): attrmetrics.ScalarMetricValue(0),
 		},
 	}
 }

@@ -117,6 +117,9 @@ func TestTokenSpeedMetricsExtractionFromFixture(t *testing.T) {
 	// kv-cache scorer computes 1 - KVCacheUsagePercent, so a 37.5 percentage
 	// would drive its score negative.
 	assert.InDelta(t, 0.375, m.KVCacheUsagePercent, 0.0001, "KVCacheUsagePercent")
+	assertScalarMetric(t, ep, WaitingQueueSizeKey, 5.0)
+	assertScalarMetric(t, ep, RunningRequestsSizeKey, 2.0)
+	assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.375)
 
 	// No LoRA and no cache-config families exist for TokenSpeed; the extractor
 	// must report no adapters and leave block size to the prefix plugin config.
@@ -160,6 +163,9 @@ func TestTokenSpeedUnscrapeableEndpointKeepsLastKnownMetrics(t *testing.T) {
 		"stale KV utilization must survive a failed scrape")
 	assert.Equal(t, 1-m.KVCacheUsagePercent, 1-after.KVCacheUsagePercent,
 		"scorer input must not change on a failed scrape")
+	assertScalarMetric(t, ep, WaitingQueueSizeKey, 5.0)
+	assertScalarMetric(t, ep, RunningRequestsSizeKey, 2.0)
+	assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.375)
 }
 
 // TestTokenSpeedKVCacheUsageIsARatioNotAPercentage guards the unit contract the

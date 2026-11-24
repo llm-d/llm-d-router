@@ -93,11 +93,13 @@ type HTTPDataSource[T any] struct {
 // independently verified the target identity; do not use SkipVerify to talk to
 // endpoints whose certificate cannot be authenticated out of band.
 type TLSOptions struct {
-	// SkipVerify disables verification of the target's server certificate.
-	// See the TLSOptions doc for the threat model this assumes.
+	// SkipVerify disables verification of the target's server certificate
+	// when CACertPath is empty. See the TLSOptions doc for the threat model
+	// this assumes.
 	SkipVerify bool
 	// CACertPath is a PEM CA bundle used to verify the target instead of the
-	// system pool. Ignored when SkipVerify is set. Must be an absolute path.
+	// system pool. Setting it enables verification even when SkipVerify is set.
+	// Must be an absolute path.
 	CACertPath string
 	// ClientCertPath and ClientKeyPath present a client certificate for mTLS.
 	// Both must be set together. Paths must be absolute.
@@ -112,6 +114,7 @@ type options struct {
 	portOverride   int
 	useNodeAddress bool
 	interval       time.Duration
+	proxyURL       *url.URL
 	onExtractor    func(fwkplugin.Plugin)
 }
 
@@ -134,6 +137,31 @@ func WithUseNodeAddress() Option {
 // every base tick (the default).
 func WithInterval(d time.Duration) Option {
 	return func(o *options) { o.interval = d }
+}
+
+// WithProxyURL sends the source's requests through the HTTP proxy at proxyURL
+// instead of dialing the endpoint. The request still names the endpoint, so a
+// proxy such as a sidecar that adds mTLS can forward it. Other sources keep
+// dialing directly.
+func WithProxyURL(proxyURL *url.URL) Option {
+	return func(o *options) { o.proxyURL = proxyURL }
+}
+
+// ParseProxyURLOption parses a proxy URL from plugin parameters and returns a
+// WithProxyURL Option. An empty string returns a no-op Option so callers can
+// always append the result.
+func ParseProxyURLOption(raw string) (Option, error) {
+	if raw == "" {
+		return func(*options) {}, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL %q: %w", raw, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("invalid proxy URL %q: must be http:// or https:// with a host", raw)
+	}
+	return WithProxyURL(u), nil
 }
 
 // WithExtractorObserver calls fn with each extractor bound to the source, so a source can
@@ -189,23 +217,34 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		Client: http.Client{
 			Timeout:   timeout,
 			Transport: baseTransport,
+			// A scraped endpoint picks the redirect target, so following one would let
+			// a pod point the scrape at any address the EPP can reach.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 	var watcher *certwatcher.CertWatcher
-	if scheme == "https" {
-		tlsCfg, cw, err := tlsClientConfig(tlsOpts)
-		if err != nil {
-			return nil, err
-		}
-		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = tlsCfg
-		cl.Transport = httpsTransport
-		if cw != nil {
-			rt := &rotatingTransport{}
-			rt.current.Store(httpsTransport)
-			cw.RegisterCallback(func(tls.Certificate) { rt.rotate() })
-			cl.Transport = rt
+	if scheme == "https" || cfg.proxyURL != nil {
+		// baseTransport is shared by every source; a source that changes it gets a copy.
+		transport := baseTransport.Clone()
+		if scheme == "https" {
+			tlsCfg, cw, err := tlsClientConfig(tlsOpts)
+			if err != nil {
+				return nil, err
+			}
+			transport.TLSClientConfig = tlsCfg
 			watcher = cw
+		}
+		if cfg.proxyURL != nil {
+			transport.Proxy = http.ProxyURL(cfg.proxyURL)
+		}
+		cl.Transport = transport
+		if watcher != nil {
+			rt := &rotatingTransport{}
+			rt.current.Store(transport)
+			watcher.RegisterCallback(func(tls.Certificate) { rt.rotate() })
+			cl.Transport = rt
 		}
 	}
 	return &HTTPDataSource[T]{
@@ -285,8 +324,8 @@ func caCertPool(path string) (*x509.CertPool, error) {
 // client certificate is served from the returned watcher so rotations on disk are
 // picked up once it is started; the CA pool is loaded once.
 func tlsClientConfig(opts TLSOptions) (*tls.Config, *certwatcher.CertWatcher, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
-	if !opts.SkipVerify && opts.CACertPath != "" {
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify && opts.CACertPath == ""} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
+	if opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
 			return nil, nil, err

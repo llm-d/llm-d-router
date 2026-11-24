@@ -22,7 +22,7 @@ package request
 // pipeline.MultimodalEntry, in the EPP's features, and in a metric label. It
 // lives here because the coordinator, the sidecar and the EPP framework all key
 // on it; the framework contract aliases these names
-// (pkg/epp/framework/interface/requesthandling).
+// (pkg/epp/framework/common/request).
 //
 // This is a vocabulary, not a validated enum. The constants name the modalities
 // this repo's pipeline produces, but a token-in request may carry a feature map

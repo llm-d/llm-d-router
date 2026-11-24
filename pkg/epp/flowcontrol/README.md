@@ -62,6 +62,14 @@ Tuning knobs, all under the `flowControl:` config section:
 * Per-band `maxRequests` / `maxBytes` — the shedding knobs. Lower them to reject excess load at the
   queue boundary instead of buffering it (for example, to approximate the legacy immediate-shed
   behavior for sheddable traffic).
+* Per-band `maxRequestsPerFlow` / `maxBytesPerFlow` bound each flow's queued requests and bytes.
+  Each limit is disabled when omitted or zero. Both limits must permit admission, including at the
+  exact boundary; aggregate band and global limits still apply. Dispatch and cleanup release queue
+  capacity. Limits use Kubernetes resource quantities and can be set on `priorityBands`,
+  `defaultPriorityBand`, and `defaultNegativePriorityBand`. While the pool has endpoints, a request
+  refused only by its own flow's limit gets 429 with reason `rejected-flow-limit`; a request refused
+  by a full band or global limit gets `rejected-saturated`, even if its flow is also at its limit.
+  With no endpoints, every capacity refusal is 503 `rejected-no-endpoints`.
 * `defaultRequestTTL` — the queue-wait budget against a pool that has endpoints, and the other way a
   request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
   budget you are willing to spend waiting on a saturated pool. Priority-band entries and templates
@@ -82,6 +90,88 @@ Tuning knobs, all under the `flowControl:` config section:
   admission ceiling for low-priority traffic as utilization rises, so that traffic waits in queue
   rather than being rejected; it sheds only by way of the two limits above. Configure it via
   `usageLimitPolicyPluginRef`.
+
+For example, limit each flow to 100 queued requests and 1 MiB within a band that holds up to
+1000 requests and 16 MiB:
+
+```yaml
+featureGates: ["flowControl"]
+flowControl:
+  defaultPriorityBand:
+    maxRequests: "1000"
+    maxBytes: "16Mi"
+    maxRequestsPerFlow: "100"
+    maxBytesPerFlow: "1Mi"
+```
+
+### Multiple active replicas
+
+Each active EPP replica runs its own flow controller. Queues, fairness accounting, and the queue
+capacity limits (global, per band, and per flow) are per replica, so N active replicas can together
+queue up to N times each limit.
+
+A replica dispatches queued requests while pool saturation, as reported by the saturation detector,
+is below the band's usage limit. `utilization-detector` reads model-server metrics, which count
+requests from every replica but lag by the scrape interval. Its
+[scrape-lag compensation](../framework/plugins/flowcontrol/saturationdetector/utilization/README.md)
+counts other replicas' requests only through a synced in-flight load producer.
+`concurrency-detector` reads the in-flight load tracked by the producer named in its
+`inFlightLoadProducerName`:
+
+* Without a syncer that shares state across replicas, the load counts only this replica's requests.
+  Each replica dispatches up to the full pool capacity, so N replicas dispatch up to N times the pool
+  capacity.
+* With a syncer that shares state across replicas, such as `redis-syncer` set as
+  `dataLayer.crossReplica.syncerPluginRef`, and `syncCrossReplicaState` left at its default on the
+  producer, the load adds the other replicas' published values to this replica's live count. The
+  other replicas' values lag by up to about two publication cycles (`syncInterval`). Requests that
+  reach several replicas within that lag can be dispatched against the same free capacity, and a
+  burst that reaches every replica at once can be dispatched up to N times the pool capacity. The
+  [Redis syncer](../framework/plugins/datalayer/cross_plugin/redis/README.md) describes which peer
+  values count while Redis is unreachable and when a stopped replica drops out.
+
+In `requests` mode, a fixed share per replica keeps total dispatch within the pool capacity
+independent of sync lag and syncer health. Point `concurrency-detector` at an in-flight load producer
+with `syncCrossReplicaState: false`, and set its `maxConcurrency` to the intended per-endpoint limit
+divided by the number of active replicas. `tokens` mode does not count
+[dispatch reservations](../framework/plugins/flowcontrol/saturationdetector/concurrency/README.md),
+and `hybrid` mode counts them only against the request limit, so a divided `maxTokenConcurrency` is
+not a strict bound.
+
+As the configured saturation detector, `concurrency-detector` is also added to every scheduling
+profile as a filter, which applies the share, plus `headroom`, to each endpoint. Scorers can keep the
+shared view through a second producer that leaves `syncCrossReplicaState` at its default. For a
+per-endpoint limit of 10 on two replicas, with a syncer configured:
+
+```yaml
+featureGates: ["flowControl"]
+plugins:
+- type: inflight-load-producer # synced, read by consumers that leave inFlightLoadProducerName unset
+- type: inflight-load-producer
+  name: admission-load
+  parameters:
+    syncCrossReplicaState: false
+- type: concurrency-detector
+  parameters:
+    maxConcurrency: 5
+    inFlightLoadProducerName: admission-load
+flowControl:
+  saturationDetector:
+    pluginRef: concurrency-detector
+```
+
+Fixed shares have these costs:
+
+* A change in replica count, including one made by EPP autoscaling, needs a configuration change.
+* A rolling update that starts new replicas before the old ones finish, as the chart's all-active
+  Deployment does by default, runs more replicas than the shares assume, so total dispatch can exceed
+  the pool capacity until the rollout completes.
+* A replica does not use capacity that another replica leaves idle. When traffic reaches the
+  replicas unevenly, or a replica is down, requests wait in one replica's queue while the pool runs
+  below capacity.
+* Replicas that share one configuration, as in a Deployment, get equal shares. `maxConcurrency` is a
+  positive integer, so the remainder of a limit that the replica count does not divide goes unused,
+  and a limit lower than the replica count cannot be enforced.
 
 ### High Level Architecture
 

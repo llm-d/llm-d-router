@@ -26,10 +26,11 @@ import (
 	"time"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -50,6 +51,7 @@ type Config struct {
 
 	TurnPriorityTimeWeight        float64 `json:"turnPriorityTimeWeight,omitempty"`
 	TurnPriorityInactivitySeconds float64 `json:"turnPriorityInactivitySeconds,omitempty"`
+	SessionStateProducerName      string  `json:"sessionStateProducerName,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -70,8 +72,13 @@ func (c Config) validate() error {
 	if c.EvictionTTLSeconds < 0 {
 		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
 	}
-	if c.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	if c.EvictionTTLSeconds > 0 {
+		if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+			return err
+		}
+	}
+	if err := duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds); err != nil {
+		return err
 	}
 	if c.LASWeightService < 0 {
 		return fmt.Errorf("lasWeightService must be >= 0, got %v", c.LASWeightService)
@@ -93,10 +100,11 @@ func (c Config) validate() error {
 
 var (
 	_ flowcontrol.FairnessPolicy  = &ProgramAwarePlugin{}
-	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
-	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
+	_ fwkrh.PreRequest            = &ProgramAwarePlugin{}
+	_ fwkrh.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
 	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
+	_ plugin.ConsumerPlugin       = &ProgramAwarePlugin{}
 )
 
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -147,6 +155,11 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 // plugin's own PreRequest to read back.
 func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
+}
+
+// Consumes declares the request data the configured strategy reads.
+func (p *ProgramAwarePlugin) Consumes() plugin.DataDependencies {
+	return p.getStrategy().Consumes()
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs
@@ -272,7 +285,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 	enqueueTime, _ := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey)
 	metrics.RecordDispatched(enqueueTime)
-	avgWaitTimeMs.WithLabelValues(id).Set(metrics.AverageWaitTime())
+	setProgramGauge(avgWaitTimeMs, id, metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
 	return nil
@@ -280,7 +293,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 // ResponseBody acts on the final stream chunk only; intermediate chunks are
 // no-ops.
-func (p *ProgramAwarePlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
+func (p *ProgramAwarePlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}

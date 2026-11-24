@@ -15,8 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package weightedrandom implements a scheduling picker that selects endpoints randomly, where the
-// probability of an endpoint being selected is proportional to its score.
+// Package weightedrandom implements weighted random selection with optional zero-score exploration.
 //
 // For detailed behavioral intent and configuration, see the package README.
 package weightedrandom
@@ -26,7 +25,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,6 +39,9 @@ import (
 const (
 	// WeightedRandomPickerType is the registered name of the weighted random picker plugin.
 	WeightedRandomPickerType = "weighted-random-picker"
+
+	// DefaultTemperature yields selection probability proportional to each endpoint's score.
+	DefaultTemperature = 1.0
 )
 
 // weightedScoredEndpoint represents a scored endpoint with its A-Res sampling key
@@ -49,19 +50,45 @@ type weightedScoredEndpoint struct {
 	key float64
 }
 
+// weightedRandomParameters extends the shared picker parameters with weighted sampling controls.
+type weightedRandomParameters struct {
+	picker.PickerParameters
+	Temperature       float64 `json:"temperature"`
+	ExplorationBudget float64 `json:"explorationBudget"`
+}
+
+func (p weightedRandomParameters) validate() error {
+	if p.ExplorationBudget < 0 || p.ExplorationBudget > 1 || math.IsNaN(p.ExplorationBudget) || math.IsInf(p.ExplorationBudget, 0) {
+		return fmt.Errorf("picker %q: explorationBudget must be finite and in [0,1], got %g", WeightedRandomPickerType, p.ExplorationBudget)
+	}
+	return nil
+}
+
 // compile-time type validation
 var _ fwksched.Picker = &WeightedRandomPicker{}
 
 // WeightedRandomPickerFactory defines the factory function for WeightedRandomPicker.
 func WeightedRandomPickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	parameters := picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}
+	parameters := weightedRandomParameters{
+		PickerParameters: picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints},
+		Temperature:      DefaultTemperature,
+	}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' picker - %w", WeightedRandomPickerType, err)
 		}
 	}
 
-	return NewWeightedRandomPicker(parameters.MaxNumOfEndpoints).WithName(name), nil
+	if parameters.Temperature <= 0 {
+		return nil, fmt.Errorf("picker '%s': temperature must be > 0, got %g", WeightedRandomPickerType, parameters.Temperature)
+	}
+
+	if err := parameters.validate(); err != nil {
+		return nil, err
+	}
+	p := NewWeightedRandomPicker(parameters.MaxNumOfEndpoints).WithName(name).WithTemperature(parameters.Temperature)
+	p.explorationBudget = parameters.ExplorationBudget
+	return p, nil
 }
 
 // NewWeightedRandomPicker initializes a new WeightedRandomPicker and returns its pointer.
@@ -73,6 +100,7 @@ func NewWeightedRandomPicker(maxNumOfEndpoints int) *WeightedRandomPicker {
 	return &WeightedRandomPicker{
 		typedName:         fwkplugin.TypedName{Type: WeightedRandomPickerType, Name: WeightedRandomPickerType},
 		maxNumOfEndpoints: maxNumOfEndpoints,
+		temperature:       DefaultTemperature,
 		randomPicker:      random.NewRandomPicker(maxNumOfEndpoints),
 	}
 }
@@ -93,6 +121,8 @@ func NewWeightedRandomPicker(maxNumOfEndpoints int) *WeightedRandomPicker {
 type WeightedRandomPicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int
+	temperature       float64
+	explorationBudget float64
 	randomPicker      *random.RandomPicker // fallback for zero weights
 }
 
@@ -102,17 +132,34 @@ func (p *WeightedRandomPicker) WithName(name string) *WeightedRandomPicker {
 	return p
 }
 
+// WithTemperature sets the temperature that tunes how sharply selection favors higher scores.
+// A non-positive value is ignored and the current temperature is kept.
+func (p *WeightedRandomPicker) WithTemperature(temperature float64) *WeightedRandomPicker {
+	if temperature > 0 {
+		p.temperature = temperature
+	}
+	return p
+}
+
 // TypedName returns the type and name tuple of this plugin instance.
 func (p *WeightedRandomPicker) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-// Pick selects the endpoint(s) randomly from the list of candidates, where the probability of the endpoint to get picked is derived
-// from its weighted score.
+// Pick selects a weighted positive-score sample with optional zero-score exploration.
 func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
-	// Check if there is at least one endpoint with Score > 0, if not let random picker run
-	if slices.IndexFunc(scoredEndpoints, func(scoredEndpoint *fwksched.ScoredEndpoint) bool { return scoredEndpoint.Score > 0 }) == -1 {
+	// Largest positive score. Normalizing by it keeps log weights <= 0 so they stay finite at
+	// extreme temperatures. Probabilities are weight ratios, so dividing every score by a constant
+	// does not change the resulting distribution.
+	maxScore := 0.0
+	for _, scoredEndpoint := range scoredEndpoints {
+		if scoredEndpoint.Score > maxScore {
+			maxScore = scoredEndpoint.Score
+		}
+	}
+	// If no endpoint has a positive score, let the random picker run.
+	if maxScore <= 0 {
 		if logger.V(logutil.DEBUG).Enabled() {
 			logger.V(logutil.DEBUG).Info("All scores are zero, delegating to RandomPicker for uniform selection")
 		}
@@ -121,27 +168,32 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 
 	if logger.V(logutil.DEBUG).Enabled() {
 		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates by random weighted picker", "max-num-of-endpoints", p.maxNumOfEndpoints,
-			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", fwksched.EndpointScores(scoredEndpoints))
 	}
 
-	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ)
-	weightedEndpoints := make([]weightedScoredEndpoint, len(scoredEndpoints))
+	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ), sorted on the order-preserving transform
+	// log(wᵢ) - log(-log(Uᵢ)). Uᵢ^(1/wᵢ) underflows to 0 when wᵢ is small, and tied keys would
+	// fall back to input order.
+	weightedEndpoints := make([]weightedScoredEndpoint, 0, len(scoredEndpoints))
 
-	for i, scoredEndpoint := range scoredEndpoints {
-		// Handle zero score
+	for _, scoredEndpoint := range scoredEndpoints {
 		if scoredEndpoint.Score <= 0 {
-			// Assign key=0 for zero-score endpoints (effectively excludes them from selection)
-			weightedEndpoints[i] = weightedScoredEndpoint{ScoredEndpoint: scoredEndpoint, key: 0}
 			continue
 		}
 
-		// If we're here the scoredEndpoint.Score > 0. Generate a random number U in (0,1)
+		// Effective weight w = (score/maxScore)^(1/T); T=1 keeps probability proportional to score.
+		logWeight := math.Log(scoredEndpoint.Score/maxScore) / p.temperature
+
+		// Generate a random number U in (0,1)
 		u := picker.PickerRand.Float64()
 		if u == 0 {
-			u = 1e-10 // Avoid 0 to ensure positive key
+			u = 1e-10 // Avoid 0 to ensure a finite key
 		}
 
-		weightedEndpoints[i] = weightedScoredEndpoint{ScoredEndpoint: scoredEndpoint, key: math.Pow(u, 1.0/scoredEndpoint.Score)} // key = U^(1/weight)
+		weightedEndpoints = append(weightedEndpoints, weightedScoredEndpoint{
+			ScoredEndpoint: scoredEndpoint,
+			key:            logWeight - math.Log(-math.Log(u)),
+		})
 	}
 
 	// Sort by key in descending order (largest keys first)
@@ -149,12 +201,41 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 		return weightedEndpoints[i].key > weightedEndpoints[j].key
 	})
 
-	// Select top k endpoints
-	selectedCount := min(p.maxNumOfEndpoints, len(weightedEndpoints))
+	// Admit at most one zero-score endpoint per list, independently of list size.
+	var exploration *fwksched.ScoredEndpoint
+	if p.explorationBudget > 0 && picker.PickerRand.Float64() < p.explorationBudget {
+		zeroCount := 0
+		for _, endpoint := range scoredEndpoints {
+			if endpoint.Score == 0 {
+				zeroCount++
+			}
+		}
+		if zeroCount > 0 {
+			index := int(picker.PickerRand.Float64() * float64(zeroCount))
+			for _, endpoint := range scoredEndpoints {
+				if endpoint.Score != 0 {
+					continue
+				}
+				if index == 0 {
+					exploration = endpoint
+					break
+				}
+				index--
+			}
+		}
+	}
+	offset := 0
+	if exploration != nil {
+		offset = 1
+	}
+	selectedCount := min(p.maxNumOfEndpoints-offset, len(weightedEndpoints))
 
-	targetEndpoints := make([]fwksched.Endpoint, selectedCount)
+	targetEndpoints := make([]fwksched.Endpoint, selectedCount+offset)
+	if exploration != nil {
+		targetEndpoints[0] = exploration
+	}
 	for i := range selectedCount {
-		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
+		targetEndpoints[i+offset] = weightedEndpoints[i].ScoredEndpoint
 	}
 
 	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}

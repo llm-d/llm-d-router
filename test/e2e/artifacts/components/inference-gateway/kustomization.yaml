@@ -1,0 +1,19 @@
+# ------------------------------------------------------------------------------
+# Inference Gateway
+#
+# The Gateway routes requests to an InferencePool. The pool references the
+# Endpoint Picker (EPP) and selects pods running a model server such as vLLM or
+# the vLLM Simulator.
+#
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- service-accounts.yaml
+- rbac.yaml
+- inference-pools.yaml
+- services.yaml
+- deployment.yaml
+- gateways.yaml
+- httproutes.yaml

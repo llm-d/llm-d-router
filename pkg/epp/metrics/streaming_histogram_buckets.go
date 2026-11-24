@@ -89,7 +89,7 @@ func newRequestTPOTHistogram(edges []float64) *prometheus.HistogramVec {
 			Help:      metricsutil.HelpMsgWithStability("Average time per output token in seconds for streaming requests, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
 			Buckets:   append([]float64(nil), edges...),
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 }
 
@@ -103,6 +103,6 @@ func newInterTokenLatencyHistogram(edges []float64) *prometheus.HistogramVec {
 			Help:      metricsutil.HelpMsgWithStability("Inter-token latency in seconds for streaming requests, measured as the time between consecutive response body chunks.", compbasemetrics.ALPHA),
 			Buckets:   append([]float64(nil), edges...),
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 }

@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -55,14 +56,20 @@ const (
 	// and updating might take some time). This allows maintaining up to two idle connections
 	// per endpoint (defined as scheme://host:port).
 	maxIdleConnsPerHost = 2
+	// net/http can continue establishing a connection after Dispatch cancels its poll.
+	dialTimeout         = 5 * time.Second
+	tlsHandshakeTimeout = 5 * time.Second
 )
 
 var (
+	baseDialer = &net.Dialer{Timeout: dialTimeout}
+
 	baseTransport = &http.Transport{
 		MaxIdleConns:        maxIdleConnections,
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		IdleConnTimeout:     maxIdleTime,
-		// TODO: set additional timeouts, transport options, etc.
+		DialContext:         baseDialer.DialContext,
+		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 )
 

@@ -37,4 +37,9 @@ const (
 
 	// ECConnectorNIXL enables the Encoder disaggregation NIXL protocol (E/PD, E/P/D)
 	ECConnectorNIXL = "ec-nixl"
+
+	// ECConnectorMooncake enables the Encoder disaggregation protocol for
+	// vLLM's ECMooncakeConnector, where the encoder pushes embeddings to the
+	// consumer over Mooncake Transfer Engine (E/PD, E/P/D)
+	ECConnectorMooncake = "ec-mooncake"
 )

@@ -357,6 +357,15 @@ type RequestHandlerConfig struct {
 	// backend's native priority scheduler can consume it. It is off by default:
 	// when disabled the request body is forwarded unchanged.
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
+
+	// +optional
+	// ComposeFairnessIDs, when true, lets the EPP combine a request's
+	// fairness-ID header (the tenant identity) with its agent-identity attribute
+	// (the session identity) into a single "<tenant>/<session>" flow key. It is
+	// off by default: the fairness-ID header wins and the session identity does
+	// not key the flow. When enabled, "%" and "/" in the header are
+	// percent-encoded so the tenant part stays unambiguous.
+	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -373,6 +382,9 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
+	}
+	if rhc.ComposeFairnessIDs {
+		parts = append(parts, "ComposeFairnessIDs: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -572,6 +584,16 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
+	// MaxBytesPerFlow bounds the total queued request bytes for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "1Mi"). Omitted or "0" disables this limit.
+	MaxBytesPerFlow *resource.Quantity `json:"maxBytesPerFlow,omitempty"`
+
+	// +optional
+	// MaxRequestsPerFlow bounds the queued request count for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "100"). Omitted or "0" disables this limit.
+	MaxRequestsPerFlow *resource.Quantity `json:"maxRequestsPerFlow,omitempty"`
+
+	// +optional
 	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
 	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
 	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
@@ -599,6 +621,14 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequests != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.MaxBytesPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxBytesPerFlow: %d", pbc.MaxBytesPerFlow.Value()))
+	}
+
+	if pbc.MaxRequestsPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxRequestsPerFlow: %d", pbc.MaxRequestsPerFlow.Value()))
 	}
 
 	if pbc.DefaultRequestTTL != nil {

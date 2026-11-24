@@ -102,6 +102,9 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	if sm.pool.consumer != nil && sourceEndpoint != "" {
+		sm.pool.AddTask(&RawMessage{SourceEndpoint: sourceEndpoint, reset: true})
+	}
 	go func() {
 		defer close(done)
 		subscriber.Start(subCtx)
@@ -142,6 +145,20 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
 	return true
+}
+
+// RequestResync asks the subscribers of a serving endpoint to reset its
+// consumers and load the publisher's state again from its snapshot or replay
+// buffer. A subscriber with neither endpoint has no state to load and keeps
+// its stream as is.
+func (sm *SubscriberManager) RequestResync(sourceEndpoint string) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, entry := range sm.subscribers {
+		if entry.sourceEndpoint == sourceEndpoint && (entry.replayEndpoint != "" || entry.snapshotEndpoint != "") {
+			entry.subscriber.resync.Store(true)
+		}
+	}
 }
 
 // retireSubscriber stops a subscriber without waiting for its socket goroutine.

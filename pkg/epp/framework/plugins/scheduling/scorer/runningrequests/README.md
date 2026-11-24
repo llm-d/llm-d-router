@@ -32,7 +32,7 @@ The scorer returns category `Distribution`, helping spread requests away from en
 
 The plugin consumes:
 
-- `metrics.RunningRequestsSizeKey` (`int`)
+- `metrics.RunningRequestsSizeKey` (`ScalarMetricValue`)
 
 ## Configuration
 

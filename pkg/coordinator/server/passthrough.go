@@ -24,12 +24,13 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -90,16 +91,6 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.V(logutil.DEFAULT).Info("received request", "method", r.Method, "path", r.URL.Path)
 
-	// The passthrough proxies request bodies verbatim and never parses them,
-	// so it cannot detect stream:true without defeating that design. Clear
-	// the write deadline unconditionally: a streaming response would otherwise
-	// be cut by WriteTimeout mid-stream. The trade-off is that non-streaming
-	// passthrough responses lose the slow-client guard; the gateway and
-	// server IdleTimeout still bound stalled connections.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.V(logutil.DEFAULT).Info("could not clear write deadline", "error", err)
-	}
-
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBodySize*config.BytesPerMB)
 
 	proxy := newPassthroughProxy(logger, h.gatewayURL, h.transport, requestID)
@@ -119,6 +110,7 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			r.URL.Host = gatewayURL.Host
 			r.Host = gatewayURL.Host
 			pipeline.StripInternalHeaders(r.Header)
+			r.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
 			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
 			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 		},
@@ -132,10 +124,18 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 		Transport:     transport,
 		ErrorLog:      log.New(&passthroughErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			isGRPC := grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType))
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				logger.V(logutil.DEFAULT).Info("passthrough proxy: request body exceeds cap", "capBytes", maxBytesErr.Limit)
-				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				switch {
+				case isGRPC:
+					grpcframe.WriteError(w, codes.ResourceExhausted, "request body too large")
+				case isOpenAIPassthroughPath(req.URL.Path):
+					rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusRequestEntityTooLarge, "request body too large")
+				default:
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+				}
 				return
 			}
 			// A request whose context already ended (client disconnected, or a
@@ -150,8 +150,28 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			} else {
 				logger.Error(err, "passthrough proxy error")
 			}
-			w.WriteHeader(http.StatusBadGateway)
+			switch {
+			case isGRPC:
+				grpcframe.WriteError(w, codes.Unavailable, reqcommon.InternalErrorMessage(requestID))
+			case isOpenAIPassthroughPath(req.URL.Path):
+				rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID))
+			default:
+				w.WriteHeader(http.StatusBadGateway)
+			}
 		},
+	}
+}
+
+// Match exact endpoints because DetectAPIType treats unknown paths as OpenAI.
+func isOpenAIPassthroughPath(path string) bool {
+	switch path {
+	case reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses,
+		reqcommon.PathConversations, reqcommon.PathModels, reqcommon.PathEmbeddings, reqcommon.PathAudioSpeech,
+		reqcommon.PathAudioGenerate, reqcommon.PathImagesGenerations, reqcommon.PathImagesEdits,
+		reqcommon.PathVideos, reqcommon.PathVideosSync:
+		return true
+	default:
+		return false
 	}
 }
 

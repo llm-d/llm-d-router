@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
@@ -294,14 +295,14 @@ func (p *Processor) enqueue(item *FlowItem) {
 	priorityStr := strconv.Itoa(key.Priority)
 	outcome := item.FinalState()
 
-	startTime := time.Now()
+	startTime := p.clock.Now()
 
 	defer func() {
 		outcomeStr := "NotYetFinalized"
 		if fs := item.FinalState(); fs != nil {
 			outcomeStr = fs.Outcome.String()
 		}
-		metrics.RecordFlowControlRequestEnqueueDuration(key.ID, priorityStr, outcomeStr, time.Since(startTime))
+		metrics.RecordFlowControlRequestEnqueueDuration(key.ID, priorityStr, outcomeStr, p.clock.Since(startTime))
 	}()
 
 	// --- Optimistic External Finalization Check ---
@@ -335,7 +336,8 @@ func (p *Processor) enqueue(item *FlowItem) {
 
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
-	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
+	flowQueue := managedQ.FlowQueueAccessor()
+	ok, flowLimit, stats, err := p.hasCapacity(flowQueue, req.ByteSize())
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
@@ -356,12 +358,17 @@ func (p *Processor) enqueue(item *FlowItem) {
 			return
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
-			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
+			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(), "flowAtLimit", flowLimit,
+			"maxRequestsPerFlow", stats.MaxRequestsPerFlow, "maxBytesPerFlow", stats.MaxBytesPerFlow,
 			"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
 			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
 			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
 			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
-		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, types.ErrQueueAtCapacity))
+		rejectErr := types.ErrQueueAtCapacity
+		if flowLimit {
+			rejectErr = fmt.Errorf("%w: %w", types.ErrQueueAtCapacity, types.ErrFlowAtCapacity)
+		}
+		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, rejectErr))
 		return
 	}
 
@@ -378,30 +385,48 @@ func (p *Processor) enqueue(item *FlowItem) {
 		"flowKey", key, "requestID", req.ID())
 }
 
-// hasCapacity checks if the global limits and the specific priority band have enough capacity.
+// hasCapacity checks the global, priority-band, and per-flow queue limits.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
+// flowLimit reports that the flow's own per-flow limit is the only limit refusing the item.
 // A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
 // exhausted.
-func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
-	snapshot, err := p.registry.CapacitySnapshot(priority)
+func (p *Processor) hasCapacity(flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (ok, flowLimit bool, snapshot contracts.CapacitySnapshot, err error) {
+	snapshot, err = p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
 	if err != nil {
-		return false, snapshot, err
+		return false, false, snapshot, err
 	}
 	global, band := snapshot.Global, snapshot.Band
 	if global.CapacityBytes > 0 && global.ByteSize+itemByteSize > global.CapacityBytes {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
 	if global.CapacityRequests > 0 && global.Len+1 > global.CapacityRequests {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
 	if band.CapacityBytes > 0 && band.ByteSize+itemByteSize > band.CapacityBytes {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
 	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
-	return true, snapshot, nil
+	// Read the flow's occupancy once: only Run adds items, but the cleanup sweep can remove finalized ones concurrently,
+	// and the reported reason must match this decision.
+	flowLimit = flowAtLimit(snapshot, flowQueue, itemByteSize)
+	return !flowLimit, flowLimit, snapshot, nil
+}
+
+// flowAtLimit reports whether admitting an item of itemByteSize would exceed the flow's own per-flow request or byte
+// limit.
+func flowAtLimit(snapshot contracts.CapacitySnapshot, flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) bool {
+	if snapshot.MaxRequestsPerFlow > 0 && clamp.Uint64(flowQueue.Len()) >= snapshot.MaxRequestsPerFlow {
+		return true
+	}
+	if limit := snapshot.MaxBytesPerFlow; limit > 0 {
+		used := flowQueue.ByteSize()
+		// Subtract from the limit to avoid overflowing on an oversized request.
+		return used > limit || itemByteSize > limit-used
+	}
+	return false
 }
 
 // recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
@@ -457,9 +482,9 @@ func (p *Processor) recordCapacityUtilization() {
 // priority, so gated bands form a contiguous tail and a skip under strict order only ever reaches further
 // gated bands.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
-	dispatchCycleStart := time.Now()
+	dispatchCycleStart := p.clock.Now()
 	defer func() {
-		metrics.RecordFlowControlDispatchCycleDuration(time.Since(dispatchCycleStart))
+		metrics.RecordFlowControlDispatchCycleDuration(p.clock.Since(dispatchCycleStart))
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
@@ -556,10 +581,16 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 
 		// --- Dispatch ---
 		req := item.OriginalRequest()
-		if err := p.dispatchItem(item); err != nil {
+		dispatched, err := p.dispatchItem(item)
+		if err != nil {
 			p.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
+		}
+		if !dispatched {
+			// The band may still hold live items. End the cycle so the next one re-selects from it
+			// before any lower-ranked band is offered the slot.
+			return false
 		}
 		p.bandSelectionPolicy.RecordDispatch(ctx, priority)
 		return true
@@ -662,42 +693,48 @@ func (p *Processor) selectItem(
 }
 
 // dispatchItem handles the final steps of dispatching an item: removing it from the queue and finalizing its outcome.
-func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
+// It reports whether the item was actually dispatched.
+func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, error) {
 	req := itemAcc.OriginalRequest()
 	key := req.FlowKey()
 	managedQ, err := p.registry.ManagedQueue(key)
 	if err != nil {
-		return fmt.Errorf("failed to get ManagedQueue for flow %s: %w", key, err)
+		return false, fmt.Errorf("failed to get ManagedQueue for flow %s: %w", key, err)
 	}
 
 	removedItemAcc, err := managedQ.Remove(itemAcc.Handle())
 	if err != nil {
 		// This happens benignly if the item was already removed by the cleanup sweep loop.
-		// We log it at a low level for visibility but return nil so the dispatch cycle proceeds.
+		// We log it at a low level for visibility and report non-dispatch so the cycle ends without recording a dispatch.
 		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
 			"flowKey", key, "requestID", req.ID(), "err", err)
-		return nil
+		return false, nil
 	}
 
 	removedItem, ok := removedItemAcc.(*FlowItem)
 	if !ok {
 		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
-		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
+		return false, fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
 	}
 	// The request can be finalized asynchronously while it is being removed. Do not create a
 	// reservation for work that will not proceed past flow control.
-	if removedItem.FinalState() != nil {
-		return nil
+	if finalState := removedItem.FinalState(); finalState != nil {
+		p.recordDrop(finalState.Outcome)
+		return false, nil
 	}
 
 	reservationTracker, tracksReservations := p.saturationDetector.(flowcontrol.DispatchReservationTracker)
 	reserved := tracksReservations && reservationTracker.ReserveDispatch(req.ID())
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithError(nil)
-	if reserved && removedItem.FinalState().Outcome != types.QueueOutcomeDispatched {
-		reservationTracker.ReleaseDispatch(req.ID())
+	if outcome := removedItem.FinalState().Outcome; outcome != types.QueueOutcomeDispatched {
+		if reserved {
+			reservationTracker.ReleaseDispatch(req.ID())
+		}
+		p.recordDrop(outcome)
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // runCleanupSweep starts a background goroutine that periodically scans all queues for externally finalized items

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -36,21 +37,28 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator; a client copy is
-// dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port, and answers
-// Prefer: if-available, the conditional-decode probe's signal, with 412 on
-// any other leg.
+// internalForwardingHeaders are set by the coordinator on outbound phase calls
+// or stamped by EPP or the gateway and read by the coordinator from a phase
+// response; a client copy is dropped, and so is a value of
+// forward_response_headers under these names. EPP routes on epp-profile and
+// x-llm-d-pin-host-port, and answers Prefer: if-available, the
+// conditional-decode probe's signal, with 412 on any other leg. The prefill
+// P2P address and prefill endpoint headers name the prefill pod a decode
+// request pulls from, so a client cannot choose them.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
+	routing.KVCachePrefillHeader:          true,
+	routing.PrefillEndpointHeader:         true,
+	routing.LegacyPrefillEndpointHeader:   true,
 }
 
 func isForwardableHeader(name string) bool {
-	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+	// accept-encoding: http.Transport decompresses only the gzip it negotiated itself.
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type" && name != "accept-encoding"
 }
 
 // StripInternalHeaders removes the internalForwardingHeaders. Call it on a
@@ -64,9 +72,17 @@ func StripInternalHeaders(headers http.Header) {
 	}
 }
 
+// StripHopByHopHeaders removes the hop-by-hop headers, which describe one
+// connection and must not be relayed to the next.
+func StripHopByHopHeaders(headers http.Header) {
+	for key := range hopByHopHeaders {
+		headers.Del(key)
+	}
+}
+
 // ForwardedHeaders returns original request headers suitable for forwarding
-// to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
-// coordinator-owned routing headers.
+// to upstream services, excluding hop-by-hop headers, Content-Length, Host,
+// Content-Type, Accept-Encoding, and coordinator-owned routing headers.
 // Keys are normalized to lowercase so they do not collide by case with headers
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
@@ -135,6 +151,13 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 	}
 }
 
+// P2PPeer is a pod's OffloadingConnector P2P tier address, the one a KV pull
+// dials. The pod's serving address is a different port.
+type P2PPeer struct {
+	Host string
+	Port int
+}
+
 // RequestContext carries all state for a single request through the pipeline.
 //
 // OriginalBody is never re-marshalled from Body, so a step reading it after
@@ -170,6 +193,10 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
+	// MMPayload is the render step's mm_payload when render returned no
+	// kwargs_data for the entries: "none". Empty when the entries
+	// carry kwargs_data or render did not populate them.
+	MMPayload string
 	// ECTransferParams is an ordered list (one entry per encode response).
 	// Each entry is a single-key map: mm_hash -> opaque per-encoding transfer
 	// descriptor (see the ec.Connector interface doc for the descriptor shape).
@@ -206,12 +233,116 @@ type RequestContext struct {
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
+	// KVRequestID is the kv-offloading transfer id. Set by the connector's
+	// PreparePrefillKVParams; empty with any other connector.
+	KVRequestID string
+	// PrefillPeer is the prefill pod's P2P tier address. Set by the
+	// kv-offloading connector's ReadPrefillResponse; nil before the prefill
+	// response and with any other connector.
+	PrefillPeer *P2PPeer
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+
+	// GRPC holds protocol-specific gRPC request state when worker legs execute
+	// over gRPC (native SGLang gRPC, native vLLM gRPC, or HTTP
+	// /inference/v1/generate translated onto vLLM gRPC). Nil for HTTP worker
+	// pipelines.
+	GRPC GRPCRequest
+}
+
+// GRPCRequest carries protocol-specific gRPC state on RequestContext.
+type GRPCRequest interface {
+	isNativeGRPC() bool
+	closeStream()
+}
+
+// SGLangGRPCRequest carries state for a native SGLang gRPC Generate request.
+type SGLangGRPCRequest struct {
+	// Payload holds the unframed protobuf payload of an SGLang native gRPC
+	// Generate request with client bootstrap fields removed. It aliases
+	// OriginalBody unless a field was removed. The prefill and decode steps
+	// send it as is, between a frame header and their bootstrap fields, so
+	// neither copies it.
+	Payload []byte
+	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
+	// started by PrefillStep and coordinated with DecodeStep.
+	PrefillStream *SGLangPrefillStream
+}
+
+func (*SGLangGRPCRequest) isNativeGRPC() bool { return true }
+func (r *SGLangGRPCRequest) closeStream() {
+	if r != nil && r.PrefillStream != nil {
+		r.PrefillStream.Close()
+	}
+}
+
+// GenerateOutputMode values for vLLM /inference/v1/generate responses.
+const (
+	GenerateOutputModeTokens = "tokens"
+	GenerateOutputModeText   = "text"
+)
+
+// HTTPGenerateReply carries response-formatting options when an inbound HTTP
+// POST /inference/v1/generate request is executed over vllm.Inference gRPC.
+type HTTPGenerateReply struct {
+	// IncludeUsage reports whether the HTTP stream requested
+	// stream_options.include_usage.
+	IncludeUsage bool
+	// ReturnTokenIDs reports whether the HTTP request asked to echo prompt
+	// token IDs in the response.
+	ReturnTokenIDs bool
+	// OutputMode is the /inference/v1/generate response level ("tokens" or
+	// "text"). Empty defaults to GenerateOutputModeTokens.
+	OutputMode string
+	// ClientRequestID holds a request_id supplied in the HTTP JSON body so
+	// translated responses echo the client's identifier when present.
+	ClientRequestID string
+}
+
+// VLLMGRPCRequest carries state for a request whose worker legs execute over
+// vllm.Inference gRPC.
+type VLLMGRPCRequest struct {
+	// Req holds the scanned vllm.Inference GenerateRequest with client
+	// kv_transfer_params and ec_transfer_params stripped.
+	Req vllmwire.Request
+	// HTTP is non-nil when Req was translated from an inbound HTTP POST
+	// /inference/v1/generate request rather than a native gRPC RPC.
+	HTTP *HTTPGenerateReply
+	// EncodeRan reports whether EncodeStep ran on this request, so downstream
+	// legs strip preprocessed media bytes to metadata-only.
+	EncodeRan bool
+	// PrefillRan reports whether PrefillStep ran on this request,
+	// distinguishing P/D handoff from decode-only or encode->decode.
+	PrefillRan bool
+	// PrefillPromptTokens holds prefill's PromptInfo.num_prompt_tokens when
+	// reported, so DecodeStep can run the prompt_token_parity check.
+	PrefillPromptTokens *uint32
+}
+
+func (r *VLLMGRPCRequest) isNativeGRPC() bool { return r != nil && r.HTTP == nil }
+func (*VLLMGRPCRequest) closeStream()         {}
+
+// IsGRPC reports whether worker stages execute via a gRPC worker protocol
+// (SGLang or vLLM).
+func (rc *RequestContext) IsGRPC() bool {
+	return rc != nil && rc.GRPC != nil
+}
+
+// IsNativeGRPC reports whether the inbound client request itself is a native
+// gRPC RPC rather than an HTTP JSON request.
+func (rc *RequestContext) IsNativeGRPC() bool {
+	return rc != nil && rc.GRPC != nil && rc.GRPC.isNativeGRPC()
+}
+
+// ClosePrefillStream cancels and releases any active concurrent prefill stream.
+func (rc *RequestContext) ClosePrefillStream() {
+	if rc != nil && rc.GRPC != nil {
+		rc.GRPC.closeStream()
+	}
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it

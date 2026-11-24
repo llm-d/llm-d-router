@@ -13,7 +13,10 @@
        hit the same trap, but the arithmetic is theirs to reason about). */ -}}
 {{- $autoscaling := .Values.router.epp.autoscaling | default dict -}}
 {{- $replicas := $autoscaling.minReplicas | default 1 -}}
-{{- if not $autoscaling.enabled -}}
+{{- $stsReplicas := include "llm-d-router.epp.statefulSetReplicas" . -}}
+{{- if $stsReplicas -}}
+{{- $replicas = $stsReplicas | int -}}
+{{- else if not $autoscaling.enabled -}}
 {{- $replicas = .Values.router.epp.replicas | default 1 -}}
 {{- end -}}
 {{- if and (hasKey $pdb "minAvailable") (or (kindIs "int" $pdb.minAvailable) (kindIs "int64" $pdb.minAvailable) (kindIs "float64" $pdb.minAvailable)) (lt ($replicas | int) 2) -}}

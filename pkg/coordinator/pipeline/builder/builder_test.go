@@ -31,6 +31,9 @@ func TestValidatePipeline(t *testing.T) {
 	render := config.StepConfig{Type: steps.RenderStepName}
 	decode := config.StepConfig{Type: steps.DecodeStepName}
 	broker := config.StepConfig{Type: asyncbroker.StepName}
+	forward := map[string]any{steps.ParamForwardPromptTokenIDs: true}
+	forwardDecode := config.StepConfig{Type: steps.DecodeStepName, Params: forward}
+	forwardCondDecode := config.StepConfig{Type: steps.ConditionalDecodeStepName, Params: forward}
 
 	tests := []struct {
 		name    string
@@ -50,6 +53,43 @@ func TestValidatePipeline(t *testing.T) {
 		{
 			name:    "tokens-in without render is rejected",
 			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "forward_prompt_token_ids with render",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{render, forwardCondDecode, forwardDecode}},
+			wantErr: false,
+		},
+		{
+			name:    "forward_prompt_token_ids on decode without render is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardDecode}},
+			wantErr: true,
+		},
+		{
+			name:    "forward_prompt_token_ids on conditional-decode without render is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardCondDecode, decode}},
+			wantErr: true,
+		},
+		{
+			name: "forward_prompt_token_ids false without render",
+			cfg: config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{
+				{Type: steps.DecodeStepName, Params: map[string]any{steps.ParamForwardPromptTokenIDs: false}},
+			}},
+			wantErr: false,
+		},
+		{
+			name:    "grpc worker protocol still requires render when use_openai_format is false",
+			cfg:     config.PipelineConfig{WorkerProtocol: config.WorkerProtocolGRPC, UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "grpc worker protocol with use_openai_format false and render is accepted",
+			cfg:     config.PipelineConfig{WorkerProtocol: config.WorkerProtocolGRPC, UseOpenAIFormat: false, Steps: []config.StepConfig{render, decode}},
+			wantErr: false,
+		},
+		{
+			name:    "invalid worker_protocol is rejected",
+			cfg:     config.PipelineConfig{WorkerProtocol: "ws", UseOpenAIFormat: true, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 		{
@@ -133,5 +173,28 @@ func TestBuildRejectsInvalidForwardResponseHeaders(t *testing.T) {
 	}}
 	if _, err := Build(cfg, nil); err == nil {
 		t.Fatal("Build() expected an error for a non-forwardable response header")
+	}
+}
+
+func TestBuildValidatesWorkerProtocolAndRenderRequirement(t *testing.T) {
+	noRender := &config.Config{Pipeline: config.PipelineConfig{
+		WorkerProtocol:  config.WorkerProtocolGRPC,
+		UseOpenAIFormat: false,
+		Steps:           []config.StepConfig{{Type: steps.DecodeStepName}},
+	}}
+	if _, err := Build(noRender, gateway.New(config.GatewayConfig{})); err == nil {
+		t.Fatal("Build() expected an error when worker_protocol=grpc, use_openai_format=false, and render step is absent")
+	}
+
+	withRender := &config.Config{Pipeline: config.PipelineConfig{
+		WorkerProtocol:  config.WorkerProtocolGRPC,
+		UseOpenAIFormat: false,
+		Steps: []config.StepConfig{
+			{Type: steps.RenderStepName, Params: map[string]any{"address": "http://127.0.0.1:8000"}},
+			{Type: steps.DecodeStepName},
+		},
+	}}
+	if _, err := Build(withRender, gateway.New(config.GatewayConfig{})); err != nil {
+		t.Fatalf("Build() unexpected error with render step: %v", err)
 	}
 }

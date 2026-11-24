@@ -219,7 +219,7 @@ func (h *testHarness) waitForFinalization(item *FlowItem) (types.QueueOutcome, e
 func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.Duration) *FlowItem {
 	h.t.Helper()
 	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
-	return NewItem(context.Background(), req, ttl, h.clock.Now(), logr.Discard())
+	return NewItem(context.Background(), req, ttl, h.clock.Now(), h.clock, logr.Discard())
 }
 
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
@@ -752,10 +752,13 @@ func TestProcessor(t *testing.T) {
 		t.Run("hasCapacity", func(t *testing.T) {
 			t.Parallel()
 			testCases := []struct {
-				name         string
-				itemByteSize uint64
-				snapshot     contracts.CapacitySnapshot
-				expectHasCap bool
+				name            string
+				itemByteSize    uint64
+				flowLen         int
+				flowByteSize    uint64
+				snapshot        contracts.CapacitySnapshot
+				expectHasCap    bool
+				expectFlowLimit bool
 			}{
 				{
 					name:         "should deny item if global byte capacity exceeded",
@@ -919,6 +922,72 @@ func TestProcessor(t *testing.T) {
 					},
 					expectHasCap: false,
 				},
+				{
+					name:         "should report the flow limit when it alone refuses the item",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityRequests: 10, Len: 2},
+						MaxRequestsPerFlow: 2,
+					},
+					expectFlowLimit: true,
+				},
+				{
+					name:         "should report the per-flow byte limit when it alone refuses the item",
+					itemByteSize: 5,
+					flowByteSize: 6,
+					snapshot: contracts.CapacitySnapshot{
+						Band:            contracts.CapacityDimension{CapacityBytes: 100, ByteSize: 6},
+						MaxBytesPerFlow: 10,
+					},
+					expectFlowLimit: true,
+				},
+				{
+					name:         "should report band request capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityRequests: 2, Len: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should report band byte capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityBytes: 2, ByteSize: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should report global request capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Global:             contracts.CapacityDimension{CapacityRequests: 2, Len: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should report global byte capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Global:             contracts.CapacityDimension{CapacityBytes: 2, ByteSize: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should allow when the flow is one below its limit",
+					itemByteSize: 1,
+					flowLen:      1,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityRequests: 10, Len: 1},
+						MaxRequestsPerFlow: 2,
+					},
+					expectHasCap: true,
+				},
 			}
 
 			for _, tc := range testCases {
@@ -926,9 +995,11 @@ func TestProcessor(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) { return tc.snapshot, nil }
-					hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					flowQueue := &fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow, LenV: tc.flowLen, ByteSizeV: tc.flowByteSize}
+					hasCap, flowLimit, _, err := h.processor.hasCapacity(flowQueue, tc.itemByteSize)
 					require.NoError(t, err, "hasCapacity should not fail when the snapshot read succeeds")
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
+					assert.Equal(t, tc.expectFlowLimit, flowLimit, "Flow-limit attribution should match expected value")
 				})
 			}
 
@@ -938,7 +1009,7 @@ func TestProcessor(t *testing.T) {
 				h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
 					return contracts.CapacitySnapshot{}, contracts.ErrPriorityBandNotFound
 				}
-				hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, 1)
+				hasCap, _, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, 1)
 				require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The lookup error should be propagated")
 				assert.False(t, hasCap, "A failed capacity read should never report available capacity")
 			})
@@ -1175,6 +1246,110 @@ func TestProcessor(t *testing.T) {
 					require.False(t, h.processor.dispatchCycle(context.Background()))
 
 					assert.Empty(t, policy.dispatched, "a cycle that dispatches nothing must not record one")
+				})
+
+				t.Run("should not record a dispatch for an already-finalized item", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					zombie := h.newTestItem("zombie", keyHigh, testTTL)
+					require.NoError(t, qHigh.Add(zombie))
+					zombie.Finalize(context.Canceled)
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a cycle that only removes a finalized item must not record a dispatch")
+					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load(),
+						"removing an already-finalized item during dispatch must record its drop")
+				})
+
+				t.Run("should keep the higher band first in line when its head item is already finalized", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					qLow := h.addQueue(keyLow)
+
+					zombieHigh := h.newTestItem("zombie-high", keyHigh, testTTL)
+					liveHigh := h.newTestItem("live-high", keyHigh, testTTL)
+					liveLow := h.newTestItem("live-low", keyLow, testTTL)
+					require.NoError(t, qHigh.Add(zombieHigh))
+					require.NoError(t, qHigh.Add(liveHigh))
+					require.NoError(t, qLow.Add(liveLow))
+					zombieHigh.Finalize(context.Canceled)
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+					assert.Nil(t, liveHigh.FinalState(), "first cycle only removes the finalized head item")
+					assert.Nil(t, liveLow.FinalState(), "lower band must not dispatch ahead of live items in the higher band")
+					assert.Empty(t, policy.dispatched, "a non-dispatched removal must not record a dispatch")
+					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load())
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+					require.NotNil(t, liveHigh.FinalState())
+					assert.Equal(t, types.QueueOutcomeDispatched, liveHigh.FinalState().Outcome,
+						"next cycle should dispatch the live item queued behind the finalized one in the higher band")
+					assert.Nil(t, liveLow.FinalState(), "lower band must remain queued while the higher band dispatches")
+					assert.Equal(t, []int{keyHigh.Priority}, policy.dispatched,
+						"RecordDispatch should charge only the band that actually dispatched")
+				})
+
+				t.Run("should not record a dispatch or drop when Remove fails", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					item := h.newTestItem("swept", keyHigh, testTTL)
+					require.NoError(t, qHigh.Add(item))
+
+					h.ManagedQueueFunc = func(flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+						return &mocks.MockManagedQueue{
+							RemoveFunc: func(flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
+								return nil, errors.New("already swept")
+							},
+						}, nil
+					}
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a swept-item Remove failure must not record a dispatch")
+					for outcome := range h.processor.dropCounts {
+						assert.Zero(t, h.processor.dropCounts[outcome].Load(),
+							"a swept-item Remove failure must not double-count a drop")
+					}
+				})
+
+				t.Run("should not record a dispatch when the item is finalized during reserve", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					item := h.newTestItem("raced", keyHigh, testTTL)
+					require.NoError(t, qHigh.Add(item))
+
+					h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+						item.Finalize(context.Canceled)
+						return true
+					}
+					var released []string
+					h.saturationDetector.ReleaseDispatchFunc = func(requestID string) bool {
+						released = append(released, requestID)
+						return true
+					}
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a lost dispatch race must not record a dispatch")
+					assert.Equal(t, []string{"raced"}, released)
+					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load())
 				})
 
 				t.Run("should skip a gated band wherever it is ranked", func(t *testing.T) {
@@ -1553,8 +1728,9 @@ func TestProcessor(t *testing.T) {
 						h := newTestHarness(t, testCleanupTick)
 						tc.setupMocks(h)
 						item := h.newTestItem("req-dispatch-fail", testFlow, testTTL)
-						err := h.processor.dispatchItem(item)
+						dispatched, err := h.processor.dispatchItem(item)
 						require.Error(t, err, "dispatchItem should return an error")
+						assert.False(t, dispatched)
 						assert.ErrorIs(t, err, tc.expectedErr, "The underlying registry error should be preserved")
 					})
 				}
@@ -1576,10 +1752,11 @@ func TestProcessor(t *testing.T) {
 				}
 
 				// --- ACT ---
-				err := h.processor.dispatchItem(item)
+				dispatched, err := h.processor.dispatchItem(item)
 
 				// --- ASSERT ---
 				require.NoError(t, err, "dispatchItem should return no error for an already finalized item")
+				assert.False(t, dispatched, "dispatchItem should report non-dispatch for an already finalized item")
 
 				// Check the final state of the item itself - it should not have changed.
 				finalState := item.FinalState()
@@ -1605,7 +1782,9 @@ func TestProcessor(t *testing.T) {
 					return true
 				}
 
-				require.NoError(t, h.processor.dispatchItem(item))
+				dispatched, err := h.processor.dispatchItem(item)
+				require.NoError(t, err)
+				require.True(t, dispatched)
 				require.True(t, reserved)
 				require.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
 			})
@@ -1627,7 +1806,9 @@ func TestProcessor(t *testing.T) {
 					return true
 				}
 
-				require.NoError(t, h.processor.dispatchItem(item))
+				dispatched, err := h.processor.dispatchItem(item)
+				require.NoError(t, err)
+				assert.False(t, dispatched)
 				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 					"The outcome set during reserve should be preserved")
 				assert.Equal(t, []string{"req-finalized-during-reserve"}, released,
@@ -2129,7 +2310,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 					regimeSince = base.Add(tc.regimeAfter)
 				}
 
-				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
+				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, nil, logr.Discard())
 				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
 				expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 

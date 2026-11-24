@@ -1,0 +1,16 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package
+      value: github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb
+plugins:
+  - local: protoc-gen-go
+    out: pkg/common/grpc/vllm/gen
+    opt:
+      - module=github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen
+  - local: protoc-gen-go-grpc
+    out: pkg/common/grpc/vllm/gen
+    opt:
+      - module=github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen
