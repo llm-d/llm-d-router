@@ -466,3 +466,42 @@ func TestExtractIgnoresStaleDelete(t *testing.T) {
 	}))
 	require.Nil(t, producer.recent.snapshot(endpointID))
 }
+
+func TestExtractDeleteDropsIndexerEntries(t *testing.T) {
+	cfg := defaultConfig
+	cfg.AutoTune = false
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	require.NoError(t, err)
+
+	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
+	serverID := ServerID(podID)
+	hashes := []blockHash{1, 2, 3}
+	live := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, fwkdl.NewMetrics())
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: live,
+	}))
+	producer.indexerInst.Add(hashes, server{ServerID: serverID})
+
+	stale := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, fwkdl.NewMetrics())
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: stale,
+	}))
+	require.Equal(t, []int{3}, producer.indexerInst.MatchLongestPrefix(hashes, []ServerID{serverID}),
+		"stale delete for a replaced endpoint must not drop the live endpoint's entries")
+
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: live,
+	}))
+	require.NotContains(t, producer.indexerInst.Pods(), serverID)
+
+	returning := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, fwkdl.NewMetrics())
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: returning,
+	}))
+	require.Equal(t, []int{0}, producer.indexerInst.MatchLongestPrefix(hashes, []ServerID{serverID}),
+		"an endpoint that returns under the same name must start without the deleted endpoint's entries")
+}
