@@ -291,7 +291,7 @@ Two replicas ran on TPU7x, one host each, on the vllm-torchtpu nightly image wit
 - **The hint decides.** With no hint, B read nothing from A in 20 of 20 runs. With a hint, B read every full block in 20 of 20 runs. Outputs were correct.
 - **Fetch pays off on the larger model.** On Qwen3-32B it is 1.7 times faster than recompute at 11.6k tokens and 2.3 times faster at 30k. On Qwen3-8B it helps only at 30k.
 - **Hinted fetches came in at two speeds.** On Qwen3-8B at 11.6k, three runs took about 0.34 s and two took 0.20 s. vllm-torchtpu's own peer read, with no shim, took a steady 0.196 s. We have not found the cause.
-- **A peer read into a full host store fails.** With a 3,840-block store that had filled, every read failed. With an 8,940-block store, none failed. The failed requests returned an error. That is vLLM's default for a failed KV load. Setting `kv_load_failure_policy` to `recompute` makes the request recompute.
+- **A full host store needs two settings.** With a 3,840-block store that had filled, every peer read failed, and by vLLM's default each request returned an error. With `kv_load_failure_policy` set to `recompute`, the requests recomputed and succeeded, about 0.22 s slower than with no hint at 30k tokens. With TPU Sync's store monitor and evict sweep also on, no read failed, and the 30k fetch took 0.645 s.
 
 Prefetch is not in vllm-torchtpu yet. We measured what it is worth with an earlier standalone connector on the JAX backend. After a prefetch, B served a 30k-token prompt on Qwen3-32B in 0.165 s, against 1.363 s to recompute. At 11.6k tokens it took 0.091 s against 0.461 s. A push into a full store was refused 5 of 5 times. With TPU Sync's evict sweep on, 5 of 5 landed.
 
@@ -315,7 +315,7 @@ The TPU path is a thin shim on vllm-torchtpu. What is missing, we will file as i
 - vllm-torchtpu: a `BlockStored` event for the host tier ([#3706](https://github.com/vllm-project/vllm-torchtpu/issues/3706)).
 - tpu-sync: caller-driven removal of a block, for `kv.move`.
 - tpu-sync: a way to trigger a push from outside the engine.
-- tpu-sync: room for reads and pushes in a full host store, without the evict sweep offering cold blocks to peers.
+- tpu-sync, a question: can the evict sweep drop cold blocks without first offering them to peers?
 
 Other risks:
 
