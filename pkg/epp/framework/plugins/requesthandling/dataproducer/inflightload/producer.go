@@ -31,6 +31,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -650,7 +651,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	if resp.EndOfStream {
 		// TTS completion tokens are codec frames, not text output-length
 		// samples; they must not train the text UNKNOWN average.
-		if request.Body != nil && request.Body.TextToSpeech == nil &&
+		if request.Body != nil && !isTextToSpeech(request) &&
 			resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
 			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))
@@ -671,6 +672,16 @@ func (p *InFlightLoadProducer) ResponseBody(
 			p.PluginState.UnbindLiveness(request.RequestID)
 		}
 	}
+}
+
+// isTextToSpeech reports whether request is a text-to-speech request. Once the
+// request is forwarded the handler keeps only the response-phase view of the
+// body, which drops TextToSpeech, so the path decides from then on.
+func isTextToSpeech(request *fwksched.InferenceRequest) bool {
+	if request.Body != nil && request.Body.TextToSpeech != nil {
+		return true
+	}
+	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(request.Headers)) == reqcommon.APITypeAudioSpeech
 }
 
 // release surgically deletes a single profile's entry from PluginState,

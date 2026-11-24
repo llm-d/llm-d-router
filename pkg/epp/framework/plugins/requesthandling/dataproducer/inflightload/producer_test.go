@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	datagraph "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -775,6 +776,29 @@ func TestInFlightLoadProducer_TTSCompletionDoesNotTrainTextEstimate(t *testing.T
 		EndOfStream:      true,
 		TerminationCause: fwkrh.TerminationCauseNatural,
 		Usage:            fwkrequest.Usage{CompletionTokens: 50},
+	}, nil)
+
+	textReq := makeTokenRequest("req-text", 4)
+	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(textReq))
+}
+
+func TestInFlightLoadProducer_TTSCompletionAfterBodyReleaseDoesNotTrainTextEstimate(t *testing.T) {
+	producer := newTestProducer(t)
+	body := &fwkrequest.InferenceRequestBody{
+		TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello"},
+	}
+	req := &fwksched.InferenceRequest{
+		RequestID: "req-tts",
+		Headers:   map[string]string{":path": reqcommon.PathAudioSpeech},
+		// The handler releases the body once the request is forwarded, before any response arrives.
+		Body:             body.ResponsePhaseView(),
+		SchedulingResult: &fwksched.SchedulingResult{},
+	}
+
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Usage:            fwkrequest.Usage{CompletionTokens: 5000},
 	}, nil)
 
 	textReq := makeTokenRequest("req-text", 4)
