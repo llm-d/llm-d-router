@@ -25,7 +25,8 @@ The plugin config supports:
 -   `path` (default "/metrics"): The URL path to use for metrics retrieval.
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert. Setting it enables verification regardless of `insecureSkipVerify`.
--   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+-   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together. A rotated
+    certificate is picked up without a restart; the CA bundle is read once at startup.
 -   `proxyURL` (string, optional): HTTP proxy (`http://` or `https://`) that every scrape is
     sent to instead of dialing the endpoint, for model servers reachable only through a proxy,
     such as a local sidecar that adds mTLS. The request still names the endpoint, so the proxy
