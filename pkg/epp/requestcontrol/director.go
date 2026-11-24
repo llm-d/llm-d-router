@@ -267,7 +267,8 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		ReceivedTimestamp: reqCtx.RequestReceivedTimestamp,
 	}
 
-	// The served priority is bound after the RequestHeader phase, which may change it.
+	// The served priority is bound before admission, after the RequestHeader phase and the
+	// resolved band, which may change it.
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "seededPriority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
@@ -295,8 +296,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		reqCtx.Priority = p
 		span.SetAttributes(attribute.Int("request_prio", p))
 	}
-	logger = logger.WithValues("priority", priority)
-	ctx = log.IntoContext(ctx, logger)
 	// Derive the FairnessID from the fairness-ID header (tenant identity) and
 	// the derived-root or agent-identity attribute (program/session identity).
 	// The derived root, published by the agent-lineage plugin, is the session
@@ -360,6 +359,8 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		reqCtx.SchedulingRequest.Objectives.Priority = resolvedBand
 		span.SetAttributes(attribute.Int("request_prio", priority))
 	}
+	logger = logger.WithValues("priority", priority)
+	ctx = log.IntoContext(ctx, logger)
 
 	admitting = true
 	// Admit may block until flow control admits the request.
