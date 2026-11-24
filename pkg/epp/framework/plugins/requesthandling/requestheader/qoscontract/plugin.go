@@ -16,8 +16,8 @@ limitations under the License.
 
 // Package qoscontract provides a RequestHeaderProcessor plugin that enforces per-team QoS
 // contracts before flow control: it maps a team to a service class (a priority band), and moves
-// traffic outside the team's contract (size limits, concurrency and a daily budget) to the next
-// lower class.
+// traffic outside the team's contract (its size limits and its commits) to the next lower class.
+// The commits are concurrency, a daily token budget and a request rate.
 package qoscontract
 
 import (
@@ -58,13 +58,15 @@ const (
 	decisionRejectedConcurrency = "rejected_concurrency"
 	decisionRejectedSize        = "rejected_size"
 	decisionRejectedDaily       = "rejected_daily"
+	decisionRejectedRate        = "rejected_rate"
 
 	// The reason label names the limit a downgraded or rejected request exceeded. When it exceeds
-	// several, the first of size, daily budget and concurrency is reported, the same order that
-	// picks the rejection.
+	// several, the first of size, daily budget, concurrency and request rate is reported, the same
+	// order that picks the rejection.
 	reasonSize        = "size"
 	reasonDaily       = "daily"
 	reasonConcurrency = "concurrency"
+	reasonRate        = "rate"
 )
 
 var (
@@ -84,6 +86,9 @@ type teamState struct {
 	inflight  int
 	dailyDay  int
 	dailyUsed float64
+	// rate holds the team's within-contract admissions for its MaxReqsPerSec commit. Nil when the
+	// team has no rate commit.
+	rate *slidingWindow
 }
 
 // hold is the accounting held for one request until it completes.
@@ -149,7 +154,11 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 		classIndex[c.Name] = i
 	}
 	newState := func(cfg TeamConfig) *teamState {
-		return &teamState{cfg: cfg, classIndex: classIndex[cfg.Class]}
+		st := &teamState{cfg: cfg, classIndex: classIndex[cfg.Class]}
+		if cfg.MaxReqsPerSec > 0 {
+			st.rate = newSlidingWindow(rateLimit(cfg, params.RateWindow.Duration))
+		}
+		return st
 	}
 	teams := make(map[string]*teamState, len(params.Teams))
 	for _, t := range params.Teams {
@@ -232,7 +241,8 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	budgetDay := team.dailyDay
 	overDaily := team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens
 	overConcurrency := team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency
-	served, decision, withinContract := committed, decisionWithinContract, !overSize && !overDaily && !overConcurrency
+	overRate := team.rate != nil && team.rate.full(now)
+	served, decision, withinContract := committed, decisionWithinContract, !overSize && !overDaily && !overConcurrency && !overRate
 	reason := ""
 	switch {
 	case overSize:
@@ -241,11 +251,16 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 		reason = reasonDaily
 	case overConcurrency:
 		reason = reasonConcurrency
+	case overRate:
+		reason = reasonRate
 	}
 	switch {
 	case withinContract:
 		team.inflight++
 		team.dailyUsed += cost
+		if team.rate != nil {
+			team.rate.add(now)
+		}
 		inflightRequests.WithLabelValues(team.cfg.ID).Set(float64(team.inflight))
 	case team.classIndex+1 < len(p.classes):
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
@@ -255,9 +270,13 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	case overDaily:
 		team.mu.Unlock()
 		return p.reject(team, committed, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
-	default:
+	case overConcurrency:
 		team.mu.Unlock()
 		return p.reject(team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
+	default: // over the request rate
+		retryAfter := team.rate.retryAfter(now)
+		team.mu.Unlock()
+		return p.reject(team, committed, decisionRejectedRate, reason, p.quotaError(team, committed.Name, retryAfter, "request rate limit reached"))
 	}
 	team.mu.Unlock()
 

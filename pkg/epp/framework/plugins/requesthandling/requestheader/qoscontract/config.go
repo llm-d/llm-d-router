@@ -19,6 +19,10 @@ package qoscontract
 import (
 	"errors"
 	"fmt"
+	"math"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -33,6 +37,9 @@ const (
 	ModeReportOnly = "report-only"
 
 	defaultOutputTokenWeight = 2
+	defaultRateWindow        = time.Second
+	// maxRateWindowRequests bounds the requests a rate window holds, and so its memory.
+	maxRateWindowRequests = 1 << 20
 )
 
 // ClassConfig is one service class, mapped onto a flow-control priority band.
@@ -41,8 +48,9 @@ type ClassConfig struct {
 	Priority int    `json:"priority"`
 }
 
-// TeamConfig is one team's QoS contract. Zero-valued limits are unenforced. MaxConcurrency and
-// DailyTokens are the team's commits, and MaxPromptTokens and MaxOutputTokens its size limits:
+// TeamConfig is one team's QoS contract. Zero-valued limits are unenforced. MaxConcurrency,
+// DailyTokens and MaxReqsPerSec are the team's commits, and MaxPromptTokens and MaxOutputTokens
+// its size limits:
 // traffic outside any of them moves one class down, and is rejected in the lowest class.
 type TeamConfig struct {
 	ID string `json:"id"`
@@ -60,6 +68,13 @@ type TeamConfig struct {
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	// DailyTokens is the committed weighted-token budget per UTC day. 0 is unlimited.
 	DailyTokens float64 `json:"dailyTokens,omitempty"`
+	// MaxReqsPerSec is the committed request rate, measured over a sliding RateWindow: at most
+	// floor(MaxReqsPerSec * RateWindow) requests are served at the team's class in any window.
+	// 0 is unlimited.
+	MaxReqsPerSec float64 `json:"maxReqsPerSec,omitempty"`
+	// RateWindow is the sliding window MaxReqsPerSec is measured over. Unset uses the plugin's
+	// RateWindow.
+	RateWindow *metav1.Duration `json:"rateWindow,omitempty"`
 }
 
 // Parameters is the plugin configuration.
@@ -74,6 +89,9 @@ type Parameters struct {
 	// DefaultOutputReservation is the output tokens reserved for a request that sets no output
 	// cap and whose team sets no MaxOutputTokens.
 	DefaultOutputReservation int64 `json:"defaultOutputReservation,omitempty"`
+	// RateWindow is the sliding window a team's MaxReqsPerSec is measured over, unless the team
+	// sets its own. Default 1s.
+	RateWindow metav1.Duration `json:"rateWindow,omitempty"`
 	// Classes are ordered from highest to lowest. Traffic outside the contract moves to the next
 	// class.
 	Classes []ClassConfig `json:"classes"`
@@ -89,6 +107,7 @@ func defaultParameters() Parameters {
 		TeamHeader:               metadata.FlowFairnessIDKey,
 		OutputTokenWeight:        defaultOutputTokenWeight,
 		DefaultOutputReservation: 1000,
+		RateWindow:               metav1.Duration{Duration: defaultRateWindow},
 	}
 }
 
@@ -104,6 +123,9 @@ func (p *Parameters) validate() error {
 	}
 	if p.DefaultOutputReservation < 0 {
 		return fmt.Errorf("defaultOutputReservation must be >= 0, got %d", p.DefaultOutputReservation)
+	}
+	if p.RateWindow.Duration <= 0 {
+		return fmt.Errorf("rateWindow must be > 0, got %s", p.RateWindow.Duration)
 	}
 	if len(p.Classes) == 0 {
 		return errors.New("at least one class is required")
@@ -121,7 +143,7 @@ func (p *Parameters) validate() error {
 		}
 		classes[c.Name] = struct{}{}
 	}
-	if err := validateTeam(&p.DefaultTeam, classes); err != nil {
+	if err := validateTeam(&p.DefaultTeam, classes, p.RateWindow.Duration); err != nil {
 		return fmt.Errorf("defaultTeam: %w", err)
 	}
 	teams := make(map[string]struct{}, len(p.Teams))
@@ -139,19 +161,48 @@ func (p *Parameters) validate() error {
 			return fmt.Errorf("teams[%d]: id %q is the defaultTeam id", i, t.ID)
 		}
 		teams[t.ID] = struct{}{}
-		if err := validateTeam(t, classes); err != nil {
+		if err := validateTeam(t, classes, p.RateWindow.Duration); err != nil {
 			return fmt.Errorf("teams[%d] %q: %w", i, t.ID, err)
 		}
 	}
 	return nil
 }
 
-func validateTeam(t *TeamConfig, classes map[string]struct{}) error {
+func validateTeam(t *TeamConfig, classes map[string]struct{}, defaultWindow time.Duration) error {
 	if _, ok := classes[t.Class]; !ok {
 		return fmt.Errorf("unknown class %q", t.Class)
 	}
-	if t.MaxConcurrency < 0 || t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 {
+	if t.MaxConcurrency < 0 || t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 || t.MaxReqsPerSec < 0 {
 		return errors.New("limits must be >= 0")
 	}
+	if t.RateWindow != nil && t.RateWindow.Duration <= 0 {
+		return fmt.Errorf("rateWindow must be > 0, got %s", t.RateWindow.Duration)
+	}
+	if t.MaxReqsPerSec == 0 {
+		return nil
+	}
+	window, limit := rateLimit(*t, defaultWindow)
+	if limit < 1 {
+		return fmt.Errorf("maxReqsPerSec %v over rateWindow %s allows no request: use a larger rateWindow", t.MaxReqsPerSec, window)
+	}
+	if limit > maxRateWindowRequests {
+		return fmt.Errorf("maxReqsPerSec %v over rateWindow %s allows more than %d requests per window: use a smaller rateWindow", t.MaxReqsPerSec, window, maxRateWindowRequests)
+	}
 	return nil
+}
+
+// rateLimit returns the sliding window a team's request rate is measured over and the requests
+// it allows in that window.
+func rateLimit(t TeamConfig, defaultWindow time.Duration) (window time.Duration, limit int) {
+	window = defaultWindow
+	if t.RateWindow != nil {
+		window = t.RateWindow.Duration
+	}
+	// The epsilon keeps a product such as 0.29 * 100 = 28.999999999999996 from flooring to 28. The
+	// clamp keeps a huge product from overflowing int; validation rejects it.
+	n := math.Floor(t.MaxReqsPerSec*window.Seconds() + 1e-9)
+	if n > maxRateWindowRequests {
+		return window, maxRateWindowRequests + 1
+	}
+	return window, int(n)
 }

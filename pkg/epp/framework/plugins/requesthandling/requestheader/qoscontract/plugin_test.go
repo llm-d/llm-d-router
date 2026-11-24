@@ -30,6 +30,7 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -56,6 +57,7 @@ func testParams() Parameters {
 		{ID: "team-a", Class: "critical", MaxConcurrency: 2, MaxPromptTokens: 1000, MaxOutputTokens: 100},
 		{ID: "team-b", Class: "batch", MaxConcurrency: 1, MaxPromptTokens: 1000, MaxOutputTokens: 100},
 		{ID: "team-d", Class: "batch", DailyTokens: 500},
+		{ID: "team-r", Class: "batch", MaxReqsPerSec: 1},
 	}
 	return p
 }
@@ -133,13 +135,20 @@ func requireCode(t *testing.T, err error, code string) errcommon.Error {
 func TestFactory(t *testing.T) {
 	raw := `{"classes":[{"name":"critical","priority":100},{"name":"batch","priority":-1}],
 		"defaultTeam":{"class":"batch"},
-		"teams":[{"id":"a","class":"critical","maxConcurrency":3,"dailyTokens":1000}]}`
+		"rateWindow":"2s",
+		"teams":[{"id":"a","class":"critical","maxConcurrency":3,"dailyTokens":1000,"maxReqsPerSec":5,"rateWindow":"10s"},
+			{"id":"b","class":"batch","maxReqsPerSec":5}]}`
 	got, err := PluginFactory("qos", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil)
 	require.NoError(t, err)
 	p := got.(*Plugin)
 	assert.Equal(t, "qos", p.TypedName().Name)
 	assert.Equal(t, 3, p.teams["a"].cfg.MaxConcurrency)
 	assert.InDelta(t, 1000, p.teams["a"].cfg.DailyTokens, 1e-9)
+	assert.Equal(t, 10*time.Second, p.teams["a"].rate.window, "a team rateWindow overrides the plugin's")
+	assert.Len(t, p.teams["a"].rate.times, 50)
+	assert.Equal(t, 2*time.Second, p.teams["b"].rate.window, "a team without rateWindow uses the plugin's")
+	assert.Len(t, p.teams["b"].rate.times, 10)
+	assert.Nil(t, p.defaultTeam.rate, "no rate commit, no window")
 	assert.True(t, p.reportOnly, "decisions are recorded, not applied, unless mode is enforce-limits")
 }
 
@@ -158,6 +167,13 @@ func TestFactory_InvalidConfig(t *testing.T) {
 		"removed rate commit":       `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","commitTokensPerMinute":1000}]}`,
 		"team named default":        `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"default","class":"a"}]}`,
 		"team named as defaultTeam": `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"id":"anon","class":"a"},"teams":[{"id":"anon","class":"a"}]}`,
+		"negative rate":             `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxReqsPerSec":-1}]}`,
+		"rate allows no request":    `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxReqsPerSec":0.5}]}`,
+		"rate above window cap":     `{"rateWindow":"1h","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxReqsPerSec":1000}]}`,
+		"zero plugin rate window":   `{"rateWindow":"0s","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
+		"zero team rate window":     `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxReqsPerSec":1,"rateWindow":"0s"}]}`,
+		"bad rate window":           `{"rateWindow":"soon","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
+		"default team rate":         `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a","maxReqsPerSec":0.5}}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -395,6 +411,84 @@ func TestDayNeverMovesBack(t *testing.T) {
 	inflight, daily := usage(p, "team-d")
 	assert.Equal(t, 0, inflight)
 	assert.InDelta(t, 280, daily, 1e-9, "both settle against the current day: 140 + 140")
+}
+
+func TestRequestHeader_OverRateCommitDowngradesOneClass(t *testing.T) {
+	p, clock := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[0].MaxConcurrency = 0
+		params.Teams[0].MaxReqsPerSec = 2 // 2 requests per 1s window
+	})
+	start := clock.t
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-a", 10, 10)))
+	clock.t = start.Add(600 * time.Millisecond)
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-a", 10, 10)))
+
+	over := newRequest("team-a", 10, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), over))
+	assert.Equal(t, 10, servedPriority(over), "a third request within 1s moves to the next class")
+
+	clock.t = start.Add(1100 * time.Millisecond)
+	next := newRequest("team-a", 10, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), next))
+	assert.Equal(t, 100, servedPriority(next), "the request at 0s left the window, the one at 0.6s did not")
+
+	again := newRequest("team-a", 10, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), again))
+	assert.Equal(t, 10, servedPriority(again), "the requests at 0.6s and 1.1s fill the window")
+}
+
+func TestRequestHeader_LowestClassOverRateRejects(t *testing.T) {
+	p, clock := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[3].MaxReqsPerSec = 0.2
+		params.Teams[3].RateWindow = &metav1.Duration{Duration: 10 * time.Second} // 2 requests per 10s
+	})
+	start := clock.t
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)))
+	clock.t = start.Add(3 * time.Second)
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)))
+
+	clock.t = start.Add(4 * time.Second)
+	e := requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonOverQuota), e.Headers[errcommon.RequestDroppedReasonHeaderKey])
+	assert.Equal(t, "batch", e.Headers[ClassHeader])
+	assert.Equal(t, "6", e.Headers[RetryAfterHeader], "the request at 0s leaves the 10s window at 10s")
+
+	clock.t = start.Add(10 * time.Second)
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), "the request at 0s left the window")
+}
+
+func TestRequestHeader_TeamRateWindowOverridesDefault(t *testing.T) {
+	p, clock := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[3].RateWindow = &metav1.Duration{Duration: 10 * time.Second} // 1 rps: 10 per 10s
+	})
+	for i := range 10 {
+		require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), "request %d", i)
+	}
+	requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
+	clock.t = clock.t.Add(5 * time.Second)
+	requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
+}
+
+// TestRequestHeader_OutsideContractTakesNoRate verifies that a downgraded or rejected request does
+// not take a place in the rate window, and that settlement does not give one back.
+func TestRequestHeader_OutsideContractTakesNoRate(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[0].MaxConcurrency = 0
+		params.Teams[0].MaxReqsPerSec = 1
+	})
+	for range 3 {
+		oversized := newRequest("team-a", 5000, 10)
+		require.NoError(t, p.RequestHeader(t.Context(), oversized))
+		require.Equal(t, 10, servedPriority(oversized))
+	}
+	within := newRequest("team-a", 10, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), within))
+	assert.Equal(t, 100, servedPriority(within), "downgraded requests left the window empty")
+
+	complete(p, within, 10, 10)
+	over := newRequest("team-a", 10, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), over))
+	assert.Equal(t, 10, servedPriority(over), "a completed request keeps its place in the window")
 }
 
 func TestRequestHeader_LowestClassOverConcurrencyRejects(t *testing.T) {
@@ -691,7 +785,7 @@ func TestOnlyEnforceLimitsSetsTheClassPriority(t *testing.T) {
 func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
 	for _, mode := range []string{ModeEnforceLimits, ModeReportOnly} {
 		t.Run(mode, func(t *testing.T) {
-			p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
+			p, clock := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
 			decide := func(req *fwksched.InferenceRequest, class, servedClass, decision, reason string) {
 				t.Helper()
 				team := req.Headers[metadata.FlowFairnessIDKey]
@@ -715,6 +809,13 @@ func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
 
 			decide(newRequest("team-d", 100, 100), "batch", "batch", decisionWithinContract, "")
 			decide(newRequest("team-d", 100, 100), "batch", "", decisionRejectedDaily, reasonDaily)
+
+			// team-r has a rate commit of 1 per second. A would-be rejection must take no place in
+			// the window, so a second later the next request is within the contract again.
+			decide(newRequest("team-r", 10, 10), "batch", "batch", decisionWithinContract, "")
+			decide(newRequest("team-r", 10, 10), "batch", "", decisionRejectedRate, reasonRate)
+			clock.t = clock.t.Add(time.Second)
+			decide(newRequest("team-r", 10, 10), "batch", "batch", decisionWithinContract, "")
 		})
 	}
 }
@@ -786,6 +887,26 @@ func TestDecisionReason(t *testing.T) {
 			setup:       []*fwksched.InferenceRequest{newRequest("team-b", 10, 10)},
 			req:         newRequest("team-b", 10, 10),
 			servedClass: "", decision: decisionRejectedConcurrency, reason: reasonConcurrency,
+		},
+		{
+			name:   "downgraded over request rate",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 0; p.Teams[0].MaxReqsPerSec = 1 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 10, 10)},
+			req:         newRequest("team-a", 10, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonRate,
+		},
+		{
+			name:   "concurrency is reported before request rate",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 1; p.Teams[0].MaxReqsPerSec = 1 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 10, 10)},
+			req:         newRequest("team-a", 10, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonConcurrency,
+		},
+		{
+			name: "rejected over request rate", team: "team-r",
+			setup:       []*fwksched.InferenceRequest{newRequest("team-r", 10, 10)},
+			req:         newRequest("team-r", 10, 10),
+			servedClass: "", decision: decisionRejectedRate, reason: reasonRate,
 		},
 		{
 			name: "rejected over daily budget", team: "team-d",
