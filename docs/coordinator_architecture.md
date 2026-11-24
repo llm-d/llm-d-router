@@ -454,6 +454,7 @@ KV connector protocols ([pkg/coordinator/connectors/kv/](../pkg/coordinator/conn
 | `kv-sglang` | `sglang` | SGLang bootstrap: `bootstrap_host`, `bootstrap_port`, `bootstrap_room`. |
 | `kv-shared-storage` | `shared-storage` | Shared filesystem / object store: prefill writes KV, decode reads it; no transfer descriptor on the wire. |
 | `kv-offloading` | `offloading` | vLLM `OffloadingConnector` P2P tier: prefill stores KV in its P2P tier under `remote_decoder.kv_request_id`; decode pulls it with `remote_prefiller` (`kv_request_id`, `remote_host`, `remote_port`). |
+| `kv-mooncake` | `mooncake` | Experimental vLLM `MooncakeConnector` for single-rank HTTP P/D: prefill and decode share a `transfer_id`; decode also receives the prefill engine ID and bootstrap address. |
 
 The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and can be
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
@@ -509,6 +510,69 @@ empty `kv_transfer_params`, which the plugin may fill with a cached-prefix sourc
 decode request. See the
 [plugin README](../pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/README.md)
 and the [header copy README](../pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy/README.md).
+
+`kv-mooncake` is an experimental connector for text-only HTTP chat completions
+with one completion per request and one data-parallel rank per worker. It uses
+sequential prefill and decode steps:
+
+```yaml
+pipeline:
+  kv_connector: kv-mooncake
+  use_openai_format: true
+  worker_protocol: http
+  steps:
+    - type: prefill
+    - type: decode
+```
+
+The prefill EPP needs an endpoint attribute with the serving endpoint, the
+current rank's Mooncake engine ID, and the bootstrap port. For example, a
+[file-discovery](../pkg/epp/framework/plugins/datalayer/discovery/file/README.md)
+entry may supply the following metadata (the engine ID is illustrative):
+
+```yaml
+endpoints:
+  - name: prefill-a
+    address: "10.0.0.2"
+    port: "8000"
+    attributes:
+      mooncakeHandoff: '{"endpoint":"10.0.0.2:8000","engine_id":"engine-a","bootstrap_port":8998}'
+```
+
+Configure the prefill EPP to send the selected endpoint's attribute and report
+the served endpoint on its response:
+
+```yaml
+plugins:
+  - type: header-profile-handler
+    parameters:
+      prefillProfile: prefill
+  - type: attributes-producer
+    parameters:
+      attributeKeys: [mooncakeHandoff]
+  - type: endpoint-header-stamper
+    parameters:
+      stamps:
+        - attributeKey: mooncakeHandoff
+          headerName: x-llm-d-mooncake-prefill-handoff
+  - type: request-header-copy-handler
+    parameters:
+      headers: [x-llm-d-mooncake-prefill-handoff]
+```
+
+Use a prefill gateway route that only the coordinator calls, with
+`response_header_mode: SEND` on its `ext_proc` filter. The coordinator rejects
+a missing or invalid handoff, including metadata for a different served
+endpoint. When the gateway does not report the served endpoint, it must route
+to the selected endpoint without retargeting the prefill request. Operators
+must keep the attribute synchronized with the current engine registration
+before making an endpoint eligible for scheduling. The coordinator does not
+query or refresh the bootstrap service.
+
+The sequential HTTP lifecycle is covered by simulated worker tests. KV transfer
+and retention with a live Mooncake engine, including release on cancellation,
+require engine-level qualification. Conditional decode, gRPC, force-stream,
+and forwarding prompt token IDs are unsupported with this connector.
 
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
@@ -830,7 +894,7 @@ connector. They must agree with the connector configured on the vLLM pods.
 
 | Key | Values | Default |
 | :---- | :---- | :---- |
-| `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang`, `kv-offloading` | `kv-shared-storage` |
+| `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang`, `kv-offloading`, `kv-mooncake` (experimental) | `kv-shared-storage` |
 | `ec_connector` | `ec-nixl`, `ec-shared-storage` | `ec-shared-storage` |
 
 KV and EC are independent: `ec-nixl` can pair with `kv-shared-storage`, and so on. A

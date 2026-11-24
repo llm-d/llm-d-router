@@ -34,13 +34,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
-const (
-	// requestHeaderDataParallelRank pins a request to a specific vLLM
-	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
-	requestHeaderDataParallelRank = "x-data-parallel-rank"
-
-	requestFieldTransferID = "transfer_id"
-)
+// requestHeaderDataParallelRank pins a request to a specific vLLM
+// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
+const requestHeaderDataParallelRank = "x-data-parallel-rank"
 
 // concurrentPrefillGrace limits how long prefill may continue after a
 // successful decode returns. A variable so tests can shorten it.

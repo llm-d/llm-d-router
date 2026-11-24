@@ -92,6 +92,8 @@ const (
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
 	FieldRemoteEngineID       = "remote_engine_id"
+	FieldTransferID           = "transfer_id"
+	FieldRemoteBootstrapAddr  = "remote_bootstrap_addr"
 	FieldRemoteHost           = "remote_host"
 	FieldRemotePort           = "remote_port"
 	// OffloadingConnector P2P tier roles, carried inside kv_transfer_params. The

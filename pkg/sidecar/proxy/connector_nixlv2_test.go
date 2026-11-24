@@ -1135,8 +1135,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteHost, decodeURL.Hostname()))
 		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteNotifyPort, BeNumerically("==", 61005)))
 		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteDPRank, BeNumerically("==", 0)))
-		Expect(kv).To(HaveKey(requestFieldTransferID))
-		Expect(kv[requestFieldTransferID]).ToNot(BeEmpty())
+		Expect(kv).To(HaveKey(reqcommon.FieldTransferID))
+		Expect(kv[reqcommon.FieldTransferID]).ToNot(BeEmpty())
 
 		// Pre-existing nil fields are still nil because they are populated by
 		// the prefill engine's request_finished, not the sidecar.
@@ -1146,7 +1146,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteBlockIDs, BeNil()))
 		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemotePort, BeNil()))
 
-		transferID := kv[requestFieldTransferID]
+		transferID := kv[reqcommon.FieldTransferID]
 
 		By("verifying decode request carries the same transfer_id")
 		Expect(decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
@@ -1156,8 +1156,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(drq).To(HaveKey(reqcommon.FieldKVTransferParams))
 		dkv, ok := drq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(dkv).To(HaveKey(requestFieldTransferID))
-		Expect(dkv[requestFieldTransferID]).To(Equal(transferID))
+		Expect(dkv).To(HaveKey(reqcommon.FieldTransferID))
+		Expect(dkv[reqcommon.FieldTransferID]).To(Equal(transferID))
 
 		cancelFn()
 		<-stoppedCh
@@ -1201,8 +1201,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, false))
 		Expect(dkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 8)))
 		Expect(dkv[requestFieldRemoteDPRank]).To(Equal(pRank))
-		Expect(dkv[requestFieldTransferID]).To(Equal(pkv[requestFieldTransferID]))
-		Expect(dkv[requestFieldTransferID]).ToNot(BeEmpty())
+		Expect(dkv[reqcommon.FieldTransferID]).To(Equal(pkv[reqcommon.FieldTransferID]))
+		Expect(dkv[reqcommon.FieldTransferID]).ToNot(BeEmpty())
 
 		By("decode remote_request_id matches its request ID header")
 		requestID := env.decodeHandler.GetCompletionHeaders()[0].Get(reqcommon.RequestIDHeaderKey)
@@ -1337,7 +1337,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				requestFieldRemoteHandshakePort:  6302,
 				requestFieldRemoteNotifyPort:     61006,
 				requestFieldRemoteDPRankOverride: true,
-				requestFieldTransferID:           "tx" + testMoRIRequestID,
+				reqcommon.FieldTransferID:        "tx" + testMoRIRequestID,
 				"remote_dp_size":                 16,
 				"remote_dp_size_local":           8,
 				"tp_size":                        1,
@@ -1501,7 +1501,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		pkv, ok := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldRemoteHost, BeNil()))
-		Expect(pkv).ToNot(HaveKey(requestFieldTransferID))
+		Expect(pkv).ToNot(HaveKey(reqcommon.FieldTransferID))
 		Expect(pkv).ToNot(HaveKey("remote_dp_size"))
 		Expect(pkv).ToNot(HaveKey("remote_hosts"))
 

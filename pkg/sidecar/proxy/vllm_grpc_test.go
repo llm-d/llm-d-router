@@ -482,7 +482,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				assert.NotEmpty(t, prefillCall.Header.Get(requestHeaderDataParallelRank))
 
 				dkv := decodeCall.Request.GetKv().GetKvTransferParams().AsMap()
-				assert.True(t, strings.HasPrefix(dkv[requestFieldTransferID].(string), "tx"))
+				assert.True(t, strings.HasPrefix(dkv[reqcommon.FieldTransferID].(string), "tx"))
 				assert.Equal(t, float64(17001), dkv["remote_notify_port"])
 				assert.NotEmpty(t, decodeCall.Header.Get(requestHeaderDataParallelRank))
 			},
@@ -501,7 +501,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				assert.NotEqual(t, "client-req-99", prefillCall.Request.GetRequestId())
 				require.Equal(t, dkv["remote_request_id"], prefillCall.Request.GetRequestId())
 				assert.Equal(t, prefillCall.Request.GetRequestId(), decodeCall.Request.GetRequestId())
-				assert.Equal(t, pkv[requestFieldTransferID], dkv[requestFieldTransferID])
+				assert.Equal(t, pkv[reqcommon.FieldTransferID], dkv[reqcommon.FieldTransferID])
 				assert.Equal(t, routing.ExtractHost(prefillAddr), dkv["remote_host"])
 				assert.Equal(t, true, dkv["do_remote_prefill"])
 			},
@@ -517,9 +517,9 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				assert.Equal(t, "2", prefillCall.Header.Get(requestHeaderDataParallelRank))
 				assert.Equal(t, true, pkv["do_remote_decode"])
 				assert.Equal(t, false, pkv["do_remote_prefill"])
-				assert.Equal(t, pkv["transfer_id"], dkv["transfer_id"])
+				assert.Equal(t, pkv[reqcommon.FieldTransferID], dkv[reqcommon.FieldTransferID])
 				assert.Equal(t, "mc-engine-rank-2", dkv["remote_engine_id"])
-				assert.Contains(t, dkv["remote_bootstrap_addr"].(string), strconv.Itoa(mcBootstrapPort))
+				assert.Contains(t, dkv[reqcommon.FieldRemoteBootstrapAddr].(string), strconv.Itoa(mcBootstrapPort))
 			},
 		},
 		{

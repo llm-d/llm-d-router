@@ -62,6 +62,9 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
+	if kvConn.Name() == kv.Mooncake && !useOpenAI {
+		return nil, fmt.Errorf("prefill: %s requires use_openai_format=true", kv.Mooncake)
+	}
 	ecConn, err := buildECConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
@@ -76,7 +79,18 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
-func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) (err error) {
+	if s.kv.Name() == kv.Mooncake {
+		reqCtx.MooncakeHandoff = nil
+		if err := validateMooncakeRequest(reqCtx); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				reqCtx.MooncakeHandoff = nil
+			}
+		}()
+	}
 	switch g := reqCtx.GRPC.(type) {
 	case *pipeline.SGLangGRPCRequest:
 		return s.executeSGLangGRPC(ctx, reqCtx, g)

@@ -97,7 +97,7 @@ var _ = Describe("Mooncake Connector", func() {
 		Expect(ok).To(BeTrue())
 		Expect(prefillKVParams[reqcommon.FieldDoRemoteDecode]).To(BeTrue())
 		Expect(prefillKVParams[reqcommon.FieldDoRemotePrefill]).To(BeFalse())
-		Expect(prefillKVParams[requestFieldTransferID]).ToNot(BeEmpty())
+		Expect(prefillKVParams[reqcommon.FieldTransferID]).ToNot(BeEmpty())
 
 		// Prefill should have max_tokens=1, max_completion_tokens=1 and stream=false
 		Expect(preq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 1))
@@ -116,12 +116,12 @@ var _ = Describe("Mooncake Connector", func() {
 		Expect(ok).To(BeTrue())
 		Expect(decodeKVParams[reqcommon.FieldDoRemotePrefill]).To(BeTrue())
 		Expect(decodeKVParams[reqcommon.FieldDoRemoteDecode]).To(BeFalse())
-		Expect(decodeKVParams[requestFieldTransferID]).To(HavePrefix("xfer-"))
+		Expect(decodeKVParams[reqcommon.FieldTransferID]).To(HavePrefix("xfer-"))
 		Expect(decodeKVParams[reqcommon.FieldRemoteEngineID]).To(Equal("test-engine-abc123"))
-		Expect(decodeKVParams[requestFieldRemoteBootstrapAddr]).To(ContainSubstring(fmt.Sprintf(":%d", testInfo.proxy.config.MooncakeBootstrapPort)))
+		Expect(decodeKVParams[reqcommon.FieldRemoteBootstrapAddr]).To(ContainSubstring(fmt.Sprintf(":%d", testInfo.proxy.config.MooncakeBootstrapPort)))
 
 		// Transfer IDs must match between prefill and decode
-		Expect(decodeKVParams[requestFieldTransferID]).To(Equal(prefillKVParams[requestFieldTransferID]))
+		Expect(decodeKVParams[reqcommon.FieldTransferID]).To(Equal(prefillKVParams[reqcommon.FieldTransferID]))
 
 		// Prefill must be pinned to the dp rank whose engine_id is sent to decode
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()

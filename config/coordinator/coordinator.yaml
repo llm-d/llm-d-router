@@ -138,6 +138,7 @@ pipeline:
   #   kv-shared-storage - shared filesystem / object store (default)
   #   kv-sglang         - SGLang-style KV bootstrap
   #   kv-offloading     - vLLM OffloadingConnector P2P tier
+  #   kv-mooncake       - experimental single-rank HTTP vLLM MooncakeConnector (prefill, decode)
   kv_connector: kv-shared-storage
 
   # ec_connector picks the protocol used to ship encoded multimodal embedding

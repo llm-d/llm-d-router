@@ -75,6 +75,8 @@ func Build(name string) (Connector, error) {
 		return sglangKV{}, nil
 	case Offloading:
 		return offloadingKV{}, nil
+	case Mooncake:
+		return mooncakeKV{}, nil
 	default:
 		return nil, fmt.Errorf("unknown kv_connector: %q", name)
 	}
