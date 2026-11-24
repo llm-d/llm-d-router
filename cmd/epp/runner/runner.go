@@ -256,7 +256,9 @@ func (r *Runner) WithCustomCollectors(collectors ...prometheus.Collector) *Runne
 
 func (r *Runner) Run(ctx context.Context) error {
 	// Setup a very basic logger in case command line argument parsing fails
-	logutil.InitSetupLogging("llm-d-epp")
+	// Request handlers log, so a stdout nobody reads must not stall them.
+	logutil.InitSetupLogging("llm-d-epp", logutil.NonBlockingStdout("llm-d-epp"))
+	defer logutil.Flush()
 
 	setupLog.Info(r.eppExecutableName+" build", "commit-sha", version.CommitSHA, "build-ref", version.BuildRef)
 
