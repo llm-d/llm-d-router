@@ -313,12 +313,36 @@ func TestHealthServer_Check(t *testing.T) {
 			wantStatus:            healthPb.HealthCheckResponse_SERVING,
 		},
 		{
-			// Drain also applies in all-active (no leader election).
-			name:                  "LeaderElectionDisabled_Draining_NotServing",
+			// In all-active mode (no leader election), liveness must stay Serving
+			// during drain so kubelet does not restart the pod mid-drain.
+			name:                  "LeaderElectionDisabled_Draining_Liveness_StillServing",
 			leaderElectionEnabled: false,
 			draining:              true,
 			hasSynced:             true,
 			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               LivenessCheckService,
+			wantStatus:            healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			// In all-active mode, readiness should still fail while draining so
+			// traffic is removed from the endpoint during graceful shutdown.
+			name:                  "LeaderElectionDisabled_Draining_Readiness_NotServing",
+			leaderElectionEnabled: false,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               ReadinessCheckService,
+			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// Empty service name is used by load balancers and should report
+			// non-liveness drain state in all-active mode.
+			name:                  "LeaderElectionDisabled_Draining_EmptyService_NotServing",
+			leaderElectionEnabled: false,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               "",
 			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
 		},
 		{
