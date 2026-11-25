@@ -22,12 +22,10 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
-// Count reads a JSON-decoded token count. A count arrives as float64 from a
-// plain decode, json.Number from a UseNumber decode, a Go integer set
-// in-process, or the string form some non-conforming providers emit; each
-// form is read by NonNegativeInt, so a value that is negative, fractional,
-// out of range, or not a number reports false and reads as absent rather
-// than failing the response.
+// Count reads a JSON-decoded token count. A count a non-conforming provider
+// emits as a string is converted to json.Number first; a value
+// NonNegativeInt rejects reads as absent rather than an error, so a
+// malformed count does not fail the response.
 func Count(value any) (int, bool) {
 	if s, ok := value.(string); ok {
 		value = json.Number(s)
