@@ -23,8 +23,11 @@ Pipeline per request:
 - (`PreRequest`) Speculative-index the selected endpoint(s) with TTL eviction.
 - (`EndpointExtractor`) Per-pod ZMQ subscriber lifecycle on add/delete.
 
-Requires `TokenizedPrompt` on the request — set by a `token-producer`
-upstream. No-op otherwise.
+Requires `TokenizedPrompt` on the request from a `token-producer` that emits exact
+engine tokens (`exact_tokens: "true"`). Configure `backend: vllm` for text pools or
+`backend: passthrough` for pre-tokenized pools. EPP rejects `backend: estimate` at
+startup so byte-packed pseudo-tokens never enter the KV-block index. A request with
+no `TokenizedPrompt` is a no-op.
 
 ## Parameters
 

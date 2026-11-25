@@ -32,15 +32,21 @@ list shape, sorted by placeholder offset.
 
 Backend selection:
 
-- **`backend`**: names the backend explicitly, `estimate` or `vllm`. It has to
-  agree with the configuration: `backend: vllm` requires `modelName` and
-  rejects `estimate`, and `backend: estimate` rejects `vllm` and `modelName`.
+- **`backend`**: names the backend explicitly (`estimate`, `passthrough`, or `vllm`).
+  It must agree with the configuration. `backend: vllm` requires `modelName` and
+  rejects `estimate`. `backend: estimate` rejects `vllm` and `modelName`.
+  `backend: passthrough` rejects `vllm`, `modelName`, and `estimate`.
   Set it in deployments that want the backend visible in the configuration
   rather than inferred.
-- **`estimate`** (default): tokenizer-free byte-packing — no model, no service.
-  Selected when no backend is set, and auto-created by the framework for any
-  config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
-  P/D routing) without declaring a `token-producer`.
+- **`estimate`** (default): tokenizer-free byte-packing, with no model and no service.
+  EPP selects `estimate` when no backend is set, and creates it automatically when
+  plugins consume `TokenizedPrompt` without declaring a `token-producer`.
+- **`passthrough`**: passes through exact token IDs already carried by the request
+  (pre-tokenized Generate, Embeddings, token-array Completions, and
+  `kv_transfer_params.prompt_token_ids`). It requires no model name and no render
+  service. Text prompts without token IDs produce no `TokenizedRequest`, so
+  pseudo-tokens never reach exact-token consumers. Use `passthrough` for
+  token-only pools paired with `precise-prefix-cache-producer`.
 - **`vllm`** (or `modelName`): forwards requests to vLLM's native
   `/v1/completions/render`, `/v1/chat/completions/render`,
   `/v1/messages/render`, and `/v1/responses/render` endpoints over HTTP or
@@ -165,17 +171,16 @@ prefill/decode mutations and coordinator rendering are separate paths; this
 EPP contract does not establish parity for them.
 
 > [!WARNING]
-> The `estimate` backend approximates token boundaries (≈4 bytes/token); its
-> token IDs do not correspond to engine tokens. The precise prefix-cache scorer
-> requires real tokens — configure a `vllm` `token-producer` explicitly for it.
-> If omitted, the auto-created `estimate` producer satisfies the dependency but
-> silently degrades precise cache correlation.
+> The `estimate` backend approximates token boundaries (about 4 bytes per token).
+> Its token IDs do not match engine tokens. `precise-prefix-cache-producer` requires
+> exact tokens and rejects `estimate` at startup. Configure `backend: vllm` for text
+> pools or `backend: passthrough` for pre-tokenized pools.
 
 ## Config
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `backend`                  | - (inferred)            | Selects the backend explicitly: `estimate` or `vllm`. `vllm` requires `modelName` and rejects `estimate`; `estimate` rejects `vllm` and `modelName`. Without it, the backend is inferred from `modelName`, `vllm`, and `estimate`. |
+| `backend`                  | - (inferred)            | Selects the backend explicitly: `estimate`, `passthrough`, or `vllm`. `vllm` requires `modelName` and rejects `estimate`. `estimate` rejects `vllm` and `modelName`. `passthrough` rejects `vllm`, `modelName`, and `estimate`. Without `backend`, EPP infers `vllm` or `estimate` from `modelName`, `vllm`, and `estimate`. |
 | `modelName`                | - (required for `vllm`) | Model for startup probes, model-limit discovery, native gRPC text, and legacy Messages/Responses conversion. Native HTTP rendering retains the effective request model. |
 | `vllm.messagesRenderMode`  | `auto`                 | Discover Messages rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
 | `vllm.responsesRenderMode` | `auto`                 | Discover Responses rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
