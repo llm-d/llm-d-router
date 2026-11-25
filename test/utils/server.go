@@ -87,9 +87,14 @@ func SetupTestStreamingServer(ctx context.Context, t *testing.T, streamingServer
 	listener := bufconn.Listen(bufSize)
 
 	errChan := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		errChan <- LaunchTestGRPCServer(ctx, streamingServer, listener)
 	}()
+	// Wait for the server goroutine when the test returns before reading errChan. ctx must derive from
+	// t.Context(), which is canceled before cleanups run.
+	t.Cleanup(func() { <-done })
 
 	return listener, errChan
 }
