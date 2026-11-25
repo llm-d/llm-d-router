@@ -40,7 +40,7 @@ func TestQueueCapacityError(t *testing.T) {
 		wrapped := fmt.Errorf("%w: %w", ErrRejected, &QueueCapacityError{RetryAfterHint: 5 * time.Second})
 		assert.ErrorIs(t, wrapped, ErrRejected)
 		assert.ErrorIs(t, wrapped, ErrQueueAtCapacity)
-		assert.Contains(t, wrapped.Error(), "queue at capacity (projected wait 5s)")
+		assert.Equal(t, fmt.Sprintf("%s: %s", ErrRejected.Error(), ErrQueueAtCapacity.Error()), wrapped.Error())
 
 		var capErr *QueueCapacityError
 		require.ErrorAs(t, wrapped, &capErr)

@@ -138,7 +138,13 @@ func (s *scopeDrain) projection(dim contracts.CapacityDimension, itemByteSize ui
 	if s.hasEstimate {
 		mean = s.meanInterval
 	}
-	slotSec := max(mean, s.busyDuration(now).Seconds())
+	stall := s.busyDuration(now).Seconds()
+	slotSec := max(mean, stall)
+	if mean > 0 {
+		// Apply the in-progress stall floor only to the first slot so a single gap does not
+		// inflate every subsequent dispatch when multiple slots must clear.
+		return slotSec + (dispatches-1)*mean, true
+	}
 	return dispatches * slotSec, true
 }
 

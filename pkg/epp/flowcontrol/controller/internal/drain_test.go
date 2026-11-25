@@ -254,6 +254,34 @@ func TestDrainEstimator_StallRampToCap(t *testing.T) {
 	}
 }
 
+func TestDrainEstimator_MultiDispatchStallFloor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stall_floor_applies_to_first_dispatch_only_when_mean_is_known", func(t *testing.T) {
+		t.Parallel()
+		// 0.05s mean + 2.0s in-progress stall with 10 required dispatches:
+		// 2.0 + 9*0.05 = 2.45s -> 3s (rather than 10*2.0 = 20s).
+		est, now := seedEstimator(50 * time.Millisecond)
+		assert.Equal(t, 3*time.Second, est.retryAfterHint(reqSnap(10, 1, 10, 100), 0, 100, now.Add(2*time.Second)))
+
+		// 0.25s mean + 1.2s in-progress stall with 25 required dispatches:
+		// 1.2 + 24*0.25 = 7.2s -> 8s (rather than 25*1.2 = 30s).
+		est2, now2 := seedEstimator(250 * time.Millisecond)
+		assert.Equal(t, 8*time.Second, est2.retryAfterHint(reqSnap(25, 1, 25, 100), 0, 100, now2.Add(1200*time.Millisecond)))
+	})
+
+	t.Run("no_estimate_scales_stall_across_all_required_dispatches", func(t *testing.T) {
+		t.Parallel()
+		est := newDrainEstimator()
+		t0 := time.Unix(1000, 0)
+		busy := reqSnap(3, 1, 3, 10)
+		est.syncBusy([]int{0}, newFakeDrainRegistry(map[int]contracts.CapacitySnapshot{0: busy}), false, t0)
+
+		// Without a dispatch estimate, 3 required dispatches * 2s stall = 6s.
+		assert.Equal(t, 6*time.Second, est.retryAfterHint(busy, 0, 100, t0.Add(2*time.Second)))
+	})
+}
+
 func TestDrainEstimator_StallPauseAndResume(t *testing.T) {
 	t.Parallel()
 

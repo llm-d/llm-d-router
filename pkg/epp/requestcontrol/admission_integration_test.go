@@ -210,10 +210,12 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		t.Parallel()
 		// A saturated detector parks a filler request in the only queue slot (bandMaxRequests=1);
 		// the next request overflows band capacity against a non-empty pool -> RejectedCapacity.
+		// Using a frozen fake clock keeps elapsed stall at 0 so Retry-After is deterministically omitted.
 		h := newRealFlowControlHarness(t, realFlowControlOpts{
 			saturation:      1.0,
 			candidates:      nonEmptyEndpoints(),
 			bandMaxRequests: 1,
+			clock:           testclock.NewFakeClock(time.Now()),
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
@@ -249,9 +251,10 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued")
 
-		// Trigger a ticker dispatch cycle after Len == 1 so the first cycle's deferred syncBusy has
-		// marked the band busy before setting the absolute stall timestamp.
-		targetProbes := probes.Load() + 2
+		// Unlabeled endpoints evaluate only the decode stage (1 probe per cycle); waiting for 3
+		// probes guarantees at least one post-enqueue dispatch cycle has completed its deferred
+		// syncBusy even if role-labeled endpoints caused two probes per cycle.
+		targetProbes := probes.Load() + 3
 		require.Eventually(t, func() bool {
 			fakeClock.Step(time.Millisecond)
 			return probes.Load() >= targetProbes

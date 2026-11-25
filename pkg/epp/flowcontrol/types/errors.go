@@ -19,7 +19,6 @@ package types
 
 import (
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -68,12 +67,7 @@ type QueueCapacityError struct {
 }
 
 // Error formats the queue capacity rejection message.
-func (e *QueueCapacityError) Error() string {
-	if e.RetryAfterHint > 0 {
-		return fmt.Sprintf("%s (projected wait %s)", ErrQueueAtCapacity.Error(), e.RetryAfterHint)
-	}
-	return ErrQueueAtCapacity.Error()
-}
+func (e *QueueCapacityError) Error() string { return ErrQueueAtCapacity.Error() }
 
 // Unwrap returns ErrQueueAtCapacity.
 func (e *QueueCapacityError) Unwrap() error { return ErrQueueAtCapacity }
