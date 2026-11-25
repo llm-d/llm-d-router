@@ -87,7 +87,7 @@ func TestSharedSessionEventSource(t *testing.T) {
 				return false
 			}
 			req := sessionRequest("next", "first")
-			req.Body.TokenizedRequest = fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, 32)})
+			req.Body.TokenizedRequest = fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, 33)})
 			if err := sessions.Produce(ctx, req, nil); err != nil {
 				return false
 			}

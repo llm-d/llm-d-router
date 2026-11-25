@@ -266,7 +266,7 @@ func TestProducerTokenBackends(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"token_ids": []uint32{1}})
 					return
 				}
-				_ = json.NewEncoder(w).Encode([]map[string]any{{"token_ids": make([]uint32, 32)}})
+				_ = json.NewEncoder(w).Encode([]map[string]any{{"token_ids": make([]uint32, 33)}})
 			}))
 			defer renderer.Close()
 			params := `{"estimate":{}}`
@@ -320,7 +320,7 @@ func TestProducerSharedBlocksForksAndEviction(t *testing.T) {
 	}
 	lookup := func(previous string) *attrprefix.PrefixCacheMatchInfo {
 		req := sessionRequest("next", previous)
-		req.Body.TokenizedRequest = fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, 32)})
+		req.Body.TokenizedRequest = fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, 33)})
 		require.NoError(t, sessions.Produce(t.Context(), req, nil))
 		return firstMatch(t, p, req)
 	}
@@ -346,7 +346,7 @@ func TestProducerCrossWorkerLineage(t *testing.T) {
 		observe(t, p, sessions, kvevents.EventSource{Endpoint: endpoint}, stored)
 	}
 	req := sessionRequest("next", "previous")
-	req.Body.TokenizedRequest = fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, 32)})
+	req.Body.TokenizedRequest = fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, 33)})
 	require.NoError(t, sessions.Produce(t.Context(), req, nil))
 	check := func(expected ...int) {
 		t.Helper()
@@ -494,7 +494,7 @@ func TestProducerRejectsRedis(t *testing.T) {
 func TestProducerCoverageAndEventScope(t *testing.T) {
 	p, _ := newTestProducer(t)
 	source := kvevents.EventSource{Endpoint: "10.0.0.1:8080"}
-	lookup := attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 32,
+	lookup := attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 33,
 		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}}
 	store := &kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16,
 		DeviceTier: "GPU", GroupIdx: ptr.To(0), KVCacheSpecKind: kvevents.KVCacheSpecKindFullAttention}
@@ -524,11 +524,12 @@ func TestProducerCoverageAndEventScope(t *testing.T) {
 			}
 		})
 	}
-	lookup.TotalTokens = 31
-	assert.Equal(t, 16, firstMatch(t, p, lookupRequest("request", lookup)).CachedBlockCount())
-	lookup.TotalTokens = 15
-	assert.Zero(t, firstMatch(t, p, lookupRequest("request", lookup)).CachedBlockCount())
-	lookup.TotalTokens = 32
+	// The engine recomputes the block that holds the last prompt token.
+	for total, want := range map[int]int{32: 16, 31: 16, 17: 16, 16: 0, 15: 0} {
+		lookup.TotalTokens = total
+		assert.Equal(t, want, firstMatch(t, p, lookupRequest("request", lookup)).CachedBlockCount(), "total tokens %d", total)
+	}
+	lookup.TotalTokens = 33
 	batch.Events = []kvevents.GenericEvent{&kvevents.BlockRemovedEvent{BlockHashes: []uint64{10}, DeviceTier: "GPU", GroupIdx: ptr.To(0), Locality: "REMOTE"}}
 	observeBatch(t, p, nil, source, batch)
 	assert.Equal(t, 32, firstMatch(t, p, lookupRequest("request", lookup)).CachedBlockCount())
@@ -537,12 +538,23 @@ func TestProducerCoverageAndEventScope(t *testing.T) {
 	assert.Zero(t, firstMatch(t, p, lookupRequest("request", lookup)).MatchBlocks())
 }
 
+func TestProducerIndexesSinkFullAttention(t *testing.T) {
+	p, _ := newTestProducer(t)
+	observe(t, p, nil, kvevents.EventSource{Endpoint: "10.0.0.1:8080"}, &kvevents.BlockStoredEvent{
+		BlockHashes: []uint64{10, 20}, BlockSize: 16, DeviceTier: "GPU",
+		GroupIdx: ptr.To(0), KVCacheSpecKind: kvevents.KVCacheSpecKindSinkFull,
+	})
+	req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 33,
+		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
+	assert.Equal(t, 32, firstMatch(t, p, req).CachedBlockCount())
+}
+
 func TestProducerIndependentReplicas(t *testing.T) {
 	first, _ := newTestProducer(t)
 	second, _ := newTestProducer(t)
 	source := kvevents.EventSource{Endpoint: "10.0.0.1:8080"}
 	store := &kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16, DeviceTier: "GPU"}
-	req := lookupRequest("next", attrsession.SessionCacheRequest{SessionID: "next", TotalTokens: 32,
+	req := lookupRequest("next", attrsession.SessionCacheRequest{SessionID: "next", TotalTokens: 33,
 		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
 	for _, p := range []*Producer{first, second} {
 		observe(t, p, nil, source, store)
@@ -561,7 +573,7 @@ func TestProducerCacheNamespace(t *testing.T) {
 		&kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16, DeviceTier: "GPU"})
 	for _, namespace := range []string{"model-v1", "different-model", ""} {
 		t.Run(namespace, func(t *testing.T) {
-			req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 32,
+			req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 33,
 				Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: namespace, BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
 			info := firstMatch(t, p, req)
 			expected := 0

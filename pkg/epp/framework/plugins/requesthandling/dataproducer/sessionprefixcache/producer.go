@@ -222,12 +222,13 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 }
 
 // match counts the leading blocks of prefix resident in scope. With Exact
-// set, blocks past the prompt's own length are not queried and the matched
-// tokens are also reported as cached GPU tokens.
+// set, the matched tokens are also reported as cached GPU tokens, and only
+// blocks the engine can serve for this prompt are queried: vLLM caps a hit at
+// totalTokens-1 because it computes the last prompt token's logits.
 func (p *Producer) match(ctx context.Context, prefix attrsession.SessionCachePrefix, scope kvblock.EngineScope, totalTokens int) (*attrprefix.PrefixCacheMatchInfo, error) {
 	hashes := prefix.BlockHashes
 	if prefix.Exact {
-		hashes = hashes[:min(len(hashes), totalTokens/prefix.BlockSizeTokens)]
+		hashes = hashes[:min(len(hashes), (totalTokens-1)/prefix.BlockSizeTokens)]
 	}
 	resident, err := p.events.residentPrefix(ctx, scope, hashes)
 	if err != nil {

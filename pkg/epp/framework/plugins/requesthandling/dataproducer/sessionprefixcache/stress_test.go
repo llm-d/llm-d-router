@@ -90,7 +90,7 @@ func TestProducerResidencyAgainstModel(t *testing.T) {
 					for _, path := range paths {
 						matched := 0
 						for _, hash := range path {
-							if !blocks[hash] || (exact && matched+16 > total) {
+							if !blocks[hash] || (exact && matched+16 >= total) {
 								break
 							}
 							matched += 16

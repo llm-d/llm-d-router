@@ -55,8 +55,8 @@ func newEventConsumer(index kvblock.Index) *eventConsumer {
 // ProcessEvents records local GPU block stores as resident in their scope,
 // removes residency for local GPU block removals, and drops the endpoint's
 // residency on AllBlocksCleared. Reports for other tiers, remote or offloaded
-// blocks, and cache kinds other than full or MLA attention leave residency
-// unchanged.
+// blocks, and cache kinds other than full, MLA, or sink full attention leave
+// residency unchanged.
 func (c *eventConsumer) ProcessEvents(ctx context.Context, source kvevents.EventSource, batch kvevents.EventBatch) error {
 	entries := []kvblock.PodEntry{{PodIdentifier: source.Endpoint, DeviceTier: kvcache.GPUTier}}
 	for _, event := range batch.Events {
@@ -161,15 +161,16 @@ func sameScope(a, b kvblock.EngineScope) bool {
 }
 
 // indexableStore reports whether a store event describes blocks this producer
-// tracks: local GPU blocks of a full-attention or MLA cache group, or of an
-// engine that reports no group. Sliding-window and other cache kinds hold
-// partial context, so their blocks do not establish prefix residency.
+// tracks: local GPU blocks of a full-attention, MLA, or sink full-attention
+// cache group, or of an engine that reports no group. Sliding-window and other
+// cache kinds hold partial context, so their blocks do not establish prefix
+// residency.
 func indexableStore(ev *kvevents.BlockStoredEvent) bool {
 	if !localGPU(ev.DeviceTier, ev.Locality, ev.Ownership) || ev.BlockSize <= 0 || len(ev.BlockHashes) == 0 {
 		return false
 	}
 	switch ev.KVCacheSpecKind {
-	case kvevents.KVCacheSpecKindFullAttention, kvevents.KVCacheSpecKindMlaAttention:
+	case kvevents.KVCacheSpecKindFullAttention, kvevents.KVCacheSpecKindMlaAttention, kvevents.KVCacheSpecKindSinkFull:
 		return true
 	case "":
 		return ev.GroupIdx == nil

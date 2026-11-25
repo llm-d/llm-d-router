@@ -9,6 +9,11 @@ The external session producer owns identity, request correlation, ordered block
 paths, concurrent branches, and confidence. The cache producer owns residency.
 Eviction removes residency without deleting the external producer's lineage.
 
+No in-tree plugin publishes block paths. A session producer that supplies only a
+stamp, with no `Prefixes` and a zero `TotalTokens`, gets its requests stamped
+and no cache match. Matching requires a manager that learns paths from the
+[event input](#event-input) and publishes them with a prompt length.
+
 ## Request contract
 
 Publish `attribute/session.SessionCacheRequest` on the request under the configured
@@ -32,7 +37,9 @@ Only leading resident blocks contribute to a match. Paths, ranks, and cache grou
 are queried separately. Exact paths contribute cached-token coverage; uncertain
 paths contribute affinity only. Block count times block size determines covered
 tokens, while `TotalTokens` bounds coverage and accounts for the remaining prompt.
-The supplied full length can itself be an estimate.
+The supplied full length can itself be an estimate. An exact path is matched
+through `TotalTokens - 1`: vLLM computes the last prompt token's logits, so a
+prompt that ends on a block boundary is matched without its last block.
 
 An absent request attribute or empty stamp skips both lookup and body mutation.
 An explicit stamp replaces a client-supplied body `session_id`; other body fields
@@ -47,10 +54,16 @@ external manager can bind its own `kvevents.EventConsumer` to the same source wi
 `Reset` invalidates observed residency; the manager can retain lineage while
 marking its observations incomplete.
 
-Local GPU full-attention and MLA stores establish residency. CPU, remote,
-offloaded, and partial-context cache reports are ignored. Removals, cache clears,
-and source resets invalidate residency. Logical paths can match any compatible
-worker; endpoint, rank, and cache group identify each physical copy.
+Local GPU full-attention, MLA, and sink full-attention stores establish
+residency. CPU, remote, offloaded, and partial-context cache reports are ignored.
+Removals, cache clears, and source resets invalidate residency. Logical paths can
+match any compatible worker; endpoint, rank, and cache group identify each
+physical copy.
+
+vLLM bounds a hit by every cache group of the model. Sliding-window and Mamba
+groups are not tracked, so on a model with such groups a match is an upper
+bound: it overstates the hit when one of those groups has evicted blocks that
+the attention group still holds.
 
 ## Configuration
 
