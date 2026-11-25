@@ -892,6 +892,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.responseCompleteTimestamp = respHeadersReceivedAt
 				reqCtx.observeToolCallingResponse(nil, true, false, span)
 				s.HandleResponseBody(ctx, reqCtx, nil, true)
+				// No body response follows, so the headers response carries the final dynamic metadata.
+				reqCtx.respHeaderResp.DynamicMetadata = reqCtx.Response.DynamicMetadata
 			}
 			reqCtx.responseProcessingDuration += time.Since(respHeadersReceivedAt)
 

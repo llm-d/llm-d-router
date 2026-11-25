@@ -395,9 +395,19 @@ func TestProcessPassthroughTrailersOnlyResponse(t *testing.T) {
 
 			parser := &recordingPassthroughParser{PassthroughParser: passthrough.NewPassthroughParser()}
 			director := &lifecycleDirector{incomingModel: "m", targetModel: "m"}
-			srv, done := startRouted(ctx, t, director, NewParserRegistry([]fwkrh.Parser{parser}, logr.Discard()),
-				map[string]string{":path": grpcMethodPath, "content-type": "application/grpc"},
-				grpcFrame(t, []byte("request")), responseHeadersMsg("application/grpc", true, "grpc-status", tc.grpcStatus))
+			srv := newPacedProcessServer(ctx)
+			done := make(chan error, 1)
+			go func() {
+				done <- NewStreamingServer(nil, director, NewParserRegistry([]fwkrh.Parser{parser}, logr.Discard()), 0).Process(srv)
+			}()
+			srv.feed(t, newRequestHeaders(map[string]string{":path": grpcMethodPath, "content-type": "application/grpc"}))
+			srv.feed(t, requestBodyMsg(grpcFrame(t, []byte("request"))))
+			srv.next(t, "the request header response")
+			srv.next(t, "the request body response")
+			srv.feed(t, responseHeadersMsg("application/grpc", true, "grpc-status", tc.grpcStatus))
+			headersResp := srv.next(t, "the response header response")
+			require.NotNil(t, headersResp.GetResponseHeaders())
+			require.NotNil(t, headersResp.GetDynamicMetadata().GetFields()[finalMetadataKey], "final dynamic metadata on the headers response")
 			close(srv.in)
 			require.NoError(t, <-done)
 			require.Empty(t, srv.out, "no body response for a trailers-only response")
