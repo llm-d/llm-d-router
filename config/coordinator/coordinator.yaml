@@ -217,13 +217,15 @@ pipeline:
   # force_stream_max_request_size: 256KiB
 
   # max_step_reruns sets how many times one request can run a failed step
-  # again. The default 0 disables re-runs. The pipeline runs a step again when
-  # a vllm.Inference gRPC prefill or decode leg returns UNAVAILABLE before a
-  # response byte reaches the client. The re-run starts at the step before the
-  # failed step: a failed decode runs prefill and decode again, and a failed
-  # prefill runs encode and prefill again. After the last re-run, the client
-  # gets the error. A gateway that sheds load can also return UNAVAILABLE, and
-  # each re-run then adds load.
+  # again. The default 0 disables re-runs. The pipeline runs steps again
+  # before a response byte reaches the client when a vllm.Inference gRPC
+  # prefill or decode leg returns UNAVAILABLE, or when an sglang.api.v1 gRPC
+  # prefill or decode leg sends a GenerateStreamItem.error with retryable=true.
+  # On vLLM, a failed decode runs prefill and decode again, and a failed
+  # prefill runs encode and prefill again. On SGLang, the coordinator cancels
+  # the peer leg and runs prefill and decode again with a new bootstrap_room.
+  # After the last re-run, the client gets the error. A gateway that sheds load
+  # can also return UNAVAILABLE on vLLM routes, and each re-run then adds load.
   # env: COORDINATOR_PIPELINE_MAX_STEP_RERUNS
   # max_step_reruns: 0
 
