@@ -122,6 +122,7 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
 	fairnessIndex, avgWaitTimeMs := newCollectors(labels)
+	fairnessIndex.Set(1)
 	p := &ProgramAwarePlugin{name: name, strategy: strategy, fairnessIndex: fairnessIndex, avgWaitTimeMs: avgWaitTimeMs}
 	if handle != nil {
 		if reg := handle.Metrics(); reg != nil {

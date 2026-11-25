@@ -57,6 +57,33 @@ func TestFactory_MetricRegistrationError(t *testing.T) {
 	})
 }
 
+func TestFactory_InitialFairnessIndex(t *testing.T) {
+	for _, strategy := range []string{"las", "turn-priority"} {
+		t.Run(strategy, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			handle := plugin.NewEppHandle(t.Context(), nil, plugin.WithMetricsRecorder(registry))
+			for _, name := range []string{"interactive", "batch"} {
+				_, err := ProgramAwarePluginFactory(name,
+					decoder(fmt.Sprintf(`{"strategy":%q,"evictionTtlSeconds":0}`, strategy)), handle)
+				require.NoError(t, err)
+			}
+
+			families, err := registry.Gather()
+			require.NoError(t, err)
+			require.Len(t, families, 1)
+			require.Equal(t, eppmetrics.LLMDRouterEndpointPickerSubsystem+"_program_aware_jains_fairness_index", families[0].GetName())
+			require.Len(t, families[0].Metric, 2)
+			values := make(map[string]float64)
+			for _, sample := range families[0].Metric {
+				require.Len(t, sample.Label, 1)
+				require.Equal(t, "policy", sample.Label[0].GetName())
+				values[sample.Label[0].GetValue()] = sample.GetGauge().GetValue()
+			}
+			require.Equal(t, map[string]float64{"interactive": 1, "batch": 1}, values)
+		})
+	}
+}
+
 func TestMetrics_InstancesAreIndependent(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	handle := plugin.NewEppHandle(t.Context(), nil, plugin.WithMetricsRecorder(registry))
