@@ -122,6 +122,11 @@ func (s *PrefillStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Re
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = routing.ExtractHost(prefillEndpoint)
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapPort] = port
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapRoom] = room
+	if rawRank := strings.TrimSpace(routing.TakeRoutingHeaderValue(resp.Header, routing.PrefillDataParallelRankHeader)); rawRank != "" {
+		if rank, err := strconv.ParseInt(rawRank, 10, 64); err == nil && rank >= 0 {
+			reqCtx.KVTransferParams[reqcommon.FieldDisaggPrefillDPRank] = rank
+		}
+	}
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
 	reqCtx.CaptureResponseHeaders(resp.Header)
 	sglangReq.PrefillStream = ps
@@ -249,6 +254,9 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 			return errors.New("decode: incomplete SGLang bootstrap parameters")
 		}
 		bootstrap = &sglangwire.Bootstrap{Host: host, Port: port, Room: room}
+		if rank, ok := int64FromParam(kvParams[reqcommon.FieldDisaggPrefillDPRank]); ok && rank >= 0 {
+			bootstrap.DisaggPrefillDPRank = &rank
+		}
 	}
 
 	payload := sglangReq.Payload

@@ -1464,6 +1464,176 @@ func TestSGLangGRPC_PromptTokenParityMismatchRecorded(t *testing.T) {
 	}
 }
 
+func TestSGLangGRPC_ForwardsPrefillDPRankToDecodeAndStripsClientHeaders(t *testing.T) {
+	tests := []struct {
+		name           string
+		prefillRankHdr string
+		wantDecodeRank *int64
+	}{
+		{
+			name:           "prefill rank 1 forwarded to decode",
+			prefillRankHdr: "1",
+			wantDecodeRank: proto.Int64(1),
+		},
+		{
+			name:           "prefill rank 0 forwarded to decode",
+			prefillRankHdr: "0",
+			wantDecodeRank: proto.Int64(0),
+		},
+		{
+			name:           "malformed prefill rank ignored",
+			prefillRankHdr: "not-a-rank",
+			wantDecodeRank: nil,
+		},
+		{
+			name:           "negative prefill rank ignored",
+			prefillRankHdr: "-1",
+			wantDecodeRank: nil,
+		},
+		{
+			name:           "absent prefill rank omitted on decode",
+			prefillRankHdr: "",
+			wantDecodeRank: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu             sync.Mutex
+				prefillHeaders http.Header
+				decodeHeaders  http.Header
+				decodeGenReq   *sglangapiv1.GenerateRequest
+			)
+
+			gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read gateway request: %v", err)
+					return
+				}
+				payload, err := grpcframe.ParsePayload(raw)
+				if err != nil {
+					t.Errorf("parse gateway gRPC payload: %v", err)
+					return
+				}
+				var genReq sglangapiv1.GenerateRequest
+				if err := proto.Unmarshal(payload, &genReq); err != nil {
+					t.Errorf("unmarshal GenerateRequest: %v", err)
+					return
+				}
+
+				switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+				case gateway.PhasePrefill:
+					mu.Lock()
+					prefillHeaders = r.Header.Clone()
+					mu.Unlock()
+
+					w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+					w.Header().Set(routing.PrefillEndpointHeader, "10.2.3.4:30011")
+					if tt.prefillRankHdr != "" {
+						w.Header().Set(routing.PrefillDataParallelRankHeader, tt.prefillRankHdr)
+					}
+					w.WriteHeader(http.StatusOK)
+					frameBytes, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+						Item: &sglangapiv1.GenerateStreamItem_Frame{
+							Frame: &sglangapiv1.GenerateResponse{
+								MetaInfo: &sglangapiv1.GenerateMetaInfo{
+									PromptTokens: 12,
+									CachedTokens: 4,
+								},
+							},
+						},
+					})
+					if err != nil {
+						t.Errorf("marshal prefill frame: %v", err)
+						return
+					}
+					_, _ = w.Write(frameBytes)
+					w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, grpcframe.StatusOK)
+
+				case gateway.PhaseDecode:
+					mu.Lock()
+					decodeHeaders = r.Header.Clone()
+					decodeGenReq = proto.Clone(&genReq).(*sglangapiv1.GenerateRequest)
+					mu.Unlock()
+
+					w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+					w.Header().Set(routing.PrefillDataParallelRankHeader, "77")
+					w.WriteHeader(http.StatusOK)
+					frameBytes, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+						Item: &sglangapiv1.GenerateStreamItem_Frame{
+							Frame: &sglangapiv1.GenerateResponse{
+								Text: "ok",
+								MetaInfo: &sglangapiv1.GenerateMetaInfo{
+									PromptTokens:     12,
+									CompletionTokens: 1,
+								},
+							},
+						},
+					})
+					if err != nil {
+						t.Errorf("marshal decode frame: %v", err)
+						return
+					}
+					_, _ = w.Write(frameBytes)
+					w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, grpcframe.StatusOK)
+				}
+			}))
+
+			gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
+			addr := startCoordinatorH2C(t, config.ServerConfig{}, newSGLangPDPipeline(t, gwClient), gwClient)
+			conn := grpctest.Dial(t, addr)
+			client := sglangapiv1.NewSglangServiceClient(conn)
+
+			callCtx := metadata.NewOutgoingContext(testCtx(t), metadata.Pairs(
+				routing.PrefillDataParallelRankHeader, "99",
+			))
+			var respHeaders metadata.MD
+			stream, err := client.Generate(callCtx, &sglangapiv1.GenerateRequest{
+				Text: &sglangapiv1.StringOrList{
+					Value: &sglangapiv1.StringOrList_One{One: "Hello"},
+				},
+				Stream: proto.Bool(true),
+			}, grpc.Header(&respHeaders))
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			for {
+				_, recvErr := stream.Recv()
+				if errors.Is(recvErr, io.EOF) {
+					break
+				}
+				if recvErr != nil {
+					t.Fatalf("Recv: %v", recvErr)
+				}
+			}
+
+			if got := respHeaders.Get(routing.PrefillDataParallelRankHeader); len(got) != 0 {
+				t.Fatalf("prefill DP rank leaked to client: %v", got)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if got := prefillHeaders.Get(routing.PrefillDataParallelRankHeader); got != "" {
+				t.Fatalf("client spoofed prefill DP rank reached prefill: %q", got)
+			}
+			if got := decodeHeaders.Get(routing.PrefillDataParallelRankHeader); got != "" {
+				t.Fatalf("client spoofed prefill DP rank reached decode: %q", got)
+			}
+			if tt.wantDecodeRank == nil {
+				if decodeGenReq.DisaggPrefillDpRank != nil {
+					t.Fatalf("decode disagg_prefill_dp_rank = %d, want nil", *decodeGenReq.DisaggPrefillDpRank)
+				}
+			} else {
+				if decodeGenReq.DisaggPrefillDpRank == nil || *decodeGenReq.DisaggPrefillDpRank != *tt.wantDecodeRank {
+					t.Fatalf("decode disagg_prefill_dp_rank = %v, want %d", decodeGenReq.DisaggPrefillDpRank, *tt.wantDecodeRank)
+				}
+			}
+		})
+	}
+}
+
 // testCtx bounds a client call so a regression that leaves the coordinator
 // waiting on a blocked mock fails with an assertion instead of a test timeout.
 func testCtx(t *testing.T) context.Context {

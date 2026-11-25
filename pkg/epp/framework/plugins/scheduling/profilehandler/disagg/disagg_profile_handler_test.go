@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -1698,6 +1699,35 @@ func TestHandler_PreRequest_PrefillDataParallelRank(t *testing.T) {
 		))
 		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
 		assert.NotContains(t, request.Headers, routing.PrefillDataParallelRankHeader)
+	})
+
+	t.Run("reportPrefillRank sends multi-port prefill rank including rank 0", func(t *testing.T) {
+		parsed, err := DisaggProfileHandlerConfigParser(
+			json.NewDecoder(strings.NewReader(`{"reportPrefillRank":true}`)),
+			nil,
+		)
+		assert.NoError(t, err)
+		params, ok := parsed.(DisaggProfileHandlerParameters)
+		assert.True(t, ok)
+		assert.True(t, params.ReportPrefillRank)
+
+		reportingHandler := NewDisaggProfileHandler("decode", "prefill", "", nil, nil).WithReportPrefillRank(true)
+		for _, tc := range []struct {
+			port     string
+			rank     int
+			wantRank string
+		}{
+			{port: "30010", rank: 0, wantRank: "0"},
+			{port: "30011", rank: 1, wantRank: "1"},
+		} {
+			request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+			_ = reportingHandler.PreRequest(ctx, request, resultWith(
+				&fwkdl.EndpointMetadata{Address: "10.0.0.3", Port: "30010", RankIndex: 0, RankByHeader: false},
+				&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: tc.port, RankIndex: tc.rank, RankByHeader: false},
+			))
+			assert.Equal(t, "10.0.0.1:"+tc.port, request.Headers[routing.PrefillEndpointHeader])
+			assert.Equal(t, tc.wantRank, request.Headers[routing.PrefillDataParallelRankHeader])
+		}
 	})
 }
 

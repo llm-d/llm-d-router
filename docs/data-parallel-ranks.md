@@ -51,7 +51,12 @@ With the P/D sidecar, one scheduling run picks the decode endpoint (primary prof
 
 ## SGLang
 
-SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`). SGLang's native `/generate` reads `x-override-routed-dp-rank` instead, and `sglang.api.v1` gRPC reads `routed_dp_rank` from the request body, so the EPP's `x-data-parallel-rank` header does not reach either route.
+SGLang Rust server (`sglang-server`) uses port-per-rank (`targetPorts`), with one HTTP and gRPC listener per DP rank. For disaggregated P/D on multi-rank SGLang pools:
+
+- **P/D sidecar:** Set `reportPrefillRank: true` on `disagg-profile-handler`. The EPP sends the selected prefill rank in `x-llm-d-prefiller-data-parallel-rank`, and the sidecar writes `disagg_prefill_dp_rank` on both prefill and decode requests.
+- **Coordinator (`sglang.api.v1` gRPC):** Set `SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK=1` on SGLang prefill pods so each rank accepts external routing without `follow_bootstrap_room conflict`. Set `reportPrefillRank: true` on `header-profile-handler` so the coordinator forwards `disagg_prefill_dp_rank` to decode.
+
+SGLang's legacy Python OpenAI `/v1/chat/completions` and `/v1/completions` routes also read `x-data-parallel-rank`.
 
 With one HTTP server for a group that spans nodes, that server's `/metrics` covers only its own node's ranks. Its `/v1/loads?format=prometheus` covers every rank and can be the metrics source.
 
@@ -71,7 +76,6 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 - **KV events from engines on another pod.** When one frontend serves engines on other pods (vLLM internal load balancing, SGLang with one HTTP server per group), those engines publish KV events on their own pods, which the EPP does not know. The precise prefix cache then sees only the frontend pod's ranks. vLLM v0.32.0 reports each engine's reachable publisher in `/kv_event_sources` when the publisher is configured with `tcp://*:0`; the EPP does not read it. SGLang has no per-node frontend ([sgl-project/sglang#47657](https://github.com/sgl-project/sglang/issues/47657)).
 - **Mooncake with `--data-parallel-start-rank-label`.** vLLM registers Mooncake engines under the pod-local rank, while the EPP sends the global one.
 - **Global ranks with one port for each rank.** The EPP ignores `--data-parallel-start-rank-label` when a pod uses multiple target ports. Every pod gets local rank offsets from `0`. When a data-parallel group spans pods, vLLM numbers its KV-event ports by global rank instead.
-- **Coordinator P/D with SGLang.** The prefill rank would have to reach both request bodies as `disagg_prefill_dp_rank`; the coordinator does not send it.
 - **Sidecar version.** A sidecar without prefill-rank support ignores `x-llm-d-prefiller-data-parallel-rank` and sends the decode rank to the prefill worker. Upgrade the sidecars before prefill pods become rank endpoints.
 
 ## Example

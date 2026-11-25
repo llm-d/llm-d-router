@@ -51,6 +51,7 @@ The handler is invoked repeatedly by the framework until all stages are complete
 | `profiles.encode` | `string` | No | `"encode"` | Name of the encode scheduling profile. |
 | `deciders.prefill` | `string` | No | — | Name of the prefill decider plugin. When set, enables P/D disaggregation. |
 | `deciders.encode` | `string` | No | — | Name of the encode decider plugin. When set, enables E disaggregation. |
+| `reportPrefillRank` | `bool` | No | `false` | Send the prefill endpoint `RankIndex` in `x-llm-d-prefiller-data-parallel-rank` even when `RankByHeader` is false. Set to `true` for multi-port SGLang prefill pools so the sidecar sets `disagg_prefill_dp_rank` on both legs. |
 
 ##### Example
 

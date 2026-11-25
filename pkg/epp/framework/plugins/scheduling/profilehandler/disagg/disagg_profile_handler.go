@@ -108,9 +108,10 @@ type disaggDecidersParameters struct {
 
 // DisaggProfileHandlerParameters is the current parameter format using nested maps.
 type DisaggProfileHandlerParameters struct {
-	StageOrder StageOrder               `json:"stageOrder,omitempty"`
-	Profiles   disaggProfilesParameters `json:"profiles"`
-	Deciders   disaggDecidersParameters `json:"deciders"`
+	StageOrder        StageOrder               `json:"stageOrder,omitempty"`
+	Profiles          disaggProfilesParameters `json:"profiles"`
+	Deciders          disaggDecidersParameters `json:"deciders"`
+	ReportPrefillRank bool                     `json:"reportPrefillRank,omitempty"`
 }
 
 // HandlerFactory is the unified factory for all disaggregation profile handlers.
@@ -166,7 +167,7 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	handler := NewDisaggProfileHandler(
 		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
 		pdDecider, encodeDecider,
-	).WithStageOrder(parameters.StageOrder)
+	).WithStageOrder(parameters.StageOrder).WithReportPrefillRank(parameters.ReportPrefillRank)
 	return handler.WithName(name), nil
 }
 
@@ -236,13 +237,14 @@ var (
 // All four handler types (D, P/D, E/PD, E/P/D) share this single implementation;
 // active stages are selected by setting encodeProfile / prefillProfile.
 type Handler struct {
-	typedName      plugin.TypedName
-	stageOrder     StageOrder
-	decodeProfile  string
-	prefillProfile string
-	encodeProfile  string
-	pdDecider      deciderPlugin
-	encodeDecider  deciderPlugin
+	typedName         plugin.TypedName
+	stageOrder        StageOrder
+	decodeProfile     string
+	prefillProfile    string
+	encodeProfile     string
+	pdDecider         deciderPlugin
+	encodeDecider     deciderPlugin
+	reportPrefillRank bool
 }
 
 // TypedName returns the typed name of the plugin.
@@ -257,6 +259,13 @@ func (h *Handler) WithName(name string) *Handler {
 // WithStageOrder sets the stage execution order for the handler.
 func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 	h.stageOrder = stageOrder
+	return h
+}
+
+// WithReportPrefillRank controls whether PreRequest sends RankIndex in
+// x-llm-d-prefiller-data-parallel-rank for multi-port prefill endpoints.
+func (h *Handler) WithReportPrefillRank(enabled bool) *Handler {
+	h.reportPrefillRank = enabled
 	return h
 }
 
@@ -617,7 +626,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
 		routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, prefillHostPort)
 		switch {
-		case targetPod.RankByHeader:
+		case targetPod.RankByHeader || (h.reportPrefillRank && targetPod.RankIndex >= 0):
 			routing.SetRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader, strconv.Itoa(targetPod.RankIndex))
 		case hasRankEndpoint(schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]):
 			routing.SetRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader, routing.NoDataParallelRank)
