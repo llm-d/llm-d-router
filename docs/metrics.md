@@ -943,6 +943,22 @@ of attainment ratios over that histogram. `streaming` has the same meaning as on
 expected to match that counter's. The plugin README carries PromQL for percentiles, threshold
 fractions and failure ratios.
 
+### Heavy hitters
+
+These metrics are owned by the `heavy-hitter-tracker` response plugin and are registered only when
+it is configured. They report the fairness IDs carrying the highest token-weighted load over a
+sliding window, per EPP replica.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_heavy_hitter_weight` | Gauge | `plugin_name`, `fairness_id` | Estimated windowed load of each of the heaviest fairness IDs. |
+| `llm_d_epp_heavy_hitter_weight_error` | Gauge | `plugin_name`, `fairness_id` | Lower-bound correction of that load: the true load is at least `weight - error`. And `weight` is within `window total / slots per slice` of the true load. |
+| `llm_d_epp_heavy_hitter_window_weight` | Gauge | `plugin_name` | Exact windowed load of all fairness IDs. |
+| `llm_d_epp_heavy_hitter_evictions_total` | Counter | `plugin_name` | Cumulative slot takeovers; a nonzero rate means the reported loads are approximate. |
+
+The plugin README carries the cost function, accuracy bounds, sizing guidance, and the PromQL for a
+fairness ID's share of window load.
+
 ### Predicted latency and SLO
 
 These metrics are registered and recorded by the `predicted-latency-producer`. They are present

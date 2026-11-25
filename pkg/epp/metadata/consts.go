@@ -40,6 +40,10 @@ const (
 	DestinationEndpointServedKey = "x-gateway-destination-endpoint-served"
 	// FlowFairnessIDKey is the header key used to pass the fairness ID to be used in Flow Control.
 	FlowFairnessIDKey = "x-llm-d-inference-fairness-id"
+
+	// FlowUserIDKey is the header key carrying the user identity inside the tenant that
+	// FlowFairnessIDKey names. Heavy-hitter tracking keys on the pair.
+	FlowUserIDKey = "x-llm-d-user-id"
 	// InferenceTTLHeaderKey is the header key used to set a request-specific flow control queue TTL.
 	InferenceTTLHeaderKey = "x-llm-d-inference-ttl"
 	// OldFlowFairnessIDKey is the deprecated alias for FlowFairnessIDKey.

@@ -318,7 +318,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 	switch {
 	case tenantID != "" && d.requestControlPlugins.ComposeFairnessIDs():
-		tenantID = escapeFairnessTenant(tenantID)
+		tenantID = metadata.EscapeTenantID(tenantID)
 		if programID != "" {
 			reqCtx.SchedulingRequest.FairnessID = tenantID + metadata.FairnessIDTenantSeparator + programID
 		} else {
@@ -463,17 +463,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, err
 	}
 	return reqCtx, nil
-}
-
-// escapeFairnessTenant percent-encodes the characters that would otherwise make
-// the tenant/session split ambiguous: "%" and the separator. A tenant with
-// neither is returned unchanged without allocating.
-func escapeFairnessTenant(id string) string {
-	if !strings.ContainsAny(id, "%"+metadata.FairnessIDTenantSeparator) {
-		return id
-	}
-	id = strings.ReplaceAll(id, "%", "%25")
-	return strings.ReplaceAll(id, metadata.FairnessIDTenantSeparator, "%2F")
 }
 
 // modelRewriteIfNeeded rewrites the model name in the payload when the resolved target

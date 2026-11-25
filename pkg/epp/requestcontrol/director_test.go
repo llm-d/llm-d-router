@@ -3940,28 +3940,6 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 	}
 }
 
-func TestEscapeFairnessTenant(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "no special characters", in: "tenant-1", want: "tenant-1"},
-		{name: "separator", in: "tenant-1/eu", want: "tenant-1%2Feu"},
-		{name: "percent sign", in: "tenant-1%2F", want: "tenant-1%252F"},
-		{name: "separator and percent sign", in: "a%/b", want: "a%25%2Fb"},
-		{name: "multiple separators", in: "a/b/c", want: "a%2Fb%2Fc"},
-		{name: "leading separator", in: "/tenant", want: "%2Ftenant"},
-		{name: "empty", in: "", want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, escapeFairnessTenant(tt.in))
-		})
-	}
-}
-
 // TestDirector_HandleResponseBody_LifecycleTimestamps verifies that the end-of-stream response
 // record carries the request lifecycle timestamps and streaming mode.
 func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
