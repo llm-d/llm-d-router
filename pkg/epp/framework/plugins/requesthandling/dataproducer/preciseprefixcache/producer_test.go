@@ -197,7 +197,7 @@ func TestMatchEndpointBlockKeys_ReusesPodID(t *testing.T) {
 			results, err := p.matchEndpointBlockKeys(ctx, trace.SpanFromContext(ctx),
 				tokenizedRequest("reuse-pod-id", 12),
 				[]endpointWithPodID{{endpoint: endpoint, podID: podID}},
-				[][]kvblock.BlockHash{{1, 2}}, []*mmPromptContent{nil},
+				[][]kvblock.BlockHash{{1, 2}}, []*mmPromptContent{nil}, []int{2},
 				kvblock.CacheFormat{Bigram: bigram, BlockSize: 4})
 			require.NoError(t, err)
 			require.Len(t, results, 1)
@@ -235,7 +235,7 @@ func TestProduce_CacheFormatLookupOncePerEndpoint(t *testing.T) {
 		},
 	}
 	p := newProducerWithIndexer(ctx, idx)
-	require.NoError(t, p.Produce(ctx, tokenizedRequest("catalog-lookups", testBlockSize), endpoints))
+	require.NoError(t, p.Produce(ctx, tokenizedRequest("catalog-lookups", testBlockSize+1), endpoints))
 	assert.Equal(t, map[string]int{"10.0.0.1:8080": 1, "10.0.0.2:8080": 1}, lookups)
 }
 
@@ -266,7 +266,7 @@ func TestProduce_EndpointsWithoutMetadata(t *testing.T) {
 				},
 			}
 			p := newProducerWithIndexer(ctx, idx)
-			require.NoError(t, p.Produce(ctx, tokenizedRequest("no-metadata", testBlockSize), endpoints))
+			require.NoError(t, p.Produce(ctx, tokenizedRequest("no-metadata", testBlockSize+1), endpoints))
 			assert.True(t, computed)
 			assert.True(t, matched)
 			for _, endpoint := range endpoints {
@@ -368,7 +368,9 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 		}},
 	}
 	require.NoError(t, p.Produce(ctx, request, endpoints))
-	for i, want := range []struct{ cached, total, blockSize, weighted int }{{7, 8, 1, 7}, {4, 8, 1, 3}, {4, 4, 2, 4}} {
+	// The plain endpoint holds all 4 blocks of the 8-token prompt, but the
+	// last one ends on the last prompt token, which the engine recomputes.
+	for i, want := range []struct{ cached, total, blockSize, weighted int }{{7, 8, 1, 7}, {4, 8, 1, 3}, {3, 4, 2, 3}} {
 		value, ok := endpoints[i].Get(p.dk)
 		require.True(t, ok)
 		info, ok := value.(*attrprefix.PrefixCacheMatchInfo)
@@ -385,7 +387,7 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	scorer, err := prefixscorer.New(ctx, "test-scorer", p.TypedName().Name)
 	require.NoError(t, err)
 	scores := scorer.Score(ctx, request, endpoints)
-	for i, want := range []float64{7.0 / 8, 3.0 / 8, 1} {
+	for i, want := range []float64{7.0 / 8, 3.0 / 8, 3.0 / 4} {
 		require.Equal(t, want, scores[endpoints[i]])
 	}
 	require.NoError(t, p.PreRequest(ctx, request, &scheduling.SchedulingResult{
@@ -399,6 +401,58 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	require.NotNil(t, cached)
 	require.Len(t, cached.Value().perPodKeys, 1)
 	require.Len(t, cached.Value().perPodKeys["10.0.0.3:8080"][0], 4)
+}
+
+// vLLM caps a prefix hit at prompt_len - 1 tokens, so a prompt that ends on a
+// block boundary is never served its last block from cache, even when the
+// endpoint holds it. One more token makes every whole block servable.
+func TestProduce_LastPromptBlockIsNotCredited(t *testing.T) {
+	const blockSize = 4
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+	for _, tt := range []struct {
+		name                string
+		promptTokens        int
+		wantCached, wantAll int
+	}{
+		{name: "prompt ends on a block boundary", promptTokens: 16, wantCached: 3, wantAll: 4},
+		{name: "prompt ends past a block boundary", promptTokens: 17, wantCached: 4, wantAll: 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: blockSize})
+			require.NoError(t, err)
+			config, err := kvcache.NewDefaultConfig()
+			require.NoError(t, err)
+			indexer, err := kvcache.NewKVCacheIndexer(ctx, config, processor)
+			require.NoError(t, err)
+			endpoints := freshEndpoints()
+			format := kvblock.CacheFormat{BlockSize: blockSize}
+			keys, err := indexer.ComputeBlockKeysForFormat(ctx, tokens[:16], "test-model", nil, format)
+			require.NoError(t, err)
+			require.Len(t, keys, 4)
+			require.NoError(t, indexer.KVBlockIndex().Add(ctx, nil, keys, []kvblock.PodEntry{
+				{PodIdentifier: "10.0.0.1:8080", DeviceTier: "gpu"},
+			}))
+
+			p := newProducerWithIndexer(ctx, indexer)
+			p.blockSizeTokens = blockSize
+			request := &scheduling.InferenceRequest{
+				RequestID: "last-block", TargetModel: "test-model",
+				Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens[:tt.promptTokens]}},
+				}},
+			}
+			require.NoError(t, p.Produce(ctx, request, endpoints))
+
+			value, ok := endpoints[0].Get(p.dk)
+			require.True(t, ok)
+			info, ok := value.(*attrprefix.PrefixCacheMatchInfo)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantCached, info.CachedBlockCount())
+			assert.Equal(t, tt.wantCached, info.MatchBlocks())
+			assert.Equal(t, tt.wantAll, info.TotalBlocks())
+		})
+	}
 }
 
 // Tokens present → Produce hashes and writes per-endpoint match info.
@@ -507,7 +561,7 @@ func TestProduce_FiltersMatchToCandidateEndpoints(t *testing.T) {
 		RequestID:   "req-filter",
 		TargetModel: "test-model",
 		Body: &fwkrequest.InferenceRequestBody{
-			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, testBlockSize)}}},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, testBlockSize+1)}}},
 		},
 	}
 
@@ -532,7 +586,7 @@ func TestProduce_MatchErrorPublishesNothing(t *testing.T) {
 		RequestID:   "req-match-error",
 		TargetModel: "test-model",
 		Body: &fwkrequest.InferenceRequestBody{
-			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, testBlockSize)}}},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, testBlockSize+1)}}},
 		},
 	}
 
@@ -642,7 +696,7 @@ func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
 	endpoints := freshEndpoints()
 
 	shortPrompt := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
-	fullPrompt := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35}
+	fullPrompt := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36}
 	wantKey := kvblock.BlockHash(0xCAFE)
 
 	var computeCalls [][]uint32
@@ -706,7 +760,7 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	endpoints := freshEndpoints()
 
 	promptA := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
-	promptB := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35}
+	promptB := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36}
 	keysA := []kvblock.BlockHash{0xA1, 0xA2}
 	keysB := []kvblock.BlockHash{0xB1}
 

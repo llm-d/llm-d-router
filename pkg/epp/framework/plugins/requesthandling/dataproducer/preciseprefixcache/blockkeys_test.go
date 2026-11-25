@@ -69,9 +69,11 @@ func TestComputeBlockKeys_PerPromptMMContent(t *testing.T) {
 		},
 	}
 
-	keys, mmContent, err := computeBlockKeys(ctx, idx, req, kvblock.CacheFormat{BlockSize: testBlockSize})
+	keys, mmContent, servable, err := computeBlockKeys(ctx, idx, req, kvblock.CacheFormat{BlockSize: testBlockSize})
 	require.NoError(t, err)
 	require.Len(t, keys, 3, "the short prompt yields no keys and is skipped")
+	assert.Equal(t, []int{1, 1, 1}, servable,
+		"a prompt that ends on a block boundary cannot be served its last block")
 	assert.Equal(t, []*mmPromptContent{
 		{blockIndices: []int{0}, features: []fwkrequest.MultiModalFeature{img}},
 		nil,
@@ -270,6 +272,28 @@ func TestCountMMMatchedBlocks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := countMMMatchedBlocks(tt.mmBlockIdx, tt.matchLen)
 			assert.Equal(t, tt.wantMMMatched, got)
+		})
+	}
+}
+
+func TestServableBlockKeys(t *testing.T) {
+	tests := []struct {
+		name      string
+		numKeys   int
+		numTokens int
+		format    kvblock.CacheFormat
+		want      int
+	}{
+		{"ends on a block boundary", 4, 64, kvblock.CacheFormat{BlockSize: 16}, 3},
+		{"one token past a boundary", 4, 65, kvblock.CacheFormat{BlockSize: 16}, 4},
+		{"partial last block", 4, 70, kvblock.CacheFormat{BlockSize: 16}, 4},
+		{"single whole block", 1, 16, kvblock.CacheFormat{BlockSize: 16}, 0},
+		{"no keys", 0, 8, kvblock.CacheFormat{BlockSize: 16}, 0},
+		{"bigram keys already stop before the last token", 4, 64, kvblock.CacheFormat{BlockSize: 16, Bigram: true}, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, servableBlockKeys(tt.numKeys, tt.numTokens, tt.format))
 		})
 	}
 }

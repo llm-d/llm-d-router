@@ -436,7 +436,7 @@ func (p *Producer) Produce(ctx context.Context,
 	keysByFormat := make(map[kvblock.CacheFormat][][]kvblock.BlockHash, len(groups))
 	var results []endpointResult
 	for format, group := range groups {
-		perPromptKeys, perPromptMMContent, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, format)
+		perPromptKeys, perPromptMMContent, perPromptServable, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, format)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to compute block keys: %w", err)
@@ -446,7 +446,7 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 		keysByFormat[format] = perPromptKeys
 		groupResults, err := p.matchEndpointBlockKeys(ctx, span, request, group,
-			perPromptKeys, perPromptMMContent, format)
+			perPromptKeys, perPromptMMContent, perPromptServable, format)
 		if err != nil {
 			return err
 		}
@@ -504,7 +504,7 @@ func (p *Producer) Produce(ctx context.Context,
 func (p *Producer) matchEndpointBlockKeys(ctx context.Context, span trace.Span,
 	request *scheduling.InferenceRequest, endpoints []endpointWithPodID,
 	perPromptKeys [][]kvblock.BlockHash, perPromptMMContent []*mmPromptContent,
-	format kvblock.CacheFormat,
+	perPromptServable []int, format kvblock.CacheFormat,
 ) ([]endpointResult, error) {
 	blockSizeTokens := format.BlockSize
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
@@ -522,12 +522,18 @@ func (p *Producer) matchEndpointBlockKeys(ctx context.Context, span trace.Span,
 	mmTracked := false
 	totalBlocks := 0
 	for i, blockKeys := range perPromptKeys {
-		promptMatches, err := p.kvCacheIndexer.MatchBlockKeys(ctx, blockKeys, endpointSet)
-		if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			return nil, fmt.Errorf("failed to match block keys: %w", err)
-		}
+		// Match only the blocks the engine can serve; the total still counts
+		// every block of the prompt.
 		totalBlocks += len(blockKeys)
+		promptMatches := map[string]kvcache.PodMatch{}
+		if servable := blockKeys[:perPromptServable[i]]; len(servable) > 0 {
+			var err error
+			promptMatches, err = p.kvCacheIndexer.MatchBlockKeys(ctx, servable, endpointSet)
+			if err != nil {
+				span.SetStatus(codes.Error, err.Error())
+				return nil, fmt.Errorf("failed to match block keys: %w", err)
+			}
+		}
 		if mm := perPromptMMContent[i]; mm != nil {
 			mmTracked = true
 			if mmMatches == nil {
