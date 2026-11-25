@@ -127,7 +127,7 @@ type WeightedRandomPicker struct {
 	explorationBudget float64
 	randomPicker      *random.RandomPicker // fallback for zero weights
 	mu                sync.Mutex
-	rng               *rand.Rand
+	rng               rand.Source
 }
 
 // WithName sets the name of the picker.
@@ -146,8 +146,8 @@ func (p *WeightedRandomPicker) WithTemperature(temperature float64) *WeightedRan
 }
 
 // WithRand configures a dedicated random source for this picker and consumes two Uint64() values
-// from src to deterministically seed its fallback RandomPicker. Passing nil restores the default
-// math/rand/v2 generator for both. Call WithRand during setup before concurrent Pick calls.
+// from src to deterministically seed its fallback RandomPicker. Passing nil restores the shared
+// picker.PickerRand generator for both. Call WithRand during setup before concurrent Pick calls.
 func (p *WeightedRandomPicker) WithRand(src rand.Source) *WeightedRandomPicker {
 	if src == nil {
 		p.rng = nil
@@ -156,16 +156,8 @@ func (p *WeightedRandomPicker) WithRand(src rand.Source) *WeightedRandomPicker {
 	}
 	s1, s2 := src.Uint64(), src.Uint64()
 	p.randomPicker.WithRand(rand.NewPCG(s1, s2)) //#nosec G404 -- endpoint selection, not security-sensitive
-	p.rng = rand.New(src)                        //#nosec G404 -- endpoint selection, not security-sensitive
+	p.rng = src
 	return p
-}
-
-// nextFloat64 returns a uniform float64 in [0,1). Callers must hold p.mu when p.rng != nil.
-func (p *WeightedRandomPicker) nextFloat64() float64 {
-	if p.rng != nil {
-		return p.rng.Float64()
-	}
-	return rand.Float64() //#nosec G404 -- endpoint selection, not security-sensitive
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -201,9 +193,11 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ), sorted on the order-preserving transform
 	// log(wᵢ) - log(-log(Uᵢ)). Uᵢ^(1/wᵢ) underflows to 0 when wᵢ is small, and tied keys would
 	// fall back to input order.
+	nextFloat64 := picker.PickerRand.Float64
 	if p.rng != nil {
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		nextFloat64 = rand.New(p.rng).Float64 //#nosec G404 -- endpoint selection, not security-sensitive
 	}
 	weightedEndpoints := make([]weightedScoredEndpoint, 0, len(scoredEndpoints))
 
@@ -216,7 +210,7 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 		logWeight := math.Log(scoredEndpoint.Score/maxScore) / p.temperature
 
 		// Generate a random number U in (0,1)
-		u := p.nextFloat64()
+		u := nextFloat64()
 		if u == 0 {
 			u = 1e-10 // Avoid 0 to ensure a finite key
 		}
@@ -234,7 +228,7 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 
 	// Admit at most one zero-score endpoint per list, independently of list size.
 	var exploration *fwksched.ScoredEndpoint
-	if p.explorationBudget > 0 && p.nextFloat64() < p.explorationBudget {
+	if p.explorationBudget > 0 && nextFloat64() < p.explorationBudget {
 		zeroCount := 0
 		for _, endpoint := range scoredEndpoints {
 			if endpoint.Score == 0 {
@@ -242,7 +236,7 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			}
 		}
 		if zeroCount > 0 {
-			index := int(p.nextFloat64() * float64(zeroCount))
+			index := int(nextFloat64() * float64(zeroCount))
 			for _, endpoint := range scoredEndpoints {
 				if endpoint.Score != 0 {
 					continue

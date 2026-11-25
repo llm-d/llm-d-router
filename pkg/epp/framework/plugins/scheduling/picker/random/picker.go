@@ -73,7 +73,7 @@ type RandomPicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int
 	mu                sync.Mutex
-	rng               *rand.Rand
+	rng               rand.Source
 }
 
 // WithName sets the name of the picker.
@@ -83,14 +83,10 @@ func (p *RandomPicker) WithName(name string) *RandomPicker {
 }
 
 // WithRand configures a dedicated random source for this picker.
-// Passing nil restores the default math/rand/v2 generator.
+// Passing nil restores the shared picker.PickerRand generator.
 // Call WithRand during setup before concurrent Pick calls.
 func (p *RandomPicker) WithRand(src rand.Source) *RandomPicker {
-	if src == nil {
-		p.rng = nil
-		return p
-	}
-	p.rng = rand.New(src) //#nosec G404 -- endpoint selection, not security-sensitive
+	p.rng = src
 	return p
 }
 
@@ -108,15 +104,15 @@ func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.Sco
 	}
 
 	// Shuffle to ensure uniform random selection.
-	swap := func(i, j int) {
-		scoredEndpoints[i], scoredEndpoints[j] = scoredEndpoints[j], scoredEndpoints[i]
-	}
 	if p.rng != nil {
 		p.mu.Lock()
-		p.rng.Shuffle(len(scoredEndpoints), swap)
+		//#nosec G404 -- endpoint selection, not security-sensitive
+		rand.New(p.rng).Shuffle(len(scoredEndpoints), func(i, j int) {
+			scoredEndpoints[i], scoredEndpoints[j] = scoredEndpoints[j], scoredEndpoints[i]
+		})
 		p.mu.Unlock()
 	} else {
-		rand.Shuffle(len(scoredEndpoints), swap) //#nosec G404 -- endpoint selection, not security-sensitive
+		picker.ShuffleScoredEndpoints(scoredEndpoints)
 	}
 
 	// if we have enough endpoints to return keep only the relevant subset
