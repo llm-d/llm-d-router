@@ -499,10 +499,9 @@ func executeForceStream(ctx context.Context, logger logr.Logger, gwClient *gatew
 		return fmt.Errorf("%s: %w", leg.step, err)
 	}
 
-	// The client asked for a non-streaming reply, so no include_usage was injected.
-	writer, finalize := parityResponseWriter(reqCtx, parity, false)
-	copyUpstreamHeaders(writer.Header(), upstreamHeader)
-	return writeForcedResponse(ctx, logger, leg.step, reqCtx, writer, finalize, reassembler)
+	applyForcedUsage(reqCtx, parity, reassembler.usageBlock())
+	copyUpstreamHeaders(reqCtx.ResponseWriter.Header(), upstreamHeader)
+	return writeForcedResponse(ctx, logger, leg.step, reqCtx, reassembler)
 }
 
 // thinkingTypeDisabled is the Anthropic Messages thinking.type that turns
@@ -767,25 +766,20 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, generated, ech
 	return nil
 }
 
-// writeForcedResponse marshals the reassembled reply and writes it as one
-// non-streaming JSON response through w, the step's response writer, so
-// the forced reply gets the same usage rewrite as the pass-through; finalize
-// flushes what w buffered. A marshal failure returns a plain error before any
-// write, so the server answers a clean 502.
-func writeForcedResponse(ctx context.Context, logger logr.Logger, step string, reqCtx *pipeline.RequestContext, w http.ResponseWriter, finalize func() error, reassembler *sseReassembler) error {
-	payload, err := json.Marshal(reassembler.result())
+// writeForcedResponse encodes the reassembled reply and writes it to the client as
+// one non-streaming JSON response. An encoding failure returns a plain error
+// before any write, so the server answers a clean 502.
+func writeForcedResponse(ctx context.Context, logger logr.Logger, step string, reqCtx *pipeline.RequestContext, reassembler *sseReassembler) error {
+	payload, err := reassembler.encodeReply()
 	if err != nil {
 		return fmt.Errorf("%s: force-stream marshal response: %w", step, err)
 	}
 
+	w := reqCtx.ResponseWriter
 	w.Header().Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 	w.WriteHeader(http.StatusOK)
-	_, err = w.Write(payload)
-	if err == nil {
-		err = finalize()
-	}
-	if err != nil {
+	if _, err = w.Write(payload); err != nil {
 		// The status is committed, so nothing else can be written; the client did
 		// not receive the reply, so it is a failure, not a forced success. A
 		// client that already left is a routine cancellation, logged quietly like

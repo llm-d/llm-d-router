@@ -377,7 +377,7 @@ func (r *cachedTokensUsageRewriter) processJSON(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	block, wrapper := r.observe(response)
-	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+	if r.cachedTokens == nil || !rewritable(wrapper) || !SetCachedTokens(block, *r.cachedTokens) {
 		return body, true
 	}
 	return marshalWithUsage(response, wrapper, block, body), true
@@ -445,7 +445,7 @@ func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isD
 	if r.dropUsageOnly && block != nil && wrapper == "" && hasEmptyChoices(response) {
 		return nil, true, true
 	}
-	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+	if r.cachedTokens == nil || !rewritable(wrapper) || !SetCachedTokens(block, *r.cachedTokens) {
 		return line, true, false
 	}
 	updated := make([]byte, 0, len(line))
@@ -538,7 +538,10 @@ func hasEmptyChoices(response map[string]json.RawMessage) bool {
 	return json.Unmarshal(raw, &choices) == nil && len(choices) == 0
 }
 
-func setCachedTokens(block map[string]any, cachedTokens int) bool {
+// SetCachedTokens writes cachedTokens into a decoded usage block as its
+// cached-token count, in the details object the block's own schema documents
+// (see tokenDetails), and reports whether the block changed.
+func SetCachedTokens(block map[string]any, cachedTokens int) bool {
 	if block == nil {
 		return false
 	}

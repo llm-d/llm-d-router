@@ -550,82 +550,150 @@ func encodedSize(v any) int64 {
 // decoded text held so far for the chat, text, and responses shapes, the
 // per-token estimate (len(ids) * forceStreamBytesPerToken) for the generate
 // shape, the per-choice envelope overhead of each choice kept (see choice), and
-// the retained usage fields (see mergeUsage). The top-level envelope the final
-// marshal adds is covered by the reservation's fixed overhead, so it is not
+// the retained usage fields (see mergeUsage). The top-level envelope
+// encodeReply adds is covered by the reservation's fixed overhead, so it is not
 // counted here.
 func (r *sseReassembler) bufferedBytes() int64 {
 	return r.contentBytes
 }
 
-// result builds the single non-streaming reply. Choices come out ordered by
-// index. A choice that never carried a finish_reason or stop_reason gets an
-// explicit null, and chat choices that never carried a role default to assistant,
-// matching a non-streaming reply's shape.
-func (r *sseReassembler) result() map[string]any {
-	if r.shape == sseShapeResponses {
-		// scanForcedResponse returns errForceStreamTruncated unless a terminal event
-		// captured the response object, so by here it is always set and emitted
-		// verbatim: the object the pod would have returned non-streaming, carrying its
-		// own status, usage, and (on failure) error.
-		return r.responseObject
+// encodeReply returns the single non-streaming reply the folded frames
+// reassemble into. A Responses reply is the terminal response object, encoded
+// whole: the object the pod would have returned non-streaming, with its own
+// status, usage, and (on failure) error. scanForcedResponse returns
+// errForceStreamTruncated unless a terminal event captured it, so by here it is
+// always set. The other shapes write choices in index order and each field in
+// encoding/json's sorted key order, except a choice's finish_reason and
+// stop_reason, which its final frame sets: they follow the choice content, so
+// the bytes before the content depend only on the shape and the choice index.
+func (r *sseReassembler) encodeReply() ([]byte, error) {
+	e := &replyEncoder{}
+	switch r.shape {
+	case sseShapeResponses:
+		e.value(r.responseObject)
+	case sseShapeMessages:
+		r.encodeMessagesHead(e)
+		e.stringBody(r.messageText.String())
+		r.encodeMessagesTail(e)
+	default:
+		e.openKey(reqcommon.FieldChoices)
+		e.raw("[")
+		indices := append([]int(nil), r.order...)
+		sort.Ints(indices)
+		for i, idx := range indices {
+			if i > 0 {
+				e.raw(",")
+			}
+			c := r.choices[idx]
+			r.encodeChoiceHead(e, c.index)
+			r.encodeChoiceContent(e, c)
+			r.encodeChoiceTail(e, c)
+		}
+		e.raw("]")
+		r.encodeEnvelope(e)
+		e.raw("}")
 	}
-	if r.shape == sseShapeMessages {
-		return r.messagesResult()
-	}
-
-	out := map[string]any{}
-	r.writeEnvelope(out)
-
-	indices := append([]int(nil), r.order...)
-	sort.Ints(indices)
-	choices := make([]any, 0, len(indices))
-	for _, idx := range indices {
-		choices = append(choices, r.resultChoice(r.choices[idx]))
-	}
-	out[reqcommon.FieldChoices] = choices
-
-	if r.usage != nil {
-		out[reqcommon.FieldUsage] = r.usage
-	}
-	if r.metrics != nil {
-		out[fieldMetrics] = r.metrics
-	}
-	return out
+	return e.buf, e.err
 }
 
-// messagesResult builds the Anthropic Messages reply from the folded events: the
-// envelope (id, type, role, model), one text content block, the terminal
-// stop_reason/stop_sequence, and every usage field merged from message_start and
-// message_delta. Reassembly runs only for a text-only reply; a non-text block
-// flags lossyFrame and falls back before here.
-func (r *sseReassembler) messagesResult() map[string]any {
+// encodeChoiceHead opens a choice up to its content: the message content string
+// for chat, the text string for completions, and the token_ids array for
+// generate. logprobs is always null, since a request asking for logprobs is not
+// force-streamed.
+func (r *sseReassembler) encodeChoiceHead(e *replyEncoder, index int) {
+	e.openKey(reqcommon.FieldIndex)
+	e.value(index)
+	e.field(reqcommon.FieldLogprobs, nil)
+	switch r.shape {
+	case sseShapeChat:
+		e.nextKey(reqcommon.FieldMessage)
+		e.openKey(reqcommon.FieldContent)
+		e.raw(`"`)
+	case sseShapeGenerate:
+		e.nextKey(fieldTokenIDs)
+		e.raw("[")
+	default:
+		e.nextKey(reqcommon.FieldText)
+		e.raw(`"`)
+	}
+}
+
+func (r *sseReassembler) encodeChoiceContent(e *replyEncoder, c *sseChoice) {
+	if r.shape != sseShapeGenerate {
+		e.stringBody(c.content.String())
+		return
+	}
+	for i, id := range c.tokenIDs {
+		if i > 0 {
+			e.raw(",")
+		}
+		e.value(id)
+	}
+}
+
+// encodeChoiceTail closes a choice's content and writes the fields that follow
+// it. A chat choice that never carried a role defaults to assistant. finish_reason
+// and stop_reason are always present, null when the stream never set them, as on
+// vLLM's non-streaming choices.
+func (r *sseReassembler) encodeChoiceTail(e *replyEncoder, c *sseChoice) {
+	switch r.shape {
+	case sseShapeChat:
+		role := c.role
+		if role == "" {
+			role = reqcommon.RoleAssistant
+		}
+		e.raw(`"`)
+		e.field(reqcommon.FieldRole, role)
+		e.raw("}")
+	case sseShapeGenerate:
+		e.raw("]")
+	default:
+		e.raw(`"`)
+	}
+	e.field(reqcommon.FieldFinishReason, c.finishReason)
+	e.field(fieldChoiceStopReason, c.stopReason)
+	e.raw("}")
+}
+
+// encodeMessagesHead opens the Anthropic Messages reply up to the text of its
+// one content block. Reassembly runs only for a text-only reply; a non-text
+// block flags lossyFrame and falls back before here.
+func (r *sseReassembler) encodeMessagesHead(e *replyEncoder) {
+	e.openKey(reqcommon.FieldContent)
+	e.raw("[")
+	e.openKey(reqcommon.FieldText)
+	e.raw(`"`)
+}
+
+// encodeMessagesTail closes the content block and writes the envelope (id,
+// model, role, type), the terminal stop_reason and stop_sequence, and every
+// usage field merged from message_start and message_delta.
+func (r *sseReassembler) encodeMessagesTail(e *replyEncoder) {
+	e.raw(`"`)
+	e.field(reqcommon.FieldType, reqcommon.PartTypeText)
+	e.raw("}]")
+	if r.id != "" {
+		e.field(fieldID, r.id)
+	}
+	if r.model != "" {
+		e.field(reqcommon.FieldModel, r.model)
+	}
 	role := r.messageRole
 	if role == "" {
 		role = reqcommon.RoleAssistant
 	}
-	out := map[string]any{
-		reqcommon.FieldType: objectMessage,
-		reqcommon.FieldRole: role,
-		reqcommon.FieldContent: []any{
-			map[string]any{reqcommon.FieldType: reqcommon.PartTypeText, reqcommon.FieldText: r.messageText.String()},
-		},
-	}
-	if r.id != "" {
-		out["id"] = r.id
-	}
-	if r.model != "" {
-		out[reqcommon.FieldModel] = r.model
-	}
+	e.field(reqcommon.FieldRole, role)
 	if r.stopReason != nil {
-		out[fieldStopReason] = r.stopReason
+		e.field(fieldStopReason, r.stopReason)
 	}
 	if r.stopSequence != nil {
-		out[fieldStopSequence] = r.stopSequence
+		e.field(fieldStopSequence, r.stopSequence)
 	}
+	e.field(reqcommon.FieldType, objectMessage)
 	if r.usage != nil {
-		out[reqcommon.FieldUsage] = r.usage
+		e.field(reqcommon.FieldUsage, r.usage)
 	}
-	return out
+	e.raw("}")
 }
 
 // terminated reports whether a frame signalled the end of generation: a Responses
@@ -653,35 +721,45 @@ func (r *sseReassembler) terminated() bool {
 	return true
 }
 
-// writeEnvelope sets the top-level reply fields for the shape. The chat and text
-// shapes share the OpenAI envelope (id, model, object, ...). The generate shape
-// instead carries request_id, prompt_logprobs, and kv_transfer_params, and no
-// object; kv_transfer_params is null in the terminal decode reply, since the
-// remote handoff it would carry is consumed before the client-facing reply. vLLM's
-// non-streaming generate reply also carries model and created, which its stream
-// does not, so the forced reply omits them.
-func (r *sseReassembler) writeEnvelope(out map[string]any) {
+// encodeEnvelope writes the top-level fields that follow choices. The chat and
+// text shapes share the OpenAI envelope (id, model, object, ...); the object is
+// fixed per shape rather than the chunk's chat.completion.chunk. The generate
+// shape instead carries request_id, prompt_logprobs, and kv_transfer_params, and
+// no object; kv_transfer_params is null in the terminal decode reply, since the
+// remote handoff it would carry is consumed before the client-facing reply.
+// vLLM's non-streaming generate reply also carries model and created, which its
+// stream does not, so the forced reply omits them.
+func (r *sseReassembler) encodeEnvelope(e *replyEncoder) {
 	if r.shape == sseShapeGenerate {
-		if r.requestID != "" {
-			out[fieldRequestID] = r.requestID
+		e.field(reqcommon.FieldKVTransferParams, nil)
+		if r.metrics != nil {
+			e.field(fieldMetrics, r.metrics)
 		}
-		out[reqcommon.FieldPromptLogprobs] = nil
-		out[reqcommon.FieldKVTransferParams] = nil
-		return
+		e.field(reqcommon.FieldPromptLogprobs, nil)
+		if r.requestID != "" {
+			e.field(fieldRequestID, r.requestID)
+		}
+	} else {
+		if r.hasCreated {
+			e.field(fieldCreated, r.created)
+		}
+		if r.id != "" {
+			e.field(fieldID, r.id)
+		}
+		if r.metrics != nil {
+			e.field(fieldMetrics, r.metrics)
+		}
+		if r.model != "" {
+			e.field(reqcommon.FieldModel, r.model)
+		}
+		e.field(fieldObject, r.resultObject())
+		if r.systemFingerprint != "" {
+			e.field(fieldSystemFingerprint, r.systemFingerprint)
+		}
 	}
-	if r.id != "" {
-		out["id"] = r.id
+	if r.usage != nil {
+		e.field(reqcommon.FieldUsage, r.usage)
 	}
-	if r.model != "" {
-		out[reqcommon.FieldModel] = r.model
-	}
-	if r.systemFingerprint != "" {
-		out[fieldSystemFingerprint] = r.systemFingerprint
-	}
-	if r.hasCreated {
-		out[fieldCreated] = r.created
-	}
-	out[fieldObject] = r.resultObject()
 }
 
 func (r *sseReassembler) resultObject() string {
@@ -694,38 +772,68 @@ func (r *sseReassembler) resultObject() string {
 	return objectTextCompletion
 }
 
-func (r *sseReassembler) resultChoice(c *sseChoice) map[string]any {
-	choice := map[string]any{
-		reqcommon.FieldIndex: c.index,
-		"logprobs":           nil,
+// usageBlock returns the usage block the reply carries: the folded usage, or the
+// terminal response object's own for the Responses shape. It is nil when the
+// reply carries none.
+func (r *sseReassembler) usageBlock() map[string]any {
+	if r.shape == sseShapeResponses {
+		block, _ := r.responseObject[reqcommon.FieldUsage].(map[string]any)
+		return block
 	}
-	if c.hasFinish {
-		choice[reqcommon.FieldFinishReason] = c.finishReason
-	} else {
-		choice[reqcommon.FieldFinishReason] = nil
-	}
-	// vLLM's non-streaming choices always carry stop_reason, null when no stop
-	// string or token id ended the choice.
-	choice[fieldChoiceStopReason] = c.stopReason
+	return r.usage
+}
 
-	switch r.shape {
-	case sseShapeChat:
-		role := c.role
-		if role == "" {
-			role = reqcommon.RoleAssistant
-		}
-		choice[reqcommon.FieldMessage] = map[string]any{
-			reqcommon.FieldRole:    role,
-			reqcommon.FieldContent: c.content.String(),
-		}
-	case sseShapeGenerate:
-		tokens := c.tokenIDs
-		if tokens == nil {
-			tokens = []any{}
-		}
-		choice[fieldTokenIDs] = tokens
-	default:
-		choice[reqcommon.FieldText] = c.content.String()
+// replyEncoder appends a forced reply's JSON to buf. Values are encoded with
+// encoding/json, so they and the escaping of strings match json.Marshal. The
+// first encoding error is kept in err and the rest of the reply is skipped.
+type replyEncoder struct {
+	buf []byte
+	err error
+}
+
+func (e *replyEncoder) raw(s string) {
+	e.buf = append(e.buf, s...)
+}
+
+// openKey opens an object at its first key: {"name":.
+func (e *replyEncoder) openKey(name string) {
+	e.buf = append(e.buf, '{')
+	e.appendKey(name)
+}
+
+// nextKey separates a key from the previous field: ,"name":.
+func (e *replyEncoder) nextKey(name string) {
+	e.buf = append(e.buf, ',')
+	e.appendKey(name)
+}
+
+func (e *replyEncoder) appendKey(name string) {
+	e.buf = append(e.buf, '"')
+	e.buf = append(e.buf, name...)
+	e.buf = append(e.buf, '"', ':')
+}
+
+func (e *replyEncoder) value(v any) {
+	if e.err != nil {
+		return
 	}
-	return choice
+	b, err := json.Marshal(v)
+	if err != nil {
+		e.err = err
+		return
+	}
+	e.buf = append(e.buf, b...)
+}
+
+// field appends ,"name":v.
+func (e *replyEncoder) field(name string, v any) {
+	e.nextKey(name)
+	e.value(v)
+}
+
+// stringBody appends s escaped as the inside of a JSON string, without the
+// quotes.
+func (e *replyEncoder) stringBody(s string) {
+	b, _ := json.Marshal(s) // a string always encodes
+	e.buf = append(e.buf, b[1:len(b)-1]...)
 }
