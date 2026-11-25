@@ -230,7 +230,7 @@ func TestDiscoveredEndpointPicker_PortRulesShareRenderPortAcrossRanks(t *testing
 	}
 
 	for range 2 {
-		got, pickErr := picker.Pick()
+		got, pickErr := picker.Pick("")
 		require.NoError(t, pickErr)
 		assert.Equal(t, "http://10.0.0.2:8200", got)
 	}
@@ -255,7 +255,7 @@ func TestDiscoveredEndpointPicker_RanksShareOneRoundRobinTurn(t *testing.T) {
 	}
 
 	for _, want := range []string{"http://10.0.0.2:8000", "http://10.0.0.3:8000", "http://10.0.0.2:8000", "http://10.0.0.3:8000"} {
-		got, pickErr := picker.Pick()
+		got, pickErr := picker.Pick("")
 		require.NoError(t, pickErr)
 		assert.Equal(t, want, got)
 	}
@@ -263,7 +263,7 @@ func TestDiscoveredEndpointPicker_RanksShareOneRoundRobinTurn(t *testing.T) {
 	// The URL stays while one rank of the pod is left.
 	picker.Delete(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "decode-a-rank-0"}})
 	for _, want := range []string{"http://10.0.0.2:8000", "http://10.0.0.3:8000"} {
-		got, pickErr := picker.Pick()
+		got, pickErr := picker.Pick("")
 		require.NoError(t, pickErr)
 		assert.Equal(t, want, got)
 	}
