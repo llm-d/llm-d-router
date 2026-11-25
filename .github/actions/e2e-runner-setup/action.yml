@@ -62,8 +62,8 @@ runs:
         echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
         echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
-    - name: Cache Go modules
-      uses: actions/cache@v6
+    - name: Restore Go modules
+      uses: actions/cache/restore@v6
       with:
         path: ${{ steps.go-cache.outputs.mod }}
         key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}

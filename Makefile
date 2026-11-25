@@ -271,6 +271,10 @@ go-mod-check: image-build-builder
 tidy:
 	go mod tidy
 
+.PHONY: mod-download
+mod-download: image-build-builder ## Download every module in the build list into the module cache
+	$(BUILDER_RUN) 'go mod download'
+
 .PHONY: clean
 clean: ## Clean build artifacts, tools and caches
 	rm -rf bin build
