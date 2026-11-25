@@ -278,6 +278,15 @@ func TestHandleResponseBodyStopReasonAcrossChunks(t *testing.T) {
 			want: fwkrh.StopReasonToolCall,
 		},
 		{
+			name: "openai_responses_function_call_then_failed",
+			path: reqcommon.APITypeResponses.Path(),
+			chunks: []string{
+				"event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}}` + "\n\n",
+				"event: response.failed\ndata: " + `{"type":"response.failed","response":{"status":"failed"}}` + "\n\n",
+			},
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
 			name: "anthropic_stop_reason_before_message_stop",
 			path: reqcommon.APITypeMessages.Path(),
 			chunks: []string{

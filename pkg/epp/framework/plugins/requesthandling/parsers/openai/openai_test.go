@@ -2475,6 +2475,15 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "ResponsesAPI incomplete without status is unknown",
+			chunk: []byte("event: response.incomplete\ndata: " + `{"response":{"incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call"}]},"type":"response.incomplete"}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonUnknown,
+			},
+		},
+		{
 			name:  "ResponsesAPI failed terminal event carries usage",
 			chunk: []byte("event: response.failed\ndata: {\"response\":{\"status\":\"failed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"total_tokens\":10}},\"type\":\"response.failed\"}"),
 			want: &fwkrh.ParsedResponse{

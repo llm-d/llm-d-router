@@ -358,7 +358,8 @@ func stopReasonFromChoices(choices []responseChoice) fwkrh.StopReason {
 
 // responsesStopReason maps a Responses API status and output list into the
 // shared stop-reason vocabulary. A function-call output item means the turn
-// stopped to call a tool.
+// stopped to call a tool; failed, cancelled, and incomplete responses are
+// unknown even when the output list contains a function call.
 func responsesStopReason(status string, output []responseOutputItem) fwkrh.StopReason {
 	status = strings.ToLower(strings.TrimSpace(status))
 	switch status {
@@ -379,20 +380,17 @@ func responsesStopReason(status string, output []responseOutputItem) fwkrh.StopR
 // responsesEventStopReason maps a terminal Responses API stream event. Some
 // providers omit response.status, so the event type is the fallback.
 func responsesEventStopReason(eventType, status string, output []responseOutputItem) fwkrh.StopReason {
-	if eventType == "response.failed" {
+	switch eventType {
+	case "response.failed", "response.incomplete":
 		return fwkrh.StopReasonUnknown
 	}
 	if reason := responsesStopReason(status, output); reason != "" {
 		return reason
 	}
-	switch eventType {
-	case "response.completed":
+	if eventType == "response.completed" {
 		return fwkrh.StopReasonTurnEnded
-	case "response.incomplete":
-		return fwkrh.StopReasonUnknown
-	default:
-		return ""
 	}
+	return ""
 }
 
 // completion returns the text of a completions response with exactly one choice
