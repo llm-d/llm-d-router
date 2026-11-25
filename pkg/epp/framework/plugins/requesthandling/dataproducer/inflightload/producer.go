@@ -653,7 +653,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	if resp.EndOfStream {
 		// TTS and image completion counts are not text output-length samples;
 		// they must not train the text UNKNOWN average.
-		if request.Body != nil && !isTextToSpeech(request) && request.Body.Images == nil &&
+		if request.Body != nil && !isTextToSpeech(request) && !isImageGeneration(request) &&
 			resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
 			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))
@@ -684,6 +684,17 @@ func isTextToSpeech(request *fwksched.InferenceRequest) bool {
 		return true
 	}
 	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(request.Headers)) == reqcommon.APITypeAudioSpeech
+}
+
+// isImageGeneration reports whether request generates images. The response-phase
+// body drops Images, so the path decides from then on.
+func isImageGeneration(request *fwksched.InferenceRequest) bool {
+	if request.Body != nil && request.Body.Images != nil {
+		return true
+	}
+	path := fwkrequest.GetRequestPath(request.Headers)
+	return fwkrequest.MatchPathSuffix(path, reqcommon.PathImagesGenerations) ||
+		fwkrequest.MatchPathSuffix(path, reqcommon.PathImagesEdits)
 }
 
 // release surgically deletes a single profile's entry from PluginState,
