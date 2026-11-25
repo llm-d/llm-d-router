@@ -184,6 +184,15 @@ ServiceMonitor that reads it must use this helper.
 {{- end -}}
 {{- end -}}
 
+{{- define "llm-d-router.epp.extProcPort" -}}
+{{- $flags := .Values.router.epp.flags | default dict -}}
+{{- if hasKey $flags "grpc-port" -}}
+{{- index $flags "grpc-port" -}}
+{{- else -}}
+{{- .Values.router.epp.extProcPort | default 9002 -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 ext_proc upstream host the proxy uses to reach EPP. Loopback in sidecar mode;
 the discovery or EPP Service FQDN in service mode.
@@ -520,7 +529,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (.Values.router.epp.extProcPort | default 9002) | quote }}
+              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (include "llm-d-router.epp.extProcPort" .) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}

@@ -173,6 +173,7 @@ router:
               -}}
               {{- $eppHealthPortCheck := eq (include "llm-d-router.proxy.eppHealthPortCheck" .) "true" -}}
               {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
+              {{- $extProcPort := include "llm-d-router.epp.extProcPort" . -}}
               admin:
                 address:
                   socket_address:
@@ -341,7 +342,7 @@ router:
                                     grpc_service:
                                       envoy_grpc:
                                         cluster_name: ext_proc
-                                        authority: localhost:9002
+                                        authority: localhost:{{ $extProcPort }}
                                       timeout: 10s
                                     processing_mode:
                                       request_header_mode: SEND
@@ -573,7 +574,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
@@ -592,7 +593,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
@@ -607,7 +608,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}

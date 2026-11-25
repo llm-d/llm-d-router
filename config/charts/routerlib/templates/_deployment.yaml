@@ -5,6 +5,7 @@
       {{- $proxySidecar := and $proxy.enabled (eq $proxyMode "sidecar") }}
       {{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . }}
       {{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml }}
+      {{- $extProcPort := include "llm-d-router.epp.extProcPort" . }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
@@ -137,6 +138,9 @@
           {{- if include "llm-d-router.epp.healthCheckingRequired" . }}
               - --health-checking=true
           {{- end }}
+          {{- if and (ne $extProcPort "9002") (not (hasKey $eppFlags "grpc-port")) }}
+              - --grpc-port={{ $extProcPort }}
+          {{- end }}
               # Pass additional flags via the router.epp.flags field in values.yaml.
               # Render them as --flag=value so boolean values are parsed correctly.
           {{- range $key, $value := $eppFlags }}
@@ -160,7 +164,7 @@
           {{- end }}
           ports:
             - name: grpc
-              containerPort: 9002
+              containerPort: {{ $extProcPort }}
             - name: grpc-health
               containerPort: {{ $grpcHealthPort }}
             - name: metrics
