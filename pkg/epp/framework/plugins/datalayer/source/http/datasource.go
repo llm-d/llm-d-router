@@ -58,6 +58,7 @@ type HTTPDataSource[T any] struct {
 	typedName fwkplugin.TypedName
 	scheme    string
 	path      string
+	rawPath   string
 	// rawQuery is the query string of the configured path, if any.
 	rawQuery string
 	// portOverride, when non-zero, replaces the port in the endpoint's
@@ -263,6 +264,7 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		scheme:         scheme,
 		path:           target.Path,
+		rawPath:        target.RawPath,
 		rawQuery:       target.RawQuery,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
@@ -456,5 +458,5 @@ func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
 		}
 		host = net.JoinHostPort(ip, strconv.Itoa(s.portOverride))
 	}
-	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path, RawQuery: s.rawQuery}
+	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path, RawPath: s.rawPath, RawQuery: s.rawQuery}
 }
