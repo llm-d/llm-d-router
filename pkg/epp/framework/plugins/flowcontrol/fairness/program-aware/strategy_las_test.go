@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -199,6 +200,60 @@ func TestLAS_OnCompleted_StreamedEventsFallback(t *testing.T) {
 			assert.Equal(t, tc.wantService, s.getOrCreateState("alpha").Service(time.Now(), 0))
 		})
 	}
+}
+
+// tokenizedBody is a request body whose token producer counted n prompt tokens.
+func tokenizedBody(n int) *fwkrequest.InferenceRequestBody {
+	return &fwkrequest.InferenceRequestBody{
+		TokenizedRequest: fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, n)}),
+	}
+}
+
+// A stream without usage is charged its prompt from the token producer's count.
+func TestLAS_OnCompleted_TokenizedPromptFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		prompt, completion, events int
+		body                       *fwkrequest.InferenceRequestBody
+		want                       float64
+	}{
+		"missing usage":                      {0, 0, 35, tokenizedBody(100), 170},
+		"reported prompt takes precedence":   {100, 0, 25, tokenizedBody(80), 150},
+		"reported completion skips fallback": {0, 40, 45, tokenizedBody(100), 80},
+		"no streamed events":                 {0, 0, 0, tokenizedBody(100), 0},
+		"no token producer":                  {0, 0, 35, &fwkrequest.InferenceRequestBody{}, 70},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &LASStrategy{}
+			req := &fwksched.InferenceRequest{FairnessID: "alpha", Body: tc.body}
+			resp := &fwkrh.Response{EndOfStream: true, StreamedEvents: tc.events}
+			resp.Usage.PromptTokens = tc.prompt
+			resp.Usage.CompletionTokens = tc.completion
+
+			s.OnCompleted(nil, req, resp)
+			assert.Equal(t, tc.want, s.getOrCreateState("alpha").Service(time.Now(), 0))
+		})
+	}
+}
+
+// A program whose streams report no usage accrues the same attained service as one that reports
+// it, given the same prompt and output sizes, so leaving out stream_options.include_usage does not
+// move it ahead in LAS order.
+func TestLAS_OnCompleted_MissingUsageChargedLikeReportedUsage(t *testing.T) {
+	const promptTokens, completionTokens, requests = 285, 20, 5
+	s := &LASStrategy{}
+	for range requests {
+		reported := &fwkrh.Response{EndOfStream: true}
+		reported.Usage.PromptTokens = promptTokens
+		reported.Usage.CompletionTokens = completionTokens
+		s.OnCompleted(nil, &fwksched.InferenceRequest{FairnessID: "honest", Body: tokenizedBody(promptTokens)}, reported)
+
+		s.OnCompleted(nil, &fwksched.InferenceRequest{FairnessID: "no-usage", Body: tokenizedBody(promptTokens)},
+			&fwkrh.Response{EndOfStream: true, StreamedEvents: completionTokens})
+	}
+
+	now := time.Now()
+	assert.Equal(t, float64(requests*(promptTokens+2*completionTokens)), s.getOrCreateState("honest").Service(now, 0))
+	assert.Equal(t, s.getOrCreateState("honest").Service(now, 0), s.getOrCreateState("no-usage").Service(now, 0))
 }
 
 func TestLAS_Pick_DeprioritizesProgramAfterTruncatedStreamWithEvents(t *testing.T) {

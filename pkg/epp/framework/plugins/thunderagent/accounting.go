@@ -131,5 +131,5 @@ func (a *ThunderAgent) endpointCapacity(m *datalayer.Metrics) float64 {
 	if m != nil && m.CacheBlockSize > 0 && m.CacheNumBlocks > 0 {
 		return float64(m.CacheBlockSize) * float64(m.CacheNumBlocks)
 	}
-	return a.capacityTokens
+	return a.fallbackCapacityTokens
 }

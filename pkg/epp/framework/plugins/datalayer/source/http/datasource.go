@@ -87,11 +87,13 @@ type HTTPDataSource[T any] struct {
 // independently verified the target identity; do not use SkipVerify to talk to
 // endpoints whose certificate cannot be authenticated out of band.
 type TLSOptions struct {
-	// SkipVerify disables verification of the target's server certificate.
-	// See the TLSOptions doc for the threat model this assumes.
+	// SkipVerify disables verification of the target's server certificate
+	// when CACertPath is empty. See the TLSOptions doc for the threat model
+	// this assumes.
 	SkipVerify bool
 	// CACertPath is a PEM CA bundle used to verify the target instead of the
-	// system pool. Ignored when SkipVerify is set. Must be an absolute path.
+	// system pool. Setting it enables verification even when SkipVerify is set.
+	// Must be an absolute path.
 	CACertPath string
 	// ClientCertPath and ClientKeyPath present a client certificate for mTLS.
 	// Both must be set together. Paths must be absolute.
@@ -183,6 +185,11 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		Client: http.Client{
 			Timeout:   timeout,
 			Transport: baseTransport,
+			// A scraped endpoint picks the redirect target, so following one would let
+			// a pod point the scrape at any address the EPP can reach.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 	if scheme == "https" {
@@ -231,8 +238,8 @@ func caCertPool(path string) (*x509.CertPool, error) {
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
 // system pool), plus an mTLS client certificate when ClientCertPath is set.
 func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
-	if !opts.SkipVerify && opts.CACertPath != "" {
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify && opts.CACertPath == ""} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
+	if opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
 			return nil, err

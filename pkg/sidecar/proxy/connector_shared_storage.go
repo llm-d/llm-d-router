@@ -30,7 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const finishReasonCacheThreshold = "cache_threshold"
@@ -63,9 +63,9 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		// An attempt that falls back to prefill is not sampled; the decode after
 		// prefill is this request's decode stage.
 		if !needsPrefill {
-			observeStageDuration(r.Context(), metrics.StageDecode, time.Since(attemptStart))
+			observeStageDuration(r.Context(), routing.StageDecode, time.Since(attemptStart))
 			if err != nil || attemptStatus.failed() {
-				observeStageError(r.Context(), metrics.StageDecode)
+				observeStageError(r.Context(), routing.StageDecode)
 			}
 		}
 		if err != nil {
@@ -103,9 +103,9 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	_, _ = toolFields.compareValidatedDispatched(decodeRequestBody)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
-	observeStageDuration(r.Context(), metrics.StageDecode, time.Since(decodeStart))
+	observeStageDuration(r.Context(), routing.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 	}
 }
 
@@ -326,10 +326,10 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	prefillStart := time.Now()
 	_, _ = toolFields.compareValidatedDispatched(pbody)
 	prefillHandler.ServeHTTP(pw, preq)
-	observeStageDuration(r.Context(), metrics.StagePrefill, time.Since(prefillStart))
+	observeStageDuration(r.Context(), routing.StagePrefill, time.Since(prefillStart))
 
 	if isHTTPError(pw.statusCode) {
-		observeStageError(r.Context(), metrics.StagePrefill)
+		observeStageError(r.Context(), routing.StagePrefill)
 		logger.Error(nil, "prefill request failed", "code", pw.statusCode)
 		maps.Copy(w.Header(), pw.headers)
 		w.WriteHeader(pw.statusCode)

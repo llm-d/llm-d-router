@@ -45,6 +45,15 @@ The plugin populates several standard fields on the endpoint's `Metrics` struct:
 
 The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`) are also published to the endpoint's attribute map (`ep.GetAttributes()`) as `ScalarMetricValue` under `ScalarMetricDataKey`, so `endpoint-attribute-scorer` and `endpoint-attribute-filter` can consume them directly without duplicating them in `customMetrics`. When a `customMetrics` entry uses one of those built-in keys as its `attributeKey`, that entry exclusively owns the attribute on `ep.GetAttributes()` while the built-in spec continues to populate `Metrics`.
 
+### Scalar samples
+
+`Metrics` fields and scalar attributes keep their last valid value when a later scrape lacks the metric, and `UpdateTime` advances when a scrape extracts any metric. A consumer that needs to know whether one metric is current reads its `ScalarSample`, which holds the last valid value and the time of the scrape that observed it:
+
+-   `GetMetrics().ScalarSample(field)` for `WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`, declared in `Consumes()` as `ScalarSampleDataKey(field)`.
+-   `GetMetrics().CustomScalarSample(attributeKey)` for each `customMetrics` entry, declared as `CustomScalarSampleDataKey(attributeKey)`.
+
+A scrape that observes a valid value records it with the same time it writes to `UpdateTime`. A missing metric, a NaN or infinite value, and a failed poll leave the sample unchanged, so `ScalarSample.FreshWithin(maxAge)` turns false once `maxAge` passes. A `ScrapeTime` older than `UpdateTime` shows that a later scrape extracted other metrics without this one. When the endpoint resolves to a different engine mapping, its samples are discarded. The `Metrics` fields and the scalar attributes are not reset: they keep the previous mapping's values until the new mapping observes each metric, so a consumer that must not act on them reads the sample instead.
+
 The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
 
 | Attribute | vLLM metric | Counted on |
@@ -77,6 +86,10 @@ The plugin config supports:
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engineConfig can include `customMetrics` entries.
     Each entry maps a scalar metric selector to an endpoint attribute key.
+    Gauge, counter, and untyped samples are supported. Histogram and summary
+    families are extraction errors; select a scalar series such as `_sum` or
+    `_count` instead. An unsupported type keeps the attribute's previous value,
+    or leaves it unset if no value has been extracted.
     A source metric missing from the scrape is an extraction error unless its
     `customMetrics` entry sets `optional: true`, which skips that entry for
     the scrape.

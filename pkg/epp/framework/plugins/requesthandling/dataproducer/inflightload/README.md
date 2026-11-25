@@ -30,6 +30,7 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 | `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 | `prefixMatchInfoProducerName` | `string` | No | _(none)_ | Optional `prefix-cache producer` name to read to find cached prefix discount. Unset defaults to approximate-prefix producer. |
+| `syncCrossReplicaState` | `bool` | No | `true` | When a `CrossReplicaSyncer` is configured, publishes this producer's per-endpoint load and adds the other replicas' published load to the value its consumers read. Set `false` to count only this replica's requests. See [Multiple active replicas](../../../../../flowcontrol/README.md#multiple-active-replicas). |
 
 When `addEstimatedOutputTokens` is true, the estimated output per request is determined
 by the output-length bucket published by the `outlen-bucket` plugin:

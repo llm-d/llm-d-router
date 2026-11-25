@@ -52,6 +52,14 @@ const (
 	// logs it, "error" also records a step error. The response to the client
 	// is never changed.
 	ParamPromptTokenParity = "prompt_token_parity"
+	// ParamForwardPromptTokenIDs, when true, makes decode and conditional-decode
+	// send the rendered token IDs in kv_transfer_params.prompt_token_ids on
+	// text-only chat completions, Responses and Messages requests. The decode
+	// worker builds the engine input from them and skips chat templating and
+	// tokenization. Requires vLLM v0.27.0 or later, where earlier versions
+	// ignore the field, and a render step, which the pipeline builder checks.
+	// Defaults to false.
+	ParamForwardPromptTokenIDs = "forward_prompt_token_ids"
 )
 
 func buildKVConnector(params map[string]any) (kv.Connector, error) {

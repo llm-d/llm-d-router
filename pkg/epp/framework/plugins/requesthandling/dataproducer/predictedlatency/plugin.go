@@ -233,11 +233,13 @@ type Config struct {
 	// the value is accepted for config compatibility and ignored.
 	SamplingMean float64 `json:"samplingMean,omitempty"`
 	// Deprecated: no longer used. Accepted for config compatibility and ignored.
-	MaxDecodeTokenSamplesForPrediction int           `json:"maxDecodeTokenSamplesForPrediction,omitempty"`
-	SLOBufferFactor                    float64       `json:"sloBufferFactor,omitempty"`
-	ContextTTL                         time.Duration `json:"contextTTL,omitempty"`
-	StreamingMode                      bool          `json:"streamingMode,omitempty"`
-	EndpointRoleLabel                  string        `json:"endpointRoleLabel,omitempty"`
+	MaxDecodeTokenSamplesForPrediction int     `json:"maxDecodeTokenSamplesForPrediction,omitempty"`
+	SLOBufferFactor                    float64 `json:"sloBufferFactor,omitempty"`
+	// ContextTTL accepts a duration string such as "5m" or an integer number
+	// of nanoseconds.
+	ContextTTL        Duration `json:"contextTTL,omitempty"`
+	StreamingMode     bool     `json:"streamingMode,omitempty"`
+	EndpointRoleLabel string   `json:"endpointRoleLabel,omitempty"`
 	// PredictInProduce controls whether bulk predictions are generated during
 	// Produce. Set to false to disable predictions (training-only mode).
 	// When false, the predictor still collects training data but does not call the
@@ -264,7 +266,7 @@ var DefaultConfig = Config{
 	SamplingMean:                       1000,
 	MaxDecodeTokenSamplesForPrediction: 0,
 	SLOBufferFactor:                    1,
-	ContextTTL:                         5 * time.Minute,
+	ContextTTL:                         Duration{Duration: 5 * time.Minute},
 	StreamingMode:                      false,
 	PredictInProduce:                   true,
 }
@@ -325,7 +327,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 	}
 
 	predictedLatency.sloContextStore = ttlcache.New(
-		ttlcache.WithTTL[string, *predictedLatencyCtx](config.ContextTTL),
+		ttlcache.WithTTL[string, *predictedLatencyCtx](config.ContextTTL.Duration),
 	)
 
 	predictedLatency.sloContextStore.OnEviction(func(ctx context.Context, reason ttlcache.EvictionReason, item *ttlcache.Item[string, *predictedLatencyCtx]) {

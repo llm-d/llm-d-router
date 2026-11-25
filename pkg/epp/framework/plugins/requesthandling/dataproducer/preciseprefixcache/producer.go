@@ -201,6 +201,10 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
+		log.FromContext(ctx).Info("kvEventsConfig.zmqEndpoint is deprecated: the bound socket takes the pod identity from the topic; "+
+			"drop zmqEndpoint and have each engine bind its own PUB socket, which the EPP subscribes to by default",
+			"zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
+			"allowUntrustedPublishers", config.KVEventsConfig.AllowUntrustedPublishers)
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
@@ -392,13 +396,20 @@ func (p *Producer) Produce(ctx context.Context,
 		return err
 	}
 
-	state := &bestAvailableState{predictedCachedTokens: make(map[datalayer.ID]int, len(results))}
+	state := &bestAvailableState{
+		predictedCachedTokens: make(map[datalayer.ID]int, len(results)),
+		gpuCachedTokens:       make(map[datalayer.ID]int, len(results)),
+	}
 	totalBlocks, maxMatch, maxMMMatch := 0, 0, 0
 	mmTracked := false
 	for _, result := range results {
 		predicted := predictedCachedTokens(result.info)
 		state.predictedCachedTokens[result.endpoint.GetMetadata().ID] = predicted
 		state.cachedTokens = max(state.cachedTokens, predicted)
+		gpu := gpuCachedTokens(result.info)
+		state.gpuCachedTokens[result.endpoint.GetMetadata().ID] = gpu
+		state.maxGPUCachedTokens = max(state.maxGPUCachedTokens, gpu)
+		state.maxConfirmedTokens = max(state.maxConfirmedTokens, confirmedCachedTokens(result.info))
 		blockSize := result.info.BlockSizeTokens()
 		totalBlocks = max(totalBlocks, result.info.TotalBlocks()*blockSize/p.blockSizeTokens)
 		maxMatch = max(maxMatch, result.info.MatchBlocks()*blockSize/p.blockSizeTokens)

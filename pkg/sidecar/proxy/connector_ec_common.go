@@ -34,7 +34,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -387,8 +387,8 @@ func (s *Server) runPDPipeline(
 		}
 	}
 	decodeReturned = true
-	observeStageDuration(r.Context(), metrics.StageDecode, time.Since(decodeStart))
+	observeStageDuration(r.Context(), routing.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 	}
 }

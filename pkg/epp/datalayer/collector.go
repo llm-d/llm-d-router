@@ -99,6 +99,12 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
+	// Expose every outcome series at zero before the first poll, so a first
+	// error or timeout after a healthy run is a 0 -> 1 step that rate() and
+	// increase() can see, rather than a series born at 1.
+	for _, d := range dispatchers {
+		metrics.InitDataLayerPollMetrics(d.TypedName().Type)
+	}
 	go c.run(ctx, ticker, ep, dispatchers)
 	return nil
 }
@@ -146,20 +152,43 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 					disp = interval.PollingDispatcher
 				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
+				deadline, _ := dispCtx.Deadline()
+				start := time.Now()
 				err := disp.Dispatch(dispCtx, ep)
+				end := time.Now()
 				cancel()
+				// Classified against the same instant the duration uses, so a
+				// deadline that passes after Dispatch returned is not charged
+				// to this poll.
+				timedOut := !end.Before(deadline)
 				// A poll cut short by Stop says nothing about the endpoint.
 				if ctx.Err() != nil {
 					return
 				}
+				tn := disp.TypedName()
+				metrics.RecordDataLayerPoll(tn.Type, pollOutcome(err, timedOut), end.Sub(start))
 				if err != nil {
-					tn := disp.TypedName()
 					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
 				}
-				statuses[i].record(ep, err, time.Now())
+				statuses[i].record(ep, err, end)
 			}
 		}
+	}
+}
+
+// pollOutcome classifies a poll the parent context did not cancel. An expired
+// deadline takes precedence over the return value, so a nil or unrelated error
+// returned after the deadline counts as a timeout. The poll error counter and
+// PollStatus keep following the returned error alone.
+func pollOutcome(err error, timedOut bool) string {
+	switch {
+	case timedOut:
+		return metrics.DataLayerPollOutcomeTimeout
+	case err != nil:
+		return metrics.DataLayerPollOutcomeError
+	default:
+		return metrics.DataLayerPollOutcomeSuccess
 	}
 }
 

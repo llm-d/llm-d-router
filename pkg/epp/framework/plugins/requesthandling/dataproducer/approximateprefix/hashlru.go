@@ -87,14 +87,15 @@ func (c *hashLRU) Contains(key blockHash) bool {
 }
 
 // Add inserts key as most recent, or refreshes it if it is already present.
+// It reports whether the key was newly inserted rather than refreshed.
 // At capacity the least recently added or refreshed key is evicted first.
-func (c *hashLRU) Add(key blockHash) {
+func (c *hashLRU) Add(key blockHash) bool {
 	if c.capacity <= 0 {
-		return
+		return false
 	}
 	if i, ok := c.index[key]; ok {
 		c.moveFront(i)
-		return
+		return false
 	}
 	var i uint32
 	if len(c.nodes) < c.capacity {
@@ -108,6 +109,37 @@ func (c *hashLRU) Add(key blockHash) {
 	c.nodes[i] = hashNode{key: key, prev: nodeNil, next: nodeNil}
 	c.index[key] = i
 	c.pushFront(i)
+	return true
+}
+
+// Remove deletes key if present. The freed node slot is reclaimed by moving
+// the last node into it, so deletions do not shrink the usable capacity.
+func (c *hashLRU) Remove(key blockHash) {
+	i, ok := c.index[key]
+	if !ok {
+		return
+	}
+	c.unlink(i)
+	delete(c.index, key)
+	last := uint32(len(c.nodes) - 1) // #nosec G115 -- index held the key, so nodes is non-empty.
+	if i != last {
+		lastKey := c.nodes[last].key
+		prev, next := c.nodes[last].prev, c.nodes[last].next
+		c.nodes[i] = c.nodes[last]
+		// prev and next cannot reference i: unlink removed i from the list.
+		if prev != nodeNil {
+			c.nodes[prev].next = i
+		} else {
+			c.head = i
+		}
+		if next != nodeNil {
+			c.nodes[next].prev = i
+		} else {
+			c.tail = i
+		}
+		c.index[lastKey] = i
+	}
+	c.nodes = c.nodes[:last]
 }
 
 func (c *hashLRU) moveFront(i uint32) {

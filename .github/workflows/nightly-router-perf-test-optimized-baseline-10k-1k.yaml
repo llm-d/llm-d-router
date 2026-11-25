@@ -44,6 +44,7 @@ jobs:
       GCP_PROJECT_ID: ${{ inputs.gcp_project_id || 'llm-d-scale' }}
       GKE_CLUSTER_NAME: ${{ inputs.gke_cluster_name || 'llm-d-ap-usc1-router-perf' }}
       GKE_CLUSTER_ZONE: ${{ inputs.gke_cluster_zone || 'us-central1' }}
+      CLOUDSDK_CONTAINER_USE_APPLICATION_DEFAULT_CREDENTIALS: 'true'
       TARGET: ${{ inputs.target || 'test/perf/config/targets/optimized-baseline-job1.yaml' }}
       GCS_BUCKET: ${{ inputs.gcs_bucket || 'llm-d-router-perf-results' }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -72,9 +73,16 @@ jobs:
 
       - name: Get GKE credentials
         run: |
+          # google-github-actions/auth sets GOOGLE_APPLICATION_CREDENTIALS and
+          # CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE. Enabling ADC tells
+          # get-credentials to pass --use_application_default_credentials to
+          # gke-gcloud-auth-plugin so it exchanges tokens from ADC directly
+          # instead of shelling out to `gcloud config config-helper`.
+          gcloud config set container/use_application_default_credentials true
           gcloud container clusters get-credentials "${{ env.GKE_CLUSTER_NAME }}" \
             --zone "${{ env.GKE_CLUSTER_ZONE }}" \
             --project "${{ env.GCP_PROJECT_ID }}"
+          gke-gcloud-auth-plugin --use_application_default_credentials > /dev/null
 
       - name: Install helm
         run: |

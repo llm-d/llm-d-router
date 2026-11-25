@@ -84,7 +84,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 > [!NOTE]
 > You can pre-pull external images to avoid slow downloads:
 > ```
-> docker pull ghcr.io/llm-d/llm-d-inference-sim:v1.1.0
+> docker pull ghcr.io/llm-d/llm-d-inference-sim:v1.2.0
 > docker pull vllm/vllm-openai-cpu:v0.31.0
 > ```
 
@@ -307,6 +307,10 @@ Data parallel and KV cache are orthogonal options that can be combined with any 
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags appended to the Prefill vLLM container args. Use `--flag=value` format. Example: `--gpu-memory-utilization=0.9` |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags appended to the Decode vLLM container args. Use `--flag=value` format. Example: `--tensor-parallel-size=2` |
 
+A `VLLM_EXTRA_ARGS_*` value can hold several plain `--flag` or `--flag=value` tokens separated by spaces, and each
+token becomes a separate argument. A value that contains JSON or quotes is passed as one argument, so it cannot be
+combined with other flags in the same variable.
+
 For technical details, refer to [docs/disaggregation.md](docs/disaggregation.md) and
 [test/e2e/artifacts/environments/dev/README.md](test/e2e/artifacts/environments/dev/README.md).
 
@@ -520,7 +524,7 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Variable | Default | Description |
 |---|---|---|
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.1.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.2.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. `echo` returns the input prompt as the response (useful for routing validation). `random` returns random sentences from a pre-defined bank. Only applies when using the simulator overlay. |
 
 ### Cleanup
@@ -614,7 +618,7 @@ kubectl --context kind-e2e-tests get pods
 | `VLLM_EXTRA_ARGS_E` | _(empty)_ | Additional flags for the Encoder vLLM container (e.g. `--mm-processor-kwargs={}`) |
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags for the Prefill vLLM container (e.g. `--gpu-memory-utilization=0.9`) |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags for the Decode vLLM container (e.g. `--tensor-parallel-size=2`) |
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.1.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.2.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
 | `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.31.0` | vLLM renderer image loaded into the Kind cluster. The e2e targets set it to `VLLM_IMAGE`, since the simulator serves every `/render` route the token-producer plugin calls. Pass it on the make command line (`make test-e2e-run VLLM_RENDER_IMAGE=...`) to render against real vLLM; an environment variable does not override a target-specific assignment |

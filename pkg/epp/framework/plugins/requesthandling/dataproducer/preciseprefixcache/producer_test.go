@@ -1158,10 +1158,10 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 	require.NotNil(t, captured)
 }
 
-// Cache salt is folded into the first block's extra keys, isolating salted
-// prompts. Mirrors engine-side ingestion, which folds vLLM's block-0 cache_salt
-// into the same per-block hash list.
-func TestProduce_FoldsCacheSalt(t *testing.T) {
+// Cache salt is set on the first block's extra features, isolating salted
+// prompts. Mirrors engine-side ingestion, which keeps vLLM's block-0 cache_salt
+// apart from the MM hashes.
+func TestProduce_SetsCacheSalt(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	tokens := make([]uint32, 16)
@@ -1170,18 +1170,17 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		mm   []fwkrequest.MultiModalFeature
-		want []kvblock.MMHash
+		name   string
+		mm     []fwkrequest.MultiModalFeature
+		wantMM []kvblock.MMHash
 	}{
 		{
 			name: "salt only",
-			want: []kvblock.MMHash{{Hash: "s3cr3t"}},
 		},
 		{
-			name: "salt appended after mm hash",
-			mm:   []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
-			want: []kvblock.MMHash{{Hash: "abc"}, {Hash: "s3cr3t"}},
+			name:   "salt alongside mm hash",
+			mm:     []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+			wantMM: []kvblock.MMHash{{Hash: "abc"}},
 		},
 	}
 
@@ -1211,7 +1210,8 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 			require.NoError(t, p.Produce(ctx, req, testEndpoints))
 			require.Len(t, captured, 1)
 			require.NotNil(t, captured[0])
-			require.Equal(t, tc.want, captured[0].MMHashes)
+			require.Equal(t, tc.wantMM, captured[0].MMHashes)
+			require.Equal(t, "s3cr3t", captured[0].CacheSalt)
 		})
 	}
 }
@@ -1387,6 +1387,29 @@ func TestPluginFactory_RejectsNonPositiveKVEventsConcurrency(t *testing.T) {
 	}
 }
 
+// Strict decoding rejects a non-loopback global ZMQ socket unless the config
+// sets kvEventsConfig.allowUntrustedPublishers.
+func TestPluginFactory_GlobalZMQEndpointGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+	handle := plugin.NewEppHandle(ctx, nil)
+
+	_, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:5557"}}`,
+	)), handle)
+	require.ErrorContains(t, err, "allowUntrustedPublishers")
+
+	result, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:0","allowUntrustedPublishers":true}}`,
+	)), handle)
+	require.NoError(t, err)
+	p := result.(*Producer)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	require.Equal(t, "tcp://0.0.0.0:0", p.kvEventsConfig.ZMQEndpoint)
+	require.True(t, p.kvEventsConfig.AllowUntrustedPublishers)
+}
+
 // Key built from string literals so an upstream rename trips the test.
 func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	p := &Producer{
@@ -1479,6 +1502,28 @@ func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
 		KVEventsConfig: kvEventsCfg,
 	})
 	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
+}
+
+func TestNewAcceptsRegisteredKVEventEngineType(t *testing.T) {
+	built := 0
+	engineadapter.Register("test-own-format", func() kvevents.EngineAdapter {
+		built++
+		return engineadapter.NewVLLMAdapter()
+	})
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "test-own-format"
+
+	_, err = New(ctx, "own-format-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, built, "New builds the pool's adapter from the registry")
 }
 
 func TestNewWindowIndexDefaultsToPrefixIndexSize(t *testing.T) {

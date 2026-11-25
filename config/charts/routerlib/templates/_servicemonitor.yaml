@@ -21,7 +21,7 @@ spec:
     authorization:
       credentials:
         key: token
-        name: {{ .Values.router.monitoring.prometheus.auth.secretName }}
+        name: {{ include "llm-d-router.metricsReaderSecretName" . }}
     {{- end }}
   {{- /* jobLabel names a Service label whose value becomes the scrape job; the selector requires it on every Service. */}}
   jobLabel: app.kubernetes.io/name

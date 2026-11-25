@@ -226,12 +226,18 @@ func (p *weightedFairShare) ResponseBody(
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
+	promptTokens := response.Usage.PromptTokens
 	completionTokens := response.Usage.CompletionTokens
 	if completionTokens <= 0 && response.StreamedEvents > 0 {
 		completionTokens = response.StreamedEvents
+		// The token producer runs after flow control, so the policy cannot declare
+		// TokenizedPrompt as a dependency. At end of stream the body carries its count when one ran.
+		if promptTokens <= 0 && request.Body != nil {
+			promptTokens = request.Body.TokenizedRequest.TokenCount()
+		}
 	}
 	cost := p.cfg.CostPerRequest +
-		p.cfg.CostPerInputToken*float64(response.Usage.PromptTokens) +
+		p.cfg.CostPerInputToken*float64(promptTokens) +
 		p.cfg.CostPerOutputToken*float64(completionTokens)
 	if cost == 0 {
 		return

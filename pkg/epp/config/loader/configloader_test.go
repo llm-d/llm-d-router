@@ -57,11 +57,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
+	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
+	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -79,6 +81,7 @@ const (
 	testWithDependencies       = "test-with-dependencies"
 	testWithNestedDependencies = "test-with-nested-dependencies"
 	testDrainFilterType        = "test-drain-filter"
+	testProfileNameFilterType  = "test-profile-name-filter"
 
 	testFeatureGate = "test-feature-gate"
 )
@@ -869,6 +872,26 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: errorDuplicateProfileText,
 			wantErr:    true,
 		},
+		{
+			name:       "Error (Deep Validation) - Plugin References Undefined Profile",
+			configText: errorPluginReferencesUndefinedProfileText,
+			wantErr:    true,
+		},
+		{
+			name:       "Success (Deep Validation) - Plugin References Defined Profile",
+			configText: successPluginReferencesDefinedProfileText,
+			wantErr:    false,
+		},
+		{
+			name:       "Success (Deep Validation) - Plugin Omits Optional Profile",
+			configText: successPluginOmitsProfileText,
+			wantErr:    false,
+		},
+		{
+			name:       "Success (Deep Validation) - Plugin References Implicit Default Profile",
+			configText: successPluginReferencesImplicitDefaultProfileText,
+			wantErr:    false,
+		},
 
 		// --- Feature Validation: Scheduling ---
 		{
@@ -998,7 +1021,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			}
 
 			// 2. Instantiate & Configure
-			handle := testutils.NewTestHandle(context.Background())
+			handle := testutils.NewTestHandleWithSchedulingProfiles(context.Background(), SchedulingProfileNames(rawConfig))
 			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
 
 			if tc.wantErr {
@@ -1172,6 +1195,60 @@ schedulingProfiles:
 	}
 }
 
+func TestSessionAffinityProfileNameValidation(t *testing.T) {
+	registerTestPlugins(t)
+	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityStable, sessionaffinityfilter.Factory)
+	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityStable, sessionaffinityfilter.MultiClusterFactory)
+	fwkplugin.Register(sessionaffinityscorer.SessionAffinityType, fwkplugin.StabilityStable, sessionaffinityscorer.Factory)
+
+	const text = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: affinity
+  type: %s
+  parameters:
+    strategy: %s
+    profileName: %s
+- name: profileHandler
+  type: test-profile-handler
+schedulingProfiles:
+- name: prefill
+  plugins:
+  - pluginRef: affinity
+- name: decode
+  plugins:
+  - pluginRef: affinity
+`
+	for _, pluginType := range []string{
+		sessionaffinityfilter.SessionAffinityType,
+		sessionaffinityfilter.MultiClusterFilterType,
+		sessionaffinityscorer.SessionAffinityType,
+	} {
+		for _, strategy := range []string{"encoded_endpoint_header", "session_id"} {
+			t.Run(pluginType+"/"+strategy, func(t *testing.T) {
+				logger := logging.NewTestLogger()
+				for _, tc := range []struct {
+					profileName string
+					wantErr     string
+				}{
+					{profileName: "prefill"},
+					{profileName: "prefil", wantErr: "scheduling profile 'prefil' is not defined"},
+				} {
+					rawConfig, _, err := LoadRawConfig([]byte(fmt.Sprintf(text, pluginType, strategy, tc.profileName)), logger)
+					require.NoError(t, err)
+					handle := testutils.NewTestHandleWithSchedulingProfiles(t.Context(), SchedulingProfileNames(rawConfig))
+					_, err = InstantiateAndConfigure(rawConfig, handle, logger)
+					if tc.wantErr == "" {
+						require.NoError(t, err, "profileName %q", tc.profileName)
+					} else {
+						require.ErrorContains(t, err, tc.wantErr)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestFlowControlConfigIgnoredWarning verifies that a flowControl config section combined with a
 // disabled flowControl feature gate logs a warning that the settings are ignored, and that the
 // warning stays silent otherwise. The silent cases carry the weight here: ensureSaturationDetector
@@ -1333,6 +1410,13 @@ var _ fwksched.Filter = &mockDrainFilter{}
 
 func (m *mockDrainFilter) Filter(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) []fwksched.Endpoint {
 	return nil
+}
+
+// Mock Filter that names a scheduling profile in its parameters
+type mockProfileNameFilter struct{ mockPlugin }
+
+func (m *mockProfileNameFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+	return endpoints
 }
 
 // Mock Handler
@@ -1525,6 +1609,21 @@ func registerTestPlugins(t *testing.T) {
 			return &mockWithNestedDependencies{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testWithNestedDependencies}}}, nil
 		}, mockWithNestedDependenciesConfigParser,
 	)
+
+	fwkplugin.Register(testProfileNameFilterType, fwkplugin.StabilityStable, func(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		var p struct {
+			ProfileName string `json:"profileName"`
+		}
+		if params != nil {
+			if err := params.Decode(&p); err != nil {
+				return nil, err
+			}
+		}
+		if err := fwkplugin.ValidateProfileName(handle, p.ProfileName); err != nil {
+			return nil, err
+		}
+		return &mockProfileNameFilter{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileNameFilterType}}}, nil
+	})
 
 	fwkplugin.Register(testSourceType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSource{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testSourceType}}}, nil

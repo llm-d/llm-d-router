@@ -110,10 +110,9 @@ eventually consistent: two EPP replicas can make scheduling or admission
 decisions before either observes the other's latest work.
 
 This synchronization does not implement an atomic cluster-wide admission
-quota. A deployment that requires a fixed admission limit can use separate
-local-only admission producers, with one admitting EPP per fixed share and the
-shares summing to the intended limit. Unused capacity is not borrowed between
-shares automatically.
+quota. Flow control admission across replicas, including fixed per-replica
+shares, is described in
+[Multiple active replicas](../../../../../flowcontrol/README.md#multiple-active-replicas).
 
 `GetOrSet` coordinates one value for one request identifier. It does not reserve
 capacity across different requests.

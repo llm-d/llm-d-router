@@ -28,6 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -43,9 +44,11 @@ func init() {
 type DecodeStep struct {
 	gwClient          *gateway.Client
 	kv                kv.Connector
+	ec                ec.Connector
 	promptTokenParity string
 	forceStream       bool
 	budget            *forceStreamBudget
+	forwardTokenIDs   bool
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -59,6 +62,10 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
+	ecConn, err := buildECConnector(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
 	parity, err := parsePromptTokenParity(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
@@ -67,7 +74,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	step := &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forceStream: forceStream}
+	forwardTokenIDs, _, err := paramBool(params, ParamForwardPromptTokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, ec: ecConn, promptTokenParity: parity, forceStream: forceStream, forwardTokenIDs: forwardTokenIDs}
 	if forceStream {
 		budget, err := parseForceStreamBudget(params)
 		if err != nil {
@@ -81,8 +92,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
-		return s.executeSGLangGRPC(ctx, reqCtx)
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
+		return s.executeSGLangGRPC(ctx, reqCtx, g)
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
 	}
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
@@ -135,7 +149,14 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 					// but correct.
 					if !kvHandoffReplaySafe(s.kv) {
 						logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "error", err.Error())
-						delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+						// The rendered IDs do not depend on the handoff, so they stay.
+						if kvParams, _ := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any); kvParams != nil {
+							if ids, ok := kvParams[reqcommon.FieldPromptTokenIDs]; ok {
+								reqCtx.Body[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldPromptTokenIDs: ids}
+							} else {
+								delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+							}
+						}
 						// The prefill cache-hit count describes the handoff just dropped.
 						reqCtx.PrefillCachedTokens = nil
 					}
@@ -215,7 +236,12 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	s.injectUUIDs(reqCtx, logger)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
+		if sendsPromptTokenIDs(s.forwardTokenIDs, reqCtx, format) {
+			kvParams[reqcommon.FieldPromptTokenIDs] = reqCtx.TokenIDs
+		}
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+	case reqcommon.APITypeVLLMGenerate:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams

@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -25,9 +26,12 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // sampleCount returns the histogram's observation count. Plain histograms have
@@ -77,26 +81,114 @@ func TestRecordDurations(t *testing.T) {
 	prefillBase := sampleCount(t, prefillDuration)
 	decodeBase := sampleCount(t, decodeDuration)
 
-	RecordEncodeDuration(50 * time.Millisecond)
-	RecordPrefillDuration(100 * time.Millisecond)
-	RecordDecodeDuration(250 * time.Millisecond)
+	RecordEncodeDuration(context.Background(), 50*time.Millisecond)
+	RecordPrefillDuration(context.Background(), 100*time.Millisecond)
+	RecordDecodeDuration(context.Background(), 250*time.Millisecond)
 
 	require.Equal(t, encodeBase+1, sampleCount(t, encodeDuration))
 	require.Equal(t, prefillBase+1, sampleCount(t, prefillDuration))
 	require.Equal(t, decodeBase+1, sampleCount(t, decodeDuration))
 }
 
+// stageRecorders pairs each stage duration recorder with the histogram it
+// observes into.
+var stageRecorders = map[string]struct {
+	record    func(context.Context, time.Duration)
+	histogram prometheus.Histogram
+}{
+	routing.StageEncode:  {RecordEncodeDuration, encodeDuration},
+	routing.StagePrefill: {RecordPrefillDuration, prefillDuration},
+	routing.StageDecode:  {RecordDecodeDuration, decodeDuration},
+}
+
+// exemplarsWithTraceID returns the labels of every exemplar on h that carries
+// traceID. The histograms are process-global and keep the newest exemplar per
+// bucket, so a test looks for its own trace rather than for any exemplar.
+func exemplarsWithTraceID(t *testing.T, h prometheus.Histogram, traceID string) []map[string]string {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, h.Write(m))
+
+	var found []map[string]string
+	for _, bucket := range m.GetHistogram().GetBucket() {
+		labels := map[string]string{}
+		for _, l := range bucket.GetExemplar().GetLabel() {
+			labels[l.GetName()] = l.GetValue()
+		}
+		if labels[metricsutil.ExemplarTraceIDLabel] == traceID {
+			found = append(found, labels)
+		}
+	}
+	return found
+}
+
+// recordingSpan returns a context with a real SDK span, like the
+// forward_request span the sidecar starts per request.
+func recordingSpan(t *testing.T) (context.Context, trace.Span) {
+	t.Helper()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+	return tp.Tracer("sidecar-exemplar-test").Start(context.Background(), "forward_request")
+}
+
+// The request span is still open when a stage finishes, so the exemplar carries
+// the span ID as well as the trace ID.
+func TestRecordDurationsAttachTraceExemplar(t *testing.T) {
+	for stage, tc := range stageRecorders {
+		t.Run(stage, func(t *testing.T) {
+			ctx, span := recordingSpan(t)
+			defer span.End()
+			base := sampleCount(t, tc.histogram)
+
+			tc.record(ctx, 120*time.Millisecond)
+
+			require.Equal(t, base+1, sampleCount(t, tc.histogram))
+			sc := span.SpanContext()
+			require.Equal(t, []map[string]string{{
+				metricsutil.ExemplarTraceIDLabel: sc.TraceID().String(),
+				metricsutil.ExemplarSpanIDLabel:  sc.SpanID().String(),
+			}}, exemplarsWithTraceID(t, tc.histogram, sc.TraceID().String()),
+				"a sampled request must attach exactly one exemplar")
+		})
+	}
+}
+
+// An unsampled trace was never exported, so an exemplar would link to a trace
+// that does not exist. The stage is still observed.
+func TestRecordDurationsSkipExemplarForUnsampledSpan(t *testing.T) {
+	const traceID = "5c0ffee5c0ffee5c0ffee5c0ffee5c0f"
+	tid, err := trace.TraceIDFromHex(traceID)
+	require.NoError(t, err)
+	sid, err := trace.SpanIDFromHex("0102030405060708")
+	require.NoError(t, err)
+	ctx := trace.ContextWithSpanContext(context.Background(),
+		trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid}))
+
+	for stage, tc := range stageRecorders {
+		t.Run(stage, func(t *testing.T) {
+			base := sampleCount(t, tc.histogram)
+
+			tc.record(ctx, 120*time.Millisecond)
+
+			require.Equal(t, base+1, sampleCount(t, tc.histogram),
+				"the stage must be observed whether or not the trace is sampled")
+			require.Empty(t, exemplarsWithTraceID(t, tc.histogram, traceID),
+				"an unsampled request must not attach an exemplar")
+		})
+	}
+}
+
 func TestRecordError(t *testing.T) {
 	errorsTotal.Reset()
 
-	RecordError(StagePrefill)
-	RecordError(StagePrefill)
-	RecordError(StageDecode)
-	RecordError(StageEncode)
+	RecordError(routing.StagePrefill)
+	RecordError(routing.StagePrefill)
+	RecordError(routing.StageDecode)
+	RecordError(routing.StageEncode)
 
-	require.Equal(t, 2.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StagePrefill)))
-	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StageDecode)))
-	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StageEncode)))
+	require.Equal(t, 2.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(routing.StagePrefill)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(routing.StageDecode)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(routing.StageEncode)))
 }
 
 func TestRecordToolCallingFieldStatuses(t *testing.T) {

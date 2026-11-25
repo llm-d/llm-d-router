@@ -56,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -2116,4 +2117,42 @@ func TestHandleResponseBody_VllmInferenceSplitFrames(t *testing.T) {
 			CachedTokens: 9,
 		},
 	}, reqCtx.Usage)
+}
+
+// TestGenerateResponseHeaderResponseStripsFailedStage covers the failed-stage
+// marker on the response header mutation: the client never sees it, and the
+// mutation of a response that carried none stays unchanged.
+func TestGenerateResponseHeaderResponseStripsFailedStage(t *testing.T) {
+	server := &StreamingServer{}
+	setValue := func(mutation *extProcPb.HeaderMutation, key string) (string, bool) {
+		for _, header := range mutation.GetSetHeaders() {
+			if header.GetHeader().GetKey() == key {
+				return string(header.GetHeader().GetRawValue()), true
+			}
+		}
+		return "", false
+	}
+
+	withMarker := &RequestContext{Response: &Response{Headers: map[string]string{
+		routing.FailedStageHeader: routing.StagePrefill,
+		"content-type":            "application/json",
+	}}}
+	mutation := server.generateResponseHeaderResponse(withMarker).
+		GetResponseHeaders().GetResponse().GetHeaderMutation()
+	require.Equal(t, []string{routing.FailedStageHeader}, mutation.GetRemoveHeaders())
+	_, present := setValue(mutation, routing.FailedStageHeader)
+	assert.False(t, present, "the marker must not be re-set")
+	value, present := setValue(mutation, "content-type")
+	require.True(t, present)
+	assert.Equal(t, "application/json", value)
+
+	withoutMarker := &RequestContext{Response: &Response{Headers: map[string]string{
+		"content-type": "application/json",
+	}}}
+	mutation = server.generateResponseHeaderResponse(withoutMarker).
+		GetResponseHeaders().GetResponse().GetHeaderMutation()
+	assert.Empty(t, mutation.GetRemoveHeaders())
+	value, present = setValue(mutation, "content-type")
+	require.True(t, present)
+	assert.Equal(t, "application/json", value)
 }
