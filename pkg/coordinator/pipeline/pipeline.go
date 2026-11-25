@@ -261,9 +261,13 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			if errors.As(err, &rerun) && reqCtx.stepRerunsLeft > 0 && ctx.Err() == nil {
 				reqCtx.stepRerunsLeft--
 				restart := p.rerunStart(idx, rerun.From)
-				coordmetrics.IncStepRerunTotal(name)
+				failedStep := rerun.Step
+				if failedStep == "" {
+					failedStep = name
+				}
+				coordmetrics.IncStepRerunTotal(failedStep)
 				logger.V(logutil.DEFAULT).Info("re-running steps after a retryable upstream failure",
-					"step", name, "from", p.steps[restart].Name(), "rerunsLeft", reqCtx.stepRerunsLeft)
+					"step", failedStep, "from", p.steps[restart].Name(), "rerunsLeft", reqCtx.stepRerunsLeft)
 				// The loop increment moves idx to restart.
 				idx = restart - 1
 				continue

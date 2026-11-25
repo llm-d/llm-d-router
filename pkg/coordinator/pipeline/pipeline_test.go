@@ -998,3 +998,28 @@ func TestStepRerunError(t *testing.T) {
 	require.Equal(t, "decode: re-run requested: "+cause.Error(), err.Error())
 	require.Equal(t, coordmetrics.ErrorCodeUpstream5xx, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
 }
+
+func TestExecute_StepRerunRecordsPeerFailedStepLabel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	decodeAttempts := 0
+	p := New([]Step{
+		&mockStep{name: "prefill", fn: func(context.Context, *RequestContext) error { return nil }},
+		&mockStep{name: "decode", fn: func(context.Context, *RequestContext) error {
+			decodeAttempts++
+			if decodeAttempts == 1 {
+				return &StepRerunError{
+					Step:  "prefill",
+					From:  "prefill",
+					Cause: &UpstreamError{Step: "prefill", StatusCode: http.StatusBadGateway},
+				}
+			}
+			return nil
+		}},
+	})
+	p.SetMaxStepReruns(1)
+
+	require.NoError(t, p.Execute(context.Background(), &RequestContext{}))
+	require.Equal(t, 2, decodeAttempts)
+	require.InDelta(t, 1.0, stepRerunCount(t, reg, "prefill"), 1e-9)
+	require.Zero(t, stepRerunCount(t, reg, "decode"))
+}

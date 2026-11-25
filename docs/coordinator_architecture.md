@@ -928,30 +928,38 @@ upstream gRPC methods regardless of `worker_protocol`.
 `pipeline.max_step_reruns` sets how many times one request can run a failed step again.
 The default value `0` disables re-runs.
 
-The pipeline runs a step again when all of these conditions are true:
+The pipeline runs a step again when no response byte reached the client and one of these
+conditions is true:
 
-- The worker legs of the request use `vllm.Inference` gRPC.
-- The `prefill` or `decode` leg returns the gRPC status `UNAVAILABLE`.
-- No response byte reached the client.
+- A `vllm.Inference` gRPC `prefill` or `decode` leg returns the gRPC status `UNAVAILABLE`.
+- An `sglang.api.v1` gRPC `prefill` or `decode` leg sends a `GenerateStreamItem.error`
+  with `retryable: true`.
 
 vLLM returns `UNAVAILABLE` for an error that the engine marks as retryable.
 [vllm-project/vllm#67430](https://github.com/vllm-project/vllm/issues/67430) proposes to
-add a failed load of the KV blocks or of the encoder cache to these errors. The failed step
-cannot use the output of the step before it, so the re-run starts at that earlier step:
+add a failed load of the KV blocks or of the encoder cache to these errors. SGLang
+reports retryable KV transfer and internal stream failures in `GenerateStreamItem.error`
+with `retryable: true` while the gRPC status stays `OK`. On SGLang, the coordinator
+cancels the peer leg and starts both `prefill` and `decode` again with a new
+`bootstrap_room`.
 
-| Failed step | Steps that run again |
-| :---- | :---- |
-| `decode` | `prefill`, `decode` |
-| `decode`, when `prefill` did not run | `encode`, `decode` |
-| `prefill` | `encode`, `prefill` |
+The failed step cannot use the output of the step before it, so the re-run starts at
+that earlier step:
+
+| Engine | Failed step | Steps that run again |
+| :---- | :---- | :---- |
+| `vllm.Inference` | `decode` | `prefill`, `decode` |
+| `vllm.Inference` | `decode`, when `prefill` did not run | `encode`, `decode` |
+| `vllm.Inference` | `prefill` | `encode`, `prefill` |
+| `sglang.api.v1` | `prefill` or `decode` | `prefill`, `decode` |
 
 When the earlier step did not run for the request, only the failed step runs again. The
 gateway schedules each leg of a re-run, so a leg can reach a different worker. After the
 last re-run, the client gets the error of the worker. The `step_reruns_total` metric counts
 the re-runs.
 
-A gateway that sheds load can also return `UNAVAILABLE`. Each re-run then adds load, so
-use a small value.
+A gateway that sheds load can also return `UNAVAILABLE` on vLLM routes. Each re-run then
+adds load, so use a small value.
 
 ### The built-in steps
 
