@@ -343,17 +343,24 @@ func TestProduce_TokenizerError(t *testing.T) {
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
+// A body neither backend can read, such as the passthrough parser's raw
+// payload, yields no tokenized request and no error.
 func TestProduce_UnsupportedBodyType(t *testing.T) {
-	p := newTestPlugin(&mockTokenizer{})
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrequest.InferenceRequestBody{
-			Payload: fwkrequest.PayloadMap{},
-		},
+	for name, p := range map[string]*Plugin{
+		"render":   newTestPlugin(&mockTokenizer{}),
+		"estimate": {typedName: plugin.TypedName{Type: PluginType, Name: "test"}, backend: estimateBackend{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for bodyName, body := range map[string]*fwkrequest.InferenceRequestBody{
+				"raw payload": {Payload: fwkrequest.RawPayload(`{"prompt":"hi"}`)},
+				"empty map":   {Payload: fwkrequest.PayloadMap{}},
+			} {
+				req := &scheduling.InferenceRequest{Body: body}
+				require.NoError(t, p.Produce(context.Background(), req, nil), bodyName)
+				assert.Nil(t, req.Body.TokenizedRequest, bodyName)
+			}
+		})
 	}
-	err := p.Produce(context.Background(), req, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported request body type")
-	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
 func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
@@ -397,9 +404,7 @@ func TestProduce_EmptyGenerateSkipsTokenization(t *testing.T) {
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrequest.InferenceRequestBody{Generate: &fwkrequest.GenerateRequest{}},
 	}
-	err := p.Produce(context.Background(), req, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported request body type")
+	require.NoError(t, p.Produce(context.Background(), req, nil))
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
@@ -474,6 +479,24 @@ func TestConvertMMFeaturesNil(t *testing.T) {
 	h, r := ConvertMMFeaturesFromUpstream(nil)
 	assert.Nil(t, h)
 	assert.Nil(t, r)
+}
+
+func TestConvertMMFeaturesExcludesHashlessFeatures(t *testing.T) {
+	// A missing hash carries no content identity; hashing it would make
+	// prompts with different media collide on those blocks (issue #4155).
+	// Such features stay in MultiModalFeatures for media detection and token
+	// accounting, but never reach the cache-key maps.
+	features := []fwkrequest.MultiModalFeature{
+		{Modality: reqcommon.ModalityImage, Hash: "h1", Offset: 1, Length: 2},
+		{Modality: reqcommon.ModalityImage, Hash: "", Offset: 5, Length: 3},
+		{Modality: reqcommon.ModalityImage, Hash: "h2", Offset: 10, Length: 3},
+	}
+	hashes, ranges := ConvertMMFeaturesFromUpstream(features)
+	assert.Equal(t, []string{"h1", "h2"}, hashes["image"])
+	assert.Equal(t,
+		[]kvblock.PlaceholderRange{{Offset: 1, Length: 2}, {Offset: 10, Length: 3}},
+		ranges["image"],
+		"the hashless span must not shift later items' pairing")
 }
 
 func TestProduces_PublishesBackendAttribute(t *testing.T) {

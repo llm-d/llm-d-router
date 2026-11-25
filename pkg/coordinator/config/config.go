@@ -86,12 +86,15 @@ func ValidateWorkerProtocol(protocol string) error {
 }
 
 type PipelineConfig struct {
-	KVConnector            string       `mapstructure:"kv_connector"`
-	ECConnector            string       `mapstructure:"ec_connector"`
-	WorkerProtocol         string       `mapstructure:"worker_protocol"`
-	UseOpenAIFormat        bool         `mapstructure:"use_openai_format"`
-	ForwardResponseHeaders []string     `mapstructure:"forward_response_headers"`
-	Steps                  []StepConfig `mapstructure:"steps"`
+	KVConnector               string       `mapstructure:"kv_connector"`
+	ECConnector               string       `mapstructure:"ec_connector"`
+	WorkerProtocol            string       `mapstructure:"worker_protocol"`
+	UseOpenAIFormat           bool         `mapstructure:"use_openai_format"`
+	ForwardResponseHeaders    []string     `mapstructure:"forward_response_headers"`
+	ForceStream               bool         `mapstructure:"force_stream"`
+	ForceStreamBufferSize     string       `mapstructure:"force_stream_buffer_size"`
+	ForceStreamMaxRequestSize string       `mapstructure:"force_stream_max_request_size"`
+	Steps                     []StepConfig `mapstructure:"steps"`
 }
 
 type StepConfig struct {
@@ -125,6 +128,9 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("pipeline.worker_protocol", WorkerProtocolHTTP)
 	v.SetDefault("pipeline.use_openai_format", true)
 	v.SetDefault("pipeline.forward_response_headers", []string{request.DisaggregatedRevisionHeaderKey})
+	v.SetDefault("pipeline.force_stream", false)
+	v.SetDefault("pipeline.force_stream_buffer_size", "")
+	v.SetDefault("pipeline.force_stream_max_request_size", "")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)

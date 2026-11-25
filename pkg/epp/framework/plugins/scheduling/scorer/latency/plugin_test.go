@@ -395,3 +395,57 @@ func TestFactoryValidatesConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestScoreEndpointWithoutPredictionDoesNotOutscorePredicted(t *testing.T) {
+	scorer := NewPlugin(noExploreConfig()) // default strategy: "least"
+
+	epTight := makeLatencyScorerEndpoint("tight", 0.3, 0, 5)
+	epLoose := makeLatencyScorerEndpoint("loose", 0.3, 0, 5)
+	epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+
+	setLatencyPrediction(epTight, true, true, 10, 2, 90, 18)
+	setLatencyPrediction(epLoose, true, true, 100, 20, 50, 10)
+	// epNoPred has no LatencyPredictionInfo attribute.
+
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epTight, epLoose, epNoPred})
+
+	if scores[epNoPred] != 0 {
+		t.Errorf("endpoint without a prediction should score 0 when others have positive headroom: tight=%f loose=%f no-prediction=%f",
+			scores[epTight], scores[epLoose], scores[epNoPred])
+	}
+	if scores[epTight] <= scores[epLoose] {
+		t.Errorf("least strategy should prefer the tighter headroom: tight=%f loose=%f", scores[epTight], scores[epLoose])
+	}
+}
+
+func TestScoreEndpointWithoutPredictionDoesNotOutscoreNegative(t *testing.T) {
+	tests := []struct {
+		name                       string
+		ttftHeadroom, tpotHeadroom float64
+	}{
+		{name: "tpot only negative", ttftHeadroom: 10, tpotHeadroom: -8},
+		{name: "ttft only negative", ttftHeadroom: -10, tpotHeadroom: 8},
+		{name: "both negative", ttftHeadroom: -10, tpotHeadroom: -8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scorer := NewPlugin(noExploreConfig())
+
+			epNeg := makeLatencyScorerEndpoint("negative", 0.3, 0, 5)
+			epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+
+			// One dispatched request skips the idle preference, so scoring reaches deficit bucketing.
+			epNeg.Put(attrlatency.LatencyPredictionInfoDataKey,
+				attrlatency.NewLatencyPredictionInfo(tt.ttftHeadroom >= 0, tt.tpotHeadroom >= 0,
+					tt.ttftHeadroom, tt.tpotHeadroom, 90, 38, 1))
+			// epNoPred has no LatencyPredictionInfo attribute.
+
+			scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epNeg, epNoPred})
+
+			if scores[epNoPred] != 0 || scores[epNeg] == 0 {
+				t.Errorf("endpoint without a prediction should score below an endpoint with a known deficit: negative=%f no-prediction=%f",
+					scores[epNeg], scores[epNoPred])
+			}
+		})
+	}
+}

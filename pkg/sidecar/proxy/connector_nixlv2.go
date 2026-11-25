@@ -170,12 +170,13 @@ func (l *httpNIXLSerialLeg) extractPrefill(w http.ResponseWriter, r *http.Reques
 	// measured the prompt cache and decode reuses the blocks it transferred.
 	// Without transfer params nothing moved, so decode recomputes the prompt and
 	// the count it reports is its own measurement. A usage block whose details
-	// are absent or null still measured the cache: vLLM reports zero hits that
-	// way.
+	// carry no number measured nothing: vLLM without
+	// --enable-prompt-tokens-details sends no details however many tokens were
+	// cached, so the decode response keeps the usage its worker sent.
 	pUsage := prefillerResponse[reqcommon.FieldUsage]
 	pKVParams, _ := pKVTransferParams.(map[string]any)
-	rewriteCachedTokens := pUsage != nil && len(pKVParams) > 0
 	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
+	rewriteCachedTokens := hasPCachedTokens && len(pKVParams) > 0
 
 	if trace := logger.V(logging.TRACE); trace.Enabled() {
 		// The count is logged only when it was measured, so a logged zero is a
@@ -544,8 +545,8 @@ func (l *httpNIXLParallelLeg) decodeWriter(w http.ResponseWriter, dreq *http.Req
 	}
 	pUsage := prefillerResponse[reqcommon.FieldUsage]
 	pKVParams, _ := prefillerResponse[reqcommon.FieldKVTransferParams].(map[string]any)
-	pCachedTokens, _ := usage.CachedTokens(pUsage)
-	return decodeResponseWriter(w, pCachedTokens, pUsage != nil && len(pKVParams) > 0, l.streaming)
+	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
+	return decodeResponseWriter(w, pCachedTokens, hasPCachedTokens && len(pKVParams) > 0, l.streaming)
 }
 
 func (l *httpNIXLParallelLeg) relayPrefillFailure(w http.ResponseWriter, r *http.Request, uuidStr string, prefillResp *bufferedResponseWriter, _ error) {
@@ -855,6 +856,10 @@ func (s *Server) executeNIXLV2WriteParallel(
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
+	// Flush buffered trailers before finalizeDecodeWriter so the gRPC cached-token
+	// finish path sees any decode error trailer instead of writing Unavailable
+	// alongside it.
+	dcw.flushTrailers()
 	var finalizeErr error
 	if finalizeDecodeWriter != nil && !decodeAborted.Load() {
 		if finalizeErr = finalizeDecodeWriter(); finalizeErr != nil {
@@ -965,7 +970,7 @@ func (s *Server) prepareNIXLV2SerialDecodeKVParams(
 	decodeDPRank, usedReturned := resolveDecodeDPRank(pKVTransferParams, uuidStr, s.config.MoRIIODPSize)
 	if pkv, ok := pKVTransferParams.(map[string]any); ok {
 		if !usedReturned && s.config.MoRIIODPSizeLocal > 0 && s.config.MoRIIODPSize > s.config.MoRIIODPSizeLocal {
-			prefillHost := s.resolver().resolveOne(ctx, extractHost(prefillPodHostPort))
+			prefillHost := s.resolver().resolveOne(ctx, routing.ExtractHost(prefillPodHostPort))
 			podIndex := slices.Index(s.currentRemoteHosts(ctx), prefillHost)
 			if podIndex < 0 {
 				return "", fmt.Errorf("cannot determine prefill pod index for %q", prefillHost)
@@ -1068,10 +1073,7 @@ func (s *Server) buildNIXLV2ParallelKVParams(
 	}
 	addP2PPullToPrefill(prefillKV, source)
 
-	prefillHost, _, splitErr := net.SplitHostPort(prefillPodHostPort)
-	if splitErr != nil {
-		prefillHost = prefillPodHostPort
-	}
+	prefillHost := routing.ExtractHost(prefillPodHostPort)
 	remoteHosts := s.currentRemoteHosts(ctx)
 
 	decodeKV = map[string]any{

@@ -205,6 +205,14 @@ func (c *Screener) getOrSetRevision(ctx context.Context, id, candidate string) (
 	return revision, existed, nil
 }
 
+var _ fwkdl.CoordinationConsumer = (*Screener)(nil)
+
+// RequiresCoordination reports whether revision decisions go through the
+// syncer's GetOrSet once Pods from more than one revision are observed.
+func (c *Screener) RequiresCoordination() bool {
+	return c.config.RevisionGating.Active() && c.config.RevisionGating.coordinationEnabled()
+}
+
 func (c *Screener) crossReplicaSyncer() fwkdl.CrossReplicaSyncer {
 	if c.handle == nil {
 		return nil

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -43,7 +44,11 @@ type InferenceRequest struct {
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.
 	Body *fwkrequest.InferenceRequestBody
-	// Headers is a map of the request headers.
+	// Headers is a map of the request headers. Edits made before the request is
+	// forwarded apply to it, except to EPP-owned headers: a header set in the
+	// map is forwarded with its value, and a client header deleted from the map
+	// is removed. Envoy never removes a pseudo-header or host, so deleting one
+	// forwards the client's value.
 	Headers map[string]string
 	// Request Objective
 	Objectives RequestObjectives
@@ -51,6 +56,8 @@ type InferenceRequest struct {
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
+	// ReceivedTimestamp is when the EPP received the request.
+	ReceivedTimestamp time.Time
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 

@@ -69,16 +69,13 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 
 	id := request.RequestID
 
-	actual, _ := pl.runningRequestLists.LoadOrStore(endpointName, newRequestPriorityQueue())
-	endpointRequestList := actual.(*requestPriorityQueue)
-
 	predictedLatencyCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	if err != nil {
 		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: Failed to get SLO context for request", "error", err, "requestID", id)
 		return nil
 	}
 
-	added := endpointRequestList.Add(id, predictedLatencyCtx.avgTPOTSLO)
+	added := pl.addRequestToEndpoint(endpointName, id, predictedLatencyCtx.avgTPOTSLO)
 	if !added {
 		logger.V(logutil.TRACE).Info("PredictedLatency: Item already exists in queue", "endpointName", endpointName, "requestID", id)
 	}
@@ -171,7 +168,10 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 			recordRequestTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft/1000)
 			recordRequestPredictedTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.predictedTTFT/1000)
 			if predictedLatencyCtx.ttftSLO > 0 {
-				recordRequestTTFTWithSLO(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft, predictedLatencyCtx.ttftSLO)
+				// requestReceivedTimestamp is the PreRequest time, where ttft starts. The SLO
+				// counts from the request's arrival at the EPP.
+				ttftSinceReceived := predictedLatencyCtx.ttft + msSinceReceived(request, predictedLatencyCtx.requestReceivedTimestamp)
+				recordRequestTTFTWithSLO(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, ttftSinceReceived, predictedLatencyCtx.ttftSLO)
 			}
 		}
 

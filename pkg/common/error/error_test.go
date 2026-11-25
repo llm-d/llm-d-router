@@ -21,7 +21,10 @@ import (
 	"errors"
 	"testing"
 
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/proto"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -222,12 +225,32 @@ func TestErrorConstants(t *testing.T) {
 	}
 }
 
+func TestModelServerStatusCode(t *testing.T) {
+	tests := map[string]string{
+		"101": "",
+		"200": "",
+		"202": "",
+		"304": "",
+		"400": ModelServerClientError,
+		"499": ModelServerClientError,
+		"500": ModelServerError,
+		"504": ModelServerError,
+		"abc": ModelServerError,
+	}
+	for status, want := range tests {
+		if got := ModelServerStatusCode(status); got != want {
+			t.Errorf("ModelServerStatusCode(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
 func TestBuildErrResponse(t *testing.T) {
 	tests := []struct {
 		name           string
 		err            error
 		apiType        reqcommon.APIType
 		wantHTTPStatus envoyTypePb.StatusCode
+		wantGRPCStatus *extProcPb.GrpcStatus
 		wantBody       string
 		wantGRPCErr    bool
 		wantHeaders    map[string]string
@@ -257,9 +280,10 @@ func TestBuildErrResponse(t *testing.T) {
 			wantBody:       `{"error":{"message":"model not found","type":"not_found_error","code":404}}`,
 		},
 		{
-			name:           "PreconditionFailed returns 412",
+			name:           "PreconditionFailed returns 412 and gRPC FAILED_PRECONDITION",
 			err:            Error{Code: PreconditionFailed, Msg: "revision mismatch"},
 			wantHTTPStatus: envoyTypePb.StatusCode_PreconditionFailed,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.FailedPrecondition)},
 			wantBody:       `{"error":{"message":"revision mismatch","type":"invalid_request_error","code":412}}`,
 		},
 		{
@@ -367,6 +391,9 @@ func TestBuildErrResponse(t *testing.T) {
 			}
 			if ir.GetStatus().GetCode() != tt.wantHTTPStatus {
 				t.Errorf("HTTP status = %v, want %v", ir.GetStatus().GetCode(), tt.wantHTTPStatus)
+			}
+			if got := ir.GetGrpcStatus(); !proto.Equal(got, tt.wantGRPCStatus) {
+				t.Errorf("gRPC status = %v, want %v", got, tt.wantGRPCStatus)
 			}
 			if got := string(ir.GetBody()); got != tt.wantBody {
 				t.Errorf("body = %s, want %s", got, tt.wantBody)

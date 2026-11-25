@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"encoding/json"
-	"errors"
 	"maps"
 	"math/rand/v2"
 	"net/http"
@@ -38,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -96,20 +96,10 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefil
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running SGLang gRPC protocol", "url", prefillPodHostPort)
 
-	defer r.Body.Close()
-	// ReadMessage rejects a declared length over the limit before it
-	// allocates, and data after the one frame of a unary request.
-	frame, err := grpcframe.ReadMessage(r.Body, grpcframe.MaxPayloadLen)
+	frame, code, err := grpcframe.ReadUnaryRequest(r, grpcframe.MaxPayloadLen)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid gRPC request frame", "error", err)
-		code, msg := codes.InvalidArgument, "invalid GenerateRequest frame"
-		switch {
-		case errors.Is(err, grpcframe.ErrCompressed):
-			code, msg = codes.Unimplemented, err.Error()
-		case errors.Is(err, grpcframe.ErrTooLarge):
-			code, msg = codes.ResourceExhausted, err.Error()
-		}
-		grpcframe.WriteError(w, code, msg)
+		grpcframe.WriteError(w, code, grpcframe.ReadErrorMessage(err))
 		return
 	}
 	scanned, err := sglangwire.ScanGenerateRequest(frame[grpcframe.HeaderLen:])
@@ -122,7 +112,7 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefil
 	roomID := s.generateSGLangRoomID()
 	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
-	bootstrapHost := extractHost(prefillPodHostPort)
+	bootstrapHost := routing.ExtractHost(prefillPodHostPort)
 	head, tail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
 		Host: bootstrapHost,
 		Port: int64(sglangBootstrapPort),
@@ -146,7 +136,7 @@ func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[stri
 	modifiedRequest := maps.Clone(requestData)
 
 	// Generate bootstrap host from prefill host
-	bootstrapHost := extractHost(prefillHostPort)
+	bootstrapHost := routing.ExtractHost(prefillHostPort)
 
 	// Add bootstrap information
 	modifiedRequest[reqcommon.FieldBootstrapHost] = bootstrapHost

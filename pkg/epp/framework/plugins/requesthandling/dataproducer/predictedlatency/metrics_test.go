@@ -17,14 +17,22 @@ limitations under the License.
 package predictedlatency
 
 import (
+	"context"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 func TestRegisterMetrics(t *testing.T) {
@@ -180,4 +188,99 @@ func resetMetrics() {
 	llmdRequestTPOTPredictionDuration.Reset()
 	llmdSloViolationCounter.Reset()
 	llmdRequestPredictionFailures.Reset()
+}
+
+func TestPredictedLatencyHistogramsTraceExemplars(t *testing.T) {
+	t.Cleanup(resetMetrics)
+
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	recordingCtx, span := provider.Tracer("predicted-latency-test").Start(context.Background(), "request")
+	defer span.End()
+
+	propagatedCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    span.SpanContext().TraceID(),
+		SpanID:     span.SpanContext().SpanID(),
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	}))
+	unsampledCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: span.SpanContext().TraceID(),
+		SpanID:  span.SpanContext().SpanID(),
+	}))
+
+	const pluginName, pluginType, model, target = "exemplar-test", "test-type", "model", "target"
+	histograms := []struct {
+		name      string
+		histogram *prometheus.HistogramVec
+		record    func(ctx context.Context) bool
+	}{
+		{"predicted ttft", llmdRequestPredictedTTFT, func(ctx context.Context) bool {
+			return recordRequestPredictedTTFT(ctx, pluginName, pluginType, model, target, 0.4)
+		}},
+		{"ttft prediction duration", llmdRequestTTFTPredictionDuration, func(ctx context.Context) bool {
+			return recordRequestTTFTPredictionDuration(ctx, pluginName, pluginType, model, target, 0.01)
+		}},
+		{"predicted tpot", llmdRequestPredictedTPOT, func(ctx context.Context) bool {
+			return recordRequestPredictedTPOT(ctx, pluginName, pluginType, model, target, 0.04)
+		}},
+		{"tpot prediction duration", llmdRequestTPOTPredictionDuration, func(ctx context.Context) bool {
+			return recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, model, target, 0.01)
+		}},
+	}
+	contexts := []struct {
+		name                string
+		ctx                 context.Context
+		wantTrace, wantSpan bool
+	}{
+		{"recording", recordingCtx, true, true},
+		{"propagated", propagatedCtx, true, false},
+		{"unsampled", unsampledCtx, false, false},
+		{"no span", context.Background(), false, false},
+	}
+
+	for _, hist := range histograms {
+		for _, ctxCase := range contexts {
+			t.Run(hist.name+"/"+ctxCase.name, func(t *testing.T) {
+				hist.histogram.Reset()
+				require.True(t, hist.record(ctxCase.ctx))
+
+				observed, err := getHistogram(hist.histogram, pluginName, pluginType, model, target)
+				require.NoError(t, err)
+				require.Equal(t, uint64(1), observed.GetSampleCount())
+				var exemplar *dto.Exemplar
+				for _, bucket := range observed.GetBucket() {
+					if bucket.GetExemplar() != nil {
+						exemplar = bucket.GetExemplar()
+						break
+					}
+				}
+				if !ctxCase.wantTrace {
+					require.Nil(t, exemplar)
+					return
+				}
+				require.NotNil(t, exemplar)
+				labels := map[string]string{}
+				for _, label := range exemplar.GetLabel() {
+					labels[label.GetName()] = label.GetValue()
+				}
+				require.Equal(t, span.SpanContext().TraceID().String(), labels[metricsutil.ExemplarTraceIDLabel])
+				if ctxCase.wantSpan {
+					require.Equal(t, span.SpanContext().SpanID().String(), labels[metricsutil.ExemplarSpanIDLabel])
+				} else {
+					require.NotContains(t, labels, metricsutil.ExemplarSpanIDLabel)
+				}
+
+				registry := prometheus.NewRegistry()
+				require.NoError(t, registry.Register(hist.histogram))
+				req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+				req.Header.Set("Accept", "application/openmetrics-text;version=1.0.0")
+				rec := httptest.NewRecorder()
+				promhttp.HandlerFor(registry, promhttp.HandlerOpts{EnableOpenMetrics: true}).ServeHTTP(rec, req)
+				require.Equal(t, http.StatusOK, rec.Code)
+				require.Contains(t, rec.Header().Get("Content-Type"), "application/openmetrics-text")
+				require.Contains(t, rec.Body.String(), `trace_id="`+span.SpanContext().TraceID().String()+`"`)
+			})
+		}
+	}
 }

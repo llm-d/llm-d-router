@@ -136,6 +136,10 @@ func WriteAPIError(w http.ResponseWriter, apiType APIType, status int, msg strin
 	return enc.Encode(ErrorEnvelope(apiType, status, msg))
 }
 
+// ReadRequestBodyErrorMessage is the client-safe message returned when reading
+// a request body fails, hiding internal transport details.
+const ReadRequestBodyErrorMessage = "failed to read request body"
+
 // InternalErrorMessage is the client answer the coordinator and the sidecar
 // give for an internal error that hides upstream detail, carrying the request
 // ID for correlation. The ID is omitted when there is none.

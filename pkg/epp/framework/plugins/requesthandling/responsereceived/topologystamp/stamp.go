@@ -61,7 +61,7 @@ var (
 )
 
 // Factory creates a topology stamp handler.
-func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := parameters{}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
@@ -70,6 +70,9 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 	}
 	if err := topoutil.ValidateHeaderName(params.HeaderName); err != nil {
 		return nil, fmt.Errorf("invalid configuration for '%s' handler: %w", PluginType, err)
+	}
+	if err := fwkplugin.ValidateProfileName(handle, params.ProfileName); err != nil {
+		return nil, fmt.Errorf("invalid profileName of the '%s' handler - %w", PluginType, err)
 	}
 	if params.HeaderName == "" {
 		params.HeaderName = defaultHeaderName

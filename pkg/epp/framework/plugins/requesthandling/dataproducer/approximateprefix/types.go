@@ -60,7 +60,20 @@ type server struct {
 	// indexer lets a metrics-derived capacity replace any earlier capacity,
 	// but never lets a fallback capacity replace a metrics-derived one.
 	CapacityFromMetrics bool
+	// OffloadCapacityUnknown reports that the index covers the offload tier but
+	// the endpoint offloads KV cache without reporting that tier's capacity, so
+	// NumOfGPUBlocks covers the HBM tier only and undercounts the cache. The
+	// indexer logs a warning for such a pod once.
+	OffloadCapacityUnknown bool
 }
+
+// Values of config.CapacityTiers.
+const (
+	// capacityTierHBM is the model server's GPU KV cache.
+	capacityTierHBM = "hbm"
+	// capacityTierCPU is the model server's host-memory offload tier.
+	capacityTierCPU = "cpu"
+)
 
 // ServerID is a unique identifier for a server, based on its NamespacedName.
 type ServerID k8stypes.NamespacedName
@@ -86,6 +99,8 @@ type SchedulingContextState struct {
 	// endpoints. Taken during Produce, the only stage that sees the candidates
 	// as they were before the scheduler's filters narrowed them.
 	BestAvailableCachedTokens int
+	// BlockSize is the block size in tokens the hashes were derived at.
+	BlockSize int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -216,6 +231,13 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
+	// CapacityTiers lists the KV cache tiers the auto-tuned per-pod capacity
+	// covers: "hbm" (the GPU cache) and "cpu" (a host-memory offload tier such
+	// as SGLang's HiCache host pool or vLLM's CPU offload tier). The index is
+	// sized to the largest listed tier the model server reports. Empty covers
+	// both. A single tier is for a producer that tracks one tier next to a
+	// producer tracking the other. Ignored when AutoTune is false.
+	CapacityTiers []string `json:"capacityTiers,omitempty"`
 	// SyncCrossReplicaState controls whether recent per-prompt prefix hashes are
 	// published through a configured CrossReplicaSyncer. Unset defaults to true.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
@@ -228,6 +250,10 @@ type config struct {
 	// for hybrid Mamba/GDN models whose decode endpoints cannot reuse KV received over the P/D
 	// transfer. It also removes decode-side prefix affinity for disaggregated requests.
 	ExcludeDecodeWhenDisaggregated bool `json:"excludeDecodeWhenDisaggregated,omitempty"`
+	// IndexCompletions records the prompt followed by the generated text of a
+	// non-streamed /v1/completions request on the decode endpoint that served it.
+	// It applies only with the estimate token-producer backend.
+	IndexCompletions bool `json:"indexCompletions,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.

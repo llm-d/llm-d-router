@@ -1,0 +1,99 @@
+# HELP vllm:kv_offload_total_bytes_total Number of bytes offloaded by KV connector
+# TYPE vllm:kv_offload_total_bytes_total counter
+vllm:kv_offload_total_bytes_total{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_total_bytes_total{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+# HELP vllm:kv_offload_total_bytes_created Number of bytes offloaded by KV connector
+# TYPE vllm:kv_offload_total_bytes_created gauge
+vllm:kv_offload_total_bytes_created{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 1.785966958566208e+09
+vllm:kv_offload_total_bytes_created{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 1.785966958566252e+09
+# HELP vllm:kv_offload_total_time_total Total time measured by all KV offloading operations
+# TYPE vllm:kv_offload_total_time_total counter
+vllm:kv_offload_total_time_total{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_total_time_total{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+# HELP vllm:kv_offload_total_time_created Total time measured by all KV offloading operations
+# TYPE vllm:kv_offload_total_time_created gauge
+vllm:kv_offload_total_time_created{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 1.785966958566217e+09
+vllm:kv_offload_total_time_created{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 1.7859669585662577e+09
+# HELP vllm:kv_offload_size Histogram of KV offload transfer size, in bytes.
+# TYPE vllm:kv_offload_size histogram
+vllm:kv_offload_size_bucket{engine="0",le="1e+06",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="5e+06",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="2e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="4e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="6e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="8e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1e+08",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1.5e+08",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="2e+08",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="+Inf",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_count{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_sum{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1e+06",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="5e+06",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="2e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="4e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="6e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="8e+07",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1e+08",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="1.5e+08",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="2e+08",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_bucket{engine="0",le="+Inf",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_count{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+vllm:kv_offload_size_sum{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 0.0
+# HELP vllm:kv_offload_size_created Histogram of KV offload transfer size, in bytes.
+# TYPE vllm:kv_offload_size_created gauge
+vllm:kv_offload_size_created{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="CPU_to_GPU"} 1.7859669585661597e+09
+vllm:kv_offload_size_created{engine="0",model_name="Qwen/Qwen3-0.6B",transfer_type="GPU_to_CPU"} 1.7859669585662274e+09
+# HELP vllm:kv_offload_cpu_cache_usage_perc Fraction of CPU KV-cache space currently pinned by active transfers (0.0 = idle, 1.0 = saturated). Sustained high values indicate transfers (stores or promotions) may be dropped due to insufficient capacity.
+# TYPE vllm:kv_offload_cpu_cache_usage_perc gauge
+# HELP vllm:kv_offload_cpu_cache_write_usage_perc Fraction of CPU KV-cache space currently pinned by in-flight stores that have not yet completed (0.0 = idle, 1.0 = saturated).
+# TYPE vllm:kv_offload_cpu_cache_write_usage_perc gauge
+# HELP vllm:kv_offload_cpu_cache_read_usage_perc Fraction of CPU KV-cache space currently pinned by in-flight loads that have not yet completed (0.0 = idle, 1.0 = saturated).
+# TYPE vllm:kv_offload_cpu_cache_read_usage_perc gauge
+# HELP vllm:kv_offload_cpu_allocation_size Histogram of the number of CPU blocks requested by each KV offload prepare_store call.
+# TYPE vllm:kv_offload_cpu_allocation_size histogram
+# HELP vllm:kv_offload_load_bytes_total Total bytes loaded from offload storage to GPU.
+# TYPE vllm:kv_offload_load_bytes_total counter
+# HELP vllm:kv_offload_load_time_total Total load time from offload storage to GPU, in seconds.
+# TYPE vllm:kv_offload_load_time_total counter
+# HELP vllm:kv_offload_load_size Histogram of KV offload load operation size, in bytes.
+# TYPE vllm:kv_offload_load_size histogram
+# HELP vllm:kv_offload_store_bytes_total Total bytes stored from GPU to offload storage.
+# TYPE vllm:kv_offload_store_bytes_total counter
+# HELP vllm:kv_offload_store_time_total Total store time from GPU to offload storage, in seconds.
+# TYPE vllm:kv_offload_store_time_total counter
+# HELP vllm:kv_offload_store_size Histogram of KV offload store operation size, in bytes.
+# TYPE vllm:kv_offload_store_size histogram
+# HELP vllm:kv_offload_lookup_sync_delay_seconds Histogram of the time spent in a single offload lookup call, in seconds.
+# TYPE vllm:kv_offload_lookup_sync_delay_seconds histogram
+# HELP vllm:kv_offload_lookup_async_delay_seconds Histogram of time between a request's offload lookup first deferring and the following lookup resolving, or request finish, in seconds.
+# TYPE vllm:kv_offload_lookup_async_delay_seconds histogram
+# HELP vllm:kv_offload_allocation_failure_total Number of KV offload store allocation attempts that failed.
+# TYPE vllm:kv_offload_allocation_failure_total counter
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="Qwen/Qwen3-0.6B"} 0.0
+# HELP vllm:num_requests_waiting_by_reason Number of waiting requests by reason. Reason labels: 'capacity' = waiting for scheduling capacity; 'deferred' = deferred by transient constraints (LoRA budget, KV transfer, blocked status). Sum of all reasons equals vllm:num_requests_waiting.
+# TYPE vllm:num_requests_waiting_by_reason gauge
+vllm:num_requests_waiting_by_reason{engine="0",model_name="Qwen/Qwen3-0.6B",reason="capacity"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="Qwen/Qwen3-0.6B",reason="deferred"} 0.0
+# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0",model_name="Qwen/Qwen3-0.6B"} 0.0
+# HELP vllm:external_prefix_cache_queries_total External prefix cache queries from KV connector cross-instance cache sharing, in terms of number of queried tokens.
+# TYPE vllm:external_prefix_cache_queries_total counter
+vllm:external_prefix_cache_queries_total{engine="0",model_name="Qwen/Qwen3-0.6B"} 0.0
+# HELP vllm:external_prefix_cache_queries_created External prefix cache queries from KV connector cross-instance cache sharing, in terms of number of queried tokens.
+# TYPE vllm:external_prefix_cache_queries_created gauge
+vllm:external_prefix_cache_queries_created{engine="0",model_name="Qwen/Qwen3-0.6B"} 1.7859669585666087e+09
+# HELP vllm:external_prefix_cache_hits_total External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.
+# TYPE vllm:external_prefix_cache_hits_total counter
+vllm:external_prefix_cache_hits_total{engine="0",model_name="Qwen/Qwen3-0.6B"} 0.0
+# HELP vllm:external_prefix_cache_hits_created External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.
+# TYPE vllm:external_prefix_cache_hits_created gauge
+vllm:external_prefix_cache_hits_created{engine="0",model_name="Qwen/Qwen3-0.6B"} 1.7859669585666184e+09
+# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
+# TYPE vllm:cache_config_info gauge
+vllm:cache_config_info{_block_size_resolved="True",block_size="16",cache_dtype="auto",calculate_kv_scales="False",enable_prefix_caching="True",engine="0",gpu_memory_utilization="0.92",is_attention_free="False",kv_cache_dtype_skip_layers="[]",kv_cache_max_concurrency="145.0625",kv_cache_memory_bytes="None",kv_cache_size_tokens="1188352",kv_offloading_backend="native",kv_offloading_size="4.0",kv_sharing_fast_prefill="False",mamba_block_size="None",mamba_cache_dtype="auto",mamba_cache_mode="none",mamba_page_size_padded="None",mamba_ssm_cache_dtype="auto",num_cpu_blocks="None",num_gpu_blocks="74272",num_gpu_blocks_override="None",prefix_caching_hash_algo="sha256",prefix_match_unit="None",skip_page_size_padded="None",sliding_window="None",user_specified_block_size="False",user_specified_mamba_block_size="False"} 1.0

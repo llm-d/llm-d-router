@@ -16,9 +16,10 @@ package kvblock
 
 import (
 	"context"
+	"time"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
-	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
@@ -65,8 +66,7 @@ func (m *instrumentedIndex) Lookup(
 	requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {
-	timer := prometheus.NewTimer(metrics.LookupLatency)
-	defer timer.ObserveDuration()
+	defer observeLookup(ctx, time.Now())
 
 	metrics.LookupRequests.Inc()
 
@@ -77,12 +77,17 @@ func (m *instrumentedIndex) Lookup(
 func (m *instrumentedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
-	timer := prometheus.NewTimer(metrics.LookupLatency)
-	defer timer.ObserveDuration()
+	defer observeLookup(ctx, time.Now())
 
 	metrics.LookupRequests.Inc()
 
 	return m.walker.WalkKeys(ctx, requestKeys, visit)
+}
+
+// observeLookup records a Lookup or WalkKeys duration with the request's trace
+// as an exemplar.
+func observeLookup(ctx context.Context, start time.Time) {
+	metricsutil.ObserveWithTraceExemplar(ctx, metrics.LookupLatency, time.Since(start).Seconds())
 }
 
 func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {

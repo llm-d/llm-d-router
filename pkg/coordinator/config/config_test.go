@@ -137,6 +137,24 @@ func TestLoadEnvOverride(t *testing.T) {
 			check:  func(c *Config) (any, any) { return c.Pipeline.WorkerProtocol, "grpc" },
 		},
 		{
+			name:   "force stream",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM",
+			envVal: "true",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStream, true },
+		},
+		{
+			name:   "force stream buffer size",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM_BUFFER_SIZE",
+			envVal: "512MiB",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStreamBufferSize, "512MiB" },
+		},
+		{
+			name:   "force stream max request size",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM_MAX_REQUEST_SIZE",
+			envVal: "128KiB",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStreamMaxRequestSize, "128KiB" },
+		},
+		{
 			name:   "metrics certificate path",
 			envKey: "COORDINATOR_SERVER_METRICS_CERT_DIR",
 			envVal: "/etc/coordinator-metrics",

@@ -88,3 +88,49 @@ plugins:
 		})
 	}
 }
+
+func TestTopologyStampProfileNameConfigLoad(t *testing.T) {
+	const config = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: topology-stamp-handler
+  parameters:
+    profileName: %s
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: prefill
+  plugins:
+  - pluginRef: max-score-picker
+`
+	tests := []struct {
+		name    string
+		profile string
+		wantErr string
+	}{
+		{name: "defined profile", profile: "prefill"},
+		{name: "undefined profile", profile: "prefil", wantErr: "scheduling profile 'prefil' is not defined"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			opts := runserver.NewOptions()
+			opts.ConfigText = fmt.Sprintf(config, tt.profile)
+			opts.PoolName = "profile-name-test-pool"
+
+			r := NewRunner()
+			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+			require.NoError(t, err)
+
+			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
+			_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

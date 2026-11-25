@@ -18,6 +18,7 @@ The Core Metrics Extractor is a data layer plugin responsible for extracting mod
     -   **KV Cache Usage**: Percentage of KV cache currently utilized.
     -   **LoRA Adapters**: Information about active and waiting LoRA adapters.
     -   **Cache Configuration**: Block size and total number of GPU blocks.
+    -   **Offload-extended KV cache capacity** (optional): The token capacity of a host-memory KV cache tier (`cacheTotalTokensSpec`, read from a label when `cacheTotalTokensLabelName` is set) and whether the engine has offloaded KV cache at all (`cacheOffloadDetectionSpec`, true while the metric is above zero). The built-in configs read SGLang's `sglang:hicache_host_total_tokens` and vLLM's `cpu_kv_cache_size_tokens` label on `vllm:kv_offload_config_info`, and detect vLLM offloading from `vllm:kv_offload_total_bytes_total`. A scrape without these families is not an extraction error. See [TotalKVCacheTokens](../../../../../../../docs/plugin-metric-protocol.md#totalkvcachetokens-optional).
     -   **Tiered Offloading** (optional): vLLM KV cache tiering metrics (`kv_offload_tiering_*`, vLLM 0.28.0 or later) when vLLM is configured with `TieringOffloadingSpec`. Skipped without an extraction error on non-tiering deployments.
 5.  Stores these values as attributes on the endpoint, making them available to scheduling plugins.
 
@@ -27,6 +28,7 @@ A model server that runs several engines in one Pod exposes one series per engin
 
 -   `WaitingQueueSize` and `RunningRequestsSize` are the sum over the matching series, so both count requests for the whole Pod. The utilization detector's scrape-lag credit compares their sum with the Pod's in-flight request count, and queue-depth thresholds apply to the Pod total.
 -   `KVCacheUsagePercent` is the maximum over the matching series: the engine closest to its limit describes the Pod, and the value stays a fraction.
+-   `KvCacheMaxTokenCapacity` is the maximum over the matching series, in line with the block count, which is read from one series: each engine's offload tier is sized for that engine, and the prefix cache index is sized per engine's cache.
 -   The tiered offloading attributes are the sum over the matching series, so they cover every engine rank of the Pod. Series of the primary tier (`tier="0:primary"`) are never included.
 
 A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration, and `customMetrics` entries without `aggregation` read one series. A `customMetrics` entry with `aggregation: sum` adds every matching series.
@@ -44,6 +46,8 @@ The plugin populates several standard fields on the endpoint's `Metrics` struct:
 -   `UpdateTime` (time.Time)
 
 The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`) are also published to the endpoint's attribute map (`ep.GetAttributes()`) as `ScalarMetricValue` under `ScalarMetricDataKey`, so `endpoint-attribute-scorer` and `endpoint-attribute-filter` can consume them directly without duplicating them in `customMetrics`. When a `customMetrics` entry uses one of those built-in keys as its `attributeKey`, that entry exclusively owns the attribute on `ep.GetAttributes()` while the built-in spec continues to populate `Metrics`.
+
+An engine config may name a `deferredRequestsSpec`: the queued requests that wait on a KV transfer in progress. The extractor publishes it as the `DeferredQueueSize` scalar attribute, 0 on a scrape without the series or with a non-finite one, and leaves `WaitingQueueSize` as the queue total. The `utilization-detector` subtracts `DeferredQueueSize` from its queue-depth term. The built-in `vllm` config reads `vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}`, which vLLM publishes from v0.32.0 on engines with a KV consumer role (`kv_consumer` or `kv_both`); on other vLLM engines the attribute is 0. Requests whose transfer has not started or has finished, and requests that wait on a LoRA slot or a grammar compile, are not counted and stay in the queue-depth term. An `engineConfigs` entry named `vllm` replaces the built-in config, so set `deferredRequestsSpec` there to keep the attribute.
 
 ### Scalar samples
 
@@ -103,6 +107,7 @@ The plugin config supports:
 
 The plugin comes with built-in support for the following engines:
 -   `vllm`
+-   `vllm-omni`
 -   `sglang`
 -   `atom`
 -   `trtllm-serve`
@@ -113,7 +118,7 @@ To correctly establish the mapping, model server Pods should be labeled using th
 ```yaml
 metadata:
   labels:
-    llm-d.ai/engine-type: vllm # other options: sglang, atom, trtllm-serve, triton-tensorrt-llm, triton 
+    llm-d.ai/engine-type: vllm # other options: vllm-omni, sglang, atom, trtllm-serve, triton-tensorrt-llm, triton 
 
 ```
 
@@ -176,10 +181,14 @@ parameters:
     - name: "vllm"
       # Standard specs (required, since overriding replaces the built-in config)
       queuedRequestsSpec: "vllm:num_requests_waiting"
+      deferredRequestsSpec: 'vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}'
       runningRequestsSpec: "vllm:num_requests_running"
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
       cacheInfoSpec: "vllm:cache_config_info"
+      cacheTotalTokensSpec: "vllm:kv_offload_config_info"
+      cacheTotalTokensLabelName: "cpu_kv_cache_size_tokens"
+      cacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total"
       # Per-tier offloading specs
       customMetrics:
         - attributeKey: "tiering_chunk_hits_fs"
@@ -213,10 +222,14 @@ parameters:
     - name: "vllm"
       # Standard specs (required, overriding replaces the built-in config)
       queuedRequestsSpec: "vllm:num_requests_waiting"
+      deferredRequestsSpec: 'vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}'
       runningRequestsSpec: "vllm:num_requests_running"
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
       cacheInfoSpec: "vllm:cache_config_info"
+      cacheTotalTokensSpec: "vllm:kv_offload_config_info"
+      cacheTotalTokensLabelName: "cpu_kv_cache_size_tokens"
+      cacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total"
       customMetrics:
         - attributeKey: "cpu_offload_usage"
           metricSpec: "vllm:kv_offload_cpu_cache_usage_perc"

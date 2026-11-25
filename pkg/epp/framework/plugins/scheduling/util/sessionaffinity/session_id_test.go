@@ -18,6 +18,8 @@ package sessionaffinity
 
 import (
 	"context"
+	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -540,9 +542,10 @@ func TestSessionIDConfig_ApplyDefaults(t *testing.T) {
 
 func TestSessionIDConfig_Validate(t *testing.T) {
 	tests := []struct {
-		name      string
-		config    SessionIDConfig
-		expectErr bool
+		name        string
+		config      SessionIDConfig
+		expectErr   bool
+		errContains string
 	}{
 		{
 			name: "single header source is valid",
@@ -588,6 +591,54 @@ func TestSessionIDConfig_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			name: "sweep shorter than 1ns rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 1e-10,
+			},
+			expectErr:   true,
+			errContains: "evictionSweepSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
+			name: "ttl shorter than 1ns rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   1e-10,
+				EvictionSweepSeconds: 10,
+			},
+			expectErr:   true,
+			errContains: "evictionTtlSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
+			name: "sweep beyond the duration range rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 1e10,
+			},
+			expectErr:   true,
+			errContains: "evictionSweepSeconds 1e+10 exceeds the representable duration",
+		},
+		{
+			name: "sweep at the duration range bound rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: float64(math.MaxInt64) / float64(time.Second),
+			},
+			expectErr:   true,
+			errContains: "exceeds the representable duration",
+		},
+		{
+			name: "1ns sweep and 9e9 second ttl accepted",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   9e9,
+				EvictionSweepSeconds: 1e-9,
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -598,6 +649,9 @@ func TestSessionIDConfig_Validate(t *testing.T) {
 			}
 			if !test.expectErr && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+			if test.errContains != "" && (err == nil || !strings.Contains(err.Error(), test.errContains)) {
+				t.Errorf("expected error containing %q, got %v", test.errContains, err)
 			}
 		})
 	}

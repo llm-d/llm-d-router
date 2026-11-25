@@ -177,6 +177,10 @@ Disabling coordination is an optional optimization. Use it only when the
 deployment cannot issue parallel E/P/D requests. When the serving topology is
 uncertain, leave `disableCoordination` unset.
 
+With revision gating active and `disableCoordination` unset, EPP fails at
+startup when the configured `CrossReplicaSyncer` does not support `GetOrSet`,
+such as `p2p-syncer`.
+
 ### Parallel Encode Requests (E/P/D)
 
 Parallel encode requests cannot wait for an earlier response to provide
