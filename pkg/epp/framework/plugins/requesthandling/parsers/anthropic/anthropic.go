@@ -38,8 +38,9 @@ import (
 const (
 	AnthropicParserType = "anthropic-parser"
 
-	messagesAPI    = "messages"
-	countTokensAPI = "messages/count_tokens"
+	messagesAPI     = "messages"
+	countTokensAPI  = "messages/count_tokens"
+	fieldStopReason = "stop_reason"
 )
 
 // compile-time type validation
@@ -152,28 +153,11 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 		return parseStreamResponse(body), nil
 	}
 
-	usage, err := extractUsage(body)
-	if err != nil {
-		return nil, err
-	}
-	stopReason, err := extractStopReason(body)
+	usage, stopReason, err := extractUsageAndStopReason(body)
 	if err != nil {
 		return nil, err
 	}
 	return &fwkrh.ParsedResponse{Usage: usage, StopReason: stopReason}, nil
-}
-
-func extractStopReason(body []byte) (fwkrh.StopReason, error) {
-	var response struct {
-		StopReason string `json:"stop_reason"`
-	}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return "", err
-	}
-	if response.StopReason == "" {
-		return "", nil
-	}
-	return parsers.NormalizeStopReason(response.StopReason), nil
 }
 
 func isEventStream(headers map[string]string) bool {
@@ -189,15 +173,20 @@ func isEventStream(headers map[string]string) bool {
 	return false
 }
 
-func extractUsage(responseBytes []byte) (*request.Usage, error) {
+func extractUsageAndStopReason(responseBytes []byte) (*request.Usage, fwkrh.StopReason, error) {
 	var responseBody map[string]any
 	if err := json.Unmarshal(responseBytes, &responseBody); err != nil {
-		return nil, err
+		return nil, "", err
+	}
+
+	stopReason := fwkrh.StopReason("")
+	if reason, ok := responseBody[fieldStopReason].(string); ok && reason != "" {
+		stopReason = parsers.NormalizeStopReason(reason)
 	}
 
 	usg, ok := responseBody[reqcommon.FieldUsage].(map[string]any)
 	if !ok {
-		return nil, nil //nolint:nilnil
+		return nil, stopReason, nil
 	}
 
 	var tokens inputTokens
@@ -207,7 +196,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	usage.CompletionTokens = jsonInt(usg, reqcommon.FieldOutputTokens)
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
-	return &usage, nil
+	return &usage, stopReason, nil
 }
 
 // inputTokens accumulates the three Messages API input counts across the events
@@ -291,7 +280,7 @@ func parseStreamResponse(chunk []byte) *fwkrh.ParsedResponse {
 		}
 		resp.StreamedEvents++
 		// Only message_start/message_delta carry the fields this parser reads.
-		if !bytes.Contains(content, []byte(reqcommon.FieldUsage)) && !bytes.Contains(content, []byte("stop_reason")) {
+		if !bytes.Contains(content, []byte(reqcommon.FieldUsage)) && !bytes.Contains(content, []byte(fieldStopReason)) {
 			continue
 		}
 

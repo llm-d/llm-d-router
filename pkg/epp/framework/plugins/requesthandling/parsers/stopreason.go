@@ -29,7 +29,7 @@ func NormalizeStopReason(reason string) fwkrh.StopReason {
 	case "tool_call", "tool_calls", "tool-calls", "tool_use", "function_call":
 		return fwkrh.StopReasonToolCall
 	case "stop", "end", "length", "end_turn", "stop_sequence", "max_tokens",
-		"pause_turn", "model_context_window_exceeded", "completed", "incomplete":
+		"pause_turn", "model_context_window_exceeded", "completed":
 		return fwkrh.StopReasonTurnEnded
 	default:
 		return fwkrh.StopReasonUnknown

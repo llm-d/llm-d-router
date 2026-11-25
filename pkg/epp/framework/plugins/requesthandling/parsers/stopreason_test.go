@@ -41,7 +41,7 @@ func TestNormalizeStopReason(t *testing.T) {
 		{name: "pause_turn", reason: "pause_turn", want: fwkrh.StopReasonTurnEnded},
 		{name: "context_window", reason: "model_context_window_exceeded", want: fwkrh.StopReasonTurnEnded},
 		{name: "completed", reason: "completed", want: fwkrh.StopReasonTurnEnded},
-		{name: "incomplete", reason: "incomplete", want: fwkrh.StopReasonTurnEnded},
+		{name: "incomplete", reason: "incomplete", want: fwkrh.StopReasonUnknown},
 		{name: "abort", reason: "abort", want: fwkrh.StopReasonUnknown},
 		{name: "error", reason: "error", want: fwkrh.StopReasonUnknown},
 		{name: "repetition", reason: "repetition", want: fwkrh.StopReasonUnknown},

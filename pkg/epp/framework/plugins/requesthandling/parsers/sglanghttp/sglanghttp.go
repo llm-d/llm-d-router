@@ -273,99 +273,57 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 	if isEventStream(headers) {
 		return parseStreamingResponse(body), nil
 	}
-	usage, err := parseGenerateResponseUsage(body)
+	usage, stopReason, err := parseGenerateResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.ParsedResponse{Usage: usage, StopReason: parseGenerateResponseStopReason(body)}, nil
+	return &fwkrh.ParsedResponse{Usage: usage, StopReason: stopReason}, nil
 }
 
-// parseGenerateResponseStopReason reads finish_reason from a /generate
-// response. With sampling_params.n above 1 the response is an array; the first
-// recognized sample wins.
-func parseGenerateResponseStopReason(body []byte) fwkrh.StopReason {
+// parseGenerateResponse reads usage and finish_reason in one decode. With
+// sampling_params.n above 1 the response is an array: samples share one prompt,
+// so completion tokens are summed and the first recognized finish reason wins.
+func parseGenerateResponse(body []byte) (*request.Usage, fwkrh.StopReason, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) > 0 && trimmed[0] == '[' {
 		var samples []json.RawMessage
-		if err := json.Unmarshal(body, &samples); err == nil {
-			for _, sample := range samples {
-				reason := parseMetaInfoStopReason(sample)
-				if reason != "" && reason != fwkrh.StopReasonUnknown {
-					return reason
+		if err := json.Unmarshal(body, &samples); err != nil {
+			return nil, "", err
+		}
+		var usage *request.Usage
+		stopReason := fwkrh.StopReasonUnknown
+		haveReason := false
+		for _, sample := range samples {
+			var resp sgLangResponse
+			if err := json.Unmarshal(sample, &resp); err != nil {
+				return nil, "", err
+			}
+			if u := metaInfoUsage(resp); u != nil {
+				if usage == nil {
+					usage = u
+				} else {
+					usage.CompletionTokens += u.CompletionTokens
 				}
 			}
-			return fwkrh.StopReasonUnknown
-		}
-	}
-	return parseMetaInfoStopReason(body)
-}
-
-func parseMetaInfoStopReason(data []byte) fwkrh.StopReason {
-	var resp sgLangResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return fwkrh.StopReasonUnknown
-	}
-	return sglangStopReason(resp.MetaInfo.FinishReason)
-}
-
-func sglangStopReason(raw json.RawMessage) fwkrh.StopReason {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return ""
-	}
-	if trimmed[0] == '"' {
-		var reason string
-		if err := json.Unmarshal(trimmed, &reason); err == nil {
-			if reason == "" {
-				return ""
+			if !haveReason {
+				reason := sglangStopReason(resp.MetaInfo.FinishReason)
+				if reason != "" && reason != fwkrh.StopReasonUnknown {
+					stopReason = reason
+					haveReason = true
+				}
 			}
-			return parsers.NormalizeStopReason(reason)
 		}
-		return fwkrh.StopReasonUnknown
+		if usage != nil {
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		}
+		return usage, stopReason, nil
 	}
-	var reason struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(trimmed, &reason); err != nil {
-		return fwkrh.StopReasonUnknown
-	}
-	if reason.Type == "" {
-		return ""
-	}
-	return parsers.NormalizeStopReason(reason.Type)
-}
 
-// parseGenerateResponseUsage reads usage from a non-streaming /generate
-// response. With sampling_params.n above 1, SGLang returns an array with one
-// object per sample. The samples share one prompt, so prompt and cached tokens
-// are counted once and completion tokens are summed.
-func parseGenerateResponseUsage(body []byte) (*request.Usage, error) {
-	if trimmed := bytes.TrimSpace(body); len(trimmed) == 0 || trimmed[0] != '[' {
-		return parseMetaInfoUsage(body)
+	var resp sgLangResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, "", err
 	}
-	var samples []json.RawMessage
-	if err := json.Unmarshal(body, &samples); err != nil {
-		return nil, err
-	}
-	var usage *request.Usage
-	for _, sample := range samples {
-		u, err := parseMetaInfoUsage(sample)
-		if err != nil {
-			return nil, err
-		}
-		if u == nil {
-			continue
-		}
-		if usage == nil {
-			usage = u
-			continue
-		}
-		usage.CompletionTokens += u.CompletionTokens
-	}
-	if usage != nil {
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-	}
-	return usage, nil
+	return metaInfoUsage(resp), sglangStopReason(resp.MetaInfo.FinishReason), nil
 }
 
 func isEventStream(headers map[string]string) bool {
@@ -405,12 +363,31 @@ func parseStreamingResponse(body []byte) *fwkrh.ParsedResponse {
 	return &fwkrh.ParsedResponse{}
 }
 
-func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
-	var resp sgLangResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, err
+func sglangStopReason(raw json.RawMessage) fwkrh.StopReason {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
 	}
-	return metaInfoUsage(resp), nil
+	if trimmed[0] == '"' {
+		var reason string
+		if err := json.Unmarshal(trimmed, &reason); err == nil {
+			if reason == "" {
+				return ""
+			}
+			return parsers.NormalizeStopReason(reason)
+		}
+		return fwkrh.StopReasonUnknown
+	}
+	var reason struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(trimmed, &reason); err != nil {
+		return fwkrh.StopReasonUnknown
+	}
+	if reason.Type == "" {
+		return ""
+	}
+	return parsers.NormalizeStopReason(reason.Type)
 }
 
 func metaInfoUsage(resp sgLangResponse) *request.Usage {

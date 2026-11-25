@@ -910,6 +910,10 @@ func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
 			name:  "with_usage",
 			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15}}"),
 		},
+		{
+			name:  "with_stop_reason",
+			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}"),
+		},
 	}
 
 	for _, tt := range tests {

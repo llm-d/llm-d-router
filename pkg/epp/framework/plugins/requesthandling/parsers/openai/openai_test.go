@@ -2038,6 +2038,18 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "responses_api_incomplete_output_is_unknown",
+			body: []byte(`{
+				"object": "response",
+				"status": "incomplete",
+				"output": [{"type": "function_call"}]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonUnknown,
+			},
+		},
+		{
 			name: "responses_api_failed_output_is_unknown",
 			body: []byte(`{
 				"object": "response",
@@ -2413,12 +2425,21 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					TotalTokens:      13,
 				},
 				StreamedEvents: 1,
-				StopReason:     fwkrh.StopReasonTurnEnded,
+				StopReason:     fwkrh.StopReasonUnknown,
 			},
 		},
 		{
 			name:  "responses_api_incomplete_content_filter_is_unknown",
 			chunk: []byte("event: response.incomplete\ndata: " + `{"response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}},"type":"response.incomplete"}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonUnknown,
+			},
+		},
+		{
+			name:  "ResponsesAPI incomplete function call is unknown",
+			chunk: []byte("event: response.incomplete\ndata: " + `{"response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call"}]},"type":"response.incomplete"}`),
 			want: &fwkrh.ParsedResponse{
 				Usage:          nil,
 				StreamedEvents: 1,
@@ -2519,6 +2540,15 @@ func BenchmarkOpenAIParser_ParseResponse_Streaming(b *testing.B) {
 		{
 			name:  "with_usage",
 			chunk: []byte(`data: {"usage":{"prompt_tokens":7,"completion_tokens":10,"total_tokens":17}}`),
+		},
+		{
+			name:  "tool_call_finish",
+			chunk: []byte(`data: {"choices":[{"finish_reason":"tool_calls"}]}`),
+		},
+		{
+			name: "responses_function_call",
+			chunk: []byte("event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"type":"function_call"}}` + "\n\n" +
+				"event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_1"}}`),
 		},
 	}
 
