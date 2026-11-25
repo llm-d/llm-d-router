@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-logr/logr/funcr"
@@ -170,6 +171,49 @@ func TestProduce_LiveContextPublishes(t *testing.T) {
 
 	_, getErr := pl.getPredictedLatencyContextForRequest(request)
 	assert.NoError(t, getErr, "SLO context should be stored on the happy path")
+}
+
+// TestProduce_TimeSinceReceivedCountsAgainstTTFT verifies that TTFT headroom subtracts the time
+// from the request's arrival at the EPP until its predictions return.
+func TestProduce_TimeSinceReceivedCountsAgainstTTFT(t *testing.T) {
+	// The TTFT SLO is 100 ms. The prediction call takes 10 ms and returns a TTFT of 50 ms.
+	tests := []struct {
+		name          string
+		noReceived    bool          // the request carries no received time
+		beforeProduce time.Duration // from the request's arrival to Produce
+		wantTTFTValid bool
+		wantHeadroom  float64
+	}{
+		{name: "received time not set", noReceived: true, wantTTFTValid: true, wantHeadroom: 50},
+		{name: "elapsed time leaves headroom", beforeProduce: 30 * time.Millisecond, wantTTFTValid: true, wantHeadroom: 10},
+		{name: "elapsed time leaves exactly the predicted TTFT", beforeProduce: 40 * time.Millisecond, wantTTFTValid: false, wantHeadroom: 0},
+		{name: "elapsed time leaves too little for the endpoint", beforeProduce: 50 * time.Millisecond, wantTTFTValid: false, wantHeadroom: -10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, &mockPredictor{
+				delay:                   10 * time.Millisecond,
+				bulkPredictionsOverride: []latencypredictor.PredictionResponse{{TTFT: 50}},
+			})
+			endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
+
+			// The clock in the bubble advances only while the predictor sleeps, so the elapsed time is exact.
+			synctest.Test(t, func(t *testing.T) {
+				request := createTestInferenceRequest("req", 100, 0)
+				if !tt.noReceived {
+					request.ReceivedTimestamp = time.Now().Add(-tt.beforeProduce)
+				}
+				require.NoError(t, pl.Produce(context.Background(), request, []fwksched.Endpoint{endpoint}))
+
+				raw, ok := endpoint.Get(pl.latencyPredictionInfoDataKey)
+				require.True(t, ok)
+				info := raw.(*attrlatency.LatencyPredictionInfo)
+				assert.Equal(t, tt.wantTTFTValid, info.TTFTValid(), "TTFTValid")
+				assert.InDelta(t, tt.wantHeadroom, info.TTFTHeadroom(), 1e-9, "TTFTHeadroom")
+			})
+		})
+	}
 }
 
 func TestProduce_PredictionFailureObservability(t *testing.T) {

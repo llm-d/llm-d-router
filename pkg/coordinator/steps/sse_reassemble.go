@@ -630,10 +630,11 @@ func (r *sseReassembler) messagesResult() map[string]any {
 
 // terminated reports whether a frame signalled the end of generation: a Responses
 // terminal event (captured as responseObject), a Messages terminal event
-// (message_delta or message_stop), or, for the other shapes, a finish_reason on any
-// choice. The scan loop pairs it with the data: [DONE] marker to tell a complete
-// stream from one cut off before its end, since the Responses and Messages streams
-// close on their terminal event without a [DONE] line.
+// (message_delta or message_stop), or, for the other shapes, a finish_reason on
+// every choice, with all maxChoices choices seen. The scan loop pairs it with the
+// data: [DONE] marker to tell a complete stream from one cut off before its end,
+// since the Responses and Messages streams close on their terminal event without
+// a [DONE] line.
 func (r *sseReassembler) terminated() bool {
 	if r.shape == sseShapeResponses {
 		return r.responseObject != nil
@@ -641,12 +642,15 @@ func (r *sseReassembler) terminated() bool {
 	if r.shape == sseShapeMessages {
 		return r.messagesTerminal
 	}
+	if len(r.choices) == 0 || len(r.choices) < r.maxChoices {
+		return false
+	}
 	for _, c := range r.choices {
-		if c.hasFinish {
-			return true
+		if !c.hasFinish {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // writeEnvelope sets the top-level reply fields for the shape. The chat and text

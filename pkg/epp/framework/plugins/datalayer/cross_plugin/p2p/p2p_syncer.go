@@ -114,6 +114,7 @@ type P2PSyncer struct {
 	typedName       fwkplugin.TypedName
 	replicaID       string
 	podName         string
+	listenAddress   string
 	port            string
 	stateTTL        time.Duration
 	refreshInterval time.Duration
@@ -121,6 +122,7 @@ type P2PSyncer struct {
 	ctx       context.Context
 	stop      context.CancelFunc
 	closeOnce sync.Once
+	startMu   sync.Mutex
 	listener  net.Listener
 	server    *grpc.Server
 	source    atomic.Pointer[fwkdl.PeerSource]
@@ -274,29 +276,25 @@ func P2PSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Handle
 	if podName == "" {
 		podName = "unknown"
 	}
-	return newP2PSyncer(ctx, name, podName, ":"+cfg.Port, cfg.Port, stateTTL, refreshInterval)
+	return newP2PSyncer(ctx, name, podName, ":"+cfg.Port, cfg.Port, stateTTL, refreshInterval), nil
 }
 
-// newP2PSyncer listens on listenAddress and starts the server and the
-// maintenance loop, which stop when ctx ends. podName must match the name
-// peers discover this replica under. port is the default for peers whose
-// metadata carries none.
-func newP2PSyncer(ctx context.Context, name, podName, listenAddress, port string, stateTTL, refreshInterval time.Duration) (*P2PSyncer, error) {
-	listener, err := net.Listen("tcp", listenAddress)
-	if err != nil {
-		return nil, fmt.Errorf("p2p-syncer: listen on %s: %w", listenAddress, err)
-	}
+// newP2PSyncer returns a syncer that listens on listenAddress once Start is
+// called. The server and the maintenance loop stop when ctx ends. podName must
+// match the name peers discover this replica under. port is the default for
+// peers whose metadata carries none.
+func newP2PSyncer(ctx context.Context, name, podName, listenAddress, port string, stateTTL, refreshInterval time.Duration) *P2PSyncer {
 	ctx, stop := context.WithCancel(ctx)
 	s := &P2PSyncer{
 		typedName:       fwkplugin.TypedName{Type: P2PSyncerType, Name: name},
 		replicaID:       podName + "-" + uuid.NewString(),
 		podName:         podName,
+		listenAddress:   listenAddress,
 		port:            port,
 		stateTTL:        stateTTL,
 		refreshInterval: refreshInterval,
 		ctx:             ctx,
 		stop:            stop,
-		listener:        netutil.LimitListener(listener, maxPeers),
 		links:           map[types.NamespacedName]*peerLink{},
 		sent:            map[fwkdl.StateKey]map[string]*sentValue{},
 		specs:           map[fwkdl.StateKey]*keySpec{},
@@ -327,10 +325,30 @@ func newP2PSyncer(ctx context.Context, name, podName, listenAddress, port string
 			ClientStreams: true,
 		}},
 	}, s)
+	context.AfterFunc(ctx, s.close)
+	return s
+}
+
+// Start listens on the configured port and starts the server and the
+// maintenance loop. The data layer calls it when cross-replica sync starts, so
+// validating a configuration opens no port.
+func (s *P2PSyncer) Start(ctx context.Context) error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.listener != nil {
+		return errors.New("p2p-syncer: already started")
+	}
+	if err := s.ctx.Err(); err != nil {
+		return fmt.Errorf("p2p-syncer: closed before start: %w", err)
+	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.listenAddress)
+	if err != nil {
+		return fmt.Errorf("p2p-syncer: listen on %s: %w", s.listenAddress, err)
+	}
+	s.listener = netutil.LimitListener(listener, maxPeers)
 	go func() { _ = s.server.Serve(s.listener) }()
 	go s.maintain()
-	context.AfterFunc(ctx, s.close)
-	return s, nil
+	return nil
 }
 
 func (s *P2PSyncer) TypedName() fwkplugin.TypedName {
@@ -851,6 +869,9 @@ func (l *peerLink) close() {
 // ends.
 func (s *P2PSyncer) close() {
 	s.closeOnce.Do(func() {
+		// startMu orders close after a Start that already passed its context check.
+		s.startMu.Lock()
+		defer s.startMu.Unlock()
 		s.stop()
 		s.server.Stop()
 		s.linksMu.Lock()

@@ -416,6 +416,9 @@ type predictedLatencyCtx struct {
 
 	ttftSLO    float64
 	avgTPOTSLO float64
+	// elapsedMs is the time from the request's arrival at the EPP until its
+	// predictions returned, which counts against its TTFT SLO.
+	elapsedMs float64
 
 	predictionsForScheduling map[string]endpointPredictionResult
 
@@ -448,6 +451,15 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
 		predictionsForScheduling:       make(map[string]endpointPredictionResult),
 	}
+}
+
+// msSinceReceived returns the time from the request's arrival at the EPP to t, in
+// milliseconds. It is 0 when the request carries no received time.
+func msSinceReceived(request *fwksched.InferenceRequest, t time.Time) float64 {
+	if request.ReceivedTimestamp.IsZero() {
+		return 0
+	}
+	return float64(t.Sub(request.ReceivedTimestamp)) / float64(time.Millisecond)
 }
 
 func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksched.InferenceRequest) (*predictedLatencyCtx, error) {

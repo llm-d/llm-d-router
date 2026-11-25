@@ -38,8 +38,8 @@ import (
 // media item.
 var testECParams = map[string]any{"peer_port": 5501, "size_bytes": 1228800, "nixl_agent_metadata_b64": "bml4..."}
 
-// encodeSubRequestHash returns the modality and hash one encode fanout
-// sub-request carries. A sub-request covers exactly one entry, so
+// encodeSubRequestHash returns the modality and hash one generate-format encode
+// fanout sub-request carries. A sub-request covers exactly one entry, so
 // features.mm_hashes holds one modality key with one hash; reading whichever key
 // is present rather than assuming image is what lets a fake encoder serve audio
 // and video. The shape is asserted so an encode-side regression surfaces as a
@@ -75,6 +75,39 @@ func encodeSubRequestHash(t *testing.T, body []byte) (modality, hash string, ok 
 	return "", "", false
 }
 
+// encodeSubRequestMediaURL returns the media URL one chat-completions-format
+// encode fanout sub-request carries. Unlike the generate format, a chat
+// sub-request carries the client's own media part (NewEncoderPrimingBody)
+// rather than a coordinator-assigned hash, so the fake encoder below
+// correlates sub-requests to entries by the URL instead, which the test gives
+// a distinct value per logical image.
+func encodeSubRequestMediaURL(t *testing.T, body []byte) (url string, ok bool) {
+	t.Helper()
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Errorf("encode sub-request is not JSON: %v", err)
+		return "", false
+	}
+	messages, _ := parsed["messages"].([]any)
+	if len(messages) != 1 {
+		t.Errorf("chat encode sub-request must carry exactly one message, got %v", messages)
+		return "", false
+	}
+	turn, _ := messages[0].(map[string]any)
+	content, _ := turn["content"].([]any)
+	if len(content) != 1 {
+		t.Errorf("chat encode sub-request must carry exactly one content part, got %v", content)
+		return "", false
+	}
+	part, _ := content[0].(map[string]any)
+	url = reqcommon.MediaPartURL(part)
+	if url == "" {
+		t.Errorf("chat encode sub-request content part carries no media url: %v", part)
+		return "", false
+	}
+	return url, true
+}
+
 // newEncodePrefillGateway serves the encode and prefill phases for the flow
 // tests below. ecFor decides what one encode sub-request gets back, keyed by
 // the modality and hash it carried; nil sends an empty response, standing in
@@ -93,6 +126,41 @@ func newEncodePrefillGateway(t *testing.T, prefillBody *map[string]any, kvParams
 			resp := map[string]any{}
 			if params := ecFor(modality, hash); params != nil {
 				resp["ec_transfer_params"] = map[string]any{hash: params}
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case gateway.PhasePrefill:
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, prefillBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": kvParams})
+
+		default:
+			http.Error(w, "unexpected phase: "+phase, http.StatusNotFound)
+		}
+	}))
+}
+
+// newChatEncodePrefillGateway is newEncodePrefillGateway's chat-completions
+// counterpart: a chat sub-request carries the client's media URL rather than a
+// coordinator hash (see encodeSubRequestMediaURL), so ecFor and the response it
+// builds are keyed by that URL instead. The response key the test cares about,
+// mapping the fake descriptor back onto an mm_hash for the prefill assertions,
+// stays the caller's job: ecFor returns both the descriptor and the mm_hash to
+// publish it under.
+func newChatEncodePrefillGateway(t *testing.T, prefillBody *map[string]any, kvParams map[string]any, ecFor func(url string) (mmHash string, params map[string]any)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch phase := r.Header.Get(reqcommon.EPPProfileHeaderKey); phase {
+		case gateway.PhaseEncode:
+			body, _ := io.ReadAll(r.Body)
+			url, ok := encodeSubRequestMediaURL(t, body)
+			if !ok {
+				http.Error(w, "malformed encode sub-request", http.StatusInternalServerError)
+				return
+			}
+			resp := map[string]any{}
+			if mmHash, params := ecFor(url); params != nil {
+				resp["ec_transfer_params"] = map[string]any{mmHash: params}
 			}
 			_ = json.NewEncoder(w).Encode(resp)
 
@@ -210,6 +278,253 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	if reqCtx.KVTransferParams["block_id"] != "b1" {
 		t.Fatalf("expected KVTransferParams.block_id=b1, got %v", reqCtx.KVTransferParams["block_id"])
 	}
+}
+
+// TestEncodeToPrefill_DeduplicatesRepeatedHashes exercises the gap between the
+// request's original entry order and the compacted index the encode fanout
+// uses once same-hash duplicates drop out: entries after the duplicate sit at
+// a different position in the compacted result slice than in
+// reqCtx.MultimodalEntries, so a fix that indexed results by their slot in
+// that slice (entryIndex) rather than their original entry position would misroute
+// a later entry's response. The distinct-hash entry right after the duplicate
+// exercises that gap with a result a mixup would actually be able to swap;
+// trailing-empty keeps the no-descriptor path covered too.
+func TestEncodeToPrefill_DeduplicatesRepeatedHashes(t *testing.T) {
+	var (
+		prefillBody map[string]any
+		mu          sync.Mutex
+		requests    = make(map[string]int)
+	)
+
+	gwServer := newEncodePrefillGateway(t, &prefillBody,
+		map[string]any{"block_id": "b1"},
+		func(_, hash string) map[string]any {
+			mu.Lock()
+			requests[hash]++
+			count := requests[hash]
+			mu.Unlock()
+			if hash == "" {
+				return nil
+			}
+			// peer_port is keyed off the hash, not a shared counter, so a
+			// response that lands under the wrong hash reads as the wrong port
+			// instead of merely a duplicate count.
+			port := map[string]int{"same-hash": 5501, "distinct-hash": 5502}[hash]
+			return map[string]any{"peer_host": "10.0.0.1", "peer_port": port + count}
+		})
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "encode-prefill-duplicate-hash",
+		Model:     "llama-3",
+		TokenIDs:  []int{1, 32000, 32000, 32000, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "same-hash", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "same-hash", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "distinct-hash", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+			{Modality: reqcommon.ModalityImage, KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+	if prefillBody == nil {
+		t.Fatal("prefill was not called")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requests["same-hash"] != 1 {
+		t.Errorf("same hash encode requests = %d, want 1", requests["same-hash"])
+	}
+	if requests["distinct-hash"] != 1 {
+		t.Errorf("distinct hash encode requests = %d, want 1", requests["distinct-hash"])
+	}
+	if requests[""] != 1 {
+		t.Errorf("empty hash encode requests = %d, want 1", requests[""])
+	}
+	if reqCtx.EncodeFanout != 3 {
+		t.Errorf("encode fanout = %d, want 3", reqCtx.EncodeFanout)
+	}
+	if len(reqCtx.ECTransferParams) != 2 {
+		t.Errorf("EC transfer responses = %d, want 2", len(reqCtx.ECTransferParams))
+	}
+	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill ec_transfer_params = %T, want map", prefillBody["ec_transfer_params"])
+	}
+	if len(ecParams) != 2 {
+		t.Errorf("prefill EC transfer params = %d entries, want 2: %v", len(ecParams), ecParams)
+	}
+	sameHash, ok := ecParams["same-hash"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill EC transfer params missing same-hash: %v", ecParams)
+	}
+	if sameHash["peer_port"] != float64(5502) {
+		t.Errorf("same-hash peer_port = %v, want 5502", sameHash["peer_port"])
+	}
+	distinctHash, ok := ecParams["distinct-hash"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill EC transfer params missing distinct-hash: %v", ecParams)
+	}
+	if distinctHash["peer_port"] != float64(5503) {
+		// A mixup that indexed the compacted result slice by resultIndex
+		// rather than entryIndex would route same-hash's response here
+		// instead, reporting 5502.
+		t.Errorf("distinct-hash peer_port = %v, want 5503 (not same-hash's response)", distinctHash["peer_port"])
+	}
+	t.Logf("encode fanout=%d, same-hash requests=%d, distinct-hash requests=%d, empty-hash requests=%d, prefill ec_transfer_params=%v",
+		reqCtx.EncodeFanout, requests["same-hash"], requests["distinct-hash"], requests[""], ecParams)
+}
+
+// TestEncodeToPrefill_DeduplicatesRepeatedHashes_OpenAIFormat is
+// TestEncodeToPrefill_DeduplicatesRepeatedHashes's chat-completions
+// counterpart: the compacted-index gap it exercises comes from the dedup
+// check in Execute, which runs before buildEncodeBody picks a format, so the
+// same misrouting risk applies to the chat body path and localIdx lookup,
+// not only the generate path.
+func TestEncodeToPrefill_DeduplicatesRepeatedHashes_OpenAIFormat(t *testing.T) {
+	const (
+		sameHashURL     = "data:image/png;base64,c2FtZQ=="
+		distinctHashURL = "data:image/png;base64,ZGlzdGluY3Q="
+		emptyHashURL    = "data:image/png;base64,ZW1wdHk="
+	)
+	var (
+		prefillBody map[string]any
+		mu          sync.Mutex
+		requests    = make(map[string]int)
+	)
+
+	gwServer := newChatEncodePrefillGateway(t, &prefillBody,
+		map[string]any{"block_id": "b1"},
+		func(url string) (string, map[string]any) {
+			mu.Lock()
+			requests[url]++
+			count := requests[url]
+			mu.Unlock()
+			switch url {
+			case sameHashURL:
+				return "same-hash", map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501 + count}
+			case distinctHashURL:
+				return "distinct-hash", map[string]any{"peer_host": "10.0.0.1", "peer_port": 5502 + count}
+			default:
+				// Mirrors the generate-format test's trailing empty-hash
+				// entry: this image's encoder reports no descriptor.
+				return "", nil
+			}
+		})
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "encode-prefill-duplicate-hash-openai",
+		Model:        "llama-3",
+		OriginalPath: reqcommon.PathChatCompletions,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 32000},
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": reqcommon.RoleUser, "content": []any{
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": sameHashURL}},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": sameHashURL}},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": distinctHashURL}},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": emptyHashURL}},
+				}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "same-hash", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "same-hash", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "distinct-hash", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
+		"use_openai_format": true,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
+		"use_openai_format": true,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+	if prefillBody == nil {
+		t.Fatal("prefill was not called")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requests[sameHashURL] != 1 {
+		t.Errorf("same-hash image encode requests = %d, want 1", requests[sameHashURL])
+	}
+	if requests[distinctHashURL] != 1 {
+		t.Errorf("distinct-hash image encode requests = %d, want 1", requests[distinctHashURL])
+	}
+	if requests[emptyHashURL] != 1 {
+		t.Errorf("empty-hash image encode requests = %d, want 1", requests[emptyHashURL])
+	}
+	if reqCtx.EncodeFanout != 3 {
+		t.Errorf("encode fanout = %d, want 3", reqCtx.EncodeFanout)
+	}
+	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill ec_transfer_params = %T, want map", prefillBody["ec_transfer_params"])
+	}
+	if len(ecParams) != 2 {
+		t.Errorf("prefill EC transfer params = %d entries, want 2: %v", len(ecParams), ecParams)
+	}
+	sameHash, ok := ecParams["same-hash"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill EC transfer params missing same-hash: %v", ecParams)
+	}
+	if sameHash["peer_port"] != float64(5502) {
+		t.Errorf("same-hash peer_port = %v, want 5502", sameHash["peer_port"])
+	}
+	distinctHash, ok := ecParams["distinct-hash"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill EC transfer params missing distinct-hash: %v", ecParams)
+	}
+	if distinctHash["peer_port"] != float64(5503) {
+		// Under the same mixup TestEncodeToPrefill_DeduplicatesRepeatedHashes
+		// guards against, this would carry same-hash's response (5502) instead.
+		t.Errorf("distinct-hash peer_port = %v, want 5503 (not same-hash's response)", distinctHash["peer_port"])
+	}
+	t.Logf("encode fanout=%d, same-hash requests=%d, distinct-hash requests=%d, empty-hash requests=%d, prefill ec_transfer_params=%v",
+		reqCtx.EncodeFanout, requests[sameHashURL], requests[distinctHashURL], requests[emptyHashURL], ecParams)
 }
 
 // TestEncodeToPrefill_PartialECResponse verifies that when only some encoders

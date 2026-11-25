@@ -17,6 +17,7 @@ limitations under the License.
 package preciseprefixcache
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -29,13 +30,16 @@ import (
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -1434,4 +1438,235 @@ func gpuMissTokens(t *testing.T, pluginName, reason string) float64 {
 		}
 	}
 	return 0
+}
+
+// endpointWithMetrics returns an endpoint with the given address and metrics.
+func endpointWithMetrics(name, address string, metrics *datalayer.Metrics) scheduling.Endpoint {
+	return scheduling.NewEndpoint(&datalayer.EndpointMetadata{
+		ID:      k8stypes.NamespacedName{Name: name},
+		Address: address,
+		Port:    "8080",
+	}, metrics, nil)
+}
+
+// keyRange returns n distinct block keys starting at first.
+func keyRange(first, n int) []kvblock.BlockHash {
+	keys := make([]kvblock.BlockHash, n)
+	for i := range keys {
+		keys[i] = kvblock.BlockHash(first + i)
+	}
+	return keys
+}
+
+// Speculative keys stop at the last whole engine block the endpoint reports,
+// since the engine cannot reuse a partial block. Without a reported engine
+// block size every key is seeded.
+func TestPreRequest_SpeculativeKeysStopAtEngineBlock(t *testing.T) {
+	cases := []struct {
+		name    string
+		metrics *datalayer.Metrics
+		prompts [][]kvblock.BlockHash
+		want    [][]kvblock.BlockHash
+	}{
+		{
+			name:    "prompt shorter than one engine block",
+			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
+		},
+		{
+			name:    "partial engine block at the tail",
+			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 6)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 4)},
+		},
+		{
+			name:    "whole engine blocks",
+			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 8)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 8)},
+		},
+		{
+			name:    "engine block not a multiple of the router block",
+			metrics: &datalayer.Metrics{CacheBlockSize: 40},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 4)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 2)},
+		},
+		{
+			name:    "engine block smaller than the router block",
+			metrics: &datalayer.Metrics{CacheBlockSize: testBlockSize / 2},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 3)},
+		},
+		{
+			name:    "engine block size not scraped yet",
+			metrics: &datalayer.Metrics{},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 3)},
+		},
+		{
+			name:    "no metrics",
+			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 3)},
+		},
+		{
+			name:    "each prompt stops at its own engine block",
+			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
+			prompts: [][]kvblock.BlockHash{keyRange(1, 6), keyRange(100, 3)},
+			want:    [][]kvblock.BlockHash{keyRange(1, 4)},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			var added [][]kvblock.BlockHash
+			idx := &fakeKVBlockIndex{
+				addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, _ []kvblock.PodEntry) error {
+					added = append(added, keys)
+					return nil
+				},
+			}
+			p := newProducerForPreRequest(ctx, true, idx)
+			endpoint := endpointWithMetrics("pod-a", "10.0.0.1", tc.metrics)
+			req := &scheduling.InferenceRequest{RequestID: "req-engine-block"}
+			p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+				perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: tc.prompts},
+			})
+
+			require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", endpoint)))
+
+			assert.Equal(t, tc.want, added)
+			cached := p.speculativeCache.Get(req.RequestID)
+			if tc.want == nil {
+				assert.Nil(t, cached)
+				return
+			}
+			require.NotNil(t, cached)
+			assert.Equal(t, map[string][][]kvblock.BlockHash{"10.0.0.1:8080": tc.want}, cached.Value().perPodKeys)
+		})
+	}
+}
+
+// P/D targets share one format's keys, but each stops at its own engine block.
+func TestPreRequest_PrefillProfile_EngineBlockPerTarget(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	added := map[string][]kvblock.BlockHash{}
+	idx := &fakeKVBlockIndex{
+		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+			added[entries[0].PodIdentifier] = keys
+			return nil
+		},
+	}
+	p := newProducerForPreRequest(ctx, true, idx)
+	p.seedDecode = true
+
+	keys := keyRange(1, 6)
+	req := &scheduling.InferenceRequest{RequestID: "req-pd-engine-block"}
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {keys}},
+	})
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{
+				endpointWithMetrics("pod-a", "10.0.0.1", &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize}),
+			}},
+			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{
+				endpointWithMetrics("pod-b", "10.0.0.2", nil),
+			}},
+		},
+	}
+
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assert.Equal(t, map[string][]kvblock.BlockHash{
+		"10.0.0.1:8080": keyRange(1, 4),
+		"10.0.0.2:8080": keys,
+	}, added)
+	cached := p.speculativeCache.Get(req.RequestID)
+	require.NotNil(t, cached)
+	assert.Equal(t, map[string][][]kvblock.BlockHash{
+		"10.0.0.1:8080": {keyRange(1, 4)},
+		"10.0.0.2:8080": {keys},
+	}, cached.Value().perPodKeys)
+}
+
+// The per-target trace log shows how many speculative keys the engine block
+// cut, so a target with every key dropped is distinguishable from speculative
+// indexing being off.
+func TestPreRequest_LogsSpeculativeKeysDroppedAtEngineBlock(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := log.IntoContext(t.Context(), logging.NewTestLoggerWithWriter(&buf))
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
+	endpoint := endpointWithMetrics("pod-a", "10.0.0.1", &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize})
+	req := &scheduling.InferenceRequest{RequestID: "req-engine-block-log"}
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {keyRange(1, 6), keyRange(10, 3)}},
+	})
+
+	require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", endpoint)))
+
+	out := buf.String()
+	assert.Contains(t, out, `"pod": "10.0.0.1:8080"`)
+	assert.Contains(t, out, `"engineBlockSize": 64`)
+	assert.Contains(t, out, `"keptKeys": 4`)
+	assert.Contains(t, out, `"droppedKeys": 5`)
+}
+
+// A repeat of a routed prompt matches only the tokens the engine can reuse:
+// whole engine blocks of the endpoint that served it.
+func TestProduceThenPreRequest_SpeculativeMatchStopsAtEngineBlock(t *testing.T) {
+	const name = "engine-block"
+	cases := []struct {
+		promptTokens int
+		wantBlocks   int
+	}{
+		{promptTokens: 3 * testBlockSize, wantBlocks: 0},
+		{promptTokens: 6*testBlockSize + 4, wantBlocks: 4},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%d tokens", tc.promptTokens), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+			t.Cleanup(cancel)
+
+			idxCfg, err := kvcache.NewDefaultConfig()
+			require.NoError(t, err)
+			p, err := New(ctx, name, PluginConfig{
+				TokenProcessorConfig: &kvblock.TokenProcessorConfig{BlockSizeTokens: testBlockSize},
+				IndexerConfig:        idxCfg,
+				KVEventsConfig:       kvevents.DefaultConfig(),
+				SpeculativeIndexing:  true,
+				SpeculativeTTL:       "1m",
+			})
+			require.NoError(t, err)
+
+			tokens := make([]uint32, tc.promptTokens)
+			for i := range tokens {
+				tokens[i] = uint32(i + 1)
+			}
+			request := func(id string) *scheduling.InferenceRequest {
+				return &scheduling.InferenceRequest{
+					RequestID:   id,
+					TargetModel: "m",
+					Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
+						Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens}},
+					}},
+				}
+			}
+			metrics := &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize}
+
+			first := endpointWithMetrics("pod-a", "10.0.0.1", metrics)
+			routed := request("routed")
+			require.NoError(t, p.Produce(ctx, routed, []scheduling.Endpoint{first}))
+			require.NoError(t, p.PreRequest(ctx, routed, primaryOnly("default", first)))
+
+			repeat := endpointWithMetrics("pod-a", "10.0.0.1", metrics)
+			require.NoError(t, p.Produce(ctx, request("repeat"), []scheduling.Endpoint{repeat}))
+			raw, ok := repeat.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name))
+			require.True(t, ok)
+			info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantBlocks, info.CachedBlockCount())
+		})
+	}
 }

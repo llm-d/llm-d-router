@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,7 +28,10 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 func TestCollectorsIncludesAllMetrics(t *testing.T) {
@@ -57,6 +61,7 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"DedupRemovedHashesForwarded", DedupRemovedHashesForwarded},
 		{"KVEventStoresSkipped", KVEventStoresSkipped},
 		{"KVEventRemovalsSkipped", KVEventRemovalsSkipped},
+		{"KVEventUnknownTagsSkipped", KVEventUnknownTagsSkipped},
 		{"SubscriberActive", SubscriberActive},
 		{"SubscriberReconnections", SubscriberReconnections},
 		{"MessagesReceived", MessagesReceived},
@@ -79,7 +84,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	// subsystem with the kv_cache_events prefix.
 	reg := prometheus.NewRegistry()
 	kvevents := []prometheus.Collector{
-		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived,
 		ZMQErrors, LiveOnlySubscribers, SnapshotLoadDuration, PoolQueueDepth, PoolCapacity,
 	}
@@ -96,6 +101,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	SnapshotLoadDuration.Observe(1)
 	KVEventStoresSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
 	KVEventRemovalsSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
+	KVEventUnknownTagsSkipped.WithLabelValues("BlockInactive").Inc()
 	PoolQueueDepth.Set(3)
 	PoolCapacity.Set(4)
 
@@ -118,6 +124,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 		"llm_d_epp_kv_cache_events_snapshot_load_duration_seconds",
 		"llm_d_epp_kv_cache_events_stores_skipped_total",
 		"llm_d_epp_kv_cache_events_removals_skipped_total",
+		"llm_d_epp_kv_cache_events_unknown_tags_skipped_total",
 		"llm_d_epp_kv_cache_events_pool_queue_depth",
 		"llm_d_epp_kv_cache_events_pool_capacity",
 	} {
@@ -167,6 +174,49 @@ func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
 	}
 
 	CleanupSubscriber("pod-b")
+}
+
+func TestRecordUnknownTagSkipped(t *testing.T) {
+	skipped := func(label string) float64 {
+		return testutil.ToFloat64(KVEventUnknownTagsSkipped.WithLabelValues(label))
+	}
+
+	const tag = "BlockInactive"
+	before := skipped(tag)
+	for range 2 {
+		if got := RecordUnknownTagSkipped(tag); got != tag {
+			t.Fatalf("RecordUnknownTagSkipped(%q) = %q, want the tag", tag, got)
+		}
+	}
+	if got := skipped(tag) - before; got != 2 {
+		t.Errorf("counter for %q rose by %v, want 2", tag, got)
+	}
+
+	// The cap is filled before the empty tag is recorded: an empty tag keeps
+	// its own label when the limiter folds every other new tag.
+	for i := range maxUnknownTagLabelValues {
+		RecordUnknownTagSkipped("Tag" + strconv.Itoa(i))
+	}
+	if got := RecordUnknownTagSkipped("PastTheCap"); got != metricsutil.OverflowValue {
+		t.Errorf("RecordUnknownTagSkipped() past the cap = %q, want %q", got, metricsutil.OverflowValue)
+	}
+
+	emptyBefore := skipped(emptyTagLabel)
+	if got := RecordUnknownTagSkipped(""); got != emptyTagLabel {
+		t.Errorf("RecordUnknownTagSkipped(\"\") = %q, want %q", got, emptyTagLabel)
+	}
+	if got := skipped(emptyTagLabel) - emptyBefore; got != 1 {
+		t.Errorf("counter for %q rose by %v, want 1", emptyTagLabel, got)
+	}
+
+	// Prometheus rejects label values that are not valid UTF-8.
+	overflowBefore := skipped(metricsutil.OverflowValue)
+	if got := RecordUnknownTagSkipped("\xff\xfe"); got != metricsutil.OverflowValue {
+		t.Errorf("RecordUnknownTagSkipped() for invalid UTF-8 = %q, want %q", got, metricsutil.OverflowValue)
+	}
+	if got := skipped(metricsutil.OverflowValue) - overflowBefore; got != 1 {
+		t.Errorf("counter for %q rose by %v, want 1", metricsutil.OverflowValue, got)
+	}
 }
 
 func TestLogMetrics(t *testing.T) {
