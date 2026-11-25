@@ -227,7 +227,7 @@ func (l *httpSequentialPDLeg) runPrefill(prefillCtx context.Context, prefillHand
 func (l *httpSequentialPDLeg) completePrefill(prefillCtx context.Context, w http.ResponseWriter, r *http.Request, pw *bufferedResponseWriter, prefillErr error, prefillSpan trace.Span) bool {
 	logger := log.FromContext(r.Context())
 	if prefillErr != nil {
-		prefillSpan.End()
+		defer prefillSpan.End()
 		// The reverse proxy also aborts the prefill body copy when the client
 		// disconnects, which is not a prefill failure.
 		if prefillCtx.Err() != nil {

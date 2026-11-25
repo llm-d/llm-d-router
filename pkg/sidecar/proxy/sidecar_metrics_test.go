@@ -1651,6 +1651,9 @@ var sequentialPrefillHandlers = map[string]func(s *Server, w http.ResponseWriter
 func TestSequentialPrefillConnectionClosedMidBody(t *testing.T) {
 	for name, handle := range sequentialPrefillHandlers {
 		t.Run(name, func(t *testing.T) {
+			spans := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
 			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				// Declaring more than is written makes the server close the
 				// connection after the partial body.
@@ -1681,6 +1684,18 @@ func TestSequentialPrefillConnectionClosedMidBody(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
 			assert.Equal(t, "server_error", errBody.Error.Type)
 			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+
+			// Shared storage does not start a prefill span.
+			if name == "p2p" {
+				var prefillSpan sdktrace.ReadOnlySpan
+				for _, span := range spans.Ended() {
+					if span.Name() == "prefill" {
+						prefillSpan = span
+					}
+				}
+				require.NotNil(t, prefillSpan, "the prefill span must end")
+				assert.Equal(t, codes.Error, prefillSpan.Status().Code)
+			}
 		})
 	}
 }
