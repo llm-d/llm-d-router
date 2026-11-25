@@ -146,11 +146,13 @@ Requests answered locally by a responder, such as `GET /v1/models`, are not coun
 
 The `api_surface` label identifies generation APIs with the values `messages`,
 `chat_completions`, `completions`, `responses`, `vllm_generate`, and `sglang_generate`.
+`vllm_generate` also covers the gRPC methods `vllm.Inference/Generate` and
+`vllm.Inference/GenerateStream`, and `sglang_generate` covers `sglang.api.v1.SglangService/Generate`.
 Responses item reads (`/v1/responses/{id}`), auxiliary token-count and render routes,
-vLLM gRPC `Generate`, Vertex AI paths, and missing or unrecognized paths use `unknown`. EPP captures
-the surface from the incoming path before routing can rewrite it. The corresponding
-request span carries `llm_d.epp.api_surface`, including requests without tools and
-requests rejected during parsing.
+`vllm.grpc.engine.VllmEngine` gRPC methods, Vertex AI paths, and missing or unrecognized paths
+use `unknown`. EPP captures the surface from the incoming path before routing can rewrite it.
+The corresponding request span carries `llm_d.epp.api_surface`, including requests without
+tools and requests rejected during parsing.
 
 Request volume and errors per second can be queried separately by surface:
 
