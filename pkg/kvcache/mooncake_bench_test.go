@@ -25,80 +25,98 @@ import (
 	"github.com/llm-d/llm-d-router/test/utils/mooncake"
 )
 
-// BenchmarkMooncakeReplay replays the Mooncake trace against the in-memory
-// index from concurrent goroutines, after loading every worker's resident
-// blocks. QueryOnly matches each turn's keys. MixedOverload also applies the
-// turn's stores and evictions, as KV events would. It reports block_ops/s over
+// BenchmarkMooncakeReplay replays the Mooncake trace against each backend
+// from concurrent goroutines, after loading every worker's resident blocks.
+// QueryOnly matches each turn's keys. MixedOverload also applies the turn's
+// stores and evictions, as KV events would. It reports block_ops/s over
 // Dynamo's denominators (mooncake.Replay). Set mooncake.TraceEnv to run it.
 func BenchmarkMooncakeReplay(b *testing.B) {
 	r := mooncake.Load(b)
 	ctx := benchContext()
-	inner, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 23, PodCacheSize: mooncake.Workers})
-	if err != nil {
-		b.Fatal(err)
-	}
-	idx := kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(inner))
-	matcher := benchMatcher(b, idx)
 
 	workers := make([][]kvblock.PodEntry, mooncake.Workers)
 	for w := range workers {
 		workers[w] = []kvblock.PodEntry{{PodIdentifier: fmt.Sprintf("10.0.0.%d:8000", w), DeviceTier: "gpu"}}
 	}
-	type turn struct {
-		query, stored, removed []kvblock.BlockHash
-		entries                []kvblock.PodEntry
-	}
-	turns := make([]turn, len(r.Turns))
-	for i, t := range r.Turns {
-		turns[i] = turn{
-			mooncake.Convert[kvblock.BlockHash](t.Query),
-			mooncake.Convert[kvblock.BlockHash](t.Stored),
-			mooncake.Convert[kvblock.BlockHash](t.Removed),
-			workers[t.Worker],
-		}
-		if warm := mooncake.Convert[kvblock.BlockHash](t.Warm); len(warm) > 0 {
-			if err := inner.Add(ctx, warm, warm, turns[i].entries); err != nil {
-				b.Fatal(err)
-			}
-		}
+
+	backends := []struct {
+		name string
+		new  func() (kvblock.Index, error)
+	}{
+		{"in-memory", func() (kvblock.Index, error) {
+			return kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 23, PodCacheSize: mooncake.Workers})
+		}},
+		{"dense", func() (kvblock.Index, error) {
+			return kvblock.NewDenseMemoryIndex(&kvblock.DenseMemoryIndexConfig{Size: "2GiB"})
+		}},
 	}
 
-	for _, mode := range []string{"QueryOnly", "MixedOverload"} {
-		b.Run(mode, func(b *testing.B) {
-			blocks := r.QueryBlocks
-			if mode == "MixedOverload" {
-				blocks = r.EventBlocks
+	for _, backend := range backends {
+		b.Run(backend.name, func(b *testing.B) {
+			inner, err := backend.new()
+			if err != nil {
+				b.Fatal(err)
 			}
-			var goroutines atomic.Int64
-			b.ReportAllocs()
-			b.RunParallel(func(pb *testing.PB) {
-				// Each goroutine walks the turns from its own offset.
-				i := int(goroutines.Add(1)) * 9973
-				for pb.Next() {
-					i++
-					t := &turns[i%len(turns)]
-					if _, err := matcher.MatchBlockKeys(ctx, t.query, nil); err != nil {
-						b.Error(err)
-						return
-					}
-					if mode == "QueryOnly" {
-						continue
-					}
-					if len(t.stored) > 0 {
-						if err := idx.Add(ctx, t.stored, t.stored, t.entries); err != nil {
-							b.Error(err)
-							return
-						}
-					}
-					if len(t.removed) > 0 {
-						if err := idx.Evict(ctx, kvblock.EngineKey, t.removed, t.entries); err != nil {
-							b.Error(err)
-							return
-						}
+			idx := kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(inner))
+			matcher := benchMatcher(b, idx)
+
+			type turn struct {
+				query, stored, removed []kvblock.BlockHash
+				entries                []kvblock.PodEntry
+			}
+			turns := make([]turn, len(r.Turns))
+			for i, t := range r.Turns {
+				turns[i] = turn{
+					mooncake.Convert[kvblock.BlockHash](t.Query),
+					mooncake.Convert[kvblock.BlockHash](t.Stored),
+					mooncake.Convert[kvblock.BlockHash](t.Removed),
+					workers[t.Worker],
+				}
+				if warm := mooncake.Convert[kvblock.BlockHash](t.Warm); len(warm) > 0 {
+					if err := inner.Add(ctx, warm, warm, turns[i].entries); err != nil {
+						b.Fatal(err)
 					}
 				}
-			})
-			b.ReportMetric(blocks*float64(b.N)/b.Elapsed().Seconds(), "block_ops/s")
+			}
+
+			for _, mode := range []string{"QueryOnly", "MixedOverload"} {
+				b.Run(mode, func(b *testing.B) {
+					blocks := r.QueryBlocks
+					if mode == "MixedOverload" {
+						blocks = r.EventBlocks
+					}
+					var goroutines atomic.Int64
+					b.ReportAllocs()
+					b.RunParallel(func(pb *testing.PB) {
+						// Each goroutine walks the turns from its own offset.
+						i := int(goroutines.Add(1)) * 9973
+						for pb.Next() {
+							i++
+							t := &turns[i%len(turns)]
+							if _, err := matcher.MatchBlockKeys(ctx, t.query, nil); err != nil {
+								b.Error(err)
+								return
+							}
+							if mode == "QueryOnly" {
+								continue
+							}
+							if len(t.stored) > 0 {
+								if err := idx.Add(ctx, t.stored, t.stored, t.entries); err != nil {
+									b.Error(err)
+									return
+								}
+							}
+							if len(t.removed) > 0 {
+								if err := idx.Evict(ctx, kvblock.EngineKey, t.removed, t.entries); err != nil {
+									b.Error(err)
+									return
+								}
+							}
+						}
+					})
+					b.ReportMetric(blocks*float64(b.N)/b.Elapsed().Seconds(), "block_ops/s")
+				})
+			}
 		})
 	}
 }
