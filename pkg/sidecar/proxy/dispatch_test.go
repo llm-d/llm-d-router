@@ -1310,21 +1310,26 @@ func TestServer_DecoderOnlyPassthroughRefusesPythonOnlyBody(t *testing.T) {
 // The body is read without decoding when it cannot name kv_transfer_params,
 // so a key spelled with \u escapes must still be decoded and its flags dropped.
 func TestServer_DecoderOnlyPassthroughDropsFlagsUnderEscapedKey(t *testing.T) {
-	s := NewProxy(Config{Port: "8000"})
-	s.allowlistValidator = &AllowlistValidator{}
-	s.dataParallelProxies = make(map[string]http.Handler)
-	var forwarded string
-	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		forwarded = string(raw)
-	})
+	// One escape from each of the U+005x, U+006x, and U+007x ranges.
+	for _, key := range []string{`kv\u005ftransfer_params`, `\u006bv_transfer_params`, `kv_\u0074ransfer_params`} {
+		t.Run(key, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			var forwarded string
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				forwarded = string(raw)
+			})
 
-	const body = `{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true}}`
-	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			body := `{"model":"m","messages":[],"` + key + `":{"do_remote_prefill":true}}`
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
 
-	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
 
-	assert.JSONEq(t, `{"messages":[],"model":"m"}`, forwarded)
+			assert.JSONEq(t, `{"messages":[],"model":"m"}`, forwarded)
+		})
+	}
 }
 
 // The data-parallel proxy forwards a request with a source before

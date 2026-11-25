@@ -339,9 +339,8 @@ func deleteCallerPDFlags(body map[string]any) bool {
 
 // decoderOnlyRequest returns r with deleteCallerPDFlags applied,
 // re-encoding the body only when it changed. Responses bodies go through
-// readJSONBody's guards. Any other body Go cannot parse is forwarded as sent,
-// for the engine to reject, unless pythonOnlyJSON reports that the engine would
-// parse it and read the flags.
+// readJSONBody's guards. Any other body that can name kv_transfer_params and
+// does not decode is refused, since the engine's parser accepts bodies Go rejects.
 func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p p2pRouting, apiType reqcommon.APIType) (*http.Request, bool) {
 	body := p2p.body
 	if body == nil {
@@ -355,7 +354,7 @@ func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p 
 		case r.Body == nil:
 			return r, true
 		default:
-			raw, err := io.ReadAll(r.Body)
+			raw, err := readBody(r)
 			_ = r.Body.Close()
 			if err != nil {
 				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("failed to read request body: %w", err)); writeErr != nil {
@@ -367,14 +366,11 @@ func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p 
 			// A key spelled with \u escapes, or a UTF-16 or UTF-32 body, which
 			// always holds a NUL byte, has no literal key to find.
 			if !bytes.Contains(raw, []byte(reqcommon.FieldKVTransferParams)) &&
-				!bytes.Contains(raw, []byte(`\u`)) && !bytes.Contains(raw, []byte{0}) {
+				!escapesKeyChar(raw) && !bytes.Contains(raw, []byte{0}) {
 				return r, true
 			}
 			// No inspected fields, so a number Go cannot hold does not hide the flags.
 			if body, err = reqcommon.DecodeRequestBody(raw, nil); err != nil {
-				if !pythonOnlyJSON(raw) {
-					return r, true
-				}
 				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("%w: %w", errInvalidJSON, err)); writeErr != nil {
 					log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
 				}
@@ -395,12 +391,31 @@ func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p 
 	return cloneRequestWithBody(r.Context(), r, raw), true
 }
 
-// pythonOnlyJSON reports whether raw may be a body Go rejects but the engine's
-// json.loads accepts: one with NaN or Infinity, a UTF-8 byte order mark, or a
-// UTF-16 or UTF-32 encoding.
-func pythonOnlyJSON(raw []byte) bool {
-	return bytes.Contains(raw, []byte("NaN")) || bytes.Contains(raw, []byte("Infinity")) ||
-		bytes.HasPrefix(raw, []byte("\xef\xbb\xbf")) || bytes.Contains(raw, []byte{0})
+// escapesKeyChar reports whether raw holds a \u escape of a character in
+// kv_transfer_params. Those characters are U+005F and U+0061 to U+007A.
+func escapesKeyChar(raw []byte) bool {
+	for {
+		i := bytes.Index(raw, []byte(`\u00`))
+		if i < 0 || i+4 >= len(raw) {
+			return false
+		}
+		if c := raw[i+4]; c == '5' || c == '6' || c == '7' {
+			return true
+		}
+		raw = raw[i+4:]
+	}
+}
+
+// readBody reads r.Body into one buffer sized from r.ContentLength. The cap
+// stops a false Content-Length from reserving a large buffer.
+func readBody(r *http.Request) ([]byte, error) {
+	const maxPresize = 4 << 20
+	if r.ContentLength <= 0 || r.ContentLength > maxPresize {
+		return io.ReadAll(r.Body)
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, r.ContentLength+bytes.MinRead))
+	_, err := buf.ReadFrom(r.Body)
+	return buf.Bytes(), err
 }
 
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {

@@ -262,7 +262,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
 		// dataParallelHandler and the decoder passthrough forward r as given, so
-		// a caller's P/D flags are removed here for every branch below. An
+		// a caller's P/D flags are removed here for every HTTP branch below. An
 		// unknown data-parallel replica is refused without reading the body.
 		dataParallelTarget := r.Header.Get(routing.DataParallelEndpointHeader)
 		unknownReplica := s.forwardDataParallel && dataParallelTarget != "" && s.dataParallelProxies[dataParallelTarget] == nil

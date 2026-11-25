@@ -22,9 +22,11 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/funcr"
@@ -629,5 +631,20 @@ func TestRedirectEncodedInferencePathUsesServedPaths(t *testing.T) {
 				t.Errorf("status = %d, want %d", rr.Code, tt.wantCode)
 			}
 		})
+	}
+}
+
+// A false Content-Length must not size the buffer: math.MaxInt64 overflows it.
+func TestReadBodyIgnoresOversizedContentLength(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+	r.ContentLength = math.MaxInt64
+
+	raw, err := readBody(r)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"model":"m"}` {
+		t.Errorf("readBody = %q", raw)
 	}
 }
