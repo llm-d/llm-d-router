@@ -369,6 +369,7 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
+		PodIdentifier:  z.podIdentifier,
 		resync:         z.resyncing && z.resyncOpen,
 	}
 	// carried is bound inside the branch on purpose. Taking &sc directly makes

@@ -1215,3 +1215,77 @@ func TestZMQSubscriber_MalformedFrameIncrementsDroppedMetric(t *testing.T) {
 		return readCounterVec(t, metrics.EventsDropped, podID, "malformed_frame") >= droppedBefore+1
 	}, 5*time.Second, 50*time.Millisecond)
 }
+
+func TestZMQSubscriber_DecodeErrorSeriesCleanedUpOnRemove(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+
+	const (
+		podID          = "default/pod-decode-cleanup"
+		sourceEndpoint = "10.0.9.5:8000"
+	)
+	t.Cleanup(func() { metrics.CleanupSubscriber(podID) })
+
+	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
+	require.NoError(t, err)
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
+	pool.Start(ctx)
+	defer pool.Shutdown(ctx)
+
+	pub := zmq4.NewPub(ctx)
+	pubEndpoint := listenEphemeral(t, pub)
+	defer pub.Close()
+	_, replayEndpoint := startReplayBuffer(t, ctx)
+
+	subManager := kvevents.NewSubscriberManager(pool)
+	defer subManager.Shutdown(ctx)
+	require.NoError(t, subManager.EnsureSubscriber(
+		ctx, podID, sourceEndpoint, pubEndpoint, replayEndpoint, "", "kv@", true))
+
+	topic := []byte("kv@" + sourceEndpoint + "@TestModel")
+	require.Eventually(t, func() bool {
+		if readCounterVec(t, metrics.EventsDropped, podID, "decode_error") >= 1 {
+			return true
+		}
+		_ = pub.Send(zmq4.NewMsgFrom(topic, seqFrame(0), []byte{0xff}))
+		return false
+	}, 5*time.Second, 20*time.Millisecond)
+
+	gatherDropped := func(tb require.TestingT) map[string]map[string]float64 {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(metrics.EventsDropped)
+		mfs, gatherErr := reg.Gather()
+		require.NoError(tb, gatherErr)
+		got := make(map[string]map[string]float64)
+		for _, mf := range mfs {
+			for _, m := range mf.GetMetric() {
+				var labelPod, labelReason string
+				for _, l := range m.GetLabel() {
+					switch l.GetName() {
+					case "pod_identifier":
+						labelPod = l.GetValue()
+					case "reason":
+						labelReason = l.GetValue()
+					}
+				}
+				if got[labelPod] == nil {
+					got[labelPod] = make(map[string]float64)
+				}
+				got[labelPod][labelReason] = m.GetCounter().GetValue()
+			}
+		}
+		return got
+	}
+
+	series := gatherDropped(t)
+	assert.Equal(t, 1.0, series[podID]["decode_error"])
+	assert.Empty(t, series[sourceEndpoint])
+
+	require.True(t, subManager.RemoveSubscriber(ctx, podID))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Empty(c, gatherDropped(c)[podID])
+	}, 5*time.Second, 20*time.Millisecond)
+}

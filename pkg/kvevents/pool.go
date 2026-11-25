@@ -503,9 +503,10 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 
 	podID, modelName, batch, err := p.decode(ctx, msg)
 	if err != nil {
-		// Attribute decode drops only to a subscriber-bound endpoint; wire topics
-		// on malformed frames are untrusted and not cleaned up by CleanupSubscriber.
-		dropPodID := msg.SourceEndpoint
+		// Attribute decode drops to the subscriber's pod identifier, or "unknown"
+		// when unset, so CleanupSubscriber removes the series and untrusted
+		// wire topics do not mint unbounded labels.
+		dropPodID := msg.PodIdentifier
 		if dropPodID == "" {
 			dropPodID = "unknown"
 		}

@@ -1281,7 +1281,7 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
 | `llm_d_epp_kv_cache_events_sequence_gaps_total` | Counter | `pod_identifier` | Sequence gaps detected on the ZMQ event stream (`seq > lastSeq + 1`). |
 | `llm_d_epp_kv_cache_events_missed_total` | Counter | `pod_identifier` | Missed KV-event sequence numbers inferred from detected gaps. |
-| `llm_d_epp_kv_cache_events_dropped_total` | Counter | `pod_identifier`, `reason` | KV-event messages dropped before indexing (`malformed_frame`, `replay_cooldown`, `decode_error`). Decode failures without a subscriber-bound `SourceEndpoint` report `pod_identifier="unknown"`. |
+| `llm_d_epp_kv_cache_events_dropped_total` | Counter | `pod_identifier`, `reason` | KV-event messages dropped before indexing (`malformed_frame`, `replay_cooldown`, `decode_error`). Decode failures without a subscriber-bound `PodIdentifier` report `pod_identifier="unknown"`. |
 | `llm_d_epp_kv_cache_events_processing_lag_seconds` | Histogram | - | Elapsed time from the engine batch timestamp (`EventBatch.Timestamp > 0`) to event-pool processing, clamped at zero under clock skew. |
 
 A vLLM release can publish an event type that the router's vLLM adapter does not know. The adapter

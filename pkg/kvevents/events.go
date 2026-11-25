@@ -73,6 +73,8 @@ type RawMessage struct {
 	Payload []byte
 	// SourceEndpoint is the serving endpoint associated with the subscriber.
 	SourceEndpoint string
+	// PodIdentifier is the subscriber key passed to EnsureSubscriber and CleanupSubscriber.
+	PodIdentifier string
 	// reset clears the message's pod before later messages on the same queue.
 	reset bool
 	// retire marks a final reset: the source endpoint has no subscribers left.

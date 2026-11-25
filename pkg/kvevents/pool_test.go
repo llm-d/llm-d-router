@@ -2794,23 +2794,25 @@ func TestProcessRawMessage_DecodeErrorIncrementsDroppedMetric(t *testing.T) {
 	pool, _, _ := newTestPool(t, 16)
 	pool.adapter = failingParseAdapter{}
 
-	const pod = "10.0.9.1:8000"
+	const pod = "default/pod-a"
 	t.Cleanup(func() { metrics.CleanupSubscriber(pod) })
 	before := counterVecValue(t, metrics.EventsDropped, pod, "decode_error")
 	pool.processRawMessage(ctx, &RawMessage{
 		Topic:          "kv@10.0.9.1:8000@test-model",
 		Payload:        []byte{0xff},
-		SourceEndpoint: pod,
+		SourceEndpoint: "10.0.9.1:8000",
+		PodIdentifier:  pod,
 	})
 	after := counterVecValue(t, metrics.EventsDropped, pod, "decode_error")
 	assert.Equal(t, before+1, after)
 
-	// Without a subscriber-bound SourceEndpoint, decode failures must fall back
-	// to "unknown" rather than minting series from untrusted wire topics.
+	// Without a subscriber-bound PodIdentifier, decode failures fall back to
+	// "unknown" so series do not leak from SourceEndpoint or wire topics.
 	unknownBefore := counterVecValue(t, metrics.EventsDropped, "unknown", "decode_error")
 	pool.processRawMessage(ctx, &RawMessage{
-		Topic:   "kv@untrusted-wire-pod:8000@test-model",
-		Payload: []byte{0xff},
+		Topic:          "kv@untrusted-wire-pod:8000@test-model",
+		Payload:        []byte{0xff},
+		SourceEndpoint: "10.0.9.2:8000",
 	})
 	assert.Equal(t, unknownBefore+1, counterVecValue(t, metrics.EventsDropped, "unknown", "decode_error"))
 
@@ -2818,13 +2820,19 @@ func TestProcessRawMessage_DecodeErrorIncrementsDroppedMetric(t *testing.T) {
 	reg.MustRegister(metrics.EventsDropped)
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
+	forbidden := map[string]struct{}{
+		"10.0.9.1:8000":           {},
+		"10.0.9.2:8000":           {},
+		"untrusted-wire-pod:8000": {},
+		"pod-shard":               {},
+		"wire-pod-from-parse":     {},
+	}
 	for _, mf := range mfs {
 		for _, m := range mf.GetMetric() {
 			for _, l := range m.GetLabel() {
 				if l.GetName() == "pod_identifier" {
-					assert.NotEqual(t, "untrusted-wire-pod:8000", l.GetValue())
-					assert.NotEqual(t, "pod-shard", l.GetValue())
-					assert.NotEqual(t, "wire-pod-from-parse", l.GetValue())
+					_, bad := forbidden[l.GetValue()]
+					assert.False(t, bad, "unexpected pod_identifier label %q", l.GetValue())
 				}
 			}
 		}
