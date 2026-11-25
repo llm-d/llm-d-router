@@ -93,8 +93,8 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 
 	var matches map[string]PodMatch
 	var err error
-	if k.keyWalker != nil {
-		matches, err = matchWalk(ctx, k.keyWalker, keys, k.tierScoring, podFilter)
+	if k.keyWalker != nil && k.ordinalResolver != nil {
+		matches, err = matchWalk(ctx, k.keyWalker, k.ordinalResolver, keys, k.tierScoring, podFilter)
 	} else {
 		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierScoring, podFilter)
 	}
@@ -127,14 +127,18 @@ func maxMatchedBlocks(matches map[string]PodMatch) int {
 }
 
 // matchWalk feeds the accumulator from an ordered index walk. The walk ends
-// at the first key without entries or once no chain is alive.
-func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash,
-	ts tierScoring, filter sets.Set[string],
+// at the first key without entries or once no chain is alive. The resolver
+// inverts the pod filter and the configured tier weights into ordinal space
+// once, so the per-entry loop compares integers only; pod and tier names are
+// resolved back at result time.
+func matchWalk(ctx context.Context, walker kvblock.KeyWalker, resolver kvblock.OrdinalResolver,
+	keys []kvblock.BlockHash, ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
 	acc := acquireAccumulator(ts, filter)
 	defer releaseAccumulator(acc)
+	acc.startWalk(resolver)
 
-	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.EntryRef) bool {
+	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.WalkEntry) bool {
 		return found && len(entries) > 0 && acc.key(entries)
 	})
 	if err != nil {
@@ -157,7 +161,8 @@ func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockH
 
 // matchMaterialized feeds the accumulator from a Lookup result, walking keys
 // in order and stopping at the first key without entries. Pod and tier
-// ordinals are assigned per call, since materialized entries carry none.
+// ordinals are assigned per call, since materialized entries carry none; the
+// filter and tier weights stay name-keyed on this path.
 func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 	ts tierScoring, filter sets.Set[string],
@@ -165,10 +170,11 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	acc := acquireAccumulator(ts, filter)
 	defer releaseAccumulator(acc)
 
-	refs := acc.refs[:0]
+	refs := acc.scratch[:0]
+	names := acc.names[:0]
 	defer func() {
-		clear(refs[:cap(refs)])
-		acc.refs = refs[:0]
+		clear(names[:cap(names)])
+		acc.names = names[:0]
 	}()
 
 	for pos, key := range keys {
@@ -185,8 +191,8 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 		same := !acc.first && len(entries) == len(refs)
 		j := 0
 		for ; j < len(entries) && j < len(refs); j++ {
-			e, r := &entries[j], &refs[j].PodEntry
-			if e.PodIdentifier != r.PodIdentifier || e.DeviceTier != r.DeviceTier || e.Speculative != r.Speculative {
+			e, n := &entries[j], &names[j]
+			if e.PodIdentifier != n.pod || e.DeviceTier != n.tier || e.Speculative != refs[j].Speculative {
 				same = false
 				break
 			}
@@ -195,15 +201,17 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 			acc.pendingRun++
 			continue
 		}
-		refs = refs[:j]
+		refs, names = refs[:j], names[:j]
 		for ; j < len(entries); j++ {
 			e := entries[j]
-			refs = append(refs, kvblock.EntryRef{
-				PodEntry:    e,
+			refs = append(refs, kvblock.WalkEntry{
 				PodOrdinal:  acc.podOrdinal(e.PodIdentifier),
 				TierOrdinal: acc.tierOrdinal(e.DeviceTier),
+				Speculative: e.Speculative,
 			})
+			names = append(names, entryNames{pod: e.PodIdentifier, tier: e.DeviceTier})
 		}
+		acc.names = names
 		if !acc.key(refs) {
 			break
 		}
@@ -235,8 +243,8 @@ type tierNameOrdinal struct {
 }
 
 // clampOrdinal bounds a table size below the math.MaxUint32 sentinel that
-// speculativeTierOrdinal reserves, so a table that somehow grew that large
-// cannot collide with it.
+// kvblock.ReservedTierOrdinal reserves, so a table that somehow grew that
+// large cannot collide with it.
 func clampOrdinal(n int) uint32 {
 	if n > math.MaxUint32-1 {
 		n = math.MaxUint32 - 1
@@ -244,9 +252,14 @@ func clampOrdinal(n int) uint32 {
 	return uint32(n)
 }
 
-// speculativeTierOrdinal keys the speculative per-tier chain. Feeders assign
-// tier ordinals from zero, so the top of the range never collides.
-const speculativeTierOrdinal = math.MaxUint32
+// entryNames is one materialized entry's pod and tier names, carried
+// parallel to the WalkEntry the materialized feeder builds for it. The
+// accumulator reads them only on the materialized path, where the filter
+// and configured tier weights stay name-keyed.
+type entryNames struct {
+	pod  string
+	tier string
+}
 
 // slotRef maps one pod ordinal to a request-local slot.
 type slotRef struct {
@@ -303,10 +316,10 @@ func (t *slotTable) insert(ordinal uint32, slot int32) {
 	t.buckets[i] = slotRef{ordinal: ordinal, slot: slot + 1}
 }
 
-// tierChain tracks one tier's contiguous prefix for a candidate pod.
+// tierChain tracks one tier's contiguous prefix for a candidate pod. The
+// tier's name is resolved from the ordinal at result time.
 type tierChain struct {
 	ordinal uint32
-	name    string
 	count   int
 	// seen is the key stamp of the last key where the pod held this tier.
 	seen  uint32
@@ -324,9 +337,12 @@ type tierWeight struct {
 
 // matchSlot is one candidate pod's accumulated state.
 type matchSlot struct {
-	pod     string
-	matched int
-	score   float64
+	pod string
+	// podOrdinal identifies the slot's pod on the walk path, where names are
+	// resolved through the index's resolver at result time.
+	podOrdinal uint32
+	matched    int
+	score      float64
 	// seen is the key stamp of the last key holding this pod; weight is the
 	// weight that key adds to score. primaryWeight and otherWeight are the
 	// highest weights among its primary and other entries at that key.
@@ -359,15 +375,35 @@ type matchSlot struct {
 // only need to be stable within one accumulation; they key request-local
 // tables and never size state, so sparse or large values cost nothing.
 type prefixAccumulator struct {
+	// Walk-path state: resolver inverts names to ordinals once per request,
+	// filterOrdinals and ordinalWeights hold the inverted filter and tier
+	// weights, and specOrdinal is the index ordinal of a device tier
+	// literally named "speculative", which merges into the speculative
+	// chain. resolver is nil on the materialized path.
+	resolver       kvblock.OrdinalResolver
+	filterOrdinals map[uint32]struct{}
+	ordinalWeights []tierWeight
+	specOrdinal    uint32
+	hasSpecOrdinal bool
+
+	// Materialized-path state: string-keyed filter and weights, plus the
+	// request-local ordinal tables they are assigned through.
 	weights  map[string]float64
 	tailOnly map[string]bool
 	filter   sets.Set[string]
+	pods     ordinalTable
 
 	table    slotTable
 	slots    []matchSlot
 	active   []int32
 	keyStamp uint32
 	first    bool
+
+	// scratch is the materialized feeder's entry buffer; the walk path
+	// passes its borrowed WalkEntries to key without copying. names is the
+	// parallel pod and tier name slice the materialized path maintains.
+	scratch []kvblock.WalkEntry
+	names   []entryNames
 
 	// prev holds the entry signatures of the last fully folded key; pendingRun
 	// counts consecutive matching keys whose slot increments are deferred.
@@ -378,11 +414,8 @@ type prefixAccumulator struct {
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
 
-	// Materialized-lookup scratch state, allocated lazily when matchMaterialized
-	// runs so walked calls allocate no extra state.
-	pods         ordinalTable
+	// tierOrdinals is the materialized path's request-local tier table.
 	tierOrdinals []tierNameOrdinal
-	refs         []kvblock.EntryRef
 }
 
 var accumulatorPool = sync.Pool{New: func() any { return &prefixAccumulator{} }}
@@ -406,6 +439,12 @@ func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumula
 
 func releaseAccumulator(a *prefixAccumulator) {
 	a.weights, a.tailOnly, a.filter = nil, nil, nil
+	a.resolver = nil
+	clear(a.filterOrdinals)
+	a.filterOrdinals = nil
+	a.ordinalWeights = nil
+	clear(a.names)
+	a.names = a.names[:0]
 	for i := range a.slots {
 		a.slots[i].pod = ""
 		clear(a.slots[i].tiers)
@@ -416,6 +455,27 @@ func releaseAccumulator(a *prefixAccumulator) {
 	clear(a.tierOrdinals)
 	a.tierOrdinals = a.tierOrdinals[:0]
 	accumulatorPool.Put(a)
+}
+
+// startWalk moves the accumulator to ordinal-keyed request state: the pod
+// filter and the configured tier weights are inverted through the index's
+// resolver once, so the per-entry loop compares ordinals only.
+func (a *prefixAccumulator) startWalk(resolver kvblock.OrdinalResolver) {
+	a.resolver = resolver
+	if a.filter.Len() > 0 {
+		a.filterOrdinals = make(map[uint32]struct{}, a.filter.Len())
+		for name := range a.filter {
+			if ordinal, ok := resolver.PodOrdinal(name); ok {
+				a.filterOrdinals[ordinal] = struct{}{}
+			}
+		}
+	}
+	for name, weight := range a.weights {
+		if ordinal, ok := resolver.TierOrdinal(name); ok {
+			a.ordinalWeights = append(a.ordinalWeights, tierWeight{ordinal: ordinal, weight: weight, primary: !a.tailOnly[name]})
+		}
+	}
+	a.specOrdinal, a.hasSpecOrdinal = resolver.TierOrdinal(SpeculativeTier)
 }
 
 func (a *prefixAccumulator) podOrdinal(name string) uint32 {
@@ -461,7 +521,7 @@ func (a *prefixAccumulator) flushRun() {
 
 // key folds one key's entries into the chains and reports whether any chain
 // is still alive. entries is borrowed for the duration of the call.
-func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
+func (a *prefixAccumulator) key(entries []kvblock.WalkEntry) bool {
 	// When entries match the previous key, every live slot holds this key in
 	// the same tiers; batch the increments until the run ends.
 	if !a.first && a.samePrev(entries) {
@@ -479,7 +539,7 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		a.prev = a.prev[:len(entries)]
 	}
 
-	hasFilter := a.filter.Len() > 0
+	hasFilter := a.filter.Len() > 0 || a.filterOrdinals != nil
 	var prevSig entrySig
 	for i := range entries {
 		ref := &entries[i]
@@ -494,10 +554,10 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 
 		s, ok := a.table.lookup(ref.PodOrdinal)
 		if !ok {
-			if !a.first || (hasFilter && !a.filter.Has(ref.PodIdentifier)) {
+			if !a.first || (hasFilter && !a.podAllowed(i, ref)) {
 				continue // the first key fixes the candidate set
 			}
-			s = a.newSlot(ref.PodIdentifier)
+			s = a.newSlot(i, ref)
 			a.table.insert(ref.PodOrdinal, s)
 		}
 		slot := &a.slots[s]
@@ -505,14 +565,18 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			continue
 		}
 
-		tier, tierOrdinal := ref.DeviceTier, ref.TierOrdinal
-		if ref.Speculative || ref.DeviceTier == SpeculativeTier {
-			tier, tierOrdinal = SpeculativeTier, speculativeTierOrdinal
-		} else {
+		tierOrdinal := a.effectiveTier(i, ref)
+		if tierOrdinal != kvblock.ReservedTierOrdinal {
 			slot.confirmedSeen = a.keyStamp
 		}
 
-		w, primary := a.weightOf(tier, tierOrdinal)
+		// weightOf reads the name only on the materialized path; the walk
+		// path resolves by ordinal.
+		tierName := ""
+		if a.resolver == nil {
+			tierName = a.names[i].tier
+		}
+		w, primary := a.weightOf(tierOrdinal, tierName)
 		if slot.seen != a.keyStamp {
 			slot.seen = a.keyStamp
 			slot.primaryWeight, slot.otherWeight = 0, 0
@@ -528,27 +592,57 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		}
 
 		if !a.stampTier(slot, tierOrdinal) && a.first {
-			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
+			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, seen: a.keyStamp, alive: true})
 		}
 	}
 	return a.endKey()
 }
 
-// entrySig packs the fields of an EntryRef that affect matching into one
+// effectiveTier maps an entry's tier to its chain ordinal: the reserved
+// ordinal for speculative entries and for a device tier literally named
+// "speculative" (matched by name on the materialized path, by the index's
+// ordinal for that name on the walk path), the entry's own ordinal
+// otherwise.
+func (a *prefixAccumulator) effectiveTier(i int, ref *kvblock.WalkEntry) uint32 {
+	if ref.Speculative {
+		return kvblock.ReservedTierOrdinal
+	}
+	if a.resolver != nil {
+		if a.hasSpecOrdinal && ref.TierOrdinal == a.specOrdinal {
+			return kvblock.ReservedTierOrdinal
+		}
+	} else if a.names[i].tier == SpeculativeTier {
+		return kvblock.ReservedTierOrdinal
+	}
+	return ref.TierOrdinal
+}
+
+// podAllowed reports whether the entry's pod passes the request filter: by
+// ordinal on the walk path, by name on the materialized path. The index i
+// addresses the materialized path's parallel name slice.
+func (a *prefixAccumulator) podAllowed(i int, ref *kvblock.WalkEntry) bool {
+	if a.resolver != nil {
+		_, ok := a.filterOrdinals[ref.PodOrdinal]
+		return ok
+	}
+	return a.filter.Has(a.names[i].pod)
+}
+
+// entrySig packs the fields of an entry that affect matching into one
 // 64-bit word so slice comparisons avoid padded-struct equality helpers.
-// Speculative entries map to speculativeTierOrdinal, which clampOrdinal and
+// Speculative entries map to kvblock.ReservedTierOrdinal, which clampOrdinal and
 // the index interner reserve above normal tier ordinals.
 type entrySig uint64
 
-func sigOf(ref *kvblock.EntryRef) entrySig {
+func sigOf(ref *kvblock.WalkEntry) entrySig {
 	tier := ref.TierOrdinal
 	if ref.Speculative {
-		tier = speculativeTierOrdinal
+		tier = kvblock.ReservedTierOrdinal
 	}
 	return entrySig(ref.PodOrdinal)<<32 | entrySig(tier)
 }
 
-func (a *prefixAccumulator) samePrev(entries []kvblock.EntryRef) bool {
+func (a *prefixAccumulator) samePrev(entries []kvblock.WalkEntry) bool {
 	if len(entries) != len(a.prev) {
 		return false
 	}
@@ -659,24 +753,50 @@ func (s *matchSlot) keyWeight(keyStamp uint32, othersScore bool) float64 {
 	return w
 }
 
-// result materializes the accumulated matches.
+// result materializes the accumulated matches, resolving pod and tier names
+// from ordinals on the walk path.
 func (a *prefixAccumulator) result() map[string]PodMatch {
 	a.flushRun()
 	out := make(map[string]PodMatch, len(a.slots))
 	for i := range a.slots {
 		s := &a.slots[i]
+		pod := s.pod
+		if a.resolver != nil {
+			// The ordinal came from this index's walk payload; immutability
+			// guarantees it resolves.
+			pod, _ = a.resolver.PodName(s.podOrdinal)
+		}
 		byTier := make(map[string]int, len(s.tiers))
 		for _, tc := range s.tiers {
-			byTier[tc.name] = tc.count
+			byTier[a.tierNameOf(tc.ordinal)] = tc.count
 		}
-		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, ConfirmedBlocks: s.confirmed, BlocksByTier: byTier}
+		out[pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, ConfirmedBlocks: s.confirmed, BlocksByTier: byTier}
 	}
 	return out
 }
 
+// tierNameOf resolves a chain ordinal to its tier name: the reserved
+// speculative name, the index's name on the walk path, or the materialized
+// path's request-local table.
+func (a *prefixAccumulator) tierNameOf(ordinal uint32) string {
+	if ordinal == kvblock.ReservedTierOrdinal {
+		return SpeculativeTier
+	}
+	if a.resolver != nil {
+		name, _ := a.resolver.TierName(ordinal)
+		return name
+	}
+	for i := range a.tierOrdinals {
+		if a.tierOrdinals[i].ordinal == ordinal {
+			return a.tierOrdinals[i].name
+		}
+	}
+	return ""
+}
+
 // newSlot appends a candidate, backing its tiers slice with inline storage
 // unless a pooled slot already holds a larger backing array.
-func (a *prefixAccumulator) newSlot(pod string) int32 {
+func (a *prefixAccumulator) newSlot(i int, ref *kvblock.WalkEntry) int32 {
 	n := len(a.slots)
 	if n < cap(a.slots) {
 		a.slots = a.slots[:n+1]
@@ -688,7 +808,10 @@ func (a *prefixAccumulator) newSlot(pod string) int32 {
 	if cap(s.tiers) > len(s.tiersBuf) {
 		tiers = s.tiers[:0]
 	}
-	*s = matchSlot{pod: pod}
+	*s = matchSlot{podOrdinal: ref.PodOrdinal}
+	if a.resolver == nil {
+		s.pod = a.names[i].pod
+	}
 	if tiers != nil {
 		s.tiers = tiers
 	} else {
@@ -703,21 +826,35 @@ func (a *prefixAccumulator) newSlot(pod string) int32 {
 	return int32(slot)
 }
 
-// weightOf resolves a tier's weight and whether it is primary, caching by
-// ordinal so the configured maps are consulted once per tier per
-// accumulation.
-func (a *prefixAccumulator) weightOf(tier string, ordinal uint32) (float64, bool) {
+// weightOf resolves a chain ordinal's weight and whether it is primary,
+// caching by ordinal so the configured maps are consulted once per tier per
+// accumulation. On the walk path the resolution is ordinal-keyed against the
+// request's inverted configuration; on the materialized path it is
+// name-keyed against the entry's tier name.
+func (a *prefixAccumulator) weightOf(ordinal uint32, tierName string) (float64, bool) {
 	for i := range a.weightCache {
 		if a.weightCache[i].ordinal == ordinal {
 			return a.weightCache[i].weight, a.weightCache[i].primary
 		}
 	}
 	w, primary := unknownTierWeight, false
-	if tier == SpeculativeTier {
+	switch {
+	case ordinal == kvblock.ReservedTierOrdinal:
 		w, primary = speculativeTierWeight, true
-	}
-	if configured, ok := a.weights[tier]; ok {
-		w, primary = configured, !a.tailOnly[tier]
+		if configured, ok := a.weights[SpeculativeTier]; ok {
+			w, primary = configured, !a.tailOnly[SpeculativeTier]
+		}
+	case a.resolver != nil:
+		for i := range a.ordinalWeights {
+			if a.ordinalWeights[i].ordinal == ordinal {
+				w, primary = a.ordinalWeights[i].weight, a.ordinalWeights[i].primary
+				break
+			}
+		}
+	default:
+		if configured, ok := a.weights[tierName]; ok {
+			w, primary = configured, !a.tailOnly[tierName]
+		}
 	}
 	a.weightCache = append(a.weightCache, tierWeight{ordinal: ordinal, weight: w, primary: primary})
 	return w, primary

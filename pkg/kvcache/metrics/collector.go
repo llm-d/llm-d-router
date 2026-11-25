@@ -204,6 +204,49 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Number of worker shards (capacity) in the event processing pool", compbasemetrics.ALPHA),
 	})
+
+	// IndexEvictions counts index keys and engine mappings removed by the
+	// memory backends' own eviction paths, labeled by cause: "capacity" (the
+	// in-memory main-store LRU bound), "clear" (a cleared pod's emptied keys),
+	// "empty" (delete-on-empty after eviction), "budget" (the dense
+	// byte-budget sweep), "dead" (a cleared pod's slots freed by the sweep).
+	IndexEvictions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_evictions_by_cause_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Index keys and engine mappings removed by the backend's eviction paths, by cause",
+			compbasemetrics.ALPHA),
+	}, []string{reasonLabel})
+	// IndexTruncatedEntries counts pods dropped by the per-key pod cap when a
+	// key holds more pods than the cap allows.
+	IndexTruncatedEntries = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_truncated_entries_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Pods dropped by the index's per-key pod cap",
+			compbasemetrics.ALPHA),
+	})
+	// IndexClearDuration observes the duration of index Clear calls.
+	IndexClearDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_clear_duration_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of index Clear calls in seconds",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.DefBuckets,
+	})
+	// IndexResidentKeys and IndexResidentBytes report the memory backends'
+	// residency; the in-memory backend refreshes them at the end of each
+	// mutating call, the dense backend when its byte-budget sweep runs.
+	IndexResidentKeys = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_resident_keys",
+		Help: metricsutil.HelpMsgWithStability(
+			"Request keys resident in the index",
+			compbasemetrics.ALPHA),
+	})
+	IndexResidentBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_resident_bytes",
+		Help: metricsutil.HelpMsgWithStability(
+			"Estimated bytes resident in the index's structures",
+			compbasemetrics.ALPHA),
+	})
 )
 
 // Collectors returns a slice of all registered Prometheus collectors.
@@ -216,6 +259,8 @@ func Collectors() []prometheus.Collector {
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		LiveOnlySubscribers, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
+		IndexEvictions, IndexTruncatedEntries, IndexClearDuration,
+		IndexResidentKeys, IndexResidentBytes,
 	}
 }
 
