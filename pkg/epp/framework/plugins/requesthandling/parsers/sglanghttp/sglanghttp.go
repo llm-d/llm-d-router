@@ -328,12 +328,11 @@ func extractStreamingUsage(body []byte) *request.Usage {
 	text := strings.TrimSpace(string(body))
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
+		data, ok := reqcommon.SSEDataPayload([]byte(line))
 		if !ok {
 			continue
 		}
-		data = strings.TrimSpace(data)
-		if data == reqcommon.SSEDoneMarker {
+		if reqcommon.SSEIsDone(data) {
 			continue
 		}
 		var resp sgLangResponse

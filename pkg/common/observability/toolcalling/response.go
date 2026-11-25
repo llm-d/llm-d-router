@@ -206,12 +206,12 @@ func (detector *ResponseDetector) processSSELine() {
 		detector.processSSEEvent()
 		return
 	}
-	payload, isData := bytes.CutPrefix(detector.line, []byte("data:"))
-	if isData || bytes.Equal(detector.line, []byte("data")) {
-		if !isData {
-			payload = nil
-		}
-		payload = bytes.TrimPrefix(payload, []byte{' '})
+	payload, isData := reqcommon.SSEDataPayload(detector.line)
+	if !isData && bytes.Equal(detector.line, []byte("data")) {
+		// A bare data line is a data field with an empty value.
+		isData, payload = true, nil
+	}
+	if isData {
 		if len(detector.eventData)+len(payload)+1 > maxResponseSSEEventBytes {
 			detector.discardSSEEvent()
 		} else {

@@ -425,11 +425,11 @@ func (r *cachedTokensUsageRewriter) processSSE(body []byte) ([]byte, bool) {
 func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isData bool, drop bool) {
 	trimmedLine := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmedLine):]
-	data, ok := bytes.CutPrefix(trimmedLine, []byte(reqcommon.SSEDataPrefix))
+	data, ok := reqcommon.SSEDataPayload(trimmedLine)
 	if !ok {
 		return line, false, false
 	}
-	if bytes.Equal(bytes.TrimSpace(data), []byte(reqcommon.SSEDoneMarker)) {
+	if reqcommon.SSEIsDone(data) {
 		return line, true, false
 	}
 	if !bytes.Contains(data, usageKey) {

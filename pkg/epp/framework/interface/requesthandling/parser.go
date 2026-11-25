@@ -128,8 +128,7 @@ type ParsedResponse struct {
 	// token the count approximates the tokens in the parsed chunk, but protocol events (role
 	// deltas, finish reasons, usage-only events, Responses API lifecycle events) inflate it, a
 	// server that batches tokens into one event deflates it, and the scan recognizes only the
-	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
-	// and keep-alive data lines skew it further).
+	// data-field framing (multi-line data fields and keep-alive data lines skew it further).
 	StreamedEvents int
 	// DisjointInputTokens is set by parsers of protocols that report the uncached,
 	// cache-read, and cache-creation input counts separately and may spread them
