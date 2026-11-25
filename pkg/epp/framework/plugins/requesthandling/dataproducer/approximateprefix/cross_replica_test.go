@@ -88,6 +88,90 @@ func TestRecentWindowRemovePrompt(t *testing.T) {
 	require.Equal(t, [][]blockHash{{1, 2}}, w.snapshot("ep"))
 }
 
+// windowSlots returns the content slots of "ep", including empty withdrawn
+// prompts, and the generation of the first element.
+func windowSlots(w *recentWindow) ([][]blockHash, uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	buf := w.pending["ep"]
+	if buf == nil {
+		return nil, 0
+	}
+	var prompts [][]blockHash
+	for _, slot := range buf.slots[buf.start:] {
+		if slot.drop {
+			continue
+		}
+		prompts = append(prompts, append([]blockHash(nil), slot.hashes...))
+	}
+	return prompts, buf.base
+}
+
+func TestRecentWindowGenerationAdvancesWithTrimmedPrompts(t *testing.T) {
+	w := newRecentWindow(4)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3})
+	prompts, base := windowSlots(w)
+	require.Equal(t, [][]blockHash{{1, 2}, {3}}, prompts)
+	require.Zero(t, base)
+
+	w.record("ep", []blockHash{4, 5, 6})
+	prompts, base = windowSlots(w)
+	require.Equal(t, [][]blockHash{{3}, {4, 5, 6}}, prompts)
+	require.Equal(t, uint64(1), base, "generation 1 still names prompt {3}")
+
+	w.forget("ep")
+	_, base = windowSlots(w)
+	require.Zero(t, base)
+}
+
+func TestRecentWindowRemovePromptKeepsLaterGenerations(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.record("ep", []blockHash{5, 6})
+	w.removePrompt("ep", []blockHash{3, 4})
+	prompts, base := windowSlots(w)
+	require.Equal(t, [][]blockHash{{1, 2}, nil, {5, 6}}, prompts)
+	require.Zero(t, base, "a withdrawn slot that is not oldest keeps its generation")
+	require.Equal(t, [][]blockHash{{1, 2}, {5, 6}}, w.snapshot("ep"))
+	set := w.sequenced("ep")
+	require.Equal(t, uint64(4), set.SequenceTip())
+	require.Equal(t, 9, set.ElementSize(3))
+}
+
+func TestRecentWindowRemoveOldestDropsLeadingSlot(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.record("ep", []blockHash{5, 6})
+	w.removePrompt("ep", []blockHash{1, 2})
+	prompts, base := windowSlots(w)
+	require.Equal(t, [][]blockHash{{3, 4}, {5, 6}}, prompts)
+	require.Equal(t, uint64(1), base, "generation 1 still names prompt {3, 4}")
+	set := w.sequenced("ep")
+	require.Equal(t, uint64(4), set.SequenceTip())
+	require.Equal(t, 9, set.ElementSize(3))
+}
+
+func TestRecentWindowWithdrawalsStayWithinCap(t *testing.T) {
+	const maxSlots = 4
+	w := newRecentWindow(maxSlots)
+	w.record("ep", []blockHash{1})
+	var tip uint64
+	for i := range 30 {
+		h := []blockHash{blockHash(100 + i)}
+		w.record("ep", h)
+		w.removePrompt("ep", h)
+		win := w.pending["ep"]
+		require.LessOrEqual(t, len(win.slots)-win.start, maxSlots)
+		set := w.sequenced("ep")
+		require.GreaterOrEqual(t, set.SequenceTip(), tip)
+		tip = set.SequenceTip()
+		require.LessOrEqual(t, int(set.SequenceTip()-set.SequenceBase()), maxSlots)
+	}
+}
+
 func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	syncOn := true
 	cfg := defaultConfig
