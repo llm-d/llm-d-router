@@ -607,6 +607,15 @@ func TestSGLangHTTPParser_StopReason(t *testing.T) {
 			want: fwkrh.StopReasonTurnEnded,
 		},
 		{
+			name: "parallel_sampling_no_finish_reason",
+			body: `[{"meta_info":{}},{"meta_info":{}}]`,
+		},
+		{
+			name: "parallel_sampling_abort_only",
+			body: `[{"meta_info":{"finish_reason":{"type":"abort"}}}]`,
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
 			name: "no_finish_reason",
 			body: `{"text":"hi","meta_info":{"prompt_tokens":1}}`,
 		},

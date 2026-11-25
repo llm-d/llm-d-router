@@ -291,8 +291,8 @@ func parseGenerateResponse(body []byte) (*request.Usage, fwkrh.StopReason, error
 			return nil, "", err
 		}
 		var usage *request.Usage
-		stopReason := fwkrh.StopReasonUnknown
-		haveReason := false
+		stopReason := fwkrh.StopReason("")
+		sawUnknown := false
 		for _, sample := range samples {
 			var resp sgLangResponse
 			if err := json.Unmarshal(sample, &resp); err != nil {
@@ -305,13 +305,18 @@ func parseGenerateResponse(body []byte) (*request.Usage, fwkrh.StopReason, error
 					usage.CompletionTokens += u.CompletionTokens
 				}
 			}
-			if !haveReason {
-				reason := sglangStopReason(resp.MetaInfo.FinishReason)
-				if reason != "" && reason != fwkrh.StopReasonUnknown {
+			switch reason := sglangStopReason(resp.MetaInfo.FinishReason); reason {
+			case "":
+			case fwkrh.StopReasonUnknown:
+				sawUnknown = true
+			default:
+				if stopReason == "" {
 					stopReason = reason
-					haveReason = true
 				}
 			}
+		}
+		if stopReason == "" && sawUnknown {
+			stopReason = fwkrh.StopReasonUnknown
 		}
 		if usage != nil {
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
