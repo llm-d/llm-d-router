@@ -316,9 +316,17 @@ func (p *discoveredEndpointPicker) rebuildOrdered() {
 	}
 	sort.Strings(ids)
 
+	// Data-parallel ranks behind one port share a render URL. It is listed once,
+	// so that each render listener gets one turn.
 	ordered := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		ordered = append(ordered, p.endpoints[id])
+		url := p.endpoints[id]
+		if _, dup := seen[url]; dup {
+			continue
+		}
+		seen[url] = struct{}{}
+		ordered = append(ordered, url)
 	}
 	p.ordered = ordered
 }
@@ -360,7 +368,12 @@ func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadat
 		if meta.RankIndex < 0 {
 			return "", fmt.Errorf("discovered endpoint %s has invalid rank index %d", meta.ID, meta.RankIndex)
 		}
-		port, ok := routing.RankPort(rule.basePort, meta.RankIndex)
+		// Data-parallel ranks behind one port share that port's render listener.
+		rankIndex := meta.RankIndex
+		if meta.RankByHeader {
+			rankIndex = 0
+		}
+		port, ok := routing.RankPort(rule.basePort, rankIndex)
 		if !ok {
 			return "", fmt.Errorf("discovered endpoint %s resolved render port outside 1-65535", meta.ID)
 		}
