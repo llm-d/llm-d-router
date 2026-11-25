@@ -31,7 +31,10 @@ indexer owns block-key computation, index lookup, and prefix matching.
   the run length per tier. It walks the index in key order when the backend
   is a `kvblock.KeyWalker` and materializes `Lookup` otherwise; both feed the
   one accumulator that holds the matching rules, so every caller and backend
-  sees the same semantics. The contiguous-chain hit metrics are recorded
+  sees the same semantics. On the walk path the pod filter and configured
+  tier weights are inverted through the index's `kvblock.OrdinalResolver`
+  once per request, and pod and tier names are resolved back from ordinals
+  at result time. The contiguous-chain hit metrics are recorded
   here, under the index's `enableMetrics` option.
 - **Tail-only tiers.** A backend with `tailOnly: true` scores its blocks
   only at positions past the longest chain, from block 0, that any candidate

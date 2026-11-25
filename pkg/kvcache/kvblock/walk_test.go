@@ -33,24 +33,39 @@ import (
 type visit struct {
 	pos     int
 	found   bool
-	entries []EntryRef
+	entries []WalkEntry
 }
 
 func walkAll(t *testing.T, walker KeyWalker, keys []BlockHash) []visit {
 	t.Helper()
 	var visits []visit
-	err := walker.WalkKeys(context.Background(), keys, func(pos int, found bool, entries []EntryRef) bool {
-		visits = append(visits, visit{pos: pos, found: found, entries: append([]EntryRef(nil), entries...)})
+	err := walker.WalkKeys(context.Background(), keys, func(pos int, found bool, entries []WalkEntry) bool {
+		visits = append(visits, visit{pos: pos, found: found, entries: append([]WalkEntry(nil), entries...)})
 		return true
 	})
 	require.NoError(t, err)
 	return visits
 }
 
-func podEntries(refs []EntryRef) []PodEntry {
-	out := make([]PodEntry, len(refs))
-	for i, ref := range refs {
-		out[i] = ref.PodEntry
+// entryLabel names one visited entry through the index's resolver, so
+// assertions can speak in pod and tier names.
+func entryLabel(t *testing.T, resolver OrdinalResolver, e WalkEntry) string {
+	t.Helper()
+	pod, ok := resolver.PodName(e.PodOrdinal)
+	require.True(t, ok, "pod ordinal %d must resolve", e.PodOrdinal)
+	tier := "speculative"
+	if !e.Speculative {
+		tier, ok = resolver.TierName(e.TierOrdinal)
+		require.True(t, ok, "tier ordinal %d must resolve", e.TierOrdinal)
+	}
+	return pod + "@" + tier
+}
+
+func entryLabels(t *testing.T, resolver OrdinalResolver, entries []WalkEntry) []string {
+	t.Helper()
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = entryLabel(t, resolver, e)
 	}
 	return out
 }
@@ -69,13 +84,13 @@ func TestWalkKeysVisitsEveryPositionInOrder(t *testing.T) {
 	require.Len(t, visits, 3)
 	assert.Equal(t, 0, visits[0].pos)
 	assert.True(t, visits[0].found)
-	assert.Equal(t, []PodEntry{podA}, podEntries(visits[0].entries))
+	assert.ElementsMatch(t, []string{"pod-a@gpu"}, entryLabels(t, index, visits[0].entries))
 	assert.Equal(t, 1, visits[1].pos)
 	assert.False(t, visits[1].found)
 	assert.Empty(t, visits[1].entries)
 	assert.Equal(t, 2, visits[2].pos)
 	assert.True(t, visits[2].found)
-	assert.Equal(t, []PodEntry{podA, podB}, podEntries(visits[2].entries))
+	assert.ElementsMatch(t, []string{"pod-a@gpu", "pod-b@cpu"}, entryLabels(t, index, visits[2].entries))
 }
 
 // A walk longer than one peek batch visits every position once, in order,
@@ -104,6 +119,37 @@ func TestWalkKeysVisitsEveryPositionAcrossBatches(t *testing.T) {
 	}
 }
 
+// A run of dense keys holding identical entry words reuses the run head's
+// decoded entries, across batch boundaries and around a key that breaks the
+// run, with each position still visiting its own entry set.
+func TestWalkKeysDenseRunReuse(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewDenseMemoryIndex(nil)
+	require.NoError(t, err)
+	podA := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "pod-b", DeviceTier: "cpu"}
+	// One peek batch caps at 256 keys, so a 600-key run spans batches.
+	keys := make([]BlockHash, 600)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+	require.NoError(t, index.Add(ctx, nil, keys[:300], []PodEntry{podA, podB}))
+	require.NoError(t, index.Add(ctx, nil, keys[300:301], []PodEntry{podA}))
+	require.NoError(t, index.Add(ctx, nil, keys[301:], []PodEntry{podA, podB}))
+
+	visits := walkAll(t, index, keys)
+
+	require.Len(t, visits, len(keys))
+	for i, v := range visits {
+		require.True(t, v.found, "position %d", i)
+		want := []string{"pod-a@gpu", "pod-b@cpu"}
+		if i == 300 {
+			want = []string{"pod-a@gpu"}
+		}
+		assert.ElementsMatch(t, want, entryLabels(t, index, v.entries), "position %d", i)
+	}
+}
+
 // A key listed twice is visited at both positions.
 func TestWalkKeysVisitsDuplicatePositions(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
@@ -118,8 +164,28 @@ func TestWalkKeysVisitsDuplicatePositions(t *testing.T) {
 	for i, v := range visits {
 		assert.Equal(t, i, v.pos)
 		assert.True(t, v.found)
-		assert.Equal(t, []PodEntry{podA}, podEntries(v.entries))
+		assert.ElementsMatch(t, []string{"pod-a@gpu"}, entryLabels(t, index, v.entries))
 	}
+}
+
+// The same (pod, tier) pair stored under different groups is visited once.
+func TestWalkKeysVisitsOneEntryPerPodTierPair(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+	group1, group2 := 1, 2
+	entries := []PodEntry{
+		{PodIdentifier: "pod-a", DeviceTier: "gpu", HasGroup: true, GroupIdx: GroupID(group1)},
+		{PodIdentifier: "pod-a", DeviceTier: "gpu", HasGroup: true, GroupIdx: GroupID(group2)},
+		{PodIdentifier: "pod-b", DeviceTier: "gpu"},
+	}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{10}, entries))
+
+	visits := walkAll(t, index, []BlockHash{10})
+
+	require.Len(t, visits, 1)
+	assert.Len(t, visits[0].entries, 2, "the grouped duplicate folds to one entry")
+	assert.ElementsMatch(t, []string{"pod-a@gpu", "pod-b@gpu"}, entryLabels(t, index, visits[0].entries))
 }
 
 func TestWalkKeysStopsWhenVisitReturnsFalse(t *testing.T) {
@@ -130,7 +196,7 @@ func TestWalkKeysStopsWhenVisitReturnsFalse(t *testing.T) {
 	require.NoError(t, index.Add(ctx, nil, keys, []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}))
 
 	visited := 0
-	err = index.WalkKeys(ctx, keys, func(pos int, _ bool, _ []EntryRef) bool {
+	err = index.WalkKeys(ctx, keys, func(pos int, _ bool, _ []WalkEntry) bool {
 		visited++
 		return pos < 2
 	})
@@ -152,7 +218,7 @@ func TestWalkKeysCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(baseCtx)
 		cancel()
 		visited := 0
-		err := index.WalkKeys(ctx, keys, func(int, bool, []EntryRef) bool {
+		err := index.WalkKeys(ctx, keys, func(int, bool, []WalkEntry) bool {
 			visited++
 			return true
 		})
@@ -164,7 +230,7 @@ func TestWalkKeysCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(baseCtx)
 		defer cancel()
 		visited := 0
-		err := index.WalkKeys(ctx, keys, func(int, bool, []EntryRef) bool {
+		err := index.WalkKeys(ctx, keys, func(int, bool, []WalkEntry) bool {
 			visited++
 			cancel()
 			return true
@@ -180,7 +246,7 @@ func TestWalkKeysCancellation(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(baseCtx)
 				defer cancel()
-				err := index.WalkKeys(ctx, keys[:2], func(int, bool, []EntryRef) bool {
+				err := index.WalkKeys(ctx, keys[:2], func(int, bool, []WalkEntry) bool {
 					cancel()
 					return !stopEarly
 				})
@@ -224,7 +290,7 @@ func TestWalkKeysPromotesOnlyVisitedKeys(t *testing.T) {
 		require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, entry))
 	}
 
-	err = index.WalkKeys(ctx, []BlockHash{10, 20, 30}, func(int, bool, []EntryRef) bool { return false })
+	err = index.WalkKeys(ctx, []BlockHash{10, 20, 30}, func(int, bool, []WalkEntry) bool { return false })
 	require.NoError(t, err)
 
 	require.NoError(t, index.Add(ctx, nil, []BlockHash{40}, entry))
@@ -253,7 +319,7 @@ func TestWalkKeysPromotesVisitedKeysOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
 	visited := 0
-	err = index.WalkKeys(ctx, keys, func(int, bool, []EntryRef) bool {
+	err = index.WalkKeys(ctx, keys, func(int, bool, []WalkEntry) bool {
 		visited++
 		cancel()
 		return true
@@ -307,22 +373,18 @@ func TestWalkKeysOrdinalsAreStable(t *testing.T) {
 	require.NoError(t, index.Add(ctx, nil, []BlockHash{2}, []PodEntry{cpuB, gpuA, specA}))
 
 	visits := walkAll(t, index, []BlockHash{1, 2})
-	byEntry := map[PodEntry]EntryRef{}
-	for _, v := range visits[0].entries {
-		byEntry[v.PodEntry] = v
-	}
-	for _, v := range visits[1].entries {
-		if first, ok := byEntry[v.PodEntry]; ok {
-			assert.Equal(t, first.PodOrdinal, v.PodOrdinal, "%v pod ordinal", v.PodEntry)
-			assert.Equal(t, first.TierOrdinal, v.TierOrdinal, "%v tier ordinal", v.PodEntry)
-		} else {
-			byEntry[v.PodEntry] = v
+	byLabel := map[string]WalkEntry{}
+	collect := func(entries []WalkEntry) {
+		for _, v := range entries {
+			byLabel[entryLabel(t, index, v)] = v
 		}
 	}
-	assert.NotEqual(t, byEntry[gpuA].PodOrdinal, byEntry[cpuB].PodOrdinal)
-	assert.NotEqual(t, byEntry[gpuA].TierOrdinal, byEntry[cpuB].TierOrdinal)
-	assert.Equal(t, byEntry[gpuA].PodOrdinal, byEntry[specA].PodOrdinal, "the same pod shares one ordinal across tiers")
-	assert.True(t, byEntry[specA].Speculative)
+	collect(visits[0].entries)
+	collect(visits[1].entries)
+	assert.NotEqual(t, byLabel["pod-a@gpu"].PodOrdinal, byLabel["pod-b@cpu"].PodOrdinal)
+	assert.NotEqual(t, byLabel["pod-a@gpu"].TierOrdinal, byLabel["pod-b@cpu"].TierOrdinal)
+	assert.Equal(t, byLabel["pod-a@gpu"].PodOrdinal, byLabel["pod-a@speculative"].PodOrdinal, "the same pod shares one ordinal across tiers")
+	assert.True(t, byLabel["pod-a@speculative"].Speculative)
 
 	// Ordinals survive removal: a pod cleared or evicted and added again
 	// keeps its own.
@@ -330,8 +392,9 @@ func TestWalkKeysOrdinalsAreStable(t *testing.T) {
 	require.NoError(t, index.Evict(ctx, RequestKey, []BlockHash{1}, []PodEntry{cpuB}))
 	require.NoError(t, index.Add(ctx, nil, []BlockHash{3}, []PodEntry{gpuA, cpuB}))
 	for _, v := range walkAll(t, index, []BlockHash{3})[0].entries {
-		assert.Equal(t, byEntry[v.PodEntry].PodOrdinal, v.PodOrdinal, "%v pod ordinal after removal", v.PodEntry)
-		assert.Equal(t, byEntry[v.PodEntry].TierOrdinal, v.TierOrdinal, "%v tier ordinal after removal", v.PodEntry)
+		label := entryLabel(t, index, v)
+		assert.Equal(t, byLabel[label].PodOrdinal, v.PodOrdinal, "%s pod ordinal after removal", label)
+		assert.Equal(t, byLabel[label].TierOrdinal, v.TierOrdinal, "%s tier ordinal after removal", label)
 	}
 }
 
@@ -354,6 +417,14 @@ func TestWalkCapabilityThroughDecorators(t *testing.T) {
 			walker, ok := wrapped.(KeyWalker)
 			require.True(t, ok, "decorators must keep the walk capability")
 			assert.Equal(t, direct, walkAll(t, walker, keys))
+
+			resolver, ok := wrapped.(OrdinalResolver)
+			require.True(t, ok, "decorators must keep the resolver capability")
+			podOrdinal, ok := resolver.PodOrdinal("pod-a")
+			require.True(t, ok)
+			podName, ok := resolver.PodName(podOrdinal)
+			require.True(t, ok)
+			assert.Equal(t, "pod-a", podName)
 		})
 	}
 
@@ -363,6 +434,8 @@ func TestWalkCapabilityThroughDecorators(t *testing.T) {
 	} {
 		t.Run(name+" without capability", func(t *testing.T) {
 			_, ok := wrapped.(KeyWalker)
+			assert.False(t, ok, "decorators must not claim a capability the backend lacks")
+			_, ok = wrapped.(OrdinalResolver)
 			assert.False(t, ok, "decorators must not claim a capability the backend lacks")
 		})
 	}
@@ -412,7 +485,7 @@ func TestWalkKeysConcurrentReadersAndWriters(t *testing.T) {
 			defer wg.Done()
 			for range iterations {
 				var visitErr error
-				err := index.WalkKeys(ctx, keys, func(pos int, found bool, entries []EntryRef) bool {
+				err := index.WalkKeys(ctx, keys, func(pos int, found bool, entries []WalkEntry) bool {
 					if !found || len(entries) != numPods {
 						visitErr = fmt.Errorf("position %d: found=%v entries=%d, want %d", pos, found, len(entries), numPods)
 						return false

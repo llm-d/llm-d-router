@@ -18,7 +18,7 @@ package kvblock
 
 import (
 	"context"
-	"sync"
+	"math"
 )
 
 // EntryRef is one indexed entry with the ordinals the index assigned to its
@@ -36,6 +36,73 @@ type EntryRef struct {
 	TierOrdinal uint32
 }
 
+// WalkEntry is the decoded walk payload: one (pod ordinal, tier ordinal,
+// speculative) triple per (pod, tier) pair a key holds. The ordinals are the
+// index's EntryRef ordinals; Speculative marks an entry stored without
+// engine confirmation. The reserved ordinal math.MaxUint32 never appears as
+// a TierOrdinal: no interner assigns it, and consumers reserve it for the
+// speculative chain.
+type WalkEntry struct {
+	PodOrdinal  uint32
+	TierOrdinal uint32
+	Speculative bool
+}
+
+// ReservedTierOrdinal is the tier ordinal consumers reserve for the
+// speculative chain. Interners assign ordinals from zero upward, so it never
+// names a real tier.
+const ReservedTierOrdinal = math.MaxUint32
+
+// OrdinalResolver is an optional Index capability: the index's name-to-
+// ordinal assignment for pod identifiers and device tiers. A consumer uses
+// it to move string-keyed request state into ordinal space once per request
+// (a pod filter, configured tier weights), and to resolve ordinals back to
+// names when materializing string-keyed results. Every KeyWalker also
+// implements OrdinalResolver: the walk payload carries ordinals, so a
+// consumer must be able to interpret them.
+//
+// An ordinal's meaning never changes over the index lifetime (see EntryRef),
+// so a name resolved at the start of a request still names the same ordinal
+// at result time. A name not yet interned has no ordinal and matches
+// nothing, which is correct for filter inversion.
+type OrdinalResolver interface {
+	// PodOrdinal returns the ordinal assigned to the pod identifier, and
+	// whether it has one.
+	PodOrdinal(name string) (uint32, bool)
+	// PodName returns the pod identifier assigned to ordinal, and whether
+	// it has one.
+	PodName(ordinal uint32) (string, bool)
+	// TierOrdinal returns the ordinal assigned to the device tier, and
+	// whether it has one.
+	TierOrdinal(name string) (uint32, bool)
+	// TierName returns the device tier assigned to ordinal, and whether it
+	// has one.
+	TierName(ordinal uint32) (string, bool)
+}
+
+// resolverForwarder forwards ordinal resolution to a wrapped index, so a
+// decorator that carries the wrapped KeyWalker inherits the OrdinalResolver
+// methods by embedding instead of restating them.
+type resolverForwarder struct {
+	resolver OrdinalResolver
+}
+
+func (f resolverForwarder) PodOrdinal(name string) (uint32, bool) {
+	return f.resolver.PodOrdinal(name)
+}
+
+func (f resolverForwarder) PodName(ordinal uint32) (string, bool) {
+	return f.resolver.PodName(ordinal)
+}
+
+func (f resolverForwarder) TierOrdinal(name string) (uint32, bool) {
+	return f.resolver.TierOrdinal(name)
+}
+
+func (f resolverForwarder) TierName(ordinal uint32) (string, bool) {
+	return f.resolver.TierName(ordinal)
+}
+
 // KeyWalker is an optional Index capability: visit requestKeys in input
 // order without materializing per-key entry slices.
 //
@@ -47,13 +114,13 @@ type EntryRef struct {
 //   - found reports whether the index held a generation of the key when the
 //     position was looked up. A miss is visited with found=false and no
 //     entries; the walk continues.
-//   - entries is every unfiltered record in that generation, in an order the
-//     consumer must not rely on. It is borrowed: read-only and valid only
-//     until visit returns, after which the index may reorder or overwrite its
-//     backing array. Consumers copy what they keep.
-//   - visit must not call back into the index; the generation's lock is held
-//     for the duration of the call. If visit panics, the lock is released
-//     and the panic propagates to the caller.
+//   - entries is every unfiltered (pod, tier) pair in that generation, one
+//     WalkEntry each, in an order the consumer must not rely on. It is
+//     borrowed: read-only and valid only until visit returns, after which
+//     the index may reorder or overwrite its backing array. Consumers copy
+//     what they keep.
+//   - visit must not call back into the index. If visit panics, any lock
+//     held for the call is released and the panic propagates to the caller.
 //   - A visit sees an internally consistent generation, exclusive of writers
 //     and other visits using that generation. Capacity eviction may detach it
 //     and a later Add may install a new generation of the same key while
@@ -63,14 +130,16 @@ type EntryRef struct {
 //     after it, and once more when the walk ends, so a cancelled ctx always
 //     yields ctx.Err(); visits may run between the cancellation and the
 //     next poll.
-//   - When the walk ends, for any reason, the prefix of requestKeys through
-//     the last key found is marked most recently used in position order
-//     under one acquisition, skipping keys absent by then. Positions after
-//     the last key found are not promoted. Lookup promotes the same way, so
-//     a prefix that is only read stays resident under capacity pressure.
+//   - When the walk ends, for any reason, the visited prefix is refreshed
+//     per the implementation's recency rule under one acquisition, skipping
+//     keys absent by then: InMemoryIndex promotes the prefix through the
+//     last key found to most recently used in position order, and positions
+//     after the last key found are not promoted. Lookup promotes the same
+//     way, so a prefix that is only read stays resident under capacity
+//     pressure.
 type KeyWalker interface {
 	WalkKeys(ctx context.Context, requestKeys []BlockHash,
-		visit func(pos int, found bool, entries []EntryRef) bool) error
+		visit func(pos int, found bool, entries []WalkEntry) bool) error
 }
 
 // Walk batches start small and double, so a walk that stops early peeks at
@@ -86,12 +155,15 @@ const (
 // a key takes its lock before the LRU's. The visited prefix is promoted in a
 // deferred call, so every exit path refreshes what was read.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
-	visit func(pos int, found bool, entries []EntryRef) bool,
+	visit func(pos int, found bool, entries []WalkEntry) bool,
 ) error {
 	visited := 0
 	// Every exit, cancellation included, refreshes what was read.
 	defer func() { m.data.Promote(requestKeys[:visited]) }()
 	var buf [walkBatchMax]*PodCache
+	// scratch materializes WalkEntries from the visited PodCache
+	// generations; one buffer serves the whole walk.
+	scratch := make([]WalkEntry, 0, 8)
 	batch := walkBatchMin
 	for start := 0; start < len(requestKeys); {
 		end := min(start+batch, len(requestKeys))
@@ -107,7 +179,7 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 				continue
 			}
 			visited = pos + 1
-			if !pc.visitEntries(pos, visit) {
+			if !pc.visitEntries(pos, visit, &scratch) {
 				return ctx.Err()
 			}
 		}
@@ -117,50 +189,44 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	return ctx.Err()
 }
 
-func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool) bool {
+// visitEntries materializes the cache's entries as WalkEntries, one per
+// distinct (pod, tier, speculative) triple, and hands them to visit under
+// the cache's lock. Duplicate triples (the same pod and tier under different
+// groups) fold to one entry: the walk payload is per (pod, tier) pair.
+// Duplicates can only coexist when entries differ in their group fields, so
+// the duplicate scan runs only while the cache holds such an entry; the
+// grouped flag is recomputed on the first visit after a mutation.
+func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []WalkEntry) bool, scratch *[]WalkEntry) bool {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-	return visit(pos, true, pc.entries)
-}
-
-// interner assigns dense uint32 ordinals to strings, stable for its lifetime
-// and never reused, up to a fixed number of distinct strings. Callers hold mu
-// across a whole batch so a batch is assigned all or nothing.
-type interner struct {
-	mu    sync.Mutex
-	ids   map[string]uint32
-	limit int
-}
-
-func newInterner(limit int) *interner {
-	return &interner{ids: make(map[string]uint32), limit: limit}
-}
-
-// fitsLocked reports whether the names not yet interned fit under the
-// limit. Called with mu held.
-func (in *interner) fitsLocked(names func(yield func(string))) bool {
-	pending := 0
-	seen := map[string]struct{}{}
-	names(func(s string) {
-		if _, ok := in.ids[s]; ok {
-			return
+	if !pc.groupedKnown {
+		pc.grouped = false
+		for i := range pc.entries {
+			if pc.entries[i].HasGroup || pc.entries[i].GroupIdx != 0 {
+				pc.grouped = true
+				break
+			}
 		}
-		if _, dup := seen[s]; dup {
-			return
-		}
-		seen[s] = struct{}{}
-		pending++
-	})
-	return len(in.ids)+pending <= in.limit
-}
-
-// internLocked returns the ordinal for s, assigning the next free one on
-// first use. Called with mu held, after fitsLocked.
-func (in *interner) internLocked(s string) uint32 {
-	if id, ok := in.ids[s]; ok {
-		return id
+		pc.groupedKnown = true
 	}
-	id := uint32(len(in.ids)) //#nosec G115 -- fitsLocked caps len(in.ids) at the interner limit, at most 1<<20
-	in.ids[s] = id
-	return id
+	entries := (*scratch)[:0]
+	for i := range pc.entries {
+		ref := &pc.entries[i]
+		e := WalkEntry{PodOrdinal: ref.PodOrdinal, TierOrdinal: ref.TierOrdinal, Speculative: ref.Speculative}
+		if pc.grouped {
+			dup := false
+			for j := range entries {
+				if entries[j] == e {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+		}
+		entries = append(entries, e)
+	}
+	*scratch = entries
+	return visit(pos, true, entries)
 }

@@ -31,3 +31,11 @@ func NewIndexerForTest(tp kvblock.TokenProcessor, idx kvblock.Index, backends []
 func NewIndexerForTestWithoutMetrics(tp kvblock.TokenProcessor, idx kvblock.Index, backends []*KVCacheBackendConfig) *Indexer {
 	return newIndexer(tp, idx, backends, false)
 }
+
+// NewSampledIndexerForTest is NewIndexerForTest with the matcher's request-key
+// sampling modulus set, matching an index configured with the same modulus.
+func NewSampledIndexerForTest(tp kvblock.TokenProcessor, idx kvblock.Index, backends []*KVCacheBackendConfig, sampleModulus int) *Indexer {
+	k := newIndexer(tp, idx, backends, true)
+	k.sampleModulus = sampleModulus
+	return k
+}
