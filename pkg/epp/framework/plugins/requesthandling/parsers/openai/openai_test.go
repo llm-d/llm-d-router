@@ -2038,6 +2038,34 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "chat_completion_mixed_choices_keep_normal_termination",
+			body: []byte(`{
+				"object": "chat.completion",
+				"choices": [
+					{"index": 0, "finish_reason": "stop"},
+					{"index": 1, "finish_reason": "content_filter"}
+				]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
+			name: "chat_completion_mixed_choices_unknown_first",
+			body: []byte(`{
+				"object": "chat.completion",
+				"choices": [
+					{"index": 0, "finish_reason": "content_filter"},
+					{"index": 1, "finish_reason": "stop"}
+				]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
 			name: "responses_api_incomplete_output_is_unknown",
 			body: []byte(`{
 				"object": "response",

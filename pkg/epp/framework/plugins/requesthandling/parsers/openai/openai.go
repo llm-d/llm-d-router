@@ -324,10 +324,6 @@ type responseOutputItem struct {
 	Type string `json:"type"`
 }
 
-type responseIncompleteDetails struct {
-	Reason string `json:"reason"`
-}
-
 // completionChoices holds the fields of a completions response that
 // ParsedResponse.Completion is built from.
 type completionChoices struct {
@@ -341,24 +337,21 @@ type completionChoices struct {
 // report the signal that matters most for join detection.
 func stopReasonFromChoices(choices []responseChoice) fwkrh.StopReason {
 	result := fwkrh.StopReason("")
-	seen := false
 	for _, choice := range choices {
 		reason := strings.TrimSpace(choice.FinishReason)
 		if reason == "" {
 			continue
 		}
-		seen = true
 		switch parsers.NormalizeStopReason(reason) {
 		case fwkrh.StopReasonToolCall:
 			return fwkrh.StopReasonToolCall
 		case fwkrh.StopReasonTurnEnded:
 			result = fwkrh.StopReasonTurnEnded
 		default:
-			result = fwkrh.StopReasonUnknown
+			if result == "" {
+				result = fwkrh.StopReasonUnknown
+			}
 		}
-	}
-	if !seen {
-		return ""
 	}
 	return result
 }
@@ -366,7 +359,7 @@ func stopReasonFromChoices(choices []responseChoice) fwkrh.StopReason {
 // responsesStopReason maps a Responses API status and output list into the
 // shared stop-reason vocabulary. A function-call output item means the turn
 // stopped to call a tool.
-func responsesStopReason(status string, output []responseOutputItem, _ responseIncompleteDetails) fwkrh.StopReason {
+func responsesStopReason(status string, output []responseOutputItem) fwkrh.StopReason {
 	status = strings.ToLower(strings.TrimSpace(status))
 	switch status {
 	case "failed", "cancelled", "incomplete":
@@ -385,19 +378,17 @@ func responsesStopReason(status string, output []responseOutputItem, _ responseI
 
 // responsesEventStopReason maps a terminal Responses API stream event. Some
 // providers omit response.status, so the event type is the fallback.
-func responsesEventStopReason(eventType, status string, output []responseOutputItem, incomplete responseIncompleteDetails) fwkrh.StopReason {
+func responsesEventStopReason(eventType, status string, output []responseOutputItem) fwkrh.StopReason {
 	if eventType == "response.failed" {
 		return fwkrh.StopReasonUnknown
 	}
-	if reason := responsesStopReason(status, output, incomplete); reason != "" {
+	if reason := responsesStopReason(status, output); reason != "" {
 		return reason
 	}
 	switch eventType {
 	case "response.completed":
 		return fwkrh.StopReasonTurnEnded
 	case "response.incomplete":
-		return fwkrh.StopReasonUnknown
-	case "response.failed":
 		return fwkrh.StopReasonUnknown
 	default:
 		return ""
@@ -437,10 +428,9 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 			Item     responseOutputItem `json:"item"`
 			Usage    json.RawMessage    `json:"usage"`
 			Response struct {
-				Usage             json.RawMessage           `json:"usage"`
-				Status            string                    `json:"status"`
-				Output            []responseOutputItem      `json:"output"`
-				IncompleteDetails responseIncompleteDetails `json:"incomplete_details"`
+				Usage  json.RawMessage      `json:"usage"`
+				Status string               `json:"status"`
+				Output []responseOutputItem `json:"output"`
 			} `json:"response"`
 		}
 		if err := json.Unmarshal(content, &streamResponse); err != nil {
@@ -454,7 +444,7 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 			stopReason = candidate
 		}
 		if isResponsesTerminalEvent(streamResponse.Type) {
-			candidate := responsesEventStopReason(streamResponse.Type, streamResponse.Response.Status, streamResponse.Response.Output, streamResponse.Response.IncompleteDetails)
+			candidate := responsesEventStopReason(streamResponse.Type, streamResponse.Response.Status, streamResponse.Response.Output)
 			if candidate == fwkrh.StopReasonTurnEnded && sawToolCall && streamResponse.Type == "response.completed" {
 				candidate = fwkrh.StopReasonToolCall
 			}
@@ -1119,10 +1109,9 @@ func toInt(v any) int {
 // mismatch outside "usage" leaves Completion nil and does not fail usage.
 func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
 	var responseBody struct {
-		Usage             map[string]any            `json:"usage"`
-		Status            string                    `json:"status"`
-		Output            []responseOutputItem      `json:"output"`
-		IncompleteDetails responseIncompleteDetails `json:"incomplete_details"`
+		Usage  map[string]any       `json:"usage"`
+		Status string               `json:"status"`
+		Output []responseOutputItem `json:"output"`
 		completionChoices
 	}
 	var completion *fwkrh.Completion
@@ -1136,7 +1125,7 @@ func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
 	}
 	reason := fwkrh.StopReason("")
 	if len(responseBody.Output) > 0 || responseBody.Status != "" {
-		reason = responsesStopReason(responseBody.Status, responseBody.Output, responseBody.IncompleteDetails)
+		reason = responsesStopReason(responseBody.Status, responseBody.Output)
 	} else {
 		reason = stopReasonFromChoices(responseBody.Choices)
 	}
