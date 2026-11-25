@@ -464,7 +464,7 @@ var (
 					"(unit 'tokens'), with endpointOverrides applied. Only the unit(s) the detector's concurrencyMode "+
 					"evaluates are exported. Labeled by the detector plugin name and by the "+
 					"pipeline stage ('prefill' or 'decode') whose endpoints were evaluated; the stage label is empty "+
-					"when the detector is evaluated without stage partitioning.",
+					"when the detector is evaluated without stage partitioning. Defined only when flow control is enabled.",
 				compbasemetrics.ALPHA),
 		},
 		[]string{"detector", "stage", "unit"},

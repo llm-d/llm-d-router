@@ -1117,6 +1117,20 @@ func TestDetector_EndpointOverrides(t *testing.T) {
 				wantErr: "maxTokenConcurrency must be strictly positive",
 			},
 			{
+				name:    "token limit only in requests mode",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxTokenConcurrency":3000}]}`,
+				wantErr: `maxTokenConcurrency has no effect in "requests" mode`,
+			},
+			{
+				name:    "request limit only in tokens mode",
+				params:  `{"concurrencyMode":"tokens","endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxConcurrency":30}]}`,
+				wantErr: `maxConcurrency has no effect in "tokens" mode`,
+			},
+			{
+				name:   "one limit in hybrid mode",
+				params: `{"concurrencyMode":"hybrid","endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxTokenConcurrency":3000}]}`,
+			},
+			{
 				name:    "invalid expression operator",
 				params:  `{"endpointOverrides":[{"matchExpressions":[{"key":"gpu","operator":"Near","values":["big"]}],"maxConcurrency":30}]}`,
 				wantErr: "invalid selector",

@@ -36,9 +36,10 @@ type apiConfig struct {
 	//
 	// This limit serves as the "ideal" request capacity for a single endpoint. The plugin aggregates
 	// the active requests across all endpoints and compares them against the aggregate pool capacity
-	// (Total Endpoints * MaxConcurrency) to compute PoolSaturation. When the pool approaches or
-	// exceeds this aggregate capacity, the Flow Controller triggers backpressure to buffer new
-	// traffic until capacity becomes available.
+	// (the sum of each endpoint's capacity; this value applies to endpoints matching no
+	// EndpointOverrides entry) to compute PoolSaturation. When the pool approaches or exceeds this
+	// aggregate capacity, the Flow Controller triggers backpressure to buffer new traffic until
+	// capacity becomes available.
 	//
 	// Defaults to 100 if unset.
 	MaxConcurrency *int64 `json:"maxConcurrency,omitempty"`
@@ -66,7 +67,8 @@ type apiConfig struct {
 	// - "requests": use discrete request counts for capacity accounting.
 	// - "tokens": use estimated token counts for capacity accounting.
 	// - "hybrid": evaluate each endpoint as the more constraining of its request and
-	//   token ratios; pool saturation is the average of these across endpoints.
+	//   token ratios; pool saturation is the largest of the average of these across
+	//   endpoints, the aggregate request ratio and the aggregate token ratio.
 	//
 	// Defaults to "requests" if unset.
 	ConcurrencyMode *concurrencyMode `json:"concurrencyMode,omitempty"`
@@ -75,7 +77,8 @@ type apiConfig struct {
 	//
 	// This is the "tokens" mode equivalent of MaxConcurrency. It represents the "ideal" token
 	// capacity per endpoint. It drives both the pool saturation calculation (for backpressure) and,
-	// combined with Headroom, the per-endpoint filtering limits (for routing).
+	// combined with Headroom, the per-endpoint filtering limits (for routing). This value applies
+	// to endpoints matching no EndpointOverrides entry.
 	//
 	// Defaults to 1000000 if unset.
 	MaxTokenConcurrency      *int64 `json:"maxTokenConcurrency,omitempty"`
@@ -241,6 +244,14 @@ func validateConfig(cfg *apiConfig) error {
 		}
 		if o.MaxConcurrency == nil && o.MaxTokenConcurrency == nil {
 			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxConcurrency or maxTokenConcurrency is required", i))
+		}
+		// An entry that sets only the limit the mode does not read would have no effect.
+		mode := ptr.Deref(cfg.ConcurrencyMode, defaultConcurrencyMode)
+		if mode == modeRequests && o.MaxConcurrency == nil && o.MaxTokenConcurrency != nil {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxTokenConcurrency has no effect in %q mode; set maxConcurrency", i, mode))
+		}
+		if mode == modeTokens && o.MaxTokenConcurrency == nil && o.MaxConcurrency != nil {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxConcurrency has no effect in %q mode; set maxTokenConcurrency", i, mode))
 		}
 		if o.MaxConcurrency != nil && *o.MaxConcurrency <= 0 {
 			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxConcurrency must be strictly positive, got %d", i, *o.MaxConcurrency))

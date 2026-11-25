@@ -201,10 +201,12 @@ func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 //
 //	Saturation = Total Inflight / Total Capacity.
 //
-// In "hybrid" mode saturation is instead evaluated per endpoint as
-// max(requestRatio, tokenRatio) and averaged across endpoints. Evaluating each
-// endpoint independently ensures an endpoint saturated on either dimension is
-// reflected in the pool signal.
+// In "hybrid" mode saturation is the largest of three terms: the per-endpoint
+// max(requestRatio, tokenRatio) averaged across endpoints, the aggregate request
+// ratio (including pending dispatches) and the aggregate token ratio. Evaluating
+// each endpoint independently ensures an endpoint saturated on either dimension is
+// reflected in the pool signal; the aggregate ratios cover endpoints whose
+// capacity exceeds the average.
 //
 // The inflight counts are read from the InFlightLoad attribute, which the
 // InFlightLoadProducer increments at dispatch and decrements on request
