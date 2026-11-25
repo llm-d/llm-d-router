@@ -71,7 +71,7 @@ func (sm *SubscriberManager) EnsureSubscriber(
 		if entry.endpoint == endpoint && entry.sourceEndpoint == sourceEndpoint &&
 			entry.replayEndpoint == replayEndpoint && entry.snapshotEndpoint == snapshotEndpoint {
 			// Subscriber already exists with the same endpoint, nothing to do
-			debugLogger.V(logging.TRACE).Info("Subscriber already exists", "podIdentifier", podIdentifier, "endpoint", endpoint)
+			log.FromContext(ctx).V(logging.TRACE).Info("Subscriber already exists", "podIdentifier", podIdentifier, "endpoint", endpoint)
 			return nil
 		}
 		// Endpoint changed, remove old subscriber
