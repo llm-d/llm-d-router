@@ -77,6 +77,7 @@ test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredic
 test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_gateway["image-digest"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model --set router.tokenizer.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.latencyPredictor.enabled=true --set router.latencyPredictor.trainingServer.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.latencyPredictor.predictionServers.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # Run the install command in case this script runs from a different bash
 # source (such as in the verify-all script)
@@ -224,7 +225,31 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
     fi
   fi
 
+  if [ "${key}" == "image-digest" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    for image in ghcr.io/llm-d/llm-d-router-endpoint-picker docker.io/vllm/vllm-openai-cpu \
+                 ghcr.io/llm-d/llm-d-latency-predictor-training-server ghcr.io/llm-d/llm-d-latency-predictor-prediction-server; do
+      if ! grep -q "image: ${image}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$" "${epp_yaml}"; then
+        echo "Validation failed: ${image} not pinned by digest for test: ${key}"
+        exit 1
+      fi
+    done
+    if grep -E -q "image: [^ ]+:[^ /@]+@sha256:" "${epp_yaml}"; then
+      echo "Validation failed: an image renders with both a tag and a digest for test: ${key}"
+      exit 1
+    fi
+  fi
+
   echo "Test case ${key} passed validation."
+done
+
+echo "Verifying an invalid image digest fails the render..."
+for bad_digest in "sha256:abc" "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef" "not-a-digest"; do
+  if ${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.epp.image.digest="${bad_digest}" > /dev/null 2>&1; then
+    echo "Invalid router.epp.image.digest ${bad_digest} rendered without an error"
+    exit 1
+  fi
 done
 
 echo "Verifying latency predictor service mode keeps EPP config checksum and scheduling..."
