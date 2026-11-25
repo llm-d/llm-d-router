@@ -672,4 +672,17 @@ func TestProduce_PassthroughBackend(t *testing.T) {
 		require.NoError(t, p.Produce(ctx, req, nil))
 		assert.Nil(t, req.Body.TokenizedRequest)
 	})
+
+	t.Run("embeddings token IDs with truncate_prompt_tokens produces no tokens", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Embeddings: &fwkrequest.EmbeddingsRequest{
+					Input: fwkrequest.EmbeddingsInput{TokenIDs: [][]uint32{{7, 8, 9}}},
+				},
+				Payload: fwkrequest.PayloadMap{reqcommon.FieldTruncatePromptTokens: float64(2)},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		assert.Nil(t, req.Body.TokenizedRequest)
+	})
 }

@@ -44,26 +44,22 @@ type tokenInputProducer interface {
 	produce(ctx context.Context, body *fwkrequest.InferenceRequestBody) (*fwkrequest.TokenizedRequest, error)
 }
 
-// passthroughBackend accepts only pre-tokenized requests that already carry
-// exact engine token IDs (Generate and token-array Embeddings; token-array
-// Completions and kv_transfer_params.prompt_token_ids are handled before
-// backend dispatch, and pre-populated TokenizedRequest skips Produce). Text
-// prompts return errUnsupportedBody so pseudo-tokens never reach exact-token
-// consumers.
+// passthroughBackend accepts only pre-tokenized Generate requests that already
+// carry exact engine token IDs (token-array Completions, token-array
+// Embeddings, and kv_transfer_params.prompt_token_ids are handled before
+// backend dispatch by clientPromptTokenIDs, and pre-populated TokenizedRequest
+// skips Produce). Text prompts return errUnsupportedBody so pseudo-tokens never
+// reach exact-token consumers.
 type passthroughBackend struct{}
 
 func (passthroughBackend) produce(_ context.Context, body *fwkrequest.InferenceRequestBody) (*fwkrequest.TokenizedRequest, error) {
-	switch {
-	case body.Generate != nil && len(body.Generate.TokenIDs) > 0:
+	if body.Generate != nil && len(body.Generate.TokenIDs) > 0 {
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}}}, nil
-	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return fwkrequest.NewTokenizedRequest(body.Embeddings.Input.TokenIDs), nil
-	default:
-		return nil, errUnsupportedBody
 	}
+	return nil, errUnsupportedBody
 }
 
 // timeoutAware is implemented by backends (and the tokenizers they wrap) whose
