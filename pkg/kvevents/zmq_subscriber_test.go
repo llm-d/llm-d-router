@@ -692,12 +692,12 @@ func TestZMQSubscriber_ProactiveReplayClearsPartialHistoryOnGap(t *testing.T) {
 }
 
 func TestZMQSubscriber_ProactiveReplayUsesInactivityDeadline(t *testing.T) {
-	const attemptIdleTimeout = 250 * time.Millisecond
+	const attemptIdleTimeout = 500 * time.Millisecond
 	h := newReplayHarnessWithBehavior(t, []replayMessage{
 		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
 		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
 		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
-	}, false, 0, 100*time.Millisecond, false,
+	}, false, 0, 200*time.Millisecond, false,
 		kvevents.WithReplayTimers(kvevents.ReplayTimers{AttemptIdleTimeout: attemptIdleTimeout}))
 
 	require.Eventually(t, func() bool {

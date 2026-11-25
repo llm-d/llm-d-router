@@ -47,10 +47,15 @@ const (
 // ReplayTimers configures the durations governing ZMQ replay attempts and cooldown.
 // Zero or negative fields fall back to the package defaults.
 type ReplayTimers struct {
-	Timeout            time.Duration
+	// Timeout bounds one replay request across all of its attempts.
+	Timeout time.Duration
+	// AttemptIdleTimeout ends a replay attempt when no message arrives for this long.
 	AttemptIdleTimeout time.Duration
-	RetryBackoff       time.Duration
-	Cooldown           time.Duration
+	// RetryBackoff is the wait between attempts of an interrupted replay.
+	RetryBackoff time.Duration
+	// Cooldown is the minimum interval after a failed replay before the next replay, and between
+	// endpoint resyncs.
+	Cooldown time.Duration
 }
 
 func (t ReplayTimers) withDefaults() ReplayTimers {
