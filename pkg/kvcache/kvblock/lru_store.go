@@ -30,8 +30,15 @@ type lruStore struct {
 	lru *simplelru.LRU[BlockHash, *PodCache]
 }
 
-func newLRUStore(size int) (*lruStore, error) {
-	lru, err := simplelru.NewLRU[BlockHash, *PodCache](size, nil)
+// newLRUStore builds a store of size keys. onEvict, when set, runs for every
+// entry the LRU drops: capacity eviction and Remove alike, since the
+// underlying callback does not distinguish them.
+func newLRUStore(size int, onEvict func(*PodCache)) (*lruStore, error) {
+	lru, err := simplelru.NewLRU[BlockHash, *PodCache](size, func(_ BlockHash, pc *PodCache) {
+		if onEvict != nil {
+			onEvict(pc)
+		}
+	})
 	if err != nil {
 		return nil, err
 	}

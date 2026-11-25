@@ -32,7 +32,10 @@ import (
 // TestInMemoryIndexEvictKeepsEntryAddedConcurrently drives, for each public
 // eviction entrypoint, the interleaving where Add has fetched a key's PodCache
 // and the eviction empties that cache before Add writes to it. The test holds
-// m.mu as Add does, so the eviction must not remove the key until the write lands.
+// m.mu as Add does. Request-key Evict and Clear empty the cache without
+// waiting for m.mu, so they must not remove the key until the write lands;
+// engine-key Evict resolves the engine mapping under m.mu, so it waits for
+// Add's critical section instead.
 func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 	const (
 		engineKey  BlockHash = 101
@@ -44,12 +47,16 @@ func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 	tests := []struct {
 		name  string
 		evict func(context.Context, *InMemoryIndex) error
+		// emptiesWithoutMu reports whether the eviction can empty the
+		// PodCache while Add holds m.mu.
+		emptiesWithoutMu bool
 	}{
 		{
 			name: "Evict by request key",
 			evict: func(ctx context.Context, idx *InMemoryIndex) error {
 				return idx.Evict(ctx, RequestKey, []BlockHash{requestKey}, []PodEntry{podA})
 			},
+			emptiesWithoutMu: true,
 		},
 		{
 			name: "Evict by engine key",
@@ -62,6 +69,7 @@ func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 			evict: func(ctx context.Context, idx *InMemoryIndex) error {
 				return idx.Clear(ctx, podA.PodIdentifier)
 			},
+			emptiesWithoutMu: true,
 		},
 	}
 
@@ -83,14 +91,16 @@ func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 			evicted := make(chan error, 1)
 			go func() { evicted <- tt.evict(ctx, idx) }()
 
-			require.Eventually(t, func() bool { return podCache.size() == 0 }, time.Second, time.Millisecond)
-			// Give an eviction that does not wait for m.mu the chance to remove the key.
 			var evictErr error
 			done := false
-			select {
-			case evictErr = <-evicted:
-				done = true
-			case <-time.After(50 * time.Millisecond):
+			if tt.emptiesWithoutMu {
+				require.Eventually(t, func() bool { return podCache.size() == 0 }, time.Second, time.Millisecond)
+				// Give the eviction the chance to remove the emptied key.
+				select {
+				case evictErr = <-evicted:
+					done = true
+				case <-time.After(50 * time.Millisecond):
+				}
 			}
 
 			podCache.addAll(recordsB)
