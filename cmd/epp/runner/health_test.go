@@ -530,8 +530,12 @@ func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
 		if _, err := healthPb.NewHealthClient(conn).Check(checkCtx, &healthPb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
 			t.Fatalf("Check failed: %v (code %v)", err, status.Code(err))
 		}
-		if state := conn.GetState(); state != connectivity.Ready {
-			t.Fatalf("connection state after Check = %v, want Ready", state)
+		// grpc-go updates the picker before the connectivity state manager, so a fast
+		// loopback Check can return while GetState still reports CONNECTING.
+		for state := conn.GetState(); state != connectivity.Ready; state = conn.GetState() {
+			if !conn.WaitForStateChange(checkCtx, state) {
+				t.Fatalf("connection state after Check = %v, want Ready", conn.GetState())
+			}
 		}
 
 		// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
