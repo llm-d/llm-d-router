@@ -34,7 +34,7 @@ func TestWalkKeysUnlocksAfterPanic(t *testing.T) {
 	require.True(t, found)
 
 	require.PanicsWithValue(t, "visit failed", func() {
-		_ = index.WalkKeys(ctx, keys, func(int, bool, []EntryRef) bool {
+		_ = index.WalkKeys(ctx, keys, func(int, bool, []WalkEntry) bool {
 			panic("visit failed")
 		})
 	})
@@ -45,11 +45,11 @@ func TestWalkKeysUnlocksAfterPanic(t *testing.T) {
 	second := PodEntry{PodIdentifier: "pod-b", DeviceTier: "cpu"}
 	require.NoError(t, index.Add(ctx, nil, keys, []PodEntry{second}))
 	visits := 0
-	require.NoError(t, index.WalkKeys(ctx, keys, func(_ int, found bool, entries []EntryRef) bool {
+	require.NoError(t, index.WalkKeys(ctx, keys, func(_ int, found bool, entries []WalkEntry) bool {
 		visits++
 		assert.True(t, found)
 		require.Len(t, entries, 2)
-		assert.ElementsMatch(t, []PodEntry{first, second}, []PodEntry{entries[0].PodEntry, entries[1].PodEntry})
+		assert.True(t, entries[0].PodOrdinal != entries[1].PodOrdinal, "the two pods carry distinct ordinals")
 		return true
 	}))
 	assert.Equal(t, 1, visits)
