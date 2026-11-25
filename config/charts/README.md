@@ -313,7 +313,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.autoscaling.targetMemoryUtilizationPercentage` | Target average memory utilization percentage across EPP pods (1-100). | `""` |
 | `router.epp.autoscaling.behavior` | Scaling behavior policies for HPA scale-up and scale-down. | `{}` |
 | `router.epp.autoscaling.metrics` | Custom HPA v2 metrics override; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
-| `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
+| `router.epp.extProcPort` | Port used by the EPP listener and its chart-managed gRPC clients. An explicit `router.epp.flags.grpc-port` takes precedence. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |
 | `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker` |
 | `router.epp.image.tag` | EPP container image tag. Ignored when `digest` is set. | `main` |
