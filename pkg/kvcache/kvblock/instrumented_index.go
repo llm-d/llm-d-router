@@ -27,10 +27,12 @@ type instrumentedIndex struct {
 	next Index
 }
 
-// instrumentedWalker carries the KeyWalker capability of the wrapped index.
+// instrumentedWalker carries the KeyWalker and OrdinalResolver capabilities
+// of the wrapped index.
 type instrumentedWalker struct {
 	*instrumentedIndex
 	walker KeyWalker
+	resolverForwarder
 }
 
 // NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict,
@@ -40,7 +42,8 @@ type instrumentedWalker struct {
 func NewInstrumentedIndex(next Index) Index {
 	m := &instrumentedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {
-		return &instrumentedWalker{instrumentedIndex: m, walker: walker}
+		resolver, _ := next.(OrdinalResolver)
+		return &instrumentedWalker{instrumentedIndex: m, walker: walker, resolverForwarder: resolverForwarder{resolver: resolver}}
 	}
 	return m
 }
@@ -75,7 +78,7 @@ func (m *instrumentedIndex) Lookup(
 
 // WalkKeys forwards the walk as a lookup request.
 func (m *instrumentedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
-	visit func(pos int, found bool, entries []EntryRef) bool,
+	visit func(pos int, found bool, entries []WalkEntry) bool,
 ) error {
 	defer observeLookup(ctx, time.Now())
 

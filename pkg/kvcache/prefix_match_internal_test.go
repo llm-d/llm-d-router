@@ -109,7 +109,7 @@ func TestMatchBlockKeysColdStateDoesNotTrackTierHistory(t *testing.T) {
 		"request state must scale with the tiers a request sees, not with tier ordinal history")
 }
 
-// clampOrdinal must never return speculativeTierOrdinal (math.MaxUint32),
+// clampOrdinal must never return kvblock.ReservedTierOrdinal (math.MaxUint32),
 // even for a table size at or past the int-to-uint32 overflow boundary.
 func TestClampOrdinal(t *testing.T) {
 	tests := []struct {
@@ -127,7 +127,7 @@ func TestClampOrdinal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := clampOrdinal(tc.n)
 			assert.Equal(t, tc.want, got)
-			assert.NotEqual(t, uint32(speculativeTierOrdinal), got,
+			assert.NotEqual(t, uint32(kvblock.ReservedTierOrdinal), got,
 				"clamped ordinal must never collide with the speculative tier sentinel")
 		})
 	}
