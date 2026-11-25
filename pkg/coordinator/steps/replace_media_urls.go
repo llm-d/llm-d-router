@@ -184,7 +184,7 @@ func NewReplaceMediaURLsStep(_ *gateway.Client, params map[string]any) (pipeline
 func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
+	if reqCtx.IsGRPC() {
 		return nil
 	}
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)

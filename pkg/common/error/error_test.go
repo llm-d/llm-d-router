@@ -222,6 +222,25 @@ func TestErrorConstants(t *testing.T) {
 	}
 }
 
+func TestModelServerStatusCode(t *testing.T) {
+	tests := map[string]string{
+		"101": "",
+		"200": "",
+		"202": "",
+		"304": "",
+		"400": ModelServerClientError,
+		"499": ModelServerClientError,
+		"500": ModelServerError,
+		"504": ModelServerError,
+		"abc": ModelServerError,
+	}
+	for status, want := range tests {
+		if got := ModelServerStatusCode(status); got != want {
+			t.Errorf("ModelServerStatusCode(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
 func TestBuildErrResponse(t *testing.T) {
 	tests := []struct {
 		name           string

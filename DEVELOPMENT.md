@@ -307,6 +307,10 @@ Data parallel and KV cache are orthogonal options that can be combined with any 
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags appended to the Prefill vLLM container args. Use `--flag=value` format. Example: `--gpu-memory-utilization=0.9` |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags appended to the Decode vLLM container args. Use `--flag=value` format. Example: `--tensor-parallel-size=2` |
 
+A `VLLM_EXTRA_ARGS_*` value can hold several plain `--flag` or `--flag=value` tokens separated by spaces, and each
+token becomes a separate argument. A value that contains JSON or quotes is passed as one argument, so it cannot be
+combined with other flags in the same variable.
+
 For technical details, refer to [docs/disaggregation.md](docs/disaggregation.md) and
 [test/e2e/artifacts/environments/dev/README.md](test/e2e/artifacts/environments/dev/README.md).
 

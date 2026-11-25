@@ -2443,7 +2443,7 @@ func TestP2PDispatchedToolCallingMetrics(t *testing.T) {
 					before := toolFieldCounters(t)
 					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(original))
 					rw := httptest.NewRecorder()
-					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields)
+					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields, false)
 					require.Equal(t, code, rw.Code)
 					require.Equal(t, tt.prefillStatus == 0, decodeCount == 1)
 					delta := toolFieldDelta(before, toolFieldCounters(t))

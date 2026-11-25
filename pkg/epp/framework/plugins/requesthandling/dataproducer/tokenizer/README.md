@@ -540,7 +540,7 @@ client sent for either field are overridden. vLLM versions without these fields
 ignore them and return the tensors. The option is false by default and works
 with `vllm.url` and `vllm.endpointDiscovery`.
 
-A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml).
+A deployment-shaped config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/e2e/artifacts/config/epp-precise-prefix-cache-config.yaml`](../../../../../../../test/e2e/artifacts/config/epp-precise-prefix-cache-config.yaml); the producer subscribes to each discovered endpoint's KV-event socket.
 
 ## Live verification
 

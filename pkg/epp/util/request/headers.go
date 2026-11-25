@@ -82,15 +82,17 @@ var (
 		routing.EndpointPinHeader,
 	)
 
-	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
-	// W3C trace context headers are re-injected from the active span in
-	// generateHeaders and must not be forwarded from the client.
-	ProtocolHeaders = sets.New(
-		"content-length",
+	// TracePropagationHeaders are the W3C Trace Context and Baggage headers.
+	// generateHeaders sets them from the propagator, and EPP removes a client
+	// copy that the propagator does not re-inject.
+	TracePropagationHeaders = sets.New(
 		"traceparent",
 		"tracestate",
 		"baggage",
 	)
+
+	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
+	ProtocolHeaders = sets.New("content-length").Union(TracePropagationHeaders)
 )
 
 func IsSystemOwnedHeader(key string) bool {

@@ -109,7 +109,7 @@ spec:
     kind: InferencePool
     name: {{ .Release.Name }}
   default:
-    timeoutSec: 300    # 5-minute timeout (adjust as needed)
+    timeoutSec: {{ .Values.provider.gke.backendTimeoutSec }}
     logging:
       enabled: true    # log all requests by default
 ---
@@ -146,7 +146,7 @@ spec:
     kind: Service
     name: {{ $serviceName }}
   default:
-    timeoutSec: 300
+    timeoutSec: {{ $.Values.provider.gke.backendTimeoutSec }}
     backendPreference: {{ $pref }}
     {{- if $gkePB.balancingMode }}
     balancingMode: {{ $gkePB.balancingMode }}
