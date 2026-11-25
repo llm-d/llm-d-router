@@ -55,15 +55,16 @@ var ResolvedBandKey = plugin.NewDataKey("resolved-band", "")
 
 const (
 	PluginType = "agent-lineage"
-	// ParentSessionHeader is the shared wire-convention header carrying the
-	// parent session ID one hop up. OpenCodeParentSessionHeader is
-	// opencode's vendor-specific form of the same link; opencode sends both.
-	ParentSessionHeader         = "x-parent-session-id"
+	// ParentSessionHeader and OpenCodeSessionHeader alias the canonical
+	// wire-header constants declared in agentidentity, so one header has
+	// one constant everywhere (agentidentity cannot import this package
+	// without a cycle). OpenCodeSessionHeader carries the request's own
+	// session ID; it is not interchangeable with
+	// agentidentity.OpenCodeSessionHeader (x-session-affinity), which
+	// carries the parent one hop up.
+	ParentSessionHeader         = agentidentity.ParentSessionHeader
+	OpenCodeSessionHeader       = agentidentity.OpenCodeOwnSessionHeader
 	OpenCodeParentSessionHeader = "x-opencode-parent-session-id"
-	// OpenCodeSessionHeader carries the request's own session ID. It is not
-	// interchangeable with agentidentity.OpenCodeSessionHeader
-	// (x-session-affinity), which carries the parent one hop up.
-	OpenCodeSessionHeader = "x-opencode-session-id"
 	// CodexTurnMetadataHeader carries a JSON blob whose session_id field is
 	// the root session identity shared by every thread in the tree. The flat
 	// session-id header is a derived cache-affinity key on root-thread

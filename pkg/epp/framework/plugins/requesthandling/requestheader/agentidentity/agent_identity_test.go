@@ -306,37 +306,43 @@ func TestRequestHeader_ThreadAndParent(t *testing.T) {
 		wantParent   string
 	}{
 		{
-			name:       "claude code main thread: thread falls back to session, no parent",
-			headers:    map[string]string{ClaudeCodeSessionHeader: "S"},
-			wantThread: "S",
+			name:         "claude code main thread: thread falls back to session, no parent",
+			headers:      map[string]string{ClaudeCodeSessionHeader: "S"},
+			wantIdentity: "S",
+			wantThread:   "S",
 		},
 		{
-			name:       "claude code depth-1 child: parent inferred as session",
-			headers:    map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "A"},
-			wantThread: "A",
-			wantParent: "S",
+			name:         "claude code depth-1 child: parent inferred as session",
+			headers:      map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "A"},
+			wantIdentity: "S",
+			wantThread:   "A",
+			wantParent:   "S",
 		},
 		{
-			name:       "claude code depth-2 child: parent header wins",
-			headers:    map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "A2", ClaudeCodeParentAgentHeader: "A1"},
-			wantThread: "A2",
-			wantParent: "A1",
+			name:         "claude code depth-2 child: parent header wins",
+			headers:      map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "A2", ClaudeCodeParentAgentHeader: "A1"},
+			wantIdentity: "S",
+			wantThread:   "A2",
+			wantParent:   "A1",
 		},
 		{
-			name:       "codex root: thread from thread-id, no parent",
-			headers:    map[string]string{CodexSessionHeader: "R", CodexThreadHeader: "R"},
-			wantThread: "R",
+			name:         "codex root: thread from thread-id, no parent",
+			headers:      map[string]string{CodexSessionHeader: "R", CodexThreadHeader: "R"},
+			wantIdentity: "R",
+			wantThread:   "R",
 		},
 		{
-			name:       "codex child: parent from x-codex-parent-thread-id",
-			headers:    map[string]string{CodexSessionHeader: "R", CodexThreadHeader: "T1", CodexParentThreadHeader: "R"},
-			wantThread: "T1",
-			wantParent: "R",
+			name:         "codex child: parent from x-codex-parent-thread-id",
+			headers:      map[string]string{CodexSessionHeader: "R", CodexThreadHeader: "T1", CodexParentThreadHeader: "R"},
+			wantIdentity: "R",
+			wantThread:   "T1",
+			wantParent:   "R",
 		},
 		{
-			name:       "codex legacy thread_id form",
-			headers:    map[string]string{CodexSessionHeader: "R", CodexThreadHeaderLegacy: "T1"},
-			wantThread: "T1",
+			name:         "codex legacy thread_id form",
+			headers:      map[string]string{CodexSessionHeader: "R", CodexThreadHeaderLegacy: "T1"},
+			wantIdentity: "R",
+			wantThread:   "T1",
 		},
 		{
 			name:         "opencode child: own session as thread, parent one hop up",
@@ -369,15 +375,17 @@ func TestRequestHeader_ThreadAndParent(t *testing.T) {
 			wantParent: "P",
 		},
 		{
-			name:       "independent lists: claude code session with opencode parent header",
-			headers:    map[string]string{ClaudeCodeSessionHeader: "S", ParentSessionHeader: "R"},
-			wantThread: "S",
-			wantParent: "R",
+			name:         "independent lists: claude code session with opencode parent header",
+			headers:      map[string]string{ClaudeCodeSessionHeader: "S", ParentSessionHeader: "R"},
+			wantIdentity: "S",
+			wantThread:   "S",
+			wantParent:   "R",
 		},
 		{
-			name:       "no thread header: thread falls back to session",
-			headers:    map[string]string{CodexSessionHeader: "R"},
-			wantThread: "R",
+			name:         "no thread header: thread falls back to session",
+			headers:      map[string]string{CodexSessionHeader: "R"},
+			wantIdentity: "R",
+			wantThread:   "R",
 		},
 		{
 			name:       "self-parent is not published",
@@ -385,15 +393,17 @@ func TestRequestHeader_ThreadAndParent(t *testing.T) {
 			wantThread: "X",
 		},
 		{
-			name:       "whitespace-only thread falls through to fallback",
-			headers:    map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "  "},
-			wantThread: "S",
+			name:         "whitespace-only thread falls through to fallback",
+			headers:      map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "  "},
+			wantIdentity: "S",
+			wantThread:   "S",
 		},
 		{
-			name:       "whitespace-only claude code parent triggers depth-1 rule",
-			headers:    map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "A", ClaudeCodeParentAgentHeader: "   "},
-			wantThread: "A",
-			wantParent: "S",
+			name:         "whitespace-only claude code parent triggers depth-1 rule",
+			headers:      map[string]string{ClaudeCodeSessionHeader: "S", ClaudeCodeAgentHeader: "A", ClaudeCodeParentAgentHeader: "   "},
+			wantIdentity: "S",
+			wantThread:   "A",
+			wantParent:   "S",
 		},
 		{
 			name:       "thread values are trimmed",
@@ -429,11 +439,14 @@ func TestRequestHeader_ThreadAndParent(t *testing.T) {
 			} else if !ok || gotThread != tt.wantThread {
 				t.Errorf("thread-id = (%q, %v), want (%q, true)", gotThread, ok, tt.wantThread)
 			}
-			if tt.wantIdentity != "" {
-				gotIdentity, ok := scheduling.ReadRequestAttribute[string](req, AgentIdentityKey)
-				if !ok || gotIdentity != tt.wantIdentity {
-					t.Errorf("agent-identity = (%q, %v), want (%q, true)", gotIdentity, ok, tt.wantIdentity)
+			// wantIdentity "" means absent, matching wantThread and wantParent.
+			gotIdentity, ok := scheduling.ReadRequestAttribute[string](req, AgentIdentityKey)
+			if tt.wantIdentity == "" {
+				if ok {
+					t.Errorf("agent-identity published as %q, want absent", gotIdentity)
 				}
+			} else if !ok || gotIdentity != tt.wantIdentity {
+				t.Errorf("agent-identity = (%q, %v), want (%q, true)", gotIdentity, ok, tt.wantIdentity)
 			}
 			gotParent, ok := scheduling.ReadRequestAttribute[string](req, ParentThreadIDKey)
 			if tt.wantParent == "" {

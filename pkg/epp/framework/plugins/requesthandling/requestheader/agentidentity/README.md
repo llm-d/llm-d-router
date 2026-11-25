@@ -36,7 +36,7 @@ The `x-llm-d-thread-id` and `x-llm-d-parent-thread-id` pair is the standard llm-
    3. `x-codex-parent-thread-id` (Codex)
    4. `x-parent-session-id` (OpenCode, shared wire convention)
 
-   A Claude Code sub-agent that sends its agent id but no parent header is a depth-1 child of the main thread, so its parent is the session id. A parent equal to the thread id is not published, and a root thread publishes no parent: an absent or empty read means root.
+   A Claude Code sub-agent that sends its agent id but no parent header is a depth-1 child of the main thread, so its parent is the session id. This inference only fires when `x-claude-code-agent-id` supplied the thread: a request carrying both `x-llm-d-thread-id` and the Claude agent header gets no inferred parent. A parent equal to the thread id is not published, and a root thread publishes no parent: an absent or empty read means root.
 4. If no session header matches, no `"agent-identity"` attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
 
 After the plugin returns, the Director derives `FairnessID`:
