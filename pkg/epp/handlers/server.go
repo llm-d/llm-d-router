@@ -881,6 +881,18 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
 			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
 			reqCtx.responseHeadersReceivedAt = respHeadersReceivedAt
+			// A trailers-only response, such as a gRPC error, ends with its headers and no body message follows.
+			// An opaque response completes here so its parser still gets the final call with an empty body.
+			if v.ResponseHeaders.EndOfStream && reqCtx.opaqueResponse {
+				// A trailers-only gRPC response carries grpc-status in its headers.
+				if cause := terminationCauseFromGRPCTrailers(&extProcPb.HttpTrailers{Trailers: v.ResponseHeaders.Headers}); cause != "" {
+					reqCtx.TerminationCause = cause
+				}
+				reqCtx.responseComplete = true
+				reqCtx.responseCompleteTimestamp = respHeadersReceivedAt
+				reqCtx.observeToolCallingResponse(nil, true, false, span)
+				s.HandleResponseBody(ctx, reqCtx, nil, true)
+			}
 			reqCtx.responseProcessingDuration += time.Since(respHeadersReceivedAt)
 
 		case *extProcPb.ProcessingRequest_ResponseBody:

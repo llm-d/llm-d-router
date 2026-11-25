@@ -35,6 +35,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -358,24 +359,60 @@ func TestProcessPassthroughResponseProtocols(t *testing.T) {
 	}
 }
 
-// TestProcessPassthroughTrailersOnlyResponse covers a gRPC error sent as headers with end of stream.
-func TestProcessPassthroughTrailersOnlyResponse(t *testing.T) {
-	eppmetrics.Register()
-	eppmetrics.Reset()
-	t.Cleanup(eppmetrics.Reset)
-	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
-	defer cancel()
+// recordingPassthroughParser records the calls the handler makes to ParseResponse.
+type recordingPassthroughParser struct {
+	*passthrough.PassthroughParser
+	mu     sync.Mutex
+	bodies []string
+	ends   []bool
+}
 
-	director := &lifecycleDirector{incomingModel: "m", targetModel: "m"}
-	srv, done := startRouted(ctx, t, director, passthroughRegistry(),
-		map[string]string{":path": grpcMethodPath, "content-type": "application/grpc"},
-		grpcFrame(t, []byte("request")), responseHeadersMsg("application/grpc", true, "grpc-status", "5"))
-	close(srv.in)
-	require.NoError(t, <-done)
-	require.Empty(t, srv.out, "no body response for a trailers-only response")
-	calls, _, _ := director.terminal()
-	require.Equal(t, 1, calls)
-	require.Zero(t, runningRequests(t))
+func (p *recordingPassthroughParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*fwkrh.ParsedResponse, error) {
+	p.mu.Lock()
+	p.bodies = append(p.bodies, string(body))
+	p.ends = append(p.ends, endOfStream)
+	p.mu.Unlock()
+	return p.PassthroughParser.ParseResponse(ctx, body, headers, endOfStream)
+}
+
+// TestProcessPassthroughTrailersOnlyResponse covers a gRPC response sent as headers with end of stream.
+// The headers end the response, so the final ParseResponse call and the completion metrics happen there.
+func TestProcessPassthroughTrailersOnlyResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name, grpcStatus string
+		wantCause        fwkrh.TerminationCause
+		wantOutcome      [2]string
+	}{
+		{name: "error status", grpcStatus: "5", wantCause: fwkrh.TerminationCauseError, wantOutcome: [2]string{outcomeFailed, errcommon.ModelServerError}},
+		{name: "OK status", grpcStatus: "0", wantOutcome: [2]string{outcomeCompleted, ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eppmetrics.Register()
+			eppmetrics.Reset()
+			t.Cleanup(eppmetrics.Reset)
+			ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+			defer cancel()
+
+			parser := &recordingPassthroughParser{PassthroughParser: passthrough.NewPassthroughParser()}
+			director := &lifecycleDirector{incomingModel: "m", targetModel: "m"}
+			srv, done := startRouted(ctx, t, director, NewParserRegistry([]fwkrh.Parser{parser}, logr.Discard()),
+				map[string]string{":path": grpcMethodPath, "content-type": "application/grpc"},
+				grpcFrame(t, []byte("request")), responseHeadersMsg("application/grpc", true, "grpc-status", tc.grpcStatus))
+			close(srv.in)
+			require.NoError(t, <-done)
+			require.Empty(t, srv.out, "no body response for a trailers-only response")
+
+			require.Equal(t, []string{""}, parser.bodies, "one final ParseResponse call with an empty body")
+			require.Equal(t, []bool{true}, parser.ends)
+			calls, causes, _ := director.terminal()
+			require.Equal(t, 1, calls)
+			require.Equal(t, []fwkrh.TerminationCause{tc.wantCause}, causes)
+			require.Equal(t, map[[2]string]float64{tc.wantOutcome: 1}, requestOutcomes(t))
+			require.Equal(t, uint64(1), histogramSampleCount(t, "llm_d_epp_response_size_bytes", nil))
+			require.Equal(t, uint64(1), histogramSampleCount(t, "llm_d_epp_request_duration_seconds", nil))
+			require.Zero(t, runningRequests(t))
+		})
+	}
 }
 
 // TestProcessPassthroughKeepsResponseMetadata checks that an opaque response's status, binary metadata and grpc-message reach the client unchanged.
