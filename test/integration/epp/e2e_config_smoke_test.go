@@ -226,6 +226,48 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
+	// kvConfig in test/e2e/configs_test.go: KV events in pull mode, with the
+	// producer wired as the endpoint-notification-source extractor that
+	// subscribes to each endpoint's socket.
+	"kvConfig": `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    modelName: Qwen/Qwen2.5-1.5B-Instruct
+    vllm:
+      url: http://localhost:9999
+- type: endpoint-notification-source
+- type: precise-prefix-cache-producer
+  parameters:
+    tokenProcessorConfig:
+      blockSizeTokens: 16
+      hashSeed: "42"
+    kvEventsConfig:
+      podDiscoveryConfig:
+        socketPort: 5557
+    indexerConfig:
+      kvBlockIndexConfig:
+        enableMetrics: false
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+- type: decode-filter
+- type: max-score-picker
+- type: disagg-profile-handler
+dataLayer:
+  sources:
+  - pluginRef: endpoint-notification-source
+    extractors:
+    - pluginRef: precise-prefix-cache-producer
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 10
+`,
 	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:

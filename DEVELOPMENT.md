@@ -443,7 +443,7 @@ The `test/e2e/artifacts/components/` directory contains all reusable Kustomize c
 - `vllm-decode/` — Decode pod with routing sidecar
 
 **Deployment overlays** — applied on top of the base components:
-- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
+- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, KV cache args, and `--zmq-endpoint=tcp://*:5557` on Decode (a per-pod KV-event publisher the EPP dials). Included by default in all dev scenario overlays.
 - `overlays/real-vllm/` — adds `--kv-events-config` on Decode, `--ec-transfer-config` on Encode, and a shared PVC for encoder embeddings.
 
 **Infrastructure components** — shared cluster infrastructure:
@@ -519,7 +519,7 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Component | What it adds | When to use |
 |---|---|---|
-| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
+| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, KV cache args, `--zmq-endpoint=tcp://*:5557` on Decode (per-pod ZMQ publisher) | Dev/test with simulator image |
 | `overlays/real-vllm/` | `--kv-events-config` on Decode (per-pod ZMQ publisher), `--ec-transfer-config` on Encode, ec-cache PVC | Production with real vLLM image |
 
 | Variable | Default | Description |

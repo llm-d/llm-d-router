@@ -240,14 +240,15 @@ plugins:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: %s
+- type: endpoint-notification-source
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
       blockSizeTokens: 16
       hashSeed: "42"
     kvEventsConfig:
-      zmqEndpoint: tcp://0.0.0.0:5557
-      allowUntrustedPublishers: true  # simulator pods publish to the EPP's bound socket
+      podDiscoveryConfig:
+        socketPort: 5557 # each simulator pod binds it (--zmq-endpoint=tcp://*:5557)
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false                  # enable kv-block index metrics (prometheus)
@@ -258,6 +259,11 @@ plugins:
 - type: decode-filter
 - type: max-score-picker
 - type: disagg-profile-handler
+dataLayer:
+  sources:
+  - pluginRef: endpoint-notification-source
+    extractors:
+    - pluginRef: precise-prefix-cache-producer
 schedulingProfiles:
 - name: decode
   plugins:
@@ -279,14 +285,15 @@ plugins:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: %s
+- type: endpoint-notification-source
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
       blockSizeTokens: 16
       hashSeed: "42"
     kvEventsConfig:
-      zmqEndpoint: tcp://0.0.0.0:5557
-      allowUntrustedPublishers: true  # simulator pods publish to the EPP's bound socket
+      podDiscoveryConfig:
+        socketPort: 5557 # each simulator pod binds it (--zmq-endpoint=tcp://*:5557)
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false
@@ -296,6 +303,11 @@ plugins:
 - type: decode-filter
 - type: max-score-picker
 - type: disagg-profile-handler
+dataLayer:
+  sources:
+  - pluginRef: endpoint-notification-source
+    extractors:
+    - pluginRef: precise-prefix-cache-producer
 schedulingProfiles:
 - name: decode
   plugins:

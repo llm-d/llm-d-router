@@ -35,8 +35,8 @@ These tests exercise rendered chart workloads; they do not exercise Helm release
 By default the end to end tests run in groups that run in parallel to each other on the same Kubernetes cluster.
 Each process uses an independent Namespace and a pair of NodePorts for HTTP and metrics. A test-only
 `router-access` Service selects the chart's router Pods. In service mode it selects the proxy Pods for
-HTTP, and a second `router-metrics-access` Service selects the EPP Pods for metrics. The chart's EPP Service also accepts simulator
-KV events on port 5557. Each case registers cleanup before creating chart and model resources and waits
+HTTP, and a second `router-metrics-access` Service selects the EPP Pods for metrics. The EPP subscribes to each simulator
+pod's KV events on port 5557. Each case registers cleanup before creating chart and model resources and waits
 for their Pods to terminate before reusing resource names. `E2E_KEEP_CLUSTER_ON_FAILURE` preserves failed
 cases for inspection.
 
