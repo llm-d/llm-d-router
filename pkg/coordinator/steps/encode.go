@@ -18,9 +18,11 @@ package steps
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"net/http"
 
 	"github.com/go-logr/logr"
@@ -134,18 +136,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		bodies[i] = body
 	}
 
-	// A repeated non-empty hash needs one encoder response; empty hashes are independent.
-	requestIndices := make([]int, 0, len(reqCtx.MultimodalEntries))
-	seenHashes := make(map[string]struct{}, len(reqCtx.MultimodalEntries))
-	for i, entry := range reqCtx.MultimodalEntries {
-		if entry.Hash != "" {
-			if _, seen := seenHashes[entry.Hash]; seen {
-				continue
-			}
-			seenHashes[entry.Hash] = struct{}{}
-		}
-		requestIndices = append(requestIndices, i)
-	}
+	requestIndices := selectEncodeRequestIndices(reqCtx.MultimodalEntries, localIdx, format, partsByMod)
 
 	reqCtx.EncodeFanout = len(requestIndices)
 	results := make([]map[string]any, len(requestIndices))
@@ -337,4 +328,85 @@ type encodeResponse struct {
 	// ECTransferParams is decoded as any (not map[string]any) so a non-object
 	// value does not fail the decode; coerceParamsMap coerces it.
 	ECTransferParams any `json:"ec_transfer_params"`
+}
+
+type modalityUUID struct {
+	modality reqcommon.Modality
+	uuid     string
+}
+
+// selectEncodeRequestIndices returns the entry indices that need an encoder
+// sub-request. Entries with a render-populated Hash deduplicate on that hash.
+// When Hash is empty on a client-format request (for example a pipeline with
+// use_openai_format enabled and no render step), entries deduplicate locally on
+// the client uuid when vLLM honors it, or on a SHA-256 digest of the media part
+// so MultimodalEntry stays free of synthetic hashes and copied media bytes.
+func selectEncodeRequestIndices(
+	entries []pipeline.MultimodalEntry,
+	localIdx []int,
+	format reqcommon.APIType,
+	partsByMod map[reqcommon.Modality][]mediaPart,
+) []int {
+	requestIndices := make([]int, 0, len(entries))
+	seenHashes := make(map[string]struct{}, len(entries))
+	var (
+		seenUUIDs  map[modalityUUID]struct{}
+		seenParts  map[[sha256.Size]byte]struct{}
+		partHasher hash.Hash
+	)
+	clientFormat := format == reqcommon.APITypeChatCompletions ||
+		format == reqcommon.APITypeResponses ||
+		format == reqcommon.APITypeMessages
+
+	for i, entry := range entries {
+		if entry.Hash != "" {
+			if _, seen := seenHashes[entry.Hash]; seen {
+				continue
+			}
+			seenHashes[entry.Hash] = struct{}{}
+			requestIndices = append(requestIndices, i)
+			continue
+		}
+		if clientFormat {
+			parts := partsByMod[entry.Modality]
+			if localIdx[i] >= 0 && localIdx[i] < len(parts) {
+				part := parts[localIdx[i]].part
+				// vLLM's Anthropic conversion ignores uuid on Messages image blocks.
+				if format != reqcommon.APITypeMessages {
+					if id, _ := part[reqcommon.FieldUUID].(string); id != "" {
+						key := modalityUUID{modality: entry.Modality, uuid: id}
+						if _, seen := seenUUIDs[key]; seen {
+							continue
+						}
+						if seenUUIDs == nil {
+							seenUUIDs = make(map[modalityUUID]struct{})
+						}
+						seenUUIDs[key] = struct{}{}
+						requestIndices = append(requestIndices, i)
+						continue
+					}
+				}
+				if partHasher == nil {
+					partHasher = sha256.New()
+				} else {
+					partHasher.Reset()
+				}
+				_, _ = partHasher.Write([]byte(entry.Modality))
+				_, _ = partHasher.Write([]byte{0})
+				if err := json.NewEncoder(partHasher).Encode(part); err == nil {
+					var digest [sha256.Size]byte
+					partHasher.Sum(digest[:0])
+					if _, seen := seenParts[digest]; seen {
+						continue
+					}
+					if seenParts == nil {
+						seenParts = make(map[[sha256.Size]byte]struct{})
+					}
+					seenParts[digest] = struct{}{}
+				}
+			}
+		}
+		requestIndices = append(requestIndices, i)
+	}
+	return requestIndices
 }
