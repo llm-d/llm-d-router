@@ -71,7 +71,7 @@ func TestInstrumentedIndexLookupLatencyTraceExemplars(t *testing.T) {
 			return err
 		},
 		"WalkKeys": func(ctx context.Context) error {
-			return walker.WalkKeys(ctx, []BlockHash{1, 2}, func(int, bool, []EntryRef) bool { return true })
+			return walker.WalkKeys(ctx, []BlockHash{1, 2}, func(int, bool, []WalkEntry) bool { return true })
 		},
 	}
 

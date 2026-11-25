@@ -29,10 +29,12 @@ type tracedIndex struct {
 	next Index
 }
 
-// tracedWalker carries the KeyWalker capability of the wrapped index.
+// tracedWalker carries the KeyWalker and OrdinalResolver capabilities of the
+// wrapped index.
 type tracedWalker struct {
 	*tracedIndex
 	walker KeyWalker
+	resolverForwarder
 }
 
 // NewTracedIndex wraps an Index and emits OpenTelemetry traces for index
@@ -40,7 +42,8 @@ type tracedWalker struct {
 func NewTracedIndex(next Index) Index {
 	t := &tracedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {
-		return &tracedWalker{tracedIndex: t, walker: walker}
+		resolver, _ := next.(OrdinalResolver)
+		return &tracedWalker{tracedIndex: t, walker: walker, resolverForwarder: resolverForwarder{resolver: resolver}}
 	}
 	return t
 }
@@ -48,7 +51,7 @@ func NewTracedIndex(next Index) Index {
 // WalkKeys forwards the walk under a span reporting the keys requested and
 // the keys present.
 func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
-	visit func(pos int, found bool, entries []EntryRef) bool,
+	visit func(pos int, found bool, entries []WalkEntry) bool,
 ) error {
 	tracer := tracing.Tracer(TracerScope)
 	ctx, span := tracer.Start(ctx, "index_walk",
@@ -58,7 +61,7 @@ func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeyCount(len(requestKeys)))
 
 	present := 0
-	err := t.walker.WalkKeys(ctx, requestKeys, func(pos int, found bool, entries []EntryRef) bool {
+	err := t.walker.WalkKeys(ctx, requestKeys, func(pos int, found bool, entries []WalkEntry) bool {
 		if found {
 			present++
 		}

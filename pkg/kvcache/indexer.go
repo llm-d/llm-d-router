@@ -54,8 +54,17 @@ type Indexer struct {
 	tokenProcessor kvblock.TokenProcessor // turns tokens to kv block keys
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
 	keyWalker      kvblock.KeyWalker      // kvBlockIndex's walk capability; nil without one
-	tierScoring    tierScoring            // device tier weights for the prefix matcher
-	cacheFormats   *kvblock.CacheFormatCatalog
+	// ordinalResolver is kvBlockIndex's name-to-ordinal capability, held
+	// alongside the walk: the walk payload carries ordinals, so matching on
+	// it requires resolving them.
+	ordinalResolver kvblock.OrdinalResolver
+	// sampleModulus is the request-key sampling modulus configured on the
+	// kv-block index. The match filters query keys by the same test the index
+	// applied on Add, so the keys it probes are exactly the keys the index
+	// can hold.
+	sampleModulus int
+	tierScoring   tierScoring // device tier weights for the prefix matcher
+	cacheFormats  *kvblock.CacheFormatCatalog
 	// recordHits enables the contiguous-chain hit metrics, under the same
 	// option that instruments the index.
 	recordHits bool
@@ -84,21 +93,24 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 	recordHits := config.KVBlockIndexConfig != nil && config.KVBlockIndexConfig.EnableMetrics
 	indexer := newIndexer(tokenProcessor, kvBlockIndex, config.BackendConfigs, recordHits)
 	indexer.config = config
+	indexer.sampleModulus = kvblock.ConfigSampleModulus(config.KVBlockIndexConfig)
 	return indexer, nil
 }
 
-// newIndexer wires an Indexer over kvBlockIndex, keeping its walk capability
-// when it has one.
+// newIndexer wires an Indexer over kvBlockIndex, keeping its walk and
+// ordinal-resolution capabilities when it has them.
 func newIndexer(tokenProcessor kvblock.TokenProcessor, kvBlockIndex kvblock.Index,
 	backends []*KVCacheBackendConfig, recordHits bool,
 ) *Indexer {
 	keyWalker, _ := kvBlockIndex.(kvblock.KeyWalker)
+	ordinalResolver, _ := kvBlockIndex.(kvblock.OrdinalResolver)
 	return &Indexer{
-		tokenProcessor: tokenProcessor,
-		kvBlockIndex:   kvBlockIndex,
-		keyWalker:      keyWalker,
-		tierScoring:    tierScoringFromBackends(backends),
-		recordHits:     recordHits,
+		tokenProcessor:  tokenProcessor,
+		kvBlockIndex:    kvBlockIndex,
+		keyWalker:       keyWalker,
+		ordinalResolver: ordinalResolver,
+		tierScoring:     tierScoringFromBackends(backends),
+		recordHits:      recordHits,
 	}
 }
 
