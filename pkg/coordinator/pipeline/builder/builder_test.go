@@ -43,6 +43,7 @@ func TestValidatePipeline(t *testing.T) {
 	forward := map[string]any{steps.ParamForwardPromptTokenIDs: true}
 	forwardDecode := config.StepConfig{Type: steps.DecodeStepName, Params: forward}
 	forwardCondDecode := config.StepConfig{Type: steps.ConditionalDecodeStepName, Params: forward}
+	forwardPrefill := config.StepConfig{Type: steps.PrefillStepName, Params: forward}
 
 	tests := []struct {
 		name    string
@@ -66,7 +67,7 @@ func TestValidatePipeline(t *testing.T) {
 		},
 		{
 			name:    "forward_prompt_token_ids with render",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{render, forwardCondDecode, forwardDecode}},
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{render, forwardCondDecode, forwardPrefill, forwardDecode}},
 			wantErr: false,
 		},
 		{
@@ -77,6 +78,11 @@ func TestValidatePipeline(t *testing.T) {
 		{
 			name:    "forward_prompt_token_ids on conditional-decode without render is rejected",
 			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardCondDecode, decode}},
+			wantErr: true,
+		},
+		{
+			name:    "forward_prompt_token_ids_on_prefill_without_render_is_rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardPrefill, decode}},
 			wantErr: true,
 		},
 		{

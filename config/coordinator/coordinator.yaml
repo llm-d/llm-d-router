@@ -523,6 +523,9 @@ pipeline:
       #   use_openai_format: true
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #   forward_prompt_token_ids: false   # same as on the decode step;
+      #                                     # rejected with
+      #                                     # use_openai_format: false
 
     # -------------------------------------------------------------------
     # decode: streams the completion back to the client. Last step.
@@ -565,5 +568,7 @@ pipeline:
       #   prompt itself, and prompt_token_parity can report
       #   ids_forwarded="true" mismatches, on Harmony models (such as gpt-oss)
       #   behind /v1/responses and on the vLLM Rust frontend, neither of which
-      #   reads the field.
+      #   reads the field. An EPP that runs the forward-prompt-token-ids
+      #   plugin on the same profile removes the IDs unless the plugin sets
+      #   trustCallerTokenIDs: true.
       #   forward_prompt_token_ids: false
