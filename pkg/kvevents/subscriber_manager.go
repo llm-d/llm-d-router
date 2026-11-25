@@ -25,11 +25,35 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// SubscriberManagerOption configures a SubscriberManager.
+type SubscriberManagerOption func(*SubscriberManager)
+
+// WithReplayTimers overrides any positive ZMQ replay timer fields for
+// subscribers created by the manager. Zero or negative fields leave any
+// earlier value in place and fall back to package defaults when unset.
+func WithReplayTimers(timers ReplayTimers) SubscriberManagerOption {
+	return func(sm *SubscriberManager) {
+		if timers.Timeout > 0 {
+			sm.replayTimers.Timeout = timers.Timeout
+		}
+		if timers.AttemptIdleTimeout > 0 {
+			sm.replayTimers.AttemptIdleTimeout = timers.AttemptIdleTimeout
+		}
+		if timers.RetryBackoff > 0 {
+			sm.replayTimers.RetryBackoff = timers.RetryBackoff
+		}
+		if timers.Cooldown > 0 {
+			sm.replayTimers.Cooldown = timers.Cooldown
+		}
+	}
+}
+
 // SubscriberManager manages multiple ZMQ subscribers, one per LLM engine.
 type SubscriberManager struct {
-	pool        *Pool
-	subscribers map[string]*subscriberEntry
-	mu          sync.RWMutex
+	pool         *Pool
+	subscribers  map[string]*subscriberEntry
+	replayTimers ReplayTimers
+	mu           sync.RWMutex
 }
 
 // subscriberEntry represents a single subscriber and its cancellation.
@@ -45,11 +69,18 @@ type subscriberEntry struct {
 }
 
 // NewSubscriberManager creates a new subscriber manager.
-func NewSubscriberManager(pool *Pool) *SubscriberManager {
-	return &SubscriberManager{
+func NewSubscriberManager(pool *Pool, opts ...SubscriberManagerOption) *SubscriberManager {
+	sm := &SubscriberManager{
 		pool:        pool,
 		subscribers: make(map[string]*subscriberEntry),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(sm)
+		}
+	}
+	sm.replayTimers = sm.replayTimers.withDefaults()
+	return sm
 }
 
 // EnsureSubscriber ensures a subscriber exists for the given pod.
@@ -98,6 +129,7 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	debugLogger.Info("Creating new subscriber", "podIdentifier", podIdentifier, "endpoint", endpoint)
 	subscriber := newZMQSubscriber(
 		sm.pool, podIdentifier, sourceEndpoint, endpoint, replayEndpoint, snapshotEndpoint, topicFilter, remoteSocket)
+	subscriber.replayTimers = sm.replayTimers
 
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)

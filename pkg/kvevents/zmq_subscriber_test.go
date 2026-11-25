@@ -155,8 +155,32 @@ type replayMessage struct {
 	payload []byte
 }
 
+func newTestPool(t *testing.T, ctx context.Context) (kvblock.Index, kvblock.TokenProcessor, *kvevents.Pool) {
+	t.Helper()
+
+	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
+	require.NoError(t, err)
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
+	pool.Start(ctx)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		pool.Shutdown(shutdownCtx)
+	})
+	return index, tokenProcessor, pool
+}
+
+func shutdownSubscriberManager(ctx context.Context, sm *kvevents.SubscriberManager) {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	sm.Shutdown(shutdownCtx)
+}
+
 const (
-	testReplayAttemptIdleTimeout = 2 * time.Second
+	testReplayAttemptIdleTimeout = 150 * time.Millisecond
 	testMaxNoProgressAttempts    = 3
 )
 
@@ -170,6 +194,16 @@ type replayBuffer struct {
 	silent       bool
 	requests     atomic.Int32
 	lastStartSeq atomic.Uint64
+	requestTimes []time.Time
+}
+
+func (b *replayBuffer) requestTime(idx int) time.Time {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if idx < 0 || idx >= len(b.requestTimes) {
+		return time.Time{}
+	}
+	return b.requestTimes[idx]
 }
 
 func (b *replayBuffer) set(messages ...replayMessage) {
@@ -191,6 +225,9 @@ func startReplayBuffer(t *testing.T, ctx context.Context) (*replayBuffer, string
 	// response rather than the loop: subscribers close a replay socket as soon
 	// as their attempt idle timer fires, and later requests must still be served.
 	serve := func(msg zmq4.Msg) {
+		buffer.mu.Lock()
+		buffer.requestTimes = append(buffer.requestTimes, time.Now())
+		buffer.mu.Unlock()
 		buffer.requests.Add(1)
 		if len(msg.Frames) != 3 {
 			return
@@ -258,24 +295,17 @@ func TestZMQPubSub(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	endpoint := "tcp://127.0.0.1:15558"
 	filter := "kv@"
 
 	// Subscriber binds (Listen), publisher connects (Dial).
 	sub := zmq4.NewSub(ctx)
 	defer sub.Close()
-	require.NoError(t, sub.Listen(endpoint))
+	endpoint := listenEphemeral(t, sub)
 	require.NoError(t, sub.SetOption(zmq4.OptionSubscribe, filter))
-
-	// Give subscriber time to bind.
-	time.Sleep(50 * time.Millisecond)
 
 	pub := zmq4.NewPub(ctx)
 	defer pub.Close()
 	require.NoError(t, pub.Dial(endpoint))
-
-	// Give the connection time to establish.
-	time.Sleep(50 * time.Millisecond)
 
 	// Build a 3-frame message: [topic, seqBytes, payload]
 	topic := "kv@10.0.0.1@TestModel"
@@ -283,9 +313,7 @@ func TestZMQPubSub(t *testing.T) {
 	binary.BigEndian.PutUint64(seqBytes, 42)
 	payload := []byte("hello")
 
-	require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte(topic), seqBytes, payload)))
-
-	// Receive with timeout.
+	// Receive with timeout, retrying send to handle ZMQ slow-joiner propagation.
 	recvDone := make(chan zmq4.Msg, 1)
 	go func() {
 		msg, err := sub.Recv()
@@ -294,77 +322,68 @@ func TestZMQPubSub(t *testing.T) {
 		}
 	}()
 
-	select {
-	case msg := <-recvDone:
-		require.Len(t, msg.Frames, 3)
-		assert.Equal(t, topic, string(msg.Frames[0]))
-		assert.Equal(t, seqBytes, msg.Frames[1])
-		assert.Equal(t, payload, msg.Frames[2])
-	case <-ctx.Done():
-		t.Fatal("timeout waiting for ZMQ message")
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte(topic), seqBytes, payload)))
+	for {
+		select {
+		case msg := <-recvDone:
+			require.Len(t, msg.Frames, 3)
+			assert.Equal(t, topic, string(msg.Frames[0]))
+			assert.Equal(t, seqBytes, msg.Frames[1])
+			assert.Equal(t, payload, msg.Frames[2])
+			return
+		case <-ticker.C:
+			require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte(topic), seqBytes, payload)))
+		case <-ctx.Done():
+			t.Fatal("timeout waiting for ZMQ message")
+		}
 	}
 }
 
 // TestZMQSubscriber_ReceivesMessages verifies the full message path:
-// publisher → zmqSubscriber → pool (end-to-end without mocks).
+// publisher -> zmqSubscriber -> pool (end-to-end without mocks).
 func TestZMQSubscriber_ReceivesMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
-	// Setup pool.
-	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
-	require.NoError(t, err)
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
-	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
-	require.NoError(t, err)
-	pool.Start(ctx)
+	index, _, pool := newTestPool(t, ctx)
 
-	// Start subscriber — remote=false means it binds (Listen).
-	endpoint := "tcp://127.0.0.1:15559"
+	// Start subscriber - remote=false means it binds (Listen).
+	endpoint := availableEndpoint(t, ctx)
 	subManager := kvevents.NewSubscriberManager(pool)
-	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false)
-	require.NoError(t, err)
-
-	// Give subscriber time to bind.
-	time.Sleep(100 * time.Millisecond)
+	t.Cleanup(func() { shutdownSubscriberManager(ctx, subManager) })
+	require.NoError(t, subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false))
 
 	// Publisher dials into the subscriber's bound address.
 	pub := zmq4.NewPub(ctx)
-	defer pub.Close()
+	t.Cleanup(func() { _ = pub.Close() })
 	require.NoError(t, pub.Dial(endpoint))
 
-	// Give the connection time to establish and subscription filter to propagate.
-	time.Sleep(100 * time.Millisecond)
-
-	// Send a valid 3-frame ZMQ message.
-	topic := "kv@10.0.0.1@TestModel"
-	seqBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(seqBytes, 1)
-	payload := buildEventBatchPayload(t)
-
-	require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte(topic), seqBytes, payload)))
-
-	// Allow time for the message to be received and processed.
-	time.Sleep(200 * time.Millisecond)
-
-	subManager.Shutdown(ctx)
+	// Send a valid 3-frame ZMQ message, retrying until the subscription propagates.
+	topic := []byte("kv@10.0.0.1@TestModel")
+	payload := buildDistinctBlockStoredPayload(t, 100)
+	var seq uint64
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		seq++
+		require.NoError(c, pub.Send(zmq4.NewMsgFrom(topic, seqFrame(seq), payload)))
+		key, err := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", 100))
+		require.NoError(c, err)
+		hits, err := index.Lookup(ctx, []kvblock.BlockHash{key}, nil)
+		require.NoError(c, err)
+		require.Len(c, hits[key], 1)
+		assert.Equal(c, "10.0.0.1", hits[key][0].PodIdentifier)
+	}, 5*time.Second, 20*time.Millisecond)
 }
 
 func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
-	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
-	require.NoError(t, err)
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
-	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
-	require.NoError(t, err)
-	pool.Start(ctx)
+	index, tokenProcessor, pool := newTestPool(t, ctx)
 
 	subManager := kvevents.NewSubscriberManager(pool)
-	defer subManager.Shutdown(ctx)
+	t.Cleanup(func() { shutdownSubscriberManager(ctx, subManager) })
 
 	sourceEndpoints := []string{"10.0.0.1:8000", "10.0.0.1:8003"}
 	zmqEndpoints := []string{availableEndpoint(t, ctx), availableEndpoint(t, ctx)}
@@ -435,30 +454,19 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 // truncated sequence frame (< 8 bytes) is skipped instead of panicking.
 func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
-	// Setup pool.
-	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
-	require.NoError(t, err)
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
-	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
-	require.NoError(t, err)
-	pool.Start(ctx)
+	_, _, pool := newTestPool(t, ctx)
 
-	// Pick an available ephemeral port to avoid conflicts with parallel tests or CI.
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	endpoint := fmt.Sprintf("tcp://%s", ln.Addr().String())
-	ln.Close()
+	endpoint := availableEndpoint(t, ctx)
 	subManager := kvevents.NewSubscriberManager(pool)
-	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false)
-	require.NoError(t, err)
+	t.Cleanup(func() { shutdownSubscriberManager(ctx, subManager) })
+	require.NoError(t, subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false))
 	time.Sleep(100 * time.Millisecond)
 
 	// Publisher dials into the subscriber's bound address.
 	pub := zmq4.NewPub(ctx)
-	defer pub.Close()
+	t.Cleanup(func() { _ = pub.Close() })
 	require.NoError(t, pub.Dial(endpoint))
 	time.Sleep(100 * time.Millisecond)
 
@@ -475,9 +483,6 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 
 	// Allow a brief moment for any in-flight message to be processed before shutdown.
 	time.Sleep(100 * time.Millisecond)
-
-	// If we reach here without a panic, the short frame was correctly skipped.
-	subManager.Shutdown(ctx)
 }
 
 type replayHarness struct {
@@ -501,18 +506,27 @@ func newReplayHarnessWithPartial(
 
 func newReplayHarnessWithBehavior(
 	t *testing.T, messages []replayMessage, fail bool, partialAfter int,
-	messageDelay time.Duration, silent bool,
+	messageDelay time.Duration, silent bool, opts ...kvevents.SubscriberManagerOption,
+) *replayHarness {
+	t.Helper()
+	smOpts := append([]kvevents.SubscriberManagerOption{
+		kvevents.WithReplayTimers(kvevents.ReplayTimers{
+			AttemptIdleTimeout: testReplayAttemptIdleTimeout,
+			RetryBackoff:       20 * time.Millisecond,
+		}),
+	}, opts...)
+	return newReplayHarnessWithOptions(t, messages, fail, partialAfter, messageDelay, silent, smOpts...)
+}
+
+func newReplayHarnessWithOptions(
+	t *testing.T, messages []replayMessage, fail bool, partialAfter int,
+	messageDelay time.Duration, silent bool, opts ...kvevents.SubscriberManagerOption,
 ) *replayHarness {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
 
-	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
-	require.NoError(t, err)
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
-	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
-	require.NoError(t, err)
-	pool.Start(ctx)
+	index, _, pool := newTestPool(t, ctx)
 
 	// The subscriber connects, as production subscribers with a replay endpoint
 	// do, so every listener in the harness binds its own port.
@@ -528,19 +542,17 @@ func newReplayHarnessWithBehavior(
 	buffer.mu.Unlock()
 	buffer.partialOnce.Store(partialAfter > 0)
 
-	subManager := kvevents.NewSubscriberManager(pool)
+	subManager := kvevents.NewSubscriberManager(pool, opts...)
+	t.Cleanup(func() {
+		_ = pub.Close()
+		shutdownSubscriberManager(ctx, subManager)
+	})
 	require.NoError(t, subManager.EnsureSubscriber(
 		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", true))
 	require.Eventually(t, func() bool { return buffer.requests.Load() >= 1 },
 		5*time.Second, 50*time.Millisecond, "proactive replay expected")
 	time.Sleep(100 * time.Millisecond)
 
-	t.Cleanup(func() {
-		pub.Close()
-		subManager.Shutdown(ctx)
-		pool.Shutdown(ctx)
-		cancel()
-	})
 	return &replayHarness{
 		ctx:        ctx,
 		index:      index,
@@ -680,18 +692,21 @@ func TestZMQSubscriber_ProactiveReplayClearsPartialHistoryOnGap(t *testing.T) {
 }
 
 func TestZMQSubscriber_ProactiveReplayUsesInactivityDeadline(t *testing.T) {
-	started := time.Now()
+	const attemptIdleTimeout = 250 * time.Millisecond
 	h := newReplayHarnessWithBehavior(t, []replayMessage{
 		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
 		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
 		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
-	}, false, 0, 1100*time.Millisecond, false)
+	}, false, 0, 100*time.Millisecond, false,
+		kvevents.WithReplayTimers(kvevents.ReplayTimers{AttemptIdleTimeout: attemptIdleTimeout}))
 
 	require.Eventually(t, func() bool {
 		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
-	require.Greater(t, time.Since(started), testReplayAttemptIdleTimeout)
+	firstReq := h.buffer.requestTime(0)
+	require.False(t, firstReq.IsZero())
+	require.Greater(t, time.Since(firstReq), attemptIdleTimeout)
 	require.Equal(t, int32(1), h.buffer.requests.Load(), "progressing replay must not reconnect")
 }
 
@@ -701,8 +716,106 @@ func TestZMQSubscriber_ProactiveReplayStopsAfterNoProgress(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return h.buffer.requests.Load() == testMaxNoProgressAttempts
 	}, 8*time.Second, 50*time.Millisecond)
-	time.Sleep(testReplayAttemptIdleTimeout + 200*time.Millisecond)
+	time.Sleep(testReplayAttemptIdleTimeout + 100*time.Millisecond)
 	require.Equal(t, int32(testMaxNoProgressAttempts), h.buffer.requests.Load())
+}
+
+func TestZMQSubscriber_WithReplayTimers(t *testing.T) {
+	t.Run("short_cooldown_allows_retry_after_expiry", func(t *testing.T) {
+		h := newReplayHarnessWithBehavior(
+			t, nil, true, 0, 0, false,
+			kvevents.WithReplayTimers(kvevents.ReplayTimers{
+				Cooldown: 150 * time.Millisecond,
+			}),
+		)
+
+		h.buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 200)})
+		h.buffer.fail.Store(false)
+
+		payload := buildEventBatchPayload(t)
+		seq := uint64(5)
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			require.NoError(c, h.pub.Send(zmq4.NewMsgFrom(h.topic, seqFrame(seq), payload)))
+			seq++
+			assert.GreaterOrEqual(c, h.buffer.requests.Load(), int32(2))
+			assert.True(c, h.indexed(200))
+		}, 2*time.Second, 30*time.Millisecond, "replay must retry after configured cooldown expires")
+	})
+
+	t.Run("short_timeout_aborts_stalled_replay", func(t *testing.T) {
+		h := newReplayHarnessWithBehavior(
+			t, nil, false, 0, 0, true,
+			kvevents.WithReplayTimers(kvevents.ReplayTimers{
+				Timeout:            150 * time.Millisecond,
+				AttemptIdleTimeout: 2 * time.Second,
+			}),
+		)
+
+		payload := buildDistinctBlockStoredPayload(t, 100)
+		seq := uint64(5)
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			require.NoError(c, h.pub.Send(zmq4.NewMsgFrom(h.topic, seqFrame(seq), payload)))
+			seq++
+			assert.True(c, h.indexed(100))
+		}, 1500*time.Millisecond, 30*time.Millisecond, "replay must abort once Timeout expires")
+		assert.Equal(t, int32(1), h.buffer.requests.Load())
+	})
+
+	t.Run("nil_option_and_non_positive_timeout_and_idle_fall_back_to_defaults", func(t *testing.T) {
+		h := newReplayHarnessWithOptions(
+			t,
+			[]replayMessage{{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)}},
+			false, 0, 50*time.Millisecond, false,
+			nil,
+			kvevents.WithReplayTimers(kvevents.ReplayTimers{
+				Timeout:            -time.Second,
+				AttemptIdleTimeout: 0,
+				RetryBackoff:       -time.Millisecond,
+				Cooldown:           -time.Second,
+			}),
+		)
+
+		require.Eventually(t, func() bool { return h.indexed(100) },
+			5*time.Second, 20*time.Millisecond, "non-positive timeout and idle timeout must fall back to defaults")
+		assert.Equal(t, int32(1), h.buffer.requests.Load())
+	})
+
+	t.Run("non_positive_retry_backoff_falls_back_to_default", func(t *testing.T) {
+		h := newReplayHarnessWithOptions(
+			t,
+			[]replayMessage{
+				{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
+				{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+			},
+			false, 1, 0, false,
+			kvevents.WithReplayTimers(kvevents.ReplayTimers{
+				AttemptIdleTimeout: 50 * time.Millisecond,
+				RetryBackoff:       -time.Millisecond,
+			}),
+		)
+
+		require.Eventually(t, func() bool {
+			return h.buffer.requests.Load() == 2 && h.indexed(200)
+		}, 5*time.Second, 20*time.Millisecond)
+		elapsed := h.buffer.requestTime(1).Sub(h.buffer.requestTime(0))
+		require.GreaterOrEqual(t, elapsed, 120*time.Millisecond,
+			"non-positive retry backoff must fall back to default")
+	})
+
+	t.Run("non_positive_cooldown_falls_back_to_default", func(t *testing.T) {
+		h := newReplayHarnessWithOptions(
+			t, nil, true, 0, 0, false,
+			kvevents.WithReplayTimers(kvevents.ReplayTimers{
+				Cooldown: -time.Second,
+			}),
+		)
+
+		h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+		h.send(t, 6, buildDistinctBlockStoredPayload(t, 200))
+		require.Eventually(t, func() bool { return h.indexed(100) && h.indexed(200) },
+			5*time.Second, 50*time.Millisecond)
+		assert.Equal(t, int32(1), h.buffer.requests.Load(), "non-positive cooldown must fall back to default")
+	})
 }
 
 func (h *replayHarness) send(t *testing.T, seq uint64, payload []byte) {
@@ -803,22 +916,15 @@ func TestZMQSubscriber_SequenceResetClearsAndRebuildsPod(t *testing.T) {
 
 func TestZMQSubscriber_SequenceResetWithoutReplayClearsPod(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
-	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
-	require.NoError(t, err)
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
-	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
-	require.NoError(t, err)
-	pool.Start(ctx)
-	defer pool.Shutdown(ctx)
+	index, _, pool := newTestPool(t, ctx)
 
 	pubEndpoint := availableEndpoint(t, ctx)
 	subManager := kvevents.NewSubscriberManager(pool)
+	t.Cleanup(func() { shutdownSubscriberManager(ctx, subManager) })
 	require.NoError(t, subManager.EnsureSubscriber(
 		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, "", "", "kv@", false))
-	defer subManager.Shutdown(ctx)
 
 	pub := zmq4.NewPub(ctx)
 	defer pub.Close()
@@ -938,14 +1044,9 @@ func newSnapshotReplayHarness(
 ) (*replayHarness, *snapshotServer) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
 
-	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
-	require.NoError(t, err)
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
-	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
-	require.NoError(t, err)
-	pool.Start(ctx)
+	index, _, pool := newTestPool(t, ctx)
 
 	pub := zmq4.NewPub(ctx)
 	pubEndpoint := listenEphemeral(t, pub)
@@ -959,16 +1060,14 @@ func newSnapshotReplayHarness(
 	}
 
 	subManager := kvevents.NewSubscriberManager(pool)
+	t.Cleanup(func() {
+		_ = pub.Close()
+		shutdownSubscriberManager(ctx, subManager)
+	})
 	require.NoError(t, subManager.EnsureSubscriber(
 		ctx, t.Name(), "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", true))
 	time.Sleep(100 * time.Millisecond)
 
-	t.Cleanup(func() {
-		pub.Close()
-		subManager.Shutdown(ctx)
-		pool.Shutdown(ctx)
-		cancel()
-	})
 	return &replayHarness{
 		ctx: ctx, index: index, buffer: buffer, pub: pub, subManager: subManager,
 		topic: []byte("kv@10.0.0.1:8000@TestModel"),
