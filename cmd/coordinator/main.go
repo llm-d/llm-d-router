@@ -152,7 +152,11 @@ func main() {
 		log.Error(err, "failed to build pipeline")
 		os.Exit(1)
 	}
-	srv, err := server.New(cfg.Server, p, gwClient, server.WithWorkerProtocol(cfg.Pipeline.WorkerProtocol))
+	opts := []server.Option{server.WithWorkerProtocol(cfg.Pipeline.WorkerProtocol)}
+	if cfg.Server.VLLMFrontend {
+		opts = append(opts, withFrontendIngress(cfg.Server))
+	}
+	srv, err := server.New(cfg.Server, p, gwClient, opts...)
 	if err != nil {
 		log.Error(err, "failed to create server")
 		os.Exit(1)
@@ -183,7 +187,11 @@ func main() {
 		}
 	}
 
-	err = run(ctx, srv, cfg.Server, nil)
+	if cfg.Server.VLLMFrontend {
+		err = runWithFrontend(ctx, srv, cfg.Server, nil, nil)
+	} else {
+		err = run(ctx, srv, cfg.Server, nil)
+	}
 	stop()
 	if shutdownTracing != nil {
 		flushCtx, cancel := context.WithTimeout(context.Background(), tracingShutdownTimeout)
