@@ -271,7 +271,13 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 		return fmt.Errorf("unmarshalling %s: %w", f.path, err)
 	}
 
+	type rankKey struct {
+		address   string
+		port      string
+		rankIndex int
+	}
 	incoming := make(map[types.NamespacedName]struct{}, len(ef.Endpoints))
+	seenRanks := make(map[rankKey]struct{})
 	var errs []error
 	for i, e := range ef.Endpoints {
 		if e.Name == "" {
@@ -306,6 +312,14 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 		if _, exists := incoming[id]; exists {
 			errs = append(errs, fmt.Errorf("endpoint %q: duplicate name in namespace %q", e.Name, ns))
 			continue
+		}
+		if e.RankByHeader {
+			key := rankKey{address: e.Address, port: e.Port, rankIndex: e.RankIndex}
+			if _, exists := seenRanks[key]; exists {
+				errs = append(errs, fmt.Errorf("endpoint %q: duplicate rank %d for %s:%s", e.Name, e.RankIndex, e.Address, e.Port))
+				continue
+			}
+			seenRanks[key] = struct{}{}
 		}
 		meta := &fwkdl.EndpointMetadata{
 			ID:           id,

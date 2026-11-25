@@ -479,12 +479,12 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				pkv := prefillCall.Request.GetKv().GetKvTransferParams().AsMap()
 				assert.Equal(t, "10.9.0.2", pkv["remote_host"])
 				assert.Equal(t, float64(17001), pkv["remote_notify_port"])
-				assert.NotEmpty(t, prefillCall.Header.Get(requestHeaderDataParallelRank))
+				assert.NotEmpty(t, prefillCall.Header.Get(routing.DataParallelRankHeader))
 
 				dkv := decodeCall.Request.GetKv().GetKvTransferParams().AsMap()
 				assert.True(t, strings.HasPrefix(dkv[requestFieldTransferID].(string), "tx"))
 				assert.Equal(t, float64(17001), dkv["remote_notify_port"])
-				assert.NotEmpty(t, decodeCall.Header.Get(requestHeaderDataParallelRank))
+				assert.NotEmpty(t, decodeCall.Header.Get(routing.DataParallelRankHeader))
 			},
 		},
 		{
@@ -514,7 +514,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 			verifyLegs: func(t *testing.T, prefillCall, decodeCall grpctest.VLLMCall, _ string) {
 				pkv := prefillCall.Request.GetKv().GetKvTransferParams().AsMap()
 				dkv := decodeCall.Request.GetKv().GetKvTransferParams().AsMap()
-				assert.Equal(t, "2", prefillCall.Header.Get(requestHeaderDataParallelRank))
+				assert.Equal(t, "2", prefillCall.Header.Get(routing.DataParallelRankHeader))
 				assert.Equal(t, true, pkv["do_remote_decode"])
 				assert.Equal(t, false, pkv["do_remote_prefill"])
 				assert.Equal(t, pkv["transfer_id"], dkv["transfer_id"])

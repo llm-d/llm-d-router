@@ -874,14 +874,16 @@ func TestDirector_HandleRequest(t *testing.T) {
 		}
 	}
 	rank1Endpoint, rank0Endpoint := rankEndpoint(1, 0.83), rankEndpoint(0, 0.41)
-	rankScheduleResults := &fwksched.SchedulingResult{
-		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"testProfile": {
-				TargetEndpoints:  []fwksched.Endpoint{rank1Endpoint, rank0Endpoint, scoredEndpoint2},
-				ScoredCandidates: []fwksched.ScoredEndpoint{*rank1Endpoint, *rank0Endpoint, *scoredEndpoint2},
+	newRankScheduleResults := func() *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"testProfile": {
+					TargetEndpoints:  []fwksched.Endpoint{rank1Endpoint, rank0Endpoint, scoredEndpoint2},
+					ScoredCandidates: []fwksched.ScoredEndpoint{*rank1Endpoint, *rank0Endpoint, *scoredEndpoint2},
+				},
 			},
-		},
-		PrimaryProfileName: "testProfile",
+			PrimaryProfileName: "testProfile",
+		}
 	}
 
 	tests := []struct {
@@ -1038,7 +1040,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			schedulerMockSetup: func(m *mockScheduler) {
-				m.scheduleResults = rankScheduleResults
+				m.scheduleResults = newRankScheduleResults()
 			},
 			initialTargetModelName: model,
 			wantReqCtx: &handlers.RequestContext{
@@ -1049,6 +1051,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpointScores: map[string]float64{
 					"192.168.5.100:8000": 0.83,
 					"192.168.2.100:8000": 0.74,
+				},
+				Request: &handlers.Request{
+					Headers: map[string]string{routing.DataParallelRankHeader: "1"},
 				},
 			},
 			inferenceObjectiveName: objectiveName,
@@ -2375,6 +2380,11 @@ func TestDirector_HandleRequest(t *testing.T) {
 					}
 					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
 					assert.Equal(t, test.wantReqCtx.TargetEndpointScores, returnedReqCtx.TargetEndpointScores, "reqCtx.TargetEndpointScores mismatch")
+					if test.wantReqCtx.Request != nil {
+						for k, v := range test.wantReqCtx.Request.Headers {
+							assert.Equal(t, v, returnedReqCtx.Request.Headers[k], "reqCtx.Request.Headers[%q] mismatch", k)
+						}
+					}
 				}
 
 				if test.wantFairnessID != "" {
@@ -4065,9 +4075,15 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 	}
 
 	// The header mutation is built from Request.Headers, so the rank must be there
-	// when no header map exists yet.
+	// when no header map exists yet, without dropping headers written by PreRequest
+	// plugins onto SchedulingRequest.Headers.
 	t.Run("rank endpoint sets its rank on a request without headers", func(t *testing.T) {
-		dir := &Director{requestControlPlugins: *NewConfig()}
+		dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(&mockPreRequestPlugin{
+			name: "marker",
+			modifyFn: func(r *fwksched.InferenceRequest) {
+				r.Headers["x-plugin-header"] = "kept"
+			},
+		})}
 		reqCtx := &handlers.RequestContext{
 			Request:           &handlers.Request{},
 			SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req"},
@@ -4077,5 +4093,38 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, "1", got.Request.Headers[routing.DataParallelRankHeader])
+		assert.Equal(t, "1", got.SchedulingRequest.Headers[routing.DataParallelRankHeader])
+		assert.Equal(t, "kept", got.Request.Headers["x-plugin-header"])
+	})
+
+	// Secondary profiles (such as encode fan-out) must not repeat the same host:port
+	// when multiple ranks of one pod are selected.
+	t.Run("secondary profile deduplicates colocated rank endpoints by address", func(t *testing.T) {
+		dir := &Director{requestControlPlugins: *NewConfig()}
+		headers := map[string]string{}
+		reqCtx := &handlers.RequestContext{
+			Request:           &handlers.Request{Headers: headers},
+			SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req", Headers: headers},
+		}
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"decode": {TargetEndpoints: []fwksched.Endpoint{endpoint("dec-rank-1", "10.0.0.1", 1, 2)}},
+				"encode": {TargetEndpoints: []fwksched.Endpoint{
+					endpoint("enc1-rank-0", "10.0.0.2", 0, 2),
+					endpoint("enc1-rank-1", "10.0.0.2", 1, 2),
+					endpoint("enc2-rank-0", "10.0.0.3", 0, 2),
+				}},
+			},
+		}
+
+		_, err := dir.prepareRequest(ctx, reqCtx, res)
+
+		require.NoError(t, err)
+		encTargets := make([]string, 0, len(res.ProfileResults["encode"].TargetEndpoints))
+		for _, ep := range res.ProfileResults["encode"].TargetEndpoints {
+			encTargets = append(encTargets, ep.GetMetadata().ID.Name)
+		}
+		assert.Equal(t, []string{"enc1-rank-0", "enc2-rank-0"}, encTargets)
 	})
 }

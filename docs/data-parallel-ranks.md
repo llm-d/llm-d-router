@@ -4,7 +4,7 @@ vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ra
 
 ## Rank endpoints
 
-The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation. Pods in one pool can thus run different DP sizes (for example prefill with 2 ranks and decode with 4). The pool must have exactly one target port. N is at most 64, and a pod with a larger or malformed value gets no endpoints. The endpoints are named `<pod>-rank-<i>`, where `i` is the rank, and share the pod's address and port.
+The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation. Pods in one pool can thus run different DP sizes (for example prefill with 2 ranks and decode with 4 with coordinator P/D; sidecar P/D is covered in Limitations below). The pool must have exactly one target port. N is at most 64, and a pod with a larger or malformed value gets no endpoints. The endpoints are named `<pod>-rank-<i>`, where `i` is the rank, and share the pod's address and port.
 
 With file discovery, list one endpoint for each rank. Give all of them the address and port of the model server. In each entry, set `rankIndex` to the rank and `rankByHeader` to `true`:
 
@@ -33,7 +33,7 @@ Requests to endpoints without ranks keep their headers and their fallbacks witho
 
 ## SGLang
 
-SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`). SGLang's native `/generate` reads the rank from `x-override-routed-dp-rank` instead, so the EPP's rank does not reach it.
+SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`). SGLang's native `/generate` reads `x-override-routed-dp-rank` instead, and `sglang.api.v1` gRPC reads `routed_dp_rank` from the request body, so the EPP's `x-data-parallel-rank` header does not reach either route.
 
 SGLang's `/health` runs a short generation, which can take longer than the 1 second default timeout of a Kubernetes probe. A readiness probe on `/health` needs a longer `timeoutSeconds`; otherwise the pod keeps leaving and rejoining the pool, and requests get `503` with no endpoints.
 

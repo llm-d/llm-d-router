@@ -254,6 +254,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		attribute.Int("request_prio", priority),
 	)
 
+	if reqCtx.Request.Headers == nil {
+		reqCtx.Request.Headers = map[string]string{}
+	}
 	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
 
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
@@ -622,8 +625,6 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	}
 	// primary profile is used to set destination
 	primaryResult := result.ProfileResults[result.PrimaryProfileName]
-	targetMetadatas := []*fwkdl.EndpointMetadata{}
-	targetEndpoints := []string{}
 
 	targets := primaryResult.TargetEndpoints
 	// A data-parallel rank endpoint is reached through its pod's shared port and
@@ -643,19 +644,35 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	// PreRequest plugins and the response hooks read the result, so it lists
 	// only the endpoints that get the request.
 	primaryResult.TargetEndpoints = targets
+	for profileName, profileResult := range result.ProfileResults {
+		if profileName == result.PrimaryProfileName || profileResult == nil || !slices.ContainsFunc(profileResult.TargetEndpoints, rankByHeader) {
+			continue
+		}
+		// Ranks of one pod share an address, so deduplicate secondary profiles by
+		// host:port to avoid duplicate addresses in headers such as encoder fan-out.
+		seen := make(map[string]struct{}, len(profileResult.TargetEndpoints))
+		deduped := make([]fwksched.Endpoint, 0, len(profileResult.TargetEndpoints))
+		for _, ep := range profileResult.TargetEndpoints {
+			md := ep.GetMetadata()
+			addr := net.JoinHostPort(md.GetIPAddress(), md.GetPort())
+			if _, dup := seen[addr]; dup {
+				continue
+			}
+			seen[addr] = struct{}{}
+			deduped = append(deduped, ep)
+		}
+		profileResult.TargetEndpoints = deduped
+	}
+	targetEndpoints := make([]string, 0, len(targets))
 	for _, pod := range targets {
 		curMetadata := pod.GetMetadata()
-		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
-		targetMetadatas = append(targetMetadatas, curMetadata)
-		if !slices.Contains(targetEndpoints, curEndpoint) {
-			targetEndpoints = append(targetEndpoints, curEndpoint)
-		}
+		targetEndpoints = append(targetEndpoints, net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort()))
 	}
 
 	multiEndpointString := strings.Join(targetEndpoints, ",")
 	logger.V(logutil.VERBOSE).Info("Request handled", "objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModel", reqCtx.TargetModelName, "endpoint", multiEndpointString)
 
-	reqCtx.TargetPod = targetMetadatas[0]
+	reqCtx.TargetPod = targets[0].GetMetadata()
 	reqCtx.TargetEndpoint = multiEndpointString
 
 	if len(primaryResult.ScoredCandidates) > 0 {
@@ -695,7 +712,14 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		// header mutation is built from Request.Headers. HandleRequest shares that
 		// map with SchedulingRequest.Headers.
 		if reqCtx.Request.Headers == nil {
-			reqCtx.Request.Headers = map[string]string{}
+			if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.Headers != nil {
+				reqCtx.Request.Headers = reqCtx.SchedulingRequest.Headers
+			} else {
+				reqCtx.Request.Headers = map[string]string{}
+				if reqCtx.SchedulingRequest != nil {
+					reqCtx.SchedulingRequest.Headers = reqCtx.Request.Headers
+				}
+			}
 		}
 		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(reqCtx.TargetPod.RankIndex)
 	}
