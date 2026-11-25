@@ -202,6 +202,10 @@ func newMetricsParser(families []string) (func(io.Reader) (PrometheusMetricMap, 
 // under the base family. Counters are declared under their _total name and need no suffix.
 var sampleSuffixes = [][]byte{[]byte("_bucket"), []byte("_sum"), []byte("_count")}
 
+// maxPooledBufferBytes is the largest kept-lines buffer returned to the pool, so a buffer grown by a
+// large response is not held between scrapes.
+const maxPooledBufferBytes = 1 << 20
+
 // familyFilter parses only the lines of the listed metric families, or every line when all is
 // set. With a cache, it reuses the parsed families of unchanged high-label lines.
 type familyFilter struct {
@@ -209,6 +213,7 @@ type familyFilter struct {
 	all      bool
 	cache    *familyCache
 	readers  sync.Pool
+	buffers  sync.Pool
 }
 
 func newFamilyFilter(families []string) *familyFilter {
@@ -217,6 +222,7 @@ func newFamilyFilter(families []string) *familyFilter {
 		f.families[name] = struct{}{}
 	}
 	f.readers.New = func() any { return bufio.NewReaderSize(nil, 64*1024) }
+	f.buffers.New = func() any { return new(bytes.Buffer) }
 	return f
 }
 
@@ -228,7 +234,13 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 		f.readers.Put(r)
 	}()
 
-	var kept bytes.Buffer
+	kept := f.buffers.Get().(*bytes.Buffer)
+	kept.Reset()
+	defer func() {
+		if kept.Cap() <= maxPooledBufferBytes {
+			f.buffers.Put(kept)
+		}
+	}()
 	var long []byte // a line longer than the reader's buffer, assembled across reads
 	var excluded map[string]struct{}
 	var runs familyRuns
@@ -260,10 +272,9 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 		}
 	}
 	if f.cache == nil {
-		return parseMetrics(&kept)
+		return parseMetrics(kept)
 	}
-	runs.close(kept.Len())
-	return f.cache.parse(kept.Bytes(), runs.cacheable)
+	return f.cache.parse(kept.Bytes(), runs.finish(kept.Len()))
 }
 
 // keep reports whether a text-format line belongs to a listed family. A declared, unlisted

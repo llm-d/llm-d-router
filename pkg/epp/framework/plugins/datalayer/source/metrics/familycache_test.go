@@ -161,6 +161,9 @@ func TestMetricsParserKeepsPlainParseErrors(t *testing.T) {
 		"family declared twice":     cacheConfigLines("1") + "# TYPE a gauge\na 1\n" + cacheConfigLines("2"),
 		"malformed high-label line": strings.Replace(cacheConfigLines("1"), "} 1.0", "} one", 1),
 		"error after the family":    cacheConfigLines("1") + "# TYPE a gauge\na one\n",
+		"family type repeated":      cacheConfigLines("1") + "# TYPE b gauge\nb 1\n# TYPE " + cacheConfigFamily + " gauge\n",
+		"gauge named as a summary sample": "# TYPE " + cacheConfigFamily + " summary\n" + cacheConfigFamily + "_count 1\n" +
+			strings.ReplaceAll(cacheConfigLines("1"), cacheConfigFamily, cacheConfigFamily+"_sum"),
 	}
 	whole, _ := newMetricsParser(nil)
 	for name, page := range pages {

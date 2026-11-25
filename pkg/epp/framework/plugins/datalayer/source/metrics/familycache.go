@@ -116,8 +116,9 @@ type familyRun struct {
 }
 
 // familyRuns splits kept lines into runs of one family name and records the cacheable runs: a
-// gauge, counter or untyped family with one TYPE line, at most one HELP line, and a sample of
-// heavyLabels or more labels. Comments and blank lines stay in the current run.
+// gauge, counter or untyped family with one TYPE line, at most one HELP line, a sample of
+// heavyLabels or more labels, no sampleSuffixes suffix, and a name that starts no other run.
+// Comments and blank lines stay in the current run.
 type familyRuns struct {
 	name      []byte
 	start     int
@@ -126,6 +127,7 @@ type familyRuns struct {
 	typed     bool
 	labels    int
 	heavy     bool
+	names     []uint64 // the name hash of each run
 	cacheable []familyRun
 }
 
@@ -136,7 +138,12 @@ func (r *familyRuns) observe(line []byte, offset int) {
 	}
 	if !bytes.Equal(name, r.name) {
 		r.close(offset)
-		*r = familyRuns{name: append(r.name[:0], name...), start: offset, cacheable: r.cacheable}
+		*r = familyRuns{
+			name:      append(r.name[:0], name...),
+			start:     offset,
+			names:     append(r.names, xxhash.Sum64(name)),
+			cacheable: r.cacheable,
+		}
 	}
 	switch kind {
 	case lineHelp:
@@ -157,9 +164,40 @@ func (r *familyRuns) observe(line []byte, offset int) {
 // close ends the current run at offset end of the kept response.
 func (r *familyRuns) close(end int) {
 	if r.types == 1 && r.helps <= 1 && r.typed && r.heavy &&
-		r.labels <= maxCachedLabels && end-r.start <= maxCachedRunBytes {
+		r.labels <= maxCachedLabels && end-r.start <= maxCachedRunBytes && !hasSampleSuffix(r.name) {
 		r.cacheable = append(r.cacheable, familyRun{name: string(r.name), start: r.start, end: end})
 	}
+}
+
+// finish ends the last run at offset end and returns the cacheable runs. A name that starts a
+// second run, such as a later TYPE line, must reach the parser together with its other lines.
+func (r *familyRuns) finish(end int) []familyRun {
+	r.close(end)
+	runs := r.cacheable[:0]
+	for _, run := range r.cacheable {
+		hash := xxhash.Sum64String(run.name)
+		count := 0
+		for _, h := range r.names {
+			if h == hash {
+				count++
+			}
+		}
+		if count == 1 {
+			runs = append(runs, run)
+		}
+	}
+	return runs
+}
+
+// hasSampleSuffix reports whether name could be a histogram or summary sample, which the text
+// parser files under the base family.
+func hasSampleSuffix(name []byte) bool {
+	for _, suffix := range sampleSuffixes {
+		if bytes.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 type lineKind int
