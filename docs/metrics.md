@@ -890,6 +890,27 @@ for a different window. An ID is missed when all of its requests went to a repli
 before Prometheus scraped it. To check the rules after editing them, run
 `promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
+#### Checking a gateway
+
+To check that a gateway sets the fairness ID and overwrites client values, send three requests
+through it and read `llm_d_epp_fairness_id_resolved_total` across the EPP replicas:
+
+1. A request from a known tenant, whose client sends neither header name. The series with that
+   tenant's ID and `source="header"` increases.
+2. A request from the same tenant, whose client sets both header names to a value no tenant uses.
+   The same series increases, and no series with the client's value as `fairness_id` appears.
+3. If the gateway admits callers it has no ID for, a request from such a caller with the same
+   client value. The request is counted under `default-flow` or under the ID the gateway assigns to
+   such callers, and no series with the client's value appears.
+
+Use one client value on every run, because a value that gets through takes a slot under the label
+cap.
+
+The steps describe a pool that does not derive agent identities and leaves
+`requestHandler.composeFairnessIDs` disabled. They need room under the label cap: if
+`llm_d_epp_fairness_id_overflow_total` increases during a step, the ID may have been counted as
+`other`, and the step is inconclusive.
+
 ### Program-aware fairness
 
 These metrics are owned by the `program-aware-fairness` Flow Control policy. They require the
