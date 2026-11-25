@@ -101,9 +101,10 @@ func TestSalvageIgnoresUsageInsideStrings(t *testing.T) {
 	reqCtx := &RequestContext{}
 	salvageDroppedSSELine(context.Background(), reqCtx, []byte(stream), true)
 
-	assert.Equal(t, 77, reqCtx.Usage.PromptTokens, "the real usage object must win over the one embedded in a string")
-	assert.Equal(t, 8, reqCtx.Usage.CompletionTokens)
-	assert.Equal(t, 85, reqCtx.Usage.TotalTokens)
+	require.NotNil(t, reqCtx.salvagedUsage, "the real usage object must win over the one embedded in a string")
+	assert.Equal(t, 77, reqCtx.salvagedUsage.PromptTokens)
+	assert.Equal(t, 8, reqCtx.salvagedUsage.CompletionTokens)
+	assert.Equal(t, 85, reqCtx.salvagedUsage.TotalTokens)
 }
 
 // Direct scanner coverage: chat, Responses and Anthropic field namings.
@@ -277,13 +278,91 @@ func TestOverflowChunkKeepsFollowingEventOutOfSalvage(t *testing.T) {
 	reqCtx := &RequestContext{}
 	ctx := context.Background()
 	require.Nil(t, completeSSELines(ctx, reqCtx, []byte(first), false))
-	assert.Zero(t, reqCtx.Usage.PromptTokens)
-	assert.Zero(t, reqCtx.Usage.CompletionTokens)
+	assert.Nil(t, reqCtx.salvagedUsage, "the dropped line has not ended yet, so nothing is salvaged")
 
 	kept := completeSSELines(ctx, reqCtx, []byte(second), true)
-	assert.Equal(t, 100, reqCtx.Usage.PromptTokens)
-	assert.Equal(t, 50, reqCtx.Usage.CompletionTokens)
-	assert.Equal(t, 150, reqCtx.Usage.TotalTokens)
+	require.NotNil(t, reqCtx.salvagedUsage)
+	assert.Equal(t, 100, reqCtx.salvagedUsage.PromptTokens)
+	assert.Equal(t, 50, reqCtx.salvagedUsage.CompletionTokens)
+	assert.Equal(t, 150, reqCtx.salvagedUsage.TotalTokens)
 	assert.Contains(t, string(kept), `data: {"usage":{"output_tokens":7}}`)
 	assert.NotContains(t, string(kept), `"prompt_tokens":100`)
+}
+
+// A dropped line that never reaches its newline before the stream ends must
+// still have its usage salvaged at end-of-stream, not lost with the request.
+func TestSalvageStreamEndsBeforeNewline(t *testing.T) {
+	t.Parallel()
+
+	stream := `data: {"choices":[{"delta":{"content":"` + strings.Repeat("x", maxSSELineBytes) +
+		`"}}],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}`
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		Response:          &Response{Headers: map[string]string{"content-type": "text/event-stream"}},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+	for i := 0; i < len(stream); i += 65536 {
+		end := min(i+65536, len(stream))
+		server.HandleResponseBody(context.Background(), reqCtx, []byte(stream[i:end]), end == len(stream))
+	}
+
+	assert.Equal(t, 42, reqCtx.Usage.PromptTokens, "usage must be salvaged even though the dropped line never ends with a newline")
+	assert.Equal(t, 7, reqCtx.Usage.CompletionTokens)
+	assert.Equal(t, 49, reqCtx.Usage.TotalTokens)
+}
+
+// A chunk that ends an oversized data line and leaves a tail over the cap must
+// salvage the two usages separately. The tail is fed first, so running
+// dropOversizedLines before the tail switch keeps each salvager to one line
+// instead of flushing the data line into the still-open tail scan.
+func TestOversizedTailAndDataLineSalvagedSeparately(t *testing.T) {
+	t.Parallel()
+
+	dataLine := `data: {"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}` + "\n"
+	pad := strings.Repeat("x", maxSSELineBytes)
+	first := pad + dataLine + `data: {"usage":{"prompt_tokens":200,"completion_tokens":70,"total_tokens":270}}` + pad
+
+	reqCtx := &RequestContext{}
+	ctx := context.Background()
+	require.Nil(t, completeSSELines(ctx, reqCtx, []byte(first), false))
+	// The data line's usage is salvaged by dropOversizedLines before the tail
+	// scan opens; nothing is merged into Usage until HandleResponseBody runs.
+	require.NotNil(t, reqCtx.salvagedUsage)
+	assert.Equal(t, 100, reqCtx.salvagedUsage.PromptTokens)
+
+	// The tail's usage finishes on the next chunk, which ends the stream.
+	completeSSELines(ctx, reqCtx, nil, true)
+	require.NotNil(t, reqCtx.salvagedUsage)
+	assert.Equal(t, 200, reqCtx.salvagedUsage.PromptTokens, "the tail's usage must not be clobbered by the data line's")
+	assert.Equal(t, 70, reqCtx.salvagedUsage.CompletionTokens)
+	assert.Equal(t, 270, reqCtx.salvagedUsage.TotalTokens)
+}
+
+// A chunk holding a normal usage line followed by a dropped oversized line must
+// keep the dropped line's usage: it is the last usage event in the chunk, and the
+// parser merges the normal line first, so the salvaged usage must merge after it.
+func TestSalvagedUsageWinsOverEarlierParsedLine(t *testing.T) {
+	t.Parallel()
+
+	small := `data: {"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n"
+	big := `data: {"choices":[{"delta":{"content":"` + strings.Repeat("x", maxSSELineBytes) +
+		`"}}],"usage":{"prompt_tokens":999,"completion_tokens":999,"total_tokens":1998}}` + "\n"
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		Response:          &Response{Headers: map[string]string{"content-type": "text/event-stream"}},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+	server.HandleResponseBody(context.Background(), reqCtx, []byte(small+big), true)
+
+	assert.Equal(t, 999, reqCtx.Usage.PromptTokens, "the dropped oversized line is the last usage event and must win")
+	assert.Equal(t, 999, reqCtx.Usage.CompletionTokens)
+	assert.Equal(t, 1998, reqCtx.Usage.TotalTokens)
 }

@@ -201,6 +201,11 @@ type RequestContext struct {
 	// sseSalvage scans the bytes of the oversized SSE line being dropped for
 	// its usage object, which is merged when the line ends.
 	sseSalvage *usageSalvager
+	// salvagedUsage accumulates usage folded out of dropped oversized SSE lines
+	// this chunk. It is merged into Usage after the parser runs so a dropped
+	// line that follows a parsed usage line still wins (last usage event in a
+	// chunk wins), rather than being clobbered by the earlier parser merge.
+	salvagedUsage *fwkrequest.Usage
 
 	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
 	grpcFrameCarry         []byte

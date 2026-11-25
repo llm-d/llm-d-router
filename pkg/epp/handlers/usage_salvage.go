@@ -23,6 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	usagepkg "github.com/llm-d/llm-d-router/pkg/common/usage"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
 
@@ -51,7 +53,14 @@ func salvageDroppedSSELine(ctx context.Context, reqCtx *RequestContext, dropped 
 	usage := reqCtx.sseSalvage.finish()
 	reqCtx.sseSalvage = nil
 	if usage != nil {
-		mergeUsage(&reqCtx.Usage, *usage)
+		// Fold into a pending bucket that is merged after the parser runs (see
+		// HandleResponseBody). A dropped line following a parsed usage line in
+		// the same chunk must still win, matching the parsers' "last usage
+		// event in a chunk wins" rule that mergeUsage alone would invert.
+		if reqCtx.salvagedUsage == nil {
+			reqCtx.salvagedUsage = &fwkrequest.Usage{}
+		}
+		mergeUsage(reqCtx.salvagedUsage, *usage)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("salvaged usage from a dropped oversized SSE line",
 			"limit", maxSSELineBytes)
 	}
@@ -201,55 +210,53 @@ func (s *usageSalvager) finish() *fwkrequest.Usage {
 
 // parseSalvagedUsage decodes a usage object covering the OpenAI chat
 // (prompt_tokens/completion_tokens), Responses and Anthropic
-// (input_tokens/output_tokens) field namings.
+// (input_tokens/output_tokens) field namings. The prompt count reuses
+// usagepkg.PromptTokens, which reads prompt_tokens as already including the
+// cache buckets, and only sums the cache read/creation counts into
+// input_tokens, so a block carrying both prompt_tokens and cache buckets is
+// not double counted.
 func parseSalvagedUsage(obj []byte) *fwkrequest.Usage {
 	var fields map[string]any
 	if err := json.Unmarshal(obj, &fields); err != nil {
 		return nil
 	}
-	usage := &fwkrequest.Usage{}
-	for _, key := range []string{"prompt_tokens", "input_tokens"} {
+	prompt, _ := usagepkg.PromptTokens(fields)
+	var completion int
+	for _, key := range []string{reqcommon.FieldCompletionTokens, reqcommon.FieldOutputTokens} {
 		if f, ok := fields[key].(float64); ok {
-			usage.PromptTokens = int(f)
+			completion = int(f)
 			break
 		}
 	}
-	// Anthropic reports the cache counts inside the prompt total.
-	for _, key := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
-		if f, ok := fields[key].(float64); ok {
-			usage.PromptTokens += int(f)
-		}
-	}
-	for _, key := range []string{"completion_tokens", "output_tokens"} {
-		if f, ok := fields[key].(float64); ok {
-			usage.CompletionTokens = int(f)
-			break
-		}
-	}
-	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+	if prompt == 0 && completion == 0 {
 		// An object with none of the token fields is not a usage block.
 		return nil
 	}
-	if f, ok := fields["total_tokens"].(float64); ok {
+	usage := &fwkrequest.Usage{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+	}
+	if f, ok := fields[reqcommon.FieldTotalTokens].(float64); ok {
 		usage.TotalTokens = int(f)
 	}
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
 	var details map[string]any
-	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+	for _, key := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
 		if d, ok := fields[key].(map[string]any); ok {
 			details = d
 			break
 		}
 	}
-	if f, ok := details["cached_tokens"].(float64); ok {
+	if f, ok := details[reqcommon.FieldCachedTokens].(float64); ok {
 		usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{CachedTokens: int(f)}
 	}
 	// Anthropic reports the cache read at the root of the usage object.
-	// CachedTokens counts that read inside PromptTokens, matching applyInputTokens.
+	// CachedTokens counts that read inside PromptTokens, matching the
+	// parser's inputTokens.apply sum.
 	if usage.PromptTokenDetails == nil {
-		if f, ok := fields["cache_read_input_tokens"].(float64); ok && int(f) != 0 {
+		if f, ok := fields[reqcommon.FieldCacheReadInputTokens].(float64); ok && int(f) != 0 {
 			usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{CachedTokens: int(f)}
 		}
 	}

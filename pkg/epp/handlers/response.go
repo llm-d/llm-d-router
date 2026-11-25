@@ -84,9 +84,6 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	contentType := reqCtx.Response.Headers[reqcommon.HeaderContentType]
 	if isEventStream(contentType) {
 		parseBytes = completeSSELines(ctx, reqCtx, responseBytes, endOfStream)
-		// A dropped oversized line can span chunks and outlive them; flush it at the
-		// latest when the stream ends or its salvage is lost with the request context.
-		salvageDroppedSSELine(ctx, reqCtx, nil, endOfStream)
 	} else if grpcframe.IsContentType(contentType) {
 		parseBytes = completeGRPCFrames(ctx, reqCtx, responseBytes, endOfStream)
 	}
@@ -109,6 +106,13 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		if parsedResp.DisjointInputTokens != nil {
 			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
 		}
+	}
+	// Usage salvaged from dropped oversized SSE lines is merged after the parser
+	// so a dropped line that follows a parsed usage line in the same chunk still
+	// wins, matching the parsers' "last usage event in a chunk wins" rule.
+	if reqCtx.salvagedUsage != nil {
+		mergeUsage(&reqCtx.Usage, *reqCtx.salvagedUsage)
+		reqCtx.salvagedUsage = nil
 	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
@@ -178,16 +182,22 @@ func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte,
 	}
 	reqCtx.sseLineCarry = nil
 	tail := chunk[lineEnd+1:]
+	// Drop oversized lines in data before salvaging the tail. The tail and the
+	// oversized lines inside data share one salvager, and the tail is fed first;
+	// running dropOversizedLines first lets each salvager see exactly one line
+	// instead of flushing a following oversized line into the still-open tail
+	// scan and losing both usages.
+	kept := dropOversizedLines(ctx, reqCtx, data)
 	switch {
 	case len(tail) > maxSSELineBytes:
 		salvageDroppedSSELine(ctx, reqCtx, tail, endOfStream)
 		dropSSELine(ctx, reqCtx, endOfStream)
 	case endOfStream:
-		data = append(data, tail...)
+		kept = append(kept, tail...)
 	case len(tail) > 0:
 		reqCtx.sseLineCarry = bytes.Clone(tail)
 	}
-	return dropOversizedLines(ctx, reqCtx, data)
+	return kept
 }
 
 // dropOversizedLines removes the lines of data longer than maxSSELineBytes, copying only when one is dropped.
