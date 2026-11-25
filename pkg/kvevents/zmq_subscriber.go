@@ -38,13 +38,11 @@ const (
 	replayTimeout               = 2 * time.Minute
 	replayAttemptIdleTimeout    = 2 * time.Second
 	replayRetryBackoff          = 100 * time.Millisecond
+	replayCooldown              = 30 * time.Second
 	maxReplayNoProgressAttempts = 3
 	snapshotTimeout             = 30 * time.Second
 	publisherIDSize             = 16
 )
-
-// replayCooldown is a variable so tests can shorten it.
-var replayCooldown = 30 * time.Second
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
@@ -701,9 +699,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				z.enqueueTask(ctx, topic, seq, payload, true)
 			} else {
 				if startSeq == 0 && replayed == 0 && !z.resyncing {
-					// A full replay announces every block the engine holds, so it
-					// replaces anything indexed from live events while no replay
-					// was available; keeping that would count each block twice.
+					// A full replay replaces events indexed while no replay was available.
 					z.resetForSource(topic)
 				}
 				z.enqueueTask(ctx, topic, seq, payload, true)

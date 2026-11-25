@@ -18,7 +18,6 @@ package kvevents
 
 import (
 	"context"
-	"time"
 
 	"github.com/cespare/xxhash/v2"
 
@@ -35,13 +34,4 @@ func ModelEngineKey(modelName string, hash uint64) kvblock.BlockHash {
 // tests can drive a real engine adapter, which this package cannot import.
 func (p *Pool) ProcessRawMessageForTest(ctx context.Context, msg *RawMessage) {
 	p.processRawMessage(ctx, msg)
-}
-
-// SetReplayCooldownForTest shortens the replay cooldown and returns a function
-// that restores it. Call it before starting a subscriber and restore it after
-// the subscriber has shut down.
-func SetReplayCooldownForTest(d time.Duration) (restore func()) {
-	previous := replayCooldown
-	replayCooldown = d
-	return func() { replayCooldown = previous }
 }
