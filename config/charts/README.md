@@ -313,10 +313,11 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.autoscaling.targetMemoryUtilizationPercentage` | Target average memory utilization percentage across EPP pods (1-100). | `""` |
 | `router.epp.autoscaling.behavior` | Scaling behavior policies for HPA scale-up and scale-down. | `{}` |
 | `router.epp.autoscaling.metrics` | Custom HPA v2 metrics override; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
-| `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
+| `router.epp.extProcPort` | Port used by the EPP listener and its chart-managed gRPC clients. An explicit `router.epp.flags.grpc-port` takes precedence. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |
 | `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker` |
-| `router.epp.image.tag` | EPP container image tag. | `main` |
+| `router.epp.image.tag` | EPP container image tag. Ignored when `digest` is set. | `main` |
+| `router.epp.image.digest` | Pins the EPP image by digest, e.g. `sha256:<64 hex characters>`. When set, the image renders as `registry/repository@digest` and the tag is dropped (CRI-O rejects references with both). An invalid digest fails the render. | `""` |
 | `router.epp.image.pullPolicy` | EPP container image pull policy. | `Always` |
 | `router.epp.env` | Extra environment variables for EPP container. | `[]` |
 | `router.epp.extraContainerPorts` | Extra ports to expose on the EPP container. | `[]` |
@@ -611,7 +612,8 @@ The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs re
 | `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.31.0` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. Ignored when `digest` is set. | `v0.31.0` |
+| `router.tokenizer.image.digest` | Pins the tokenizer image by digest; same rules as `router.epp.image.digest`. | `""` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
@@ -680,8 +682,8 @@ Runs a latency training server and one or more prediction servers that feed a la
 | `router.latencyPredictor.podSecurityContext` | Pod-level `securityContext` for the training and prediction pods in `service` mode. | `{}` |
 | `router.latencyPredictor.affinity` | Affinity for the training and prediction pods in `service` mode. Empty uses `router.epp.affinity`. | `{}` |
 | `router.latencyPredictor.tolerations` | Tolerations for the training and prediction pods in `service` mode. Empty uses `router.epp.tolerations`. | `[]` |
-| `router.latencyPredictor.trainingServer.image` | Latency training server image configuration. | |
-| `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration. | |
+| `router.latencyPredictor.trainingServer.image` | Latency training server image configuration (`registry`, `repository`, `tag`, `digest`, `pullPolicy`). `digest` follows the same rules as `router.epp.image.digest`. | |
+| `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration (`registry`, `repository`, `tag`, `digest`, `pullPolicy`). `digest` follows the same rules as `router.epp.image.digest`. | |
 | `router.latencyPredictor.predictionServers.count` | Number of prediction servers: containers in the EPP pod in `sidecar` mode, pods in `service` mode. | `1` |
 | `router.latencyPredictor.trainingServer.securityContext` | Container-level `securityContext` for the training server container. | `{}` |
 | `router.latencyPredictor.predictionServers.securityContext` | Container-level `securityContext` for each prediction server container. | `{}` |
@@ -844,7 +846,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |
 | `router.proxy.tracing.samplingPercentage` | Percentage of requests without an incoming sampling decision that Envoy traces (`random_sampling`). | `10` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
-| `router.proxy.image` | Sidecar container image. | `""` |
+| `router.proxy.image` | Sidecar container image, as a full reference. To pin by digest, write `repository@sha256:...` without a tag. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |
 | `router.proxy.command` | Sidecar container command. | `""` |
 | `router.proxy.args` | Sidecar container arguments. | `[]` |

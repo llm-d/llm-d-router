@@ -44,6 +44,39 @@ import (
 
 const testHash = "abc123"
 
+// promptTokenIDsCase is a request shape and whether a step built with params
+// sends the rendered IDs in kv_transfer_params.prompt_token_ids for it.
+type promptTokenIDsCase struct {
+	name    string
+	params  map[string]any
+	path    string
+	tokens  []int
+	entries []pipeline.MultimodalEntry
+	extra   map[string]any
+	want    bool
+}
+
+// promptTokenIDsCases covers the sendsPromptTokenIDs rule that the prefill,
+// decode and conditional-decode steps share.
+func promptTokenIDsCases() []promptTokenIDsCase {
+	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
+	forward := map[string]any{ParamForwardPromptTokenIDs: true}
+	return []promptTokenIDsCase{
+		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
+		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
+		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
+		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
+		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
+		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
+		{name: "return_prompt_text_on_responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
+		{name: "not_rendered", params: forward, path: reqcommon.PathChatCompletions},
+		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
+		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
+		{name: "off_by_default", params: map[string]any{}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
+		{name: "off", params: map[string]any{ParamForwardPromptTokenIDs: false}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
+	}
+}
+
 // testKwargs is a base64 tensor blob standing in for a real (non-cache-hit)
 // kwargs_data entry.
 const testKwargs = "dGVuc29y"

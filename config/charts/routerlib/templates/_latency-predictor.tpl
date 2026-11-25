@@ -88,7 +88,7 @@ training Deployment in service mode.
 {{- define "llm-d-router.latencyPredictor.trainingContainer" -}}
 {{- $ts := .Values.router.latencyPredictor.trainingServer }}
 - name: training-server
-  image: {{ $ts.image.registry }}/{{ $ts.image.repository }}:{{ $ts.image.tag }}
+  image: {{ include "llm-d-router.image" (dict "image" $ts.image "path" "router.latencyPredictor.trainingServer.image") }}
   imagePullPolicy: {{ $ts.image.pullPolicy }}
   {{- with $ts.securityContext }}
   securityContext:
@@ -137,7 +137,7 @@ Prediction server container. Takes a dict with "root" (the chart context) and
 {{- $port := add (int $ps.startPort) $i }}
 {{- $ordinal := add $i 1 }}
 - name: prediction-server-{{ $ordinal }}
-  image: {{ $ps.image.registry }}/{{ $ps.image.repository }}:{{ $ps.image.tag }}
+  image: {{ include "llm-d-router.image" (dict "image" $ps.image "path" "router.latencyPredictor.predictionServers.image") }}
   imagePullPolicy: {{ $ps.image.pullPolicy }}
   {{- with $ps.securityContext }}
   securityContext:

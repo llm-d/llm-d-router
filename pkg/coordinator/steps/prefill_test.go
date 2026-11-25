@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1320,6 +1322,70 @@ func TestPrefillStep_FreshBodyForwardsCacheSaltAndPriority(t *testing.T) {
 				if inClient != inPrefill || got != want {
 					t.Errorf("%s: prefill has %v (present=%v), client sent %v (present=%v)", field, got, inPrefill, want, inClient)
 				}
+			}
+		})
+	}
+}
+
+// With forward_prompt_token_ids set, chat-shaped prefill requests in the
+// OpenAI format carry the rendered token IDs in
+// kv_transfer_params.prompt_token_ids next to the connector's fields.
+// Multimodal, echo, unrendered and non-chat requests, and requests with the
+// parameter unset, carry none.
+func TestPrefillStep_PromptTokenIDsInKVParams(t *testing.T) {
+	for _, tc := range promptTokenIDsCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&sent)
+				_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+			}))
+			defer server.Close()
+
+			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				TokenIDs:          tc.tokens,
+				MultimodalEntries: tc.entries,
+				Body:              map[string]any{"model": testModelName},
+			}
+			maps.Copy(reqCtx.Body, tc.extra)
+			if err := step.Execute(t.Context(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			kvParams, _ := sent[reqcommon.FieldKVTransferParams].(map[string]any)
+			got, ok := kvParams[reqcommon.FieldPromptTokenIDs]
+			if ok != tc.want {
+				t.Fatalf("prompt_token_ids present = %v, want %v (params %v)", ok, tc.want, kvParams)
+			}
+			if tc.want && fmt.Sprint(got) != fmt.Sprint(tc.tokens) {
+				t.Fatalf("prompt_token_ids = %v, want %v", got, tc.tokens)
+			}
+			if kvParams[reqcommon.FieldDoRemoteDecode] != true {
+				t.Fatalf("do_remote_decode = %v, want true", kvParams[reqcommon.FieldDoRemoteDecode])
+			}
+			if _, onClientBody := reqCtx.Body[reqcommon.FieldKVTransferParams]; onClientBody {
+				t.Fatal("prefill must not write kv_transfer_params to reqCtx.Body")
+			}
+		})
+	}
+}
+
+func TestPrefillStep_ForwardPromptTokenIDs_RejectsInvalidParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+	}{
+		{name: "non_bool", params: map[string]any{ParamForwardPromptTokenIDs: "yes"}},
+		{name: "tokens_in_format", params: map[string]any{ParamForwardPromptTokenIDs: true, "use_openai_format": false}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params); err == nil {
+				t.Fatal("expected an error")
 			}
 		})
 	}
