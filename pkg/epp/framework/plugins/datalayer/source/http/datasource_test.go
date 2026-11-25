@@ -283,8 +283,23 @@ func TestGetEndpoint_PathWithQuery(t *testing.T) {
 
 func TestNewHTTPDataSource_RejectsMalformedPath(t *testing.T) {
 	parser := func(r io.Reader) (int, error) { return 0, nil }
-	_, err := NewHTTPDataSource("http", "/v1/loads?%zz", TLSOptions{}, "test", "test", parser)
-	require.Error(t, err)
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "invalid query escape", path: "/v1/loads?%zz"},
+		{name: "full URL with scheme and host", path: "http://10.0.0.1:8000/v1/loads?format=prometheus"},
+		{name: "scheme-relative host", path: "//10.0.0.1:8000/metrics"},
+		{name: "userinfo and host", path: "//user@10.0.0.1/metrics"},
+		{name: "opaque URI", path: "http:metrics"},
+		{name: "fragment", path: "/v1/loads?format=prometheus#frag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewHTTPDataSource("http", tc.path, TLSOptions{}, "test", "test", parser)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestNewHTTPDataSource_UseNodeAddressWithoutPortOverride(t *testing.T) {

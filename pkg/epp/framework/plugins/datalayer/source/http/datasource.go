@@ -187,6 +187,9 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	if err != nil {
 		return nil, fmt.Errorf("invalid path %q: %w", path, err)
 	}
+	if target.Scheme != "" || target.Opaque != "" || target.User != nil || target.Host != "" || target.Fragment != "" {
+		return nil, fmt.Errorf("invalid path %q: must be a URL path with optional query string", path)
+	}
 
 	cl := &client{
 		Client: http.Client{
