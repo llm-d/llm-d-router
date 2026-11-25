@@ -25,6 +25,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
+	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -70,11 +72,25 @@ func NewRandomPicker(maxNumOfEndpoints int) *RandomPicker {
 type RandomPicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int
+	mu                sync.Mutex
+	rng               *rand.Rand
 }
 
 // WithName sets the name of the picker.
 func (p *RandomPicker) WithName(name string) *RandomPicker {
 	p.typedName.Name = name
+	return p
+}
+
+// WithRand configures a dedicated random source for this picker.
+// Passing nil restores the default math/rand/v2 generator.
+// Call WithRand during setup before concurrent Pick calls.
+func (p *RandomPicker) WithRand(src rand.Source) *RandomPicker {
+	if src == nil {
+		p.rng = nil
+		return p
+	}
+	p.rng = rand.New(src) //#nosec G404 -- endpoint selection, not security-sensitive
 	return p
 }
 
@@ -92,7 +108,16 @@ func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.Sco
 	}
 
 	// Shuffle to ensure uniform random selection.
-	picker.ShuffleScoredEndpoints(scoredEndpoints)
+	swap := func(i, j int) {
+		scoredEndpoints[i], scoredEndpoints[j] = scoredEndpoints[j], scoredEndpoints[i]
+	}
+	if p.rng != nil {
+		p.mu.Lock()
+		p.rng.Shuffle(len(scoredEndpoints), swap)
+		p.mu.Unlock()
+	} else {
+		rand.Shuffle(len(scoredEndpoints), swap) //#nosec G404 -- endpoint selection, not security-sensitive
+	}
 
 	// if we have enough endpoints to return keep only the relevant subset
 	if p.maxNumOfEndpoints < len(scoredEndpoints) {

@@ -21,7 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"math/rand/v2"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -309,4 +313,136 @@ func TestPickWeightedRandomPickerExcludesNonPositiveScores(t *testing.T) {
 	if result.TargetEndpoints[0].GetMetadata().ID.Name != "pod1" {
 		t.Fatalf("expected pod1, got %s", result.TargetEndpoints[0].GetMetadata().ID.Name)
 	}
+}
+
+func TestWeightedRandomPickerWithRand(t *testing.T) {
+	t.Parallel()
+
+	makeMixedInput := func() []*fwksched.ScoredEndpoint {
+		input := make([]*fwksched.ScoredEndpoint, 10)
+		for i := range input {
+			ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod" + strconv.Itoa(i)}}, nil, nil)
+			score := 0.0
+			if i < 5 {
+				score = float64(i + 1)
+			}
+			input[i] = &fwksched.ScoredEndpoint{Endpoint: ep, Score: score}
+		}
+		return input
+	}
+
+	makeZeroInput := func() []*fwksched.ScoredEndpoint {
+		input := make([]*fwksched.ScoredEndpoint, 10)
+		for i := range input {
+			ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "zero" + strconv.Itoa(i)}}, nil, nil)
+			input[i] = &fwksched.ScoredEndpoint{Endpoint: ep, Score: 0}
+		}
+		return input
+	}
+
+	collectPicks := func(ctx context.Context, p *WeightedRandomPicker, makeInput func() []*fwksched.ScoredEndpoint, n int) []string {
+		picks := make([]string, 0, n*5)
+		for range n {
+			res := p.Pick(ctx, makeInput())
+			for _, ep := range res.TargetEndpoints {
+				picks = append(picks, ep.GetMetadata().ID.Name)
+			}
+		}
+		return picks
+	}
+
+	t.Run("reproducible_positive_picks", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p1 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		p1.explorationBudget = 0.5
+		p2 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		p2.explorationBudget = 0.5
+		p3 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(100, 200))
+		p3.explorationBudget = 0.5
+
+		got1 := collectPicks(ctx, p1, makeMixedInput, 20)
+		got2 := collectPicks(ctx, p2, makeMixedInput, 20)
+		got3 := collectPicks(ctx, p3, makeMixedInput, 20)
+
+		if !slices.Equal(got1, got2) {
+			t.Fatalf("identical seeds produced different picks: %v vs %v", got1, got2)
+		}
+		if slices.Equal(got1, got3) {
+			t.Fatalf("distinct seeds produced identical picks: %v", got1)
+		}
+	})
+
+	t.Run("reproducible_all_zero_fallback", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p1 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(7, 13))
+		p2 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(7, 13))
+		p3 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(100, 200))
+
+		got1 := collectPicks(ctx, p1, makeZeroInput, 20)
+		got2 := collectPicks(ctx, p2, makeZeroInput, 20)
+		got3 := collectPicks(ctx, p3, makeZeroInput, 20)
+
+		if !slices.Equal(got1, got2) {
+			t.Fatalf("identical seeds produced different all-zero picks: %v vs %v", got1, got2)
+		}
+		if slices.Equal(got1, got3) {
+			t.Fatalf("distinct seeds produced identical all-zero picks: %v", got1)
+		}
+	})
+
+	t.Run("nil_restores_default", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		seeded := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		seeded.explorationBudget = 0.5
+		reset := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99)).WithRand(nil)
+		reset.explorationBudget = 0.5
+
+		wantPositive := collectPicks(ctx, seeded, makeMixedInput, 20)
+		gotPositive := collectPicks(ctx, reset, makeMixedInput, 20)
+		if len(gotPositive) != 20*5 {
+			t.Fatalf("expected %d positive-path picks, got %d", 20*5, len(gotPositive))
+		}
+		if slices.Equal(wantPositive, gotPositive) {
+			t.Fatalf("WithRand(nil) still followed the seeded positive sequence")
+		}
+
+		wantZero := collectPicks(ctx, seeded, makeZeroInput, 20)
+		gotZero := collectPicks(ctx, reset, makeZeroInput, 20)
+		if len(gotZero) != 20*5 {
+			t.Fatalf("expected %d all-zero picks, got %d", 20*5, len(gotZero))
+		}
+		if slices.Equal(wantZero, gotZero) {
+			t.Fatalf("WithRand(nil) still followed the seeded all-zero fallback sequence")
+		}
+	})
+
+	t.Run("concurrent_pick_mixed_inputs", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p := NewWeightedRandomPicker(3).WithRand(rand.NewPCG(11, 22))
+		p.explorationBudget = 0.5
+
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				for i := range 200 {
+					var input []*fwksched.ScoredEndpoint
+					if i%2 == 0 {
+						input = makeMixedInput()
+					} else {
+						input = makeZeroInput()
+					}
+					res := p.Pick(ctx, input)
+					if len(res.TargetEndpoints) != 3 {
+						t.Errorf("expected 3 endpoints, got %d", len(res.TargetEndpoints))
+						return
+					}
+				}
+			})
+		}
+		wg.Wait()
+	})
 }
