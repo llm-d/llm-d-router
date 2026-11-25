@@ -623,12 +623,7 @@ func (r *sseReassembler) encodeChoiceContent(e *replyEncoder, c *sseChoice) {
 		e.stringBody(c.content.String())
 		return
 	}
-	for i, id := range c.tokenIDs {
-		if i > 0 {
-			e.raw(",")
-		}
-		e.value(id)
-	}
+	e.arrayBody(c.tokenIDs)
 }
 
 // encodeChoiceTail closes a choice's content and writes the fields that follow
@@ -722,8 +717,7 @@ func (r *sseReassembler) terminated() bool {
 }
 
 // encodeEnvelope writes the top-level fields that follow choices. The chat and
-// text shapes share the OpenAI envelope (id, model, object, ...); the object is
-// fixed per shape rather than the chunk's chat.completion.chunk. The generate
+// text shapes share the OpenAI envelope (id, model, object, ...). The generate
 // shape instead carries request_id, prompt_logprobs, and kv_transfer_params, and
 // no object; kv_transfer_params is null in the terminal decode reply, since the
 // remote handoff it would carry is consumed before the client-facing reply.
@@ -784,8 +778,8 @@ func (r *sseReassembler) usageBlock() map[string]any {
 }
 
 // replyEncoder appends a forced reply's JSON to buf. Values are encoded with
-// encoding/json, so they and the escaping of strings match json.Marshal. The
-// first encoding error is kept in err and the rest of the reply is skipped.
+// encoding/json, so they and the escaping of strings match json.Marshal. Once
+// an encoding error is kept in err, buf is incomplete and is discarded.
 type replyEncoder struct {
 	buf []byte
 	err error
@@ -795,13 +789,11 @@ func (e *replyEncoder) raw(s string) {
 	e.buf = append(e.buf, s...)
 }
 
-// openKey opens an object at its first key: {"name":.
 func (e *replyEncoder) openKey(name string) {
 	e.buf = append(e.buf, '{')
 	e.appendKey(name)
 }
 
-// nextKey separates a key from the previous field: ,"name":.
 func (e *replyEncoder) nextKey(name string) {
 	e.buf = append(e.buf, ',')
 	e.appendKey(name)
@@ -825,7 +817,6 @@ func (e *replyEncoder) value(v any) {
 	e.buf = append(e.buf, b...)
 }
 
-// field appends ,"name":v.
 func (e *replyEncoder) field(name string, v any) {
 	e.nextKey(name)
 	e.value(v)
@@ -835,5 +826,19 @@ func (e *replyEncoder) field(name string, v any) {
 // quotes.
 func (e *replyEncoder) stringBody(s string) {
 	b, _ := json.Marshal(s) // a string always encodes
+	e.buf = append(e.buf, b[1:len(b)-1]...)
+}
+
+// arrayBody appends the elements of vs as the inside of a JSON array, without
+// the brackets.
+func (e *replyEncoder) arrayBody(vs []any) {
+	if e.err != nil || len(vs) == 0 {
+		return
+	}
+	b, err := json.Marshal(vs)
+	if err != nil {
+		e.err = err
+		return
+	}
 	e.buf = append(e.buf, b[1:len(b)-1]...)
 }

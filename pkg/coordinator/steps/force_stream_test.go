@@ -3253,7 +3253,7 @@ func TestForceStream_PrefillCachedTokens(t *testing.T) {
 				ResponseWriter:      recorder,
 			}
 
-			require.NoError(t, step.Execute(context.Background(), reqCtx))
+			require.NoError(t, step.Execute(t.Context(), reqCtx))
 			result := recorder.Result()
 			respBody, _ := io.ReadAll(result.Body)
 			require.Equal(t, strconv.Itoa(len(respBody)), result.Header.Get("Content-Length"))
@@ -3271,36 +3271,83 @@ func TestForceStream_PrefillCachedTokens(t *testing.T) {
 // prompt count that differs from the rendered token count is counted the same as
 // on the pass-through.
 func TestForceStream_PromptTokenParity(t *testing.T) {
-	frames := []string{
-		`{"id":"c","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
-		`{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
-		`{"id":"c","model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`,
-	}
-	server := sseServer(t, frames, nil)
-	defer server.Close()
-
-	step, reg := newForceStreamStep(t, server.URL, "1GiB")
-	recorder := httptest.NewRecorder()
-	reqCtx := &pipeline.RequestContext{
-		RequestID:        "req-forced-parity",
-		OriginalPath:     reqcommon.PathChatCompletions,
-		Model:            "m",
-		Stream:           false,
-		TokenIDs:         []int{1, 2, 3},
-		KVTransferParams: map[string]any{},
-		Body: map[string]any{
-			"model": "m", "stream": false, "max_tokens": 16,
-			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	for _, tc := range []struct {
+		name      string
+		path      string
+		body      map[string]any
+		frames    []string
+		apiType   string
+		promptKey string
+	}{
+		{
+			name: "chat",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{
+				"model": "m", "stream": false, "max_tokens": 16,
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			},
+			frames: []string{
+				`{"id":"c","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+				`{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`{"id":"c","model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`,
+			},
+			apiType:   "chat_completions",
+			promptKey: "prompt_tokens",
 		},
-		ResponseWriter: recorder,
-	}
+		{
+			name: "messages",
+			path: reqcommon.PathMessages,
+			body: map[string]any{
+				"model": "m", "stream": false, "max_tokens": 16,
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			},
+			frames: []string{
+				`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m","usage":{"input_tokens":5,"output_tokens":0}}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+				`{"type":"message_stop"}`,
+			},
+			apiType:   "messages",
+			promptKey: "input_tokens",
+		},
+		{
+			name: "responses",
+			path: reqcommon.PathResponses,
+			body: map[string]any{"model": "m", "stream": false, "max_output_tokens": 16, "input": "hi"},
+			frames: []string{
+				`{"type":"response.output_text.delta","delta":"hi"}`,
+				`{"type":"response.completed","response":{"id":"r","object":"response","status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}`,
+			},
+			apiType:   "responses",
+			promptKey: "input_tokens",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := sseServer(t, tc.frames, nil)
+			defer server.Close()
 
-	require.NoError(t, step.Execute(context.Background(), reqCtx))
-	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
-	require.InDelta(t, 1.0, counterValue(t, reg, parityMetric, map[string]string{"api_type": "chat_completions"}), 1e-9,
-		"the forced reply's 5 prompt tokens differ from the 3 rendered")
-	var got map[string]any
-	respBody, _ := io.ReadAll(recorder.Result().Body)
-	require.NoError(t, json.Unmarshal(respBody, &got))
-	require.EqualValues(t, 5, got["usage"].(map[string]any)["prompt_tokens"], "the check does not change the reply")
+			step, reg := newForceStreamStep(t, server.URL, "1GiB")
+			recorder := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-forced-parity",
+				OriginalPath:     tc.path,
+				Model:            "m",
+				Stream:           false,
+				TokenIDs:         []int{1, 2, 3},
+				KVTransferParams: map[string]any{},
+				Body:             tc.body,
+				ResponseWriter:   recorder,
+			}
+
+			require.NoError(t, step.Execute(t.Context(), reqCtx))
+			require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+			require.InDelta(t, 1.0, counterValue(t, reg, parityMetric, map[string]string{"api_type": tc.apiType}), 1e-9,
+				"the forced reply's 5 prompt tokens differ from the 3 rendered")
+			var got map[string]any
+			respBody, _ := io.ReadAll(recorder.Result().Body)
+			require.NoError(t, json.Unmarshal(respBody, &got))
+			require.EqualValues(t, 5, got["usage"].(map[string]any)[tc.promptKey], "the check does not change the reply")
+		})
+	}
 }
