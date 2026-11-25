@@ -146,9 +146,11 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 		}
 	}
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoResolutionHeaderKey); ok {
-		if w, h := fwkrequest.ParseResolution(s); w <= int64(math.MaxInt) && h <= int64(math.MaxInt) {
-			meta.width, meta.height = int(w), int(h)
+		w, h := fwkrequest.ParseResolution(s)
+		if w > int64(math.MaxInt) || h > int64(math.MaxInt) {
+			return meta
 		}
+		meta.width, meta.height = int(w), int(h)
 	}
 	return meta
 }
