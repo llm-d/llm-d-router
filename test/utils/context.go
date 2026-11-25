@@ -29,11 +29,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// NewTestContext creates a new context with a logger associated with the testing.T.
-// It simplifies the boilerplate of integrating klog/logr with unit tests.
+// NewTestContext creates a context derived from t.Context() with a testr logger.
+// Because it derives from t.Context(), the returned context is canceled before
+// t.Cleanup functions run.
 func NewTestContext(t *testing.T) context.Context {
 	t.Helper()
 
 	logger := testr.New(t)
-	return log.IntoContext(context.Background(), logger)
+	return log.IntoContext(t.Context(), logger)
 }

@@ -19,6 +19,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -45,11 +46,10 @@ import (
 
 const bufSize = 1024 * 1024
 
-var testListener *bufconn.Listener
-
 func PrepareForTestStreamingServer(t *testing.T, objectives []*apixv1.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
 	poolPort int32) (context.Context, context.CancelFunc, datastore.Datastore) {
-	ctx, cancel := context.WithCancel(context.Background())
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
 
 	epf := datalayer.NewTestRuntime(t, time.Second)
 	ds := datastore.NewDatastore(ctx, epf)
@@ -77,47 +77,41 @@ func PrepareForTestStreamingServer(t *testing.T, objectives []*apixv1.InferenceO
 		Build()
 	pool := fwkgaie.MakeInferencePool(poolName).Namespace(namespace).ObjRef()
 	pool.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(poolPort)}}
-	_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(pool))
+	_ = ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool))
 
 	return ctx, cancel, ds
 }
 
 func SetupTestStreamingServer(ctx context.Context, t *testing.T, streamingServer pb.ExternalProcessorServer) (*bufconn.Listener, chan error) {
-	testListener = bufconn.Listen(bufSize)
+	t.Helper()
+	listener := bufconn.Listen(bufSize)
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	go func() {
-		err := LaunchTestGRPCServer(ctx, streamingServer, testListener)
-		if err != nil {
-			t.Error("Error launching listener", err)
-		}
-		errChan <- err
+		errChan <- LaunchTestGRPCServer(ctx, streamingServer, listener)
 	}()
 
-	time.Sleep(2 * time.Second)
-	return testListener, errChan
+	return listener, errChan
 }
 
-func testDialer(context.Context, string) (net.Conn, error) {
-	return testListener.Dial()
-}
-
-func GetStreamingServerClient(ctx context.Context, t *testing.T) (pb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
+func GetStreamingServerClient(ctx context.Context, t *testing.T, listener *bufconn.Listener) (pb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
+	t.Helper()
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(testDialer),
+		grpc.WithContextDialer(func(dialCtx context.Context, _ string) (net.Conn, error) {
+			return listener.DialContext(dialCtx)
+		}),
 	}
 	conn, err := grpc.NewClient("passthrough://bufconn", opts...)
 	if err != nil {
-		t.Error(err)
-		return nil, nil
+		t.Fatal(err)
 	}
 
 	extProcClient := pb.NewExternalProcessorClient(conn)
 	process, err := extProcClient.Process(ctx)
 	if err != nil {
-		t.Error(err)
-		return nil, nil
+		_ = conn.Close()
+		t.Fatal(err)
 	}
 
 	return process, conn
@@ -136,7 +130,11 @@ func LaunchTestGRPCServer(ctx context.Context, s pb.ExternalProcessorServer, lis
 		grpcServer.GracefulStop()
 	}()
 
-	return grpcServer.Serve(listener)
+	err := grpcServer.Serve(listener)
+	if errors.Is(err, grpc.ErrServerStopped) && ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 func CheckEnvoyGRPCHeaders(t *testing.T, response *pb.CommonResponse, expectedHeaders map[string]string) bool {
