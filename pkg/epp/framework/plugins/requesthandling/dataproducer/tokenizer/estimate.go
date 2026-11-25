@@ -208,13 +208,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions, mmMetadataFromContext(ctx))
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
-		tokens := packBytes(raw)
+		tokens := PackBytes(raw)
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Anthropic messages prefix-cache estimation",
 			"messageCount", len(body.Messages.Messages),
 			"rawBytes", len(raw),
@@ -230,21 +230,21 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if body.Responses != nil {
 		raw, features := b.responsesBytes(body.Responses)
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
 	if body.Images != nil {
 		raw, features := b.imagesBytes(body.Images)
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
 	if body.Transcriptions != nil {
 		raw, features := b.transcriptionsBytes(body.Transcriptions, mmMetadataFromContext(ctx))
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
@@ -257,13 +257,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
+	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: PackBytes(raw)}}}, nil
 }
 
 func estimateMultiStringCompletions(req *fwkrequest.CompletionsRequest) (*fwkrequest.TokenizedRequest, error) {
 	prompts := make([]fwkrequest.PromptTokens, 0, len(req.Prompt.Strings))
 	for _, s := range req.Prompt.Strings {
-		ids := packBytes([]byte(s))
+		ids := PackBytes([]byte(s))
 		prompts = append(prompts, fwkrequest.PromptTokens{TokenIDs: ids})
 	}
 	return &fwkrequest.TokenizedRequest{Prompts: prompts}, nil
@@ -303,18 +303,22 @@ func imageGenerationText(r *fwkrequest.ImagesGenerationsRequest) string {
 	return r.Prompt + "\n" + r.NegativePrompt
 }
 
-// imagesBytes flattens an images request's conditioning text and, for an edits
-// request's uploaded image, its placeholder tokens into the byte stream with an
-// image feature, mirroring the chat multimodal representation so downstream
-// consumers treat both alike. A request without an image part (generations)
-// carries the text alone.
+// imagesBytes flattens an images request's conditioning text and, for each of
+// an edits request's uploaded images, its placeholder tokens into the byte
+// stream with an image feature, mirroring the chat multimodal representation so
+// downstream consumers treat both alike. A request without an image part
+// (generations) carries the text alone.
 func (b estimateBackend) imagesBytes(images *fwkrequest.ImagesGenerationsRequest) ([]byte, []fwkrequest.MultiModalFeature) {
 	out := []byte(imageGenerationText(images))
-	if images.Image.SizeBytes == 0 {
-		return out, nil
+	var features []fwkrequest.MultiModalFeature
+	for _, img := range images.InputImages {
+		if img.SizeBytes == 0 {
+			continue
+		}
+		out, features = appendMMAssetHash(out, features, reqcommon.ModalityImage, img.Hash,
+			b.img.placeholderCountFromHead(img.Head))
 	}
-	return appendMMAssetHash(out, nil, reqcommon.ModalityImage, images.Image.Hash,
-		b.img.placeholderCountFromHead(images.Image.Head))
+	return out, features
 }
 
 // audioGenerateText joins an audio-generate request's prompt with its
@@ -660,9 +664,9 @@ func appendMMAssetHash(out []byte, features []fwkrequest.MultiModalFeature, moda
 	return out, features
 }
 
-// packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
+// PackBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
 // Reinterpreting them reproduces the input, so locality keys are unchanged.
-func packBytes(raw []byte) []uint32 {
+func PackBytes(raw []byte) []uint32 {
 	if len(raw) == 0 {
 		return nil
 	}

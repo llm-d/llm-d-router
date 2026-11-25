@@ -30,6 +30,8 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
 const (
@@ -52,6 +54,7 @@ type Parameters struct {
 
 // compile-time interface assertion
 var _ fwkrh.Admitter = &ProbabilisticAdmitter{}
+var _ fwkplugin.ConsumerPlugin = &ProbabilisticAdmitter{}
 
 // ProbabilisticAdmitter implements binary-tier probabilistic shedding.
 type ProbabilisticAdmitter struct {
@@ -120,6 +123,16 @@ func (p *ProbabilisticAdmitter) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
+// Consumes declares DeferredQueueSize as optional: only engine configs with a
+// deferredRequestsSpec publish it.
+func (p *ProbabilisticAdmitter) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Optional: map[fwkplugin.DataKey]any{deferredQueueSizeDataKey: attrmetrics.ScalarMetricValue(0)},
+	}
+}
+
+var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
+
 // Admit implements requesthandling.Admitter.
 // Returns nil to admit, or a ResourceExhausted error to reject.
 func (p *ProbabilisticAdmitter) Admit(_ context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
@@ -149,6 +162,8 @@ func (p *ProbabilisticAdmitter) Admit(_ context.Context, request *fwksched.Infer
 }
 
 // computeSaturation calculates avg(max(QD/qdThreshold, KV/kvThreshold)) across pods with collected metrics.
+// QD is WaitingQueueSize less DeferredQueueSize. A deferred count above the waiting queue comes from
+// series scraped out of step and leaves QD unchanged.
 func (p *ProbabilisticAdmitter) computeSaturation(pods []fwksched.Endpoint) float64 {
 	var total float64
 	collected := 0
@@ -157,7 +172,11 @@ func (p *ProbabilisticAdmitter) computeSaturation(pods []fwksched.Endpoint) floa
 		if !m.Updated() {
 			continue
 		}
-		qRatio := float64(m.WaitingQueueSize) / p.queueDepthThreshold
+		queued := float64(m.WaitingQueueSize)
+		if deferred, ok := attrmetrics.ReadScalarMetricValue(pod, deferredQueueSizeDataKey); ok && deferred >= 0 && float64(deferred) <= queued {
+			queued -= float64(deferred)
+		}
+		qRatio := queued / p.queueDepthThreshold
 		kvRatio := m.KVCacheUsagePercent / p.kvCacheUtilThreshold
 		total += math.Max(qRatio, kvRatio)
 		collected++

@@ -31,8 +31,9 @@ import (
 )
 
 const (
-	gpuUtilMetricName = "DCGM_FI_DEV_GPU_UTIL"
-	podLabelName      = "pod"
+	gpuUtilMetricName  = "DCGM_FI_DEV_GPU_UTIL"
+	podLabelName       = "pod"
+	namespaceLabelName = "namespace"
 )
 
 var _ fwkplugin.ProducerPlugin = &Extractor{}
@@ -72,7 +73,7 @@ func DCGMExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwk
 }
 
 // Extract parses DCGM_FI_DEV_GPU_UTIL from the Prometheus families,
-// keeps samples for this endpoint's pod (when the pod label is present),
+// keeps samples for this endpoint's pod (when the pod and namespace labels are present),
 // aggregates across matching GPUs (max), normalizes to [0.0, 1.0], and
 // stores the result in the endpoint's AttributeMap.
 func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
@@ -81,15 +82,15 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 		return fmt.Errorf("metric %q not found in DCGM response", gpuUtilMetricName)
 	}
 
-	podName := ""
+	podName, podNamespace := "", ""
 	if meta := in.Endpoint.GetMetadata(); meta != nil {
-		podName = meta.Name
+		podName, podNamespace = meta.Name, meta.ID.Namespace
 	}
 
 	maxUtil := 0.0
 	found := false
 	for _, m := range family.GetMetric() {
-		if !sampleBelongsToPod(m, podName) {
+		if !sampleBelongsToPod(m, podName, podNamespace) {
 			continue
 		}
 		val, err := gaugeValue(m)
@@ -118,8 +119,10 @@ func (e *Extractor) Produces() map[fwkplugin.DataKey]any {
 // sampleBelongsToPod reports whether m should contribute to this endpoint's
 // utilization. When podName is empty, or the sample has no pod label, the
 // sample is kept (sidecar / single-tenant payloads). When both are set, only
-// matching samples are kept (DaemonSet multi-pod payloads).
-func sampleBelongsToPod(m *dto.Metric, podName string) bool {
+// matching samples are kept (DaemonSet multi-pod payloads), and a sample's
+// namespace label, when present, must also match, since pod names repeat
+// across namespaces on one node.
+func sampleBelongsToPod(m *dto.Metric, podName, podNamespace string) bool {
 	if podName == "" {
 		return true
 	}
@@ -127,7 +130,11 @@ func sampleBelongsToPod(m *dto.Metric, podName string) bool {
 	if !ok {
 		return true
 	}
-	return samplePod == podName
+	if samplePod != podName {
+		return false
+	}
+	sampleNamespace, ok := labelValue(m, namespaceLabelName)
+	return !ok || podNamespace == "" || sampleNamespace == podNamespace
 }
 
 func labelValue(m *dto.Metric, name string) (string, bool) {

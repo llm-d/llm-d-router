@@ -45,7 +45,7 @@ const p2pConnectorPort = 7777
 // prefillP2PHostPort returns the P2P tier address EPP sets for the prefill pod
 // at prefillHostPort: the same host on the rank-0 tier port.
 func prefillP2PHostPort(prefillHostPort string) string {
-	return net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(p2pConnectorPort))
+	return net.JoinHostPort(routing.ExtractHost(prefillHostPort), strconv.Itoa(p2pConnectorPort))
 }
 
 // addPrefillRouting routes req to prefillHostPort with the P2P tier address the
@@ -122,7 +122,7 @@ var _ = Describe("P2P Connector", func() {
 		decodePrefill, ok := decodeKVParams[reqcommon.FieldRemotePrefiller].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodePrefill[reqcommon.FieldKVRequestID]).To(Equal(prefillKVRequestID))
-		Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
+		Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(routing.ExtractHost(prefillHostPort)))
 		Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 		// Decode preserves the caller's original token limits.
@@ -168,7 +168,7 @@ var _ = Describe("P2P Connector", func() {
 			}
 
 			decodePrefill := decodeRemotePrefiller(testInfo)
-			Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
+			Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(routing.ExtractHost(prefillHostPort)))
 			Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 			testInfo.cancelFn()
@@ -549,13 +549,34 @@ var _ = Describe("P2P Connector cached token usage", func() {
 		Expect(body).To(ContainSubstring("data: [DONE]"))
 	})
 
-	It("reports a measured zero when the prefill usage has no cached tokens", func() {
+	It("keeps the decode cached tokens when the prefill usage reports no count", func() {
+		// A null or absent details object carries no number: vLLM without
+		// --enable-prompt-tokens-details never sends one, so the count was
+		// never measured and the decoder's own count is the only one there is.
 		testInfo.prefillHandler.RawResponse = `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":null}}`
 		testInfo.decodeHandler.RawResponse = decodeUsage49
 
 		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
 
-		Expect(cachedTokens(body)).To(BeNumerically("==", 0))
+		Expect(cachedTokens(body)).To(BeNumerically("==", 49))
+	})
+
+	It("keeps the decode cached tokens when the prefill usage has no details", func() {
+		testInfo.prefillHandler.RawResponse = `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		testInfo.decodeHandler.RawResponse = decodeUsage49
+
+		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
+
+		Expect(cachedTokens(body)).To(BeNumerically("==", 49))
+	})
+
+	It("leaves a decode usage without details unchanged", func() {
+		testInfo.prefillHandler.RawResponse = `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+
+		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
+
+		Expect(body).ToNot(ContainSubstring(`prompt_tokens_details`))
 	})
 
 	It("streams the decode chunks as they arrive while rewriting the usage", func() {

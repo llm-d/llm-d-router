@@ -98,7 +98,7 @@ func referenceMMExtra(features []fwkrequest.MultiModalFeature, start, end int) [
 	var out []byte
 	var lenBuf [8]byte
 	for _, f := range sorted {
-		if f.Length <= 0 {
+		if f.Length <= 0 || f.Hash == "" {
 			continue
 		}
 		if f.Offset >= end || f.Offset+f.Length <= start {
@@ -129,9 +129,13 @@ func TestGetBlockHashesMatchesReference(t *testing.T) {
 			// lengths, and duplicate offsets, so the reference covers the
 			// mixing, the clamped block end, and the position ordering.
 			for range rng.IntN(4) {
+				hash := fmt.Sprintf("hash-%d", rng.IntN(5))
+				if rng.IntN(4) == 0 {
+					hash = "" // a hashless feature must encode as featureless
+				}
 				prompts[i].MultiModalFeatures = append(prompts[i].MultiModalFeatures, fwkrequest.MultiModalFeature{
 					Modality: "image",
-					Hash:     fmt.Sprintf("hash-%d", rng.IntN(5)),
+					Hash:     hash,
 					Offset:   rng.IntN(len(tokens)+10) - 2,
 					Length:   rng.IntN(9) - 1,
 				})

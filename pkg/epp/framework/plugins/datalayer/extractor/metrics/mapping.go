@@ -28,10 +28,12 @@ import (
 // Mapping holds specifications for the well-known metrics defined
 // in the Model Server Protocol.
 type Mapping struct {
-	TotalQueuedRequests  *Spec
-	TotalRunningRequests *Spec
-	KVCacheUtilization   *Spec
-	LoraRequestInfo      *LoRASpec
+	TotalQueuedRequests *Spec
+	// DeferredQueuedRequests is the deferredRequestsSpec of the engine config. Optional.
+	DeferredQueuedRequests *Spec
+	TotalRunningRequests   *Spec
+	KVCacheUtilization     *Spec
+	LoraRequestInfo        *LoRASpec
 	// CacheInfo is used for info-style gauge metrics where block_size and
 	// num_gpu_blocks are exposed as label values.
 	CacheInfo *Spec
@@ -44,21 +46,35 @@ type Mapping struct {
 	// config as separate gauge values rather than labels on an info metric.
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
-	CustomMetrics  []CustomMetric
+	// CacheTotalTokens reads the KV cache capacity in tokens of the engine's
+	// offload-extended cache. Optional: a scrape without the metric is not an
+	// error and leaves the endpoint's KvCacheMaxTokenCapacity unchanged. When
+	// CacheTotalTokensLabel is set, the value is read from that label of the
+	// matching series instead of the gauge value.
+	CacheTotalTokens      *Spec
+	CacheTotalTokensLabel string
+	// CacheOffloadDetection is a metric whose value above zero reports that the
+	// engine has offloaded KV cache to another tier. Optional.
+	CacheOffloadDetection *Spec
+	CustomMetrics         []CustomMetric
 }
 
 // MappingConfig holds configuration used to build a Mapping.
 type MappingConfig struct {
-	Queue               string
-	Running             string
-	KVUsage             string
-	Lora                string
-	CacheInfo           string
-	CacheBlockSizeLabel string
-	CacheNumBlocksLabel string
-	CacheBlockSize      string
-	CacheNumBlocks      string
-	CustomMetrics       []CustomMetric
+	Queue                 string
+	Deferred              string
+	Running               string
+	KVUsage               string
+	Lora                  string
+	CacheInfo             string
+	CacheBlockSizeLabel   string
+	CacheNumBlocksLabel   string
+	CacheBlockSize        string
+	CacheNumBlocks        string
+	CacheTotalTokens      string
+	CacheTotalTokensLabel string
+	CacheOffloadDetection string
+	CustomMetrics         []CustomMetric
 }
 
 type metricAggregation string
@@ -94,6 +110,9 @@ func (m *Mapping) specs() []namedSpec {
 		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
+	if m.DeferredQueuedRequests != nil {
+		specs = append(specs, namedSpec{"deferred", m.DeferredQueuedRequests, true})
+	}
 	for _, custom := range m.CustomMetrics {
 		specs = append(specs, namedSpec{
 			name:    custom.AttributeKey,
@@ -158,6 +177,10 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	deferredSpec, err := parseStringToSpec(cfg.Deferred)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	runningSpec, err := parseStringToSpec(cfg.Running)
 	if err != nil {
 		errs = append(errs, err)
@@ -182,6 +205,17 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	cacheTotalTokensSpec, err := parseStringToSpec(cfg.CacheTotalTokens)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if cacheTotalTokensSpec == nil && cfg.CacheTotalTokensLabel != "" {
+		errs = append(errs, errors.New("cacheTotalTokensLabelName requires cacheTotalTokensSpec"))
+	}
+	cacheOffloadDetectionSpec, err := parseStringToSpec(cfg.CacheOffloadDetection)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
 	errs = append(errs, customErrs...)
 
@@ -189,16 +223,20 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		return nil, errors.Join(errs...)
 	}
 	return &Mapping{
-		TotalQueuedRequests:  queueSpec,
-		TotalRunningRequests: runningSpec,
-		KVCacheUtilization:   kvusageSpec,
-		LoraRequestInfo:      loraSpec,
-		CacheInfo:            cacheInfoSpec,
-		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
-		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
-		CacheBlockSize:       cacheBlockSizeSpec,
-		CacheNumBlocks:       cacheNumBlocksSpec,
-		CustomMetrics:        customMetrics,
+		TotalQueuedRequests:    queueSpec,
+		DeferredQueuedRequests: deferredSpec,
+		TotalRunningRequests:   runningSpec,
+		KVCacheUtilization:     kvusageSpec,
+		LoraRequestInfo:        loraSpec,
+		CacheInfo:              cacheInfoSpec,
+		CacheBlockSizeLabel:    cfg.CacheBlockSizeLabel,
+		CacheNumBlocksLabel:    cfg.CacheNumBlocksLabel,
+		CacheBlockSize:         cacheBlockSizeSpec,
+		CacheNumBlocks:         cacheNumBlocksSpec,
+		CacheTotalTokens:       cacheTotalTokensSpec,
+		CacheTotalTokensLabel:  cfg.CacheTotalTokensLabel,
+		CacheOffloadDetection:  cacheOffloadDetectionSpec,
+		CustomMetrics:          customMetrics,
 	}, nil
 }
 

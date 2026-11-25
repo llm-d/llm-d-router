@@ -505,25 +505,7 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 		}
 		return otelhttp.NewTransport(t)
 	}
-	h2c := t.Clone()
-	h2cProtocols := new(http.Protocols)
-	h2cProtocols.SetUnencryptedHTTP2(true)
-	h2c.Protocols = h2cProtocols
-	return otelhttp.NewTransport(&h2cAwareTransport{http1: t, h2c: h2c})
-}
-
-// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
-// while keeping HTTP/1.1 for standard HTTP backends.
-type h2cAwareTransport struct {
-	http1 http.RoundTripper
-	h2c   http.RoundTripper
-}
-
-func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
-		return rt.h2c.RoundTrip(req)
-	}
-	return rt.http1.RoundTrip(req)
+	return otelhttp.NewTransport(grpcframe.NewH2CAwareTransport(t))
 }
 
 func (s *Server) setKVConnector() {
@@ -617,11 +599,11 @@ func (s *Server) createRoutes() http.Handler {
 	}
 	// DetectAPIType owns the HTTP path-to-API mapping; deriving it here keeps
 	// the HTTP routes from drifting away from it.
-	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
+	for _, path := range routing.PDHTTPPaths {
 		registerInferenceRoute(path, reqcommon.DetectAPIType(path))
 	}
-	grpcPaths := make([]string, 0, len(grpcMethodRoutes)+1)
-	for grpcMethod, apiType := range grpcMethodRoutes {
+	grpcPaths := make([]string, 0, len(routing.PDVLLMGRPCMethods)+1)
+	for grpcMethod, apiType := range routing.PDVLLMGRPCMethods {
 		grpcPaths = append(grpcPaths, grpcMethod)
 		registerInferenceRoute(grpcMethod, apiType)
 	}
@@ -637,7 +619,7 @@ func (s *Server) createRoutes() http.Handler {
 
 	mux.Handle("/", s.decoderProxy)
 
-	return redirectEncodedInferencePath(mux, grpcPaths...)
+	return redirectEncodedInferencePath(mux, routing.PDHTTPPaths, grpcPaths)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.

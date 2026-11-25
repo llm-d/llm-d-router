@@ -20,8 +20,8 @@ replica of a model server can run with the same arguments.
 
 | Engine | Constructor | Notes |
 |--------|-------------|-------|
-| vLLM | `NewVLLMAdapter` | msgpack payloads; supports HMA group identity and map-encoded events. |
-| SGLang | `NewSGLangAdapter` | SGLang's topic scheme and payload format. |
+| vLLM | `NewVLLMAdapter` | msgpack payloads; supports HMA group identity and map-encoded events. Skips an event with an unknown tag and lists the tag in `EventBatch.SkippedTags`. |
+| SGLang | `NewSGLangAdapter` | SGLang's topic scheme and payload format. Rejects a message that holds an event with an unknown tag. |
 
 `NewAdapter` selects the adapter registered for a given engine type
 (`kvEventsConfig.engineType`).

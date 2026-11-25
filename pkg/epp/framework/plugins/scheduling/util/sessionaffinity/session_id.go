@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -94,13 +95,10 @@ func (c *SessionIDConfig) Validate() error {
 	if err := ValidateSources(c.Sources); err != nil {
 		return err
 	}
-	if c.EvictionTTLSeconds <= 0 {
-		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
+	if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+		return err
 	}
-	if c.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
-	}
-	return nil
+	return duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds)
 }
 
 // ValidateSources rejects a source that does not set exactly one of Header or

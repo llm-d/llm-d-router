@@ -348,7 +348,7 @@ var _ = Describe("Common Connector tests", func() {
 var _ = Describe("IPv6 endpoint address construction", func() {
 	DescribeTable("mooncake bootstrapAddr brackets IPv6 host",
 		func(prefillHostPort string, port int, want string) {
-			got := "http://" + net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port))
+			got := "http://" + net.JoinHostPort(routing.ExtractHost(prefillHostPort), strconv.Itoa(port))
 			Expect(got).To(Equal(want))
 		},
 		Entry("IPv4", "10.0.0.1:8080", 9090, "http://10.0.0.1:9090"),
@@ -500,7 +500,7 @@ var _ = Describe("Unreachable prefill", func() {
 			}),
 		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
-				s.handleP2P(w, r, prefill, p2pRouting{prefill: &p2pPeer{host: extractHost(prefill), port: p2pConnectorPort}}, reqcommon.APITypeMessages)
+				s.handleP2P(w, r, prefill, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefill), port: p2pConnectorPort}}, reqcommon.APITypeMessages)
 			}),
 		// The concurrent-dispatch connectors relay the prefill response through
 		// the decoder proxy's error handler, so the decode leg needs the real
@@ -582,7 +582,7 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleP2P(w, r, upstream, p2pRouting{prefill: &p2pPeer{host: extractHost(upstream), port: p2pConnectorPort}}, reqcommon.APITypeResponses)
+				s.handleP2P(w, r, upstream, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(upstream), port: p2pConnectorPort}}, reqcommon.APITypeResponses)
 			}),
 		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
@@ -602,7 +602,7 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.decodeWithP2PSource(w, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: extractHost(upstream), port: p2pConnectorPort}}})
+				s.decodeWithP2PSource(w, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: routing.ExtractHost(upstream), port: p2pConnectorPort}}})
 			}),
 	)
 })

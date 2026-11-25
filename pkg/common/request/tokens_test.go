@@ -336,6 +336,12 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_tokens": 100, "max_output_tokens": 1, "stream": false, "store": false},
 		},
 		{
+			name:    "audio speech caps max_new_tokens",
+			apiType: APITypeAudioSpeech,
+			body:    map[string]any{"model": "m", "max_new_tokens": 800, "stream": true},
+			want:    map[string]any{"model": "m", "max_new_tokens": 1, "stream": false},
+		},
+		{
 			name:    "generate preserves other sampling_params entries",
 			apiType: APITypeVLLMGenerate,
 			body: map[string]any{
@@ -407,6 +413,13 @@ func TestOutputTokenLimit(t *testing.T) {
 			wantOK:  true,
 		},
 		{
+			name:    "audio speech reads max_new_tokens",
+			apiType: APITypeAudioSpeech,
+			body:    map[string]any{"max_new_tokens": float64(128)},
+			want:    128,
+			wantOK:  true,
+		},
+		{
 			name:    "generate reads max_tokens from sampling_params",
 			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"sampling_params": map[string]any{"max_tokens": float64(50)}},
@@ -475,6 +488,39 @@ func TestOutputTokenLimit(t *testing.T) {
 			apiType: APITypeChatCompletions,
 			body:    map[string]any{"max_tokens": 77},
 			want:    77,
+			wantOK:  true,
+		},
+		{
+			name:    "json.Number decimal form is read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": json.Number("64.0")},
+			want:    64,
+			wantOK:  true,
+		},
+		{
+			name:    "wrong type has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": "64"},
+			wantOK:  false,
+		},
+		{
+			name:    "out-of-range value has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(1e300)},
+			wantOK:  false,
+		},
+		{
+			name:    "falls back when the primary field is negative",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": float64(-1), "max_tokens": float64(50)},
+			want:    50,
+			wantOK:  true,
+		},
+		{
+			name:    "falls back when the primary field is the wrong type",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": "bad", "max_tokens": float64(50)},
+			want:    50,
 			wantOK:  true,
 		},
 	}
@@ -568,6 +614,8 @@ func TestNonNegativeInt(t *testing.T) {
 		{"float64", float64(3), 3, true},
 		{"zero", float64(0), 0, true},
 		{"json.Number", json.Number("7"), 7, true},
+		{"json.Number decimal point", json.Number("100.0"), 100, true},
+		{"json.Number exponent", json.Number("1e3"), 1000, true},
 		{"int", 5, 5, true},
 		{"int64", int64(9), 9, true},
 		{"negative float64", float64(-1), 0, false},

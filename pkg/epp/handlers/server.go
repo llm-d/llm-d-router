@@ -160,6 +160,8 @@ type RequestContext struct {
 	RequestSize              int
 	Usage                    fwkrequest.Usage
 	StreamedEvents           int
+	// Completion is set at end of stream from a response with a 200 status.
+	Completion *fwkrh.Completion
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
 	Request             *Request
@@ -254,6 +256,10 @@ type Request struct {
 	Headers  map[string]string
 	RawBody  []byte // This field will be updated when request body is modified (e.g. model mutation in requestBody)
 	Metadata map[string]any
+
+	// clientHeaderNames are the Headers keys copied from the client request,
+	// except pseudo-headers and host, which Envoy never lets ext_proc remove.
+	clientHeaderNames []string
 }
 type Response struct {
 	Headers         map[string]string
