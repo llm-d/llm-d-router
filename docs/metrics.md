@@ -413,14 +413,28 @@ Ready, the series keeps its last value.
 
 ### Scheduler
 
-These metrics are owned by EPP scheduler instrumentation.
+These metrics are owned by EPP scheduler instrumentation. Their declarations in
+[`zz_generated.scheduler_metrics.go`](../pkg/epp/metrics/zz_generated.scheduler_metrics.go)
+and the table below are generated from
+[`scheduler-metrics.yaml`](../pkg/common/observability/semconv/registry/scheduler-metrics.yaml).
+Edit the registry and run `make update-telemetry`; `make verify-telemetry` checks for drift.
+The registry supplies Prometheus names, histogram boundaries, and positional label order.
+Generation requires the `llm_d_epp_` name prefix and unique label positions covering `0..n-1`.
+Metric descriptions supply the Prometheus help text and the documentation. The registry's
+`unit` and `stability` fields are metadata and are not consumed by these templates. Collectors
+retain their `ALPHA` help prefix; unit suffixes come from `metric_name`.
+Other sections of this catalog are maintained manually.
+
+<!-- BEGIN GENERATED SCHEDULER METRICS -->
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
-| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
-| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Total number of scheduling attempts. |
+| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency distribution in seconds. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Total number of failed scheduling attempts, by reason. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Total number of candidate endpoints removed by scheduling filters, by scheduler profile, plugin type and plugin name. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
+
+<!-- END GENERATED SCHEDULER METRICS -->
 
 Each scheduler invocation records an attempt and latency, including failures.
 
@@ -1004,6 +1018,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
 | `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector`, `stage` | Candidate endpoints with missing or stale metrics. |
 | `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
+| `llm_d_epp_flow_control_detector_capacity` | Gauge | `detector`, `stage`, `unit` | Aggregate capacity of the endpoints a `concurrency-detector` evaluated, from its most recent evaluation: the sum of per-endpoint `maxConcurrency` (`unit="requests"`) or `maxTokenConcurrency` (`unit="tokens"`), with `endpointOverrides` applied. Only the unit(s) the detector's `concurrencyMode` evaluates are exported. `stage` as for `llm_d_epp_flow_control_detector_saturation`. Interleaved (`prefill-decode`) endpoints are in both stage partitions, so their capacity is reported under both `stage="prefill"` and `stage="decode"` and summing across stages double counts them. Defined only when flow control is enabled. |
 | `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
 | `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
 | `llm_d_epp_flow_control_global_capacity_utilization_requests` | Gauge | `inference_pool` | Global request capacity use. |

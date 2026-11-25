@@ -25,6 +25,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 // BenchmarkSyncerSet measures redis-syncer Set (publish) latency against
@@ -48,6 +49,42 @@ func BenchmarkSyncerSet(b *testing.B) {
 						return values[0]
 					},
 				}
+
+				b.ReportAllocs()
+				for b.Loop() {
+					if err := syncer.Set(context.Background(), spec, testEndpointID); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkSyncerSetUnchangedPeer measures Set when the hash holds one peer
+// field that does not change between calls, for growing peer payloads.
+func BenchmarkSyncerSetUnchangedPeer(b *testing.B) {
+	for _, prompts := range []int{8, 128} {
+		for _, hashesPerPrompt := range []int{64, 256} {
+			b.Run(fmt.Sprintf("prompts=%d/hashes=%d", prompts, hashesPerPrompt), func(b *testing.B) {
+				server := miniredis.RunT(b)
+				syncer, _ := newTestSyncer(b, server, testReplicaID)
+				local := benchPrefixHashSet(1, 16)
+				spec := fwkdl.CrossReplicaSpec{
+					StateKey: "approx-prefix:bench",
+					Read:     func(string) fwkdl.Cloneable { return local.Clone() },
+					Aggregate: func(values []any) any {
+						if len(values) == 0 {
+							return &attrprefix.PrefixHashSet{}
+						}
+						return values[0]
+					},
+				}
+				peer, err := crossreplica.EncodeValue(benchPrefixHashSet(prompts, hashesPerPrompt))
+				if err != nil {
+					b.Fatal(err)
+				}
+				server.HSet(syncer.hashKey(spec.StateKey, testEndpointID), "epp-peer", string(peer))
 
 				b.ReportAllocs()
 				for b.Loop() {

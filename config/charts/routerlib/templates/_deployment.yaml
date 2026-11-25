@@ -96,7 +96,7 @@
         {{- end }}
         {{- end }}
         - name: epp
-          image: {{ .Values.router.epp.image.registry }}/{{ .Values.router.epp.image.repository }}:{{ .Values.router.epp.image.tag }}
+          image: {{ include "llm-d-router.image" (dict "image" .Values.router.epp.image "path" "router.epp.image") }}
           imagePullPolicy: {{ .Values.router.epp.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
@@ -269,7 +269,7 @@
         {{- $renderPort := $tokenizer.port | default 8000 | int }}
         {{- $flavor := $tokenizer.flavor | default "python" | lower }}
         - name: vllm-render
-          image: {{ $tokenizer.image.registry }}/{{ $tokenizer.image.repository }}:{{ $tokenizer.image.tag }}
+          image: {{ include "llm-d-router.image" (dict "image" $tokenizer.image "path" "router.tokenizer.image") }}
           imagePullPolicy: {{ $tokenizer.image.pullPolicy | default "IfNotPresent" }}
           command:
           {{- if $tokenizer.command }}

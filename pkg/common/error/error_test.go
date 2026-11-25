@@ -357,10 +357,10 @@ func TestBuildErrResponse(t *testing.T) {
 		},
 		{
 			name:           "headers follow content-type",
-			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)}},
+			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated), RetryAfterHeaderKey: "5"}},
 			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
 			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
-			wantHeaders:    map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)},
+			wantHeaders:    map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated), RetryAfterHeaderKey: "5"},
 		},
 	}
 

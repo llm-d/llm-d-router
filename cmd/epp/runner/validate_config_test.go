@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,6 +227,29 @@ func TestRunValidateConfig(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+}
+
+// A running EPP holds the p2p-syncer port, so validating the same
+// configuration next to it must not open that port.
+func TestRunValidateConfigP2PSyncerPortInUse(t *testing.T) {
+	held, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+	_, port, err := net.SplitHostPort(held.Addr().String())
+	require.NoError(t, err)
+
+	peers := "- name: peers\n  type: k8s-peer-discovery\n  parameters:\n    selector: app=epp\n    namespace: default\n    port: \"" + port + "\"\n"
+	syncer := "- name: p2p\n  type: p2p-syncer\n  parameters:\n    port: \"" + port + "\"\n"
+	configText := editBase(t, "plugins:\n- type: approx-prefix-cache-producer", "plugins:\n"+peers+syncer+"- type: approx-prefix-cache-producer") +
+		"dataLayer:\n  discovery:\n    peers:\n      pluginRef: peers\n  crossReplica:\n    syncerPluginRef: p2p\n"
+
+	origArgs, origFlags := os.Args, pflag.CommandLine
+	t.Cleanup(func() { os.Args, pflag.CommandLine = origArgs, origFlags })
+	os.Args = []string{"epp", "--validate-config", "--tracing=false", "--allow-experimental-plugins=true",
+		"--pool-name=epp", "--config-text=" + configText}
+	pflag.CommandLine = pflag.NewFlagSet("epp", pflag.ContinueOnError)
+
+	require.NoError(t, NewRunner().Run(context.Background()))
 }
 
 // editBase replaces old in validateConfigBase, which must contain it exactly once.

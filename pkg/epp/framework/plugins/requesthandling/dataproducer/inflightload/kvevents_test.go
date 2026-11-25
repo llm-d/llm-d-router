@@ -25,6 +25,7 @@ import (
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -35,6 +36,7 @@ import (
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -203,6 +205,41 @@ func TestKVEventPrefillCompletion_ReleasesWhenDecodeStoresLastBlock(t *testing.T
 	require.Equal(t, float64(0), completions(name, signalFirstByte))
 	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
+}
+
+// An SGLang decode engine publishes the pulled prompt at its default page size
+// of 1, stamped with the request's session id.
+func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
+	t.Parallel()
+	const name = "kv-release-sglang"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+	prefillID := fullEndpointName("prefill-0")
+
+	prompt := seq(0, 200)
+	req := newStampedRequest("req-sglang", prompt)
+	require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+
+	payload, err := msgpack.Marshal([]any{1.0, []any{map[string]any{
+		"type":         "BlockStored",
+		"block_hashes": seq(1000, len(prompt)),
+		"token_ids":    prompt,
+		"block_size":   1,
+		"medium":       "GPU",
+		"session_id":   req.Headers[sessionIDHeader],
+	}}, nil})
+	require.NoError(t, err)
+	_, _, batch, err := engineadapter.NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic: "kv@" + decodeSource + "@model", Payload: payload,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource}, batch))
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }
 
 func TestKVEventPrefillCompletion_IgnoresOtherBlocks(t *testing.T) {

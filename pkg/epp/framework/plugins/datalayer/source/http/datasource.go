@@ -34,8 +34,10 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -56,6 +58,8 @@ type HTTPDataSource[T any] struct {
 	typedName fwkplugin.TypedName
 	scheme    string
 	path      string
+	// rawQuery is the query string of the configured path, if any.
+	rawQuery string
 	// portOverride, when non-zero, replaces the port in the endpoint's
 	// MetricsHost with this value. This allows a source to target a
 	// different port on the same pod (e.g. DCGM Exporter on :9400)
@@ -76,6 +80,10 @@ type HTTPDataSource[T any] struct {
 
 	mu   sync.RWMutex
 	exts []fwkdl.PollingExtractor[T]
+
+	// certWatcher, when set, hot-reloads the mTLS client certificate. Start runs it.
+	certWatcher *certwatcher.CertWatcher
+	startOnce   sync.Once
 }
 
 // TLSOptions configures the https transport. The zero value verifies the target
@@ -206,6 +214,16 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	if cfg.interval < 0 {
 		return nil, fmt.Errorf("interval must be non-negative, got %s", cfg.interval)
 	}
+	target, err := url.Parse(path)
+	if err == nil {
+		_, err = url.ParseQuery(target.RawQuery)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid path %q: %w", path, err)
+	}
+	if target.Scheme != "" || target.Opaque != "" || target.User != nil || target.Host != "" || target.Fragment != "" {
+		return nil, fmt.Errorf("invalid path %q: must be a URL path with optional query string", path)
+	}
 
 	cl := &client{
 		Client: http.Client{
@@ -218,32 +236,79 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 			},
 		},
 	}
+	var watcher *certwatcher.CertWatcher
 	if scheme == "https" || cfg.proxyURL != nil {
 		// baseTransport is shared by every source; a source that changes it gets a copy.
 		transport := baseTransport.Clone()
 		if scheme == "https" {
-			tlsCfg, err := tlsClientConfig(tlsOpts)
+			tlsCfg, cw, err := tlsClientConfig(tlsOpts)
 			if err != nil {
 				return nil, err
 			}
 			transport.TLSClientConfig = tlsCfg
+			watcher = cw
 		}
 		if cfg.proxyURL != nil {
 			transport.Proxy = http.ProxyURL(cfg.proxyURL)
 		}
 		cl.Transport = transport
+		if watcher != nil {
+			rt := &rotatingTransport{}
+			rt.current.Store(transport)
+			watcher.RegisterCallback(func(tls.Certificate) { rt.rotate() })
+			cl.Transport = rt
+		}
 	}
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		scheme:         scheme,
-		path:           path,
+		path:           target.Path,
+		rawQuery:       target.RawQuery,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
 		interval:       cfg.interval,
 		onExtractor:    cfg.onExtractor,
 		client:         cl,
 		parser:         parser,
+		certWatcher:    watcher,
 	}, nil
+}
+
+// rotatingTransport delegates to a transport that is replaced whenever the client
+// certificate rotates, so keep-alive connections handshaken with the previous
+// certificate are not reused. Connections in flight at rotation finish on the old
+// transport and are then reaped by its idle timeout.
+type rotatingTransport struct {
+	mu      sync.Mutex // serializes rotate
+	current atomic.Pointer[http.Transport]
+}
+
+func (t *rotatingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.current.Load().RoundTrip(req)
+}
+
+func (t *rotatingTransport) rotate() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	old := t.current.Load()
+	t.current.Store(old.Clone())
+	old.CloseIdleConnections()
+}
+
+// Start runs the client certificate watcher, if any, until ctx is done. It does
+// not block, and calls after the first are no-ops.
+func (s *HTTPDataSource[T]) Start(ctx context.Context) error {
+	if s.certWatcher == nil {
+		return nil
+	}
+	s.startOnce.Do(func() {
+		go func() {
+			if err := s.certWatcher.Start(ctx); err != nil {
+				log.FromContext(ctx).Error(err, "client certificate watcher stopped", "source", s.typedName)
+			}
+		}()
+	})
+	return nil
 }
 
 var (
@@ -268,24 +333,29 @@ func caCertPool(path string) (*x509.CertPool, error) {
 }
 
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
-// system pool), plus an mTLS client certificate when ClientCertPath is set.
-func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
+// system pool), plus an mTLS client certificate when ClientCertPath is set. The
+// client certificate is served from the returned watcher so rotations on disk are
+// picked up once it is started; the CA pool is loaded once.
+func tlsClientConfig(opts TLSOptions) (*tls.Config, *certwatcher.CertWatcher, error) {
 	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify && opts.CACertPath == ""} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
 	if opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		cfg.RootCAs = pool
 	}
-	if opts.ClientCertPath != "" || opts.ClientKeyPath != "" {
-		cert, err := tls.LoadX509KeyPair(opts.ClientCertPath, opts.ClientKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
-		}
-		cfg.Certificates = []tls.Certificate{cert}
+	if opts.ClientCertPath == "" && opts.ClientKeyPath == "" {
+		return cfg, nil, nil
 	}
-	return cfg, nil
+	cw, err := certwatcher.New(opts.ClientCertPath, opts.ClientKeyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return cw.GetCertificate(nil)
+	}
+	return cfg, cw, nil
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
@@ -386,5 +456,5 @@ func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
 		}
 		host = net.JoinHostPort(ip, strconv.Itoa(s.portOverride))
 	}
-	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path}
+	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path, RawQuery: s.rawQuery}
 }

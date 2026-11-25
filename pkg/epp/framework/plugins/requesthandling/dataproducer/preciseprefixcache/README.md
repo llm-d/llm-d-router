@@ -34,7 +34,7 @@ upstream. No-op otherwise.
 | `indexerConfig` | object | `kvcache.NewDefaultConfig()` | `kvcache.Indexer` config. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
 | `kvEventsSourceRef` | string | _(none)_ | Name of a `kv-events-source` whose decoded batches this producer indexes. The producer then opens no subscribers of its own, and `kvEventsConfig` is rejected. |
-| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
+| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions, covering only whole engine blocks of the block size the endpoint reports in its metrics. An endpoint that reports none gets every router block. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
 | `seedDecodeWhenDisaggregated` | bool | `false` | Also seed a disaggregated request's speculative entries on its decode endpoint. By default only the prefill endpoint is seeded: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
 
@@ -107,6 +107,26 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+### Cache tiers
+
+Each KV event names the medium that holds its blocks. The index stores the
+medium lowercased as the block's device tier, and
+`indexerConfig.kvCacheBackendConfigs` sets each tier's scoring weight. A tier
+with no configured weight scores 0. A configured list replaces the defaults in
+`kvcache.DefaultKVCacheBackendConfig()`.
+
+SGLang publishes these media:
+
+| SGLang medium | Device tier | Blocks |
+|---------------|-------------|--------|
+| `GPU` | `gpu` | device memory |
+| `CPU_PINNED` | `cpu_pinned` | HiCache host memory |
+| `EXTERNAL` | `external` | HiCache storage, for every `--hicache-storage-backend`; requires an SGLang build with [sgl-project/sglang#50154](https://github.com/sgl-project/sglang/pull/50154) |
+| `DISK` | `disk` | defined by SGLang but not published |
+
+A `kvCacheBackendConfigs` for SGLang pods lists `cpu_pinned` to score
+host-memory blocks; a `cpu` entry does not match them.
 
 ### Shared event input
 

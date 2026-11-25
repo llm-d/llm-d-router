@@ -77,6 +77,7 @@ test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredic
 test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_gateway["image-digest"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model --set router.tokenizer.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.latencyPredictor.enabled=true --set router.latencyPredictor.trainingServer.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.latencyPredictor.predictionServers.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # Run the install command in case this script runs from a different bash
 # source (such as in the verify-all script)
@@ -224,7 +225,31 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
     fi
   fi
 
+  if [ "${key}" == "image-digest" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    for image in ghcr.io/llm-d/llm-d-router-endpoint-picker docker.io/vllm/vllm-openai-cpu \
+                 ghcr.io/llm-d/llm-d-latency-predictor-training-server ghcr.io/llm-d/llm-d-latency-predictor-prediction-server; do
+      if ! grep -q "image: ${image}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$" "${epp_yaml}"; then
+        echo "Validation failed: ${image} not pinned by digest for test: ${key}"
+        exit 1
+      fi
+    done
+    if grep -E -q "image: [^ ]+:[^ /@]+@sha256:" "${epp_yaml}"; then
+      echo "Validation failed: an image renders with both a tag and a digest for test: ${key}"
+      exit 1
+    fi
+  fi
+
   echo "Test case ${key} passed validation."
+done
+
+echo "Verifying an invalid image digest fails the render..."
+for bad_digest in "sha256:abc" "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef" "not-a-digest"; do
+  if ${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.epp.image.digest="${bad_digest}" > /dev/null 2>&1; then
+    echo "Invalid router.epp.image.digest ${bad_digest} rendered without an error"
+    exit 1
+  fi
 done
 
 echo "Verifying latency predictor service mode keeps EPP config checksum and scheduling..."
@@ -955,6 +980,37 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   for bad_metrics_port in 0 -1 65536 abc; do
     if ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" --set router.modelServers.matchLabels.app=llm-instance-gateway --set "router.epp.metricsDataSource.port=${bad_metrics_port}" >/dev/null 2>&1; then
       echo "${chart} accepted invalid router.epp.metricsDataSource.port=${bad_metrics_port}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying router.modelServers.type and protocol case normalization..."
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for engine_case in \
+    "vLLM:GRPC:absent:vllminference-parser,vllmgrpc-parser,passthrough-parser" \
+    "SGLang:GRPC:sglang:sglanggrpc-parser,passthrough-parser" \
+    "Triton:HTTP:triton:passthrough-parser"; do
+    IFS=: read -r engine_set protocol_set engine_want parsers_want <<< "${engine_case}"
+    engine_render_output="${TEMP_DIR}/${chart}-model-server-type-${engine_set}-${protocol_set}-render.yaml"
+    ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" \
+      --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set "router.modelServers.type=${engine_set}" \
+      --set "router.modelServers.protocol=${protocol_set}" > "${engine_render_output}" || exit 1
+    engine_config=$("${YQ}" -N 'select(.kind == "ConfigMap" and (.data | has("default-plugins.yaml"))) | .data."default-plugins.yaml"' "${engine_render_output}")
+    extractor_count=$(printf '%s\n' "${engine_config}" | "${YQ}" '[.plugins[] | select(.type == "core-metrics-extractor")] | length')
+    if [ "${extractor_count}" != "1" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected 1 core-metrics-extractor plugin, got ${extractor_count}"
+      exit 1
+    fi
+    default_engine=$(printf '%s\n' "${engine_config}" | "${YQ}" '.plugins[] | select(.type == "core-metrics-extractor") | .parameters.defaultEngine // "absent"')
+    if [ "${default_engine}" != "${engine_want}" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected core-metrics-extractor defaultEngine=${engine_want}, got ${default_engine}"
+      exit 1
+    fi
+    rendered_parsers=$(printf '%s\n' "${engine_config}" | "${YQ}" '.requestHandler.parsers // [] | map(.pluginRef) | join(",")')
+    if [ "${rendered_parsers}" != "${parsers_want}" ]; then
+      echo "${chart} (${engine_set}/${protocol_set}): expected requestHandler.parsers=${parsers_want}, got ${rendered_parsers}"
       exit 1
     fi
   done

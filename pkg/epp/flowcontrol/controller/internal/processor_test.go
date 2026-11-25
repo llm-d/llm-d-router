@@ -1643,6 +1643,53 @@ func TestProcessor(t *testing.T) {
 				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
 			})
 
+			t.Run("should drop unpartitioned detector capacity series once stages are evaluated", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "unpartitioned-capacity-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlDetectorCapacity(detector, flowcontrol.SaturationStageFromContext(ctx), "requests", 1)
+					return 1.0
+				}
+
+				// Empty pool: the detector is evaluated without a stage.
+				h.endpointCandidates.Candidates = nil
+				h.processor.dispatchCycle(context.Background())
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				assert.NotContains(t, capacityStages(t, detector), "", "unpartitioned series should have been deleted")
+			})
+
+			t.Run("should drop a stage's detector capacity series once the stage empties", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "emptied-stage-capacity-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlDetectorCapacity(detector, flowcontrol.SaturationStageFromContext(ctx), "requests", 1)
+					return 1.0
+				}
+
+				// Both stages record a series, then prefill empties.
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+				h.processor.dispatchCycle(context.Background())
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				// Stage cleanup deletes the stage for every detector, so a parallel test's empty
+				// partition can remove this detector's series too; asserting absence is race-free.
+				assert.NotContains(t, capacityStages(t, detector), flowcontrol.SaturationStagePrefill,
+					"the emptied prefill stage's series should have been deleted")
+			})
+
 			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
 				t.Parallel()
 				h := newTestHarness(t, testCleanupTick)
@@ -2422,6 +2469,152 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 	})
 }
 
+func TestProcessor_RetryAfterHintOnCapacityRejection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("contended_drain_projects_retry_after", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		q := h.addQueue(testFlow)
+		ctx := t.Context()
+
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			n := uint64(q.Len())
+			return contracts.CapacitySnapshot{
+				Band:   contracts.CapacityDimension{Len: n, CapacityRequests: 1, CapacityBytes: 1e9},
+				Global: contracts.CapacityDimension{Len: n, CapacityRequests: 10, CapacityBytes: 1e9},
+			}, nil
+		}
+
+		// Seed three contended dispatches spaced 3s, 1s, 1s:
+		// EWMA updates 3.0 -> 2.4 -> 1.98s (ceil = 2s), whereas omitting recordDispatch
+		// folds all three busy windows into a 5s retained stall.
+		for i, gap := range []time.Duration{3 * time.Second, 1 * time.Second, 1 * time.Second} {
+			h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 1.0 }
+			h.processor.enqueue(h.newTestItem(fmt.Sprintf("req-seed-%d", i), testFlow, testTTL))
+			assert.False(t, h.processor.dispatchCycle(ctx))
+
+			h.clock.Step(gap)
+			h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 0.0 }
+			assert.True(t, h.processor.dispatchCycle(ctx))
+		}
+
+		// Re-saturate, park a filler, and reject an overflow item.
+		h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 1.0 }
+		h.processor.enqueue(h.newTestItem("req-filler", testFlow, testTTL))
+		assert.False(t, h.processor.dispatchCycle(ctx))
+
+		overflow := h.newTestItem("req-overflow", testFlow, testTTL)
+		h.processor.enqueue(overflow)
+
+		state := overflow.FinalState()
+		require.NotNil(t, state)
+		assert.Equal(t, types.QueueOutcomeRejectedCapacity, state.Outcome)
+		assert.ErrorIs(t, state.Err, types.ErrRejected)
+		assert.ErrorIs(t, state.Err, types.ErrQueueAtCapacity)
+		var capErr *types.QueueCapacityError
+		require.ErrorAs(t, state.Err, &capErr)
+		assert.Equal(t, 2*time.Second, capErr.RetryAfterHint)
+	})
+
+	t.Run("pass_through_dispatch_produces_zero_hint", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		q := h.addQueue(testFlow)
+		ctx := t.Context()
+
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			n := uint64(q.Len())
+			return contracts.CapacitySnapshot{
+				Band:   contracts.CapacityDimension{Len: n, CapacityRequests: 1, CapacityBytes: 1e9},
+				Global: contracts.CapacityDimension{Len: n, CapacityRequests: 10, CapacityBytes: 1e9},
+			}, nil
+		}
+
+		// Enqueue into an idle unsaturated band so the item dispatches in the same cycle.
+		h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 0.0 }
+		h.processor.enqueue(h.newTestItem("req-passthrough-1", testFlow, testTTL))
+		assert.True(t, h.processor.dispatchCycle(ctx))
+		h.clock.Step(3 * time.Second)
+		h.processor.enqueue(h.newTestItem("req-passthrough-2", testFlow, testTTL))
+		assert.True(t, h.processor.dispatchCycle(ctx))
+
+		// Saturate, park a filler, and reject an overflow item immediately: pass-throughs left no estimate.
+		h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 1.0 }
+		h.processor.enqueue(h.newTestItem("req-filler", testFlow, testTTL))
+		assert.False(t, h.processor.dispatchCycle(ctx))
+
+		overflow := h.newTestItem("req-overflow", testFlow, testTTL)
+		h.processor.enqueue(overflow)
+
+		state := overflow.FinalState()
+		require.NotNil(t, state)
+		assert.Equal(t, types.QueueOutcomeRejectedCapacity, state.Outcome)
+		var capErr *types.QueueCapacityError
+		require.ErrorAs(t, state.Err, &capErr)
+		assert.Zero(t, capErr.RetryAfterHint)
+	})
+
+	t.Run("per_flow_limit_omits_queue_capacity_error", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		q := h.addQueue(testFlow)
+		ctx := t.Context()
+
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			n := uint64(q.Len())
+			return contracts.CapacitySnapshot{
+				Band:               contracts.CapacityDimension{Len: n, CapacityRequests: 10, CapacityBytes: 1e9},
+				Global:             contracts.CapacityDimension{Len: n, CapacityRequests: 10, CapacityBytes: 1e9},
+				MaxRequestsPerFlow: 1,
+			}, nil
+		}
+
+		h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 1.0 }
+		h.processor.enqueue(h.newTestItem("req-filler", testFlow, testTTL))
+		assert.False(t, h.processor.dispatchCycle(ctx))
+
+		h.clock.Step(5 * time.Second)
+		overflow := h.newTestItem("req-flow-limit", testFlow, testTTL)
+		h.processor.enqueue(overflow)
+
+		state := overflow.FinalState()
+		require.NotNil(t, state)
+		assert.Equal(t, types.QueueOutcomeRejectedCapacity, state.Outcome)
+		assert.ErrorIs(t, state.Err, types.ErrFlowAtCapacity)
+		var capErr *types.QueueCapacityError
+		assert.NotErrorAs(t, state.Err, &capErr)
+	})
+
+	t.Run("oversized_item_produces_zero_hint", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+		ctx := t.Context()
+
+		oversized := h.newTestItem("req-oversized", testFlow, testTTL)
+		capBytes := oversized.OriginalRequest().ByteSize() - 1
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			return contracts.CapacitySnapshot{
+				Band:   contracts.CapacityDimension{Len: 1, ByteSize: capBytes, CapacityBytes: capBytes},
+				Global: contracts.CapacityDimension{Len: 1, ByteSize: capBytes, CapacityBytes: 1e9},
+			}, nil
+		}
+		h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 { return 1.0 }
+		h.processor.dispatchCycle(ctx)
+		h.clock.Step(5 * time.Second)
+
+		h.processor.enqueue(oversized)
+
+		state := oversized.FinalState()
+		require.NotNil(t, state)
+		assert.Equal(t, types.QueueOutcomeRejectedCapacity, state.Outcome)
+		var capErr *types.QueueCapacityError
+		require.ErrorAs(t, state.Err, &capErr)
+		assert.Zero(t, capErr.RetryAfterHint)
+	})
+}
+
 // fakeBandSelectionPolicy ranks bands in a fixed order and records the priorities reported back to it.
 // An empty order leaves the framework's pre-filled identity permutation in place.
 type fakeBandSelectionPolicy struct {
@@ -2442,4 +2635,28 @@ func (f *fakeBandSelectionPolicy) Rank(_ context.Context, _ flowcontrol.BandSele
 
 func (f *fakeBandSelectionPolicy) RecordDispatch(_ context.Context, priority int) {
 	f.dispatched = append(f.dispatched, priority)
+}
+
+// capacityStages returns the stage label of every llm_d_epp_flow_control_detector_capacity
+// series recorded for detector.
+func capacityStages(t *testing.T, detector string) []string {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var stages []string
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_detector_capacity" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				labels[lp.GetName()] = lp.GetValue()
+			}
+			if labels["detector"] == detector {
+				stages = append(stages, labels["stage"])
+			}
+		}
+	}
+	return stages
 }

@@ -10,7 +10,8 @@ scores and are more likely to be selected by the picker. For negative headroom
 ## Inputs
 
 - `LatencyPredictionInfo` endpoint attribute:
-  - `TTFTHeadroom` / `TPOTHeadroom` - `SLO - predicted` (positive = meets SLO, negative = violates)
+  - `TTFTHeadroom` / `TPOTHeadroom` - `SLO - predicted` (positive = meets SLO, negative = violates).
+    `TTFTHeadroom` also subtracts the time since the EPP received the request
   - `DispatchedRequestCount` - in-flight requests tracked by the EPP
 - `PrefixCacheMatchInfo` endpoint attribute:
   - Prefix cache score (0.0-1.0), used in composite fallback
