@@ -76,6 +76,8 @@ const (
 	LLMDEPPPDReasonKey = attribute.Key("llm_d.epp.pd.reason")
 	// LLMDEPPPickerCandidateEndpointsKey: Candidate endpoints entering the picker.
 	LLMDEPPPickerCandidateEndpointsKey = attribute.Key("llm_d.epp.picker.candidate_endpoints")
+	// LLMDEPPPickerTargetEndpointsKey: The endpoint names the picker selected.
+	LLMDEPPPickerTargetEndpointsKey = attribute.Key("llm_d.epp.picker.target_endpoints")
 	// LLMDEPPPickerTopEndpointsKey: The top scored endpoint names.
 	LLMDEPPPickerTopEndpointsKey = attribute.Key("llm_d.epp.picker.top_endpoints")
 	// LLMDEPPPickerTopScoresKey: The top scored endpoint values.
@@ -410,6 +412,11 @@ func LLMDEPPPDReason(value string) attribute.KeyValue {
 // LLMDEPPPickerCandidateEndpoints: Candidate endpoints entering the picker.
 func LLMDEPPPickerCandidateEndpoints(value int) attribute.KeyValue {
 	return LLMDEPPPickerCandidateEndpointsKey.Int(value)
+}
+
+// LLMDEPPPickerTargetEndpoints: The endpoint names the picker selected.
+func LLMDEPPPickerTargetEndpoints(value []string) attribute.KeyValue {
+	return LLMDEPPPickerTargetEndpointsKey.StringSlice(value)
 }
 
 // LLMDEPPPickerTopEndpoints: The top scored endpoint names.

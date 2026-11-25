@@ -54,3 +54,6 @@ groups:
       - ref: llm_d.epp.picker.top_scores
         requirement_level:
           conditionally_required: When at least one scored endpoint is available.
+      - ref: llm_d.epp.picker.target_endpoints
+        requirement_level:
+          conditionally_required: When the picker selects at least one endpoint.
