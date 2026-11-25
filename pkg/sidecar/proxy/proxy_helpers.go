@@ -339,9 +339,9 @@ func deleteCallerPDFlags(body map[string]any) bool {
 
 // decoderOnlyRequest returns r with deleteCallerPDFlags applied,
 // re-encoding the body only when it changed. Responses bodies go through
-// readJSONBody's guards. Any other body that is not a JSON object is forwarded
-// as sent, for the engine to reject, unless it holds NaN or Infinity: Python's
-// parser accepts those literals, so the engine would read the flags.
+// readJSONBody's guards. Any other body Go cannot parse is forwarded as sent,
+// for the engine to reject, unless pythonOnlyJSON reports that the engine would
+// parse it and read the flags.
 func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p p2pRouting, apiType reqcommon.APIType) (*http.Request, bool) {
 	body := p2p.body
 	if body == nil {
@@ -364,9 +364,15 @@ func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p 
 				return r, false
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
+			// A key spelled with \u escapes, or a UTF-16 or UTF-32 body, which
+			// always holds a NUL byte, has no literal key to find.
+			if !bytes.Contains(raw, []byte(reqcommon.FieldKVTransferParams)) &&
+				!bytes.Contains(raw, []byte(`\u`)) && !bytes.Contains(raw, []byte{0}) {
+				return r, true
+			}
 			// No inspected fields, so a number Go cannot hold does not hide the flags.
 			if body, err = reqcommon.DecodeRequestBody(raw, nil); err != nil {
-				if !bytes.Contains(raw, []byte("NaN")) && !bytes.Contains(raw, []byte("Infinity")) {
+				if !pythonOnlyJSON(raw) {
 					return r, true
 				}
 				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("%w: %w", errInvalidJSON, err)); writeErr != nil {
@@ -387,6 +393,14 @@ func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p 
 		return r, false
 	}
 	return cloneRequestWithBody(r.Context(), r, raw), true
+}
+
+// pythonOnlyJSON reports whether raw may be a body Go rejects but the engine's
+// json.loads accepts: one with NaN or Infinity, a UTF-8 byte order mark, or a
+// UTF-16 or UTF-32 encoding.
+func pythonOnlyJSON(raw []byte) bool {
+	return bytes.Contains(raw, []byte("NaN")) || bytes.Contains(raw, []byte("Infinity")) ||
+		bytes.HasPrefix(raw, []byte("\xef\xbb\xbf")) || bytes.Contains(raw, []byte{0})
 }
 
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {

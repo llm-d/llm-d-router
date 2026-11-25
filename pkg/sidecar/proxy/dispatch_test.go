@@ -1274,23 +1274,57 @@ func TestServer_DecoderOnlyPassthroughDropsFlagsBesideUndecodableNumber(t *testi
 	assert.NotContains(t, forwarded, reqcommon.FieldDoRemotePrefill)
 }
 
-// Python's JSON parser reads NaN, so a body Go rejects only for that literal
-// would reach vLLM with its flags. It is refused instead.
-func TestServer_DecoderOnlyPassthroughRefusesNaNBody(t *testing.T) {
+// Python's json.loads reads NaN, a UTF-8 byte order mark, and UTF-16, so a body
+// Go rejects only for one of those would reach vLLM with its flags. It is
+// refused instead.
+func TestServer_DecoderOnlyPassthroughRefusesPythonOnlyBody(t *testing.T) {
+	const flags = `{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true}}`
+	var utf16Body strings.Builder
+	for _, c := range flags {
+		utf16Body.WriteString(string(c) + "\x00")
+	}
+	tests := map[string]string{
+		"NaN":       `{"model":"m","messages":[],"temperature":NaN,"kv_transfer_params":{"do_remote_prefill":true}}`,
+		"UTF-8 BOM": "\xef\xbb\xbf" + flags,
+		"UTF-16LE":  utf16Body.String(),
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decoder must not receive the body")
+			})
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		})
+	}
+}
+
+// The body is read without decoding when it cannot name kv_transfer_params,
+// so a key spelled with \u escapes must still be decoded and its flags dropped.
+func TestServer_DecoderOnlyPassthroughDropsFlagsUnderEscapedKey(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
-	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("decoder must not receive the body")
+	var forwarded string
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		forwarded = string(raw)
 	})
 
-	const body = `{"model":"m","messages":[],"temperature":NaN,"kv_transfer_params":{"do_remote_prefill":true}}`
+	const body = `{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true}}`
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
-	recorder := httptest.NewRecorder()
 
-	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
 
-	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.JSONEq(t, `{"messages":[],"model":"m"}`, forwarded)
 }
 
 // The data-parallel proxy forwards a request with a source before
