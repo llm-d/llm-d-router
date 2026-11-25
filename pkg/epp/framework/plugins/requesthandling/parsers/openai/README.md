@@ -10,6 +10,7 @@ Parses HTTP/H2C requests and responses in the OpenAI API format.
 Supports all standard OpenAI-compatible endpoints: completions, chat/completions, conversations, responses, embeddings, images/generations, and images/edits. 
 The fields parsed out vary by endpoint: the request's input content (prompt, messages, or input), the streaming mode, and token usage from responses that report it. 
 The images/edits endpoint accepts multipart/form-data.
+The embeddings endpoint also accepts vLLM's chat-style input: `messages` holding one conversation or a list of conversations, or the same conversations in `input`. Media parts in those messages are read as multimodal items.
 
 **Parameters:** None.
 

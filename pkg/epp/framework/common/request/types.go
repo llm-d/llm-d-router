@@ -654,11 +654,116 @@ func (e EmbeddingsInput) IsEmpty() bool {
 
 // EmbeddingsRequest represents the OpenAI /v1/embeddings request body structure.
 // Input can be a string or array of strings; see https://platform.openai.com/docs/api-reference/embeddings.
+// vLLM also accepts chat conversations, which can carry media parts; see
+// https://docs.vllm.ai/en/latest/serving/openai_compatible_server/#embeddings-api.
 type EmbeddingsRequest struct {
-	// Input is the text to embed (string or array of strings).
+	// Input is the text or token IDs to embed. It is empty when the request
+	// carries conversations.
 	Input EmbeddingsInput `json:"input,omitempty"`
+	// Messages holds the conversations to embed, read from messages or, when
+	// messages is absent, from an input holding conversations.
+	Messages EmbeddingsMessages `json:"messages,omitempty"`
 	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+// UnmarshalJSON mirrors vLLM's embeddings request union: messages takes
+// precedence and input is then ignored, and an input whose items are all
+// messages with a role is read as conversations.
+func (e *EmbeddingsRequest) UnmarshalJSON(data []byte) error {
+	type embeddingsRequest EmbeddingsRequest
+	var req struct {
+		embeddingsRequest
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+	*e = EmbeddingsRequest(req.embeddingsRequest)
+	if len(e.Messages) > 0 || len(req.Input) == 0 {
+		return nil
+	}
+	if conversations, ok := conversationsInput(req.Input); ok {
+		e.Messages = conversations
+		return nil
+	}
+	return json.Unmarshal(req.Input, &e.Input)
+}
+
+// IsEmpty reports whether the request carries nothing to embed.
+func (e EmbeddingsRequest) IsEmpty() bool {
+	return e.Input.IsEmpty() && len(e.Messages) == 0
+}
+
+// EmbeddingsMessages is a list of conversations, each embedded separately. It
+// unmarshals from one conversation or from an array of conversations.
+type EmbeddingsMessages [][]Message
+
+func (m *EmbeddingsMessages) UnmarshalJSON(data []byte) error {
+	if string(bytes.TrimSpace(data)) == "null" {
+		return nil
+	}
+	first, ok := firstArrayElement(data)
+	if !ok {
+		return errors.New("embeddings messages: must be an array")
+	}
+	if len(first) > 0 && first[0] == '[' {
+		var batch [][]Message
+		if err := json.Unmarshal(data, &batch); err != nil {
+			return err
+		}
+		for i, conversation := range batch {
+			if len(conversation) == 0 {
+				return fmt.Errorf("embeddings messages: empty conversation at index %d", i)
+			}
+		}
+		*m = batch
+		return nil
+	}
+	var conversation []Message
+	if err := json.Unmarshal(data, &conversation); err != nil {
+		return err
+	}
+	*m = nil
+	if len(conversation) > 0 {
+		*m = EmbeddingsMessages{conversation}
+	}
+	return nil
+}
+
+// conversationsInput reads an embeddings input holding one conversation or an
+// array of conversations. Every message needs a role, as in vLLM, so an array
+// of other objects is left to EmbeddingsInput.
+func conversationsInput(data []byte) (EmbeddingsMessages, bool) {
+	first, ok := firstArrayElement(data)
+	if ok && len(first) > 0 && first[0] == '[' {
+		first, ok = firstArrayElement(first)
+	}
+	if !ok || len(first) == 0 || first[0] != '{' {
+		return nil, false
+	}
+	var conversations EmbeddingsMessages
+	if err := json.Unmarshal(data, &conversations); err != nil || len(conversations) == 0 {
+		return nil, false
+	}
+	for _, conversation := range conversations {
+		for _, message := range conversation {
+			if message.Role == "" {
+				return nil, false
+			}
+		}
+	}
+	return conversations, true
+}
+
+// firstArrayElement returns the bytes of a JSON array from its first element
+// onward, with leading whitespace trimmed, or false when data is not an array.
+func firstArrayElement(data []byte) ([]byte, bool) {
+	data = bytes.TrimLeft(data, " \t\r\n")
+	if len(data) == 0 || data[0] != '[' {
+		return nil, false
+	}
+	return bytes.TrimLeft(data[1:], " \t\r\n"), true
 }
 
 func (e *EmbeddingsRequest) String() string {

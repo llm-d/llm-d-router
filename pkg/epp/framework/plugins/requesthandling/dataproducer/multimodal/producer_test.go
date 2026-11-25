@@ -198,6 +198,29 @@ func TestExtractMMItemsFromStructuredChatMedia(t *testing.T) {
 	}, items)
 }
 
+func TestExtractMMItemsFromEmbeddingsMessages(t *testing.T) {
+	message := func(url string) []fwkrequest.Message {
+		return []fwkrequest.Message{{
+			Role: "user",
+			Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{
+				{Type: "image_url", ImageURL: fwkrequest.ImageBlock{URL: url}},
+			}},
+		}}
+	}
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			Embeddings: &fwkrequest.EmbeddingsRequest{
+				Messages: fwkrequest.EmbeddingsMessages{message("https://example.com/a.png"), message("https://example.com/b.png")},
+			},
+		},
+	})
+
+	assert.Equal(t, []attrmm.MatchItem{
+		{Hash: contentHash("image_url", "https://example.com/a.png"), Size: 1, Modality: string(reqcommon.ModalityImage)},
+		{Hash: contentHash("image_url", "https://example.com/b.png"), Size: 1, Modality: string(reqcommon.ModalityImage)},
+	}, items)
+}
+
 func TestExtractMMItemsFromStructuredChatAudioURL(t *testing.T) {
 	audioURL := "https://example.com/clip.wav"
 	items := ExtractMMItems(&scheduling.InferenceRequest{

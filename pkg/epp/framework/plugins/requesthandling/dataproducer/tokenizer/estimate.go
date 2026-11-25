@@ -212,6 +212,9 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 			MultiModalFeatures: features,
 		}}}, nil
 	}
+	if body.Embeddings != nil && len(body.Embeddings.Messages) > 0 {
+		return b.embeddingsMessagesPrompts(body.Embeddings.Messages, mmMetadataFromContext(ctx)), nil
+	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
 		tokens := PackBytes(raw)
@@ -372,6 +375,21 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrequest.ChatCompletionsRe
 		out, features = b.appendChatMessage(out, features, msg, meta)
 	}
 	return out, features
+}
+
+// embeddingsMessagesPrompts estimates one prompt per embeddings conversation,
+// since the engine embeds each conversation separately.
+func (b estimateBackend) embeddingsMessagesPrompts(conversations fwkrequest.EmbeddingsMessages, meta mmMetadata) *fwkrequest.TokenizedRequest {
+	prompts := make([]fwkrequest.PromptTokens, 0, len(conversations))
+	for _, conversation := range conversations {
+		var raw []byte
+		var features []fwkrequest.MultiModalFeature
+		for _, msg := range conversation {
+			raw, features = b.appendChatMessage(raw, features, msg, meta)
+		}
+		prompts = append(prompts, fwkrequest.PromptTokens{TokenIDs: PackBytes(raw), MultiModalFeatures: features})
+	}
+	return &fwkrequest.TokenizedRequest{Prompts: prompts}
 }
 
 // appendChatMessage flattens a single chat-completions message into the byte

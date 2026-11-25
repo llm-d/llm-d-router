@@ -355,6 +355,10 @@ func extractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
 		return itemsFromChat(request.Body.ChatCompletions)
 	}
 
+	if request.Body.Embeddings != nil {
+		return itemsFromEmbeddings(request.Body.Embeddings)
+	}
+
 	return nil
 }
 
@@ -391,6 +395,18 @@ func itemsFromChat(request *fwkrequest.ChatCompletionsRequest) []attrmm.MatchIte
 	for _, message := range request.Messages {
 		for _, block := range message.Content.Structured {
 			addBlockItem(collector, block)
+		}
+	}
+	return collector.items
+}
+
+func itemsFromEmbeddings(request *fwkrequest.EmbeddingsRequest) []attrmm.MatchItem {
+	collector := newItemCollector()
+	for _, conversation := range request.Messages {
+		for _, message := range conversation {
+			for _, block := range message.Content.Structured {
+				addBlockItem(collector, block)
+			}
 		}
 	}
 	return collector.items

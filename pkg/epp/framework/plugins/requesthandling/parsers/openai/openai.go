@@ -593,12 +593,12 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		return &request.InferenceRequestBody{Completions: &completions.CompletionsRequest}, nil
 
 	case embeddingsAPI:
-		validationErr := errors.New("invalid embeddings request: must have input field")
+		validationErr := errors.New("invalid embeddings request: must have input or messages field")
 		var embeddings request.EmbeddingsRequest
 		if err := json.Unmarshal(rawBody, &embeddings); err != nil {
 			return nil, requestBodyDecodeError(err, "embeddings", validationErr)
 		}
-		if embeddings.Input.IsEmpty() {
+		if embeddings.IsEmpty() {
 			return nil, validationErr
 		}
 		return &request.InferenceRequestBody{Embeddings: &embeddings}, nil

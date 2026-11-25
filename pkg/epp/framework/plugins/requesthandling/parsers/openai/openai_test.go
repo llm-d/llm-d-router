@@ -1407,10 +1407,68 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "embeddings request with messages",
+			headers: map[string]string{":path": "/v1/embeddings"},
+			body: map[string]any{
+				"model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+				"messages": []any{map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/page.png"}},
+				}}},
+			},
+			want: &request.InferenceRequestBody{
+				Embeddings: &request.EmbeddingsRequest{
+					Messages: request.EmbeddingsMessages{{{Role: "user", Content: request.Content{Structured: []request.ContentBlock{
+						{Type: "image_url", ImageURL: request.ImageBlock{URL: "https://example.com/page.png"}},
+					}}}}},
+				},
+				Payload: request.PayloadMap{
+					"model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+					"messages": []any{map[string]any{"role": "user", "content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/page.png"}},
+					}}},
+				},
+			},
+		},
+		{
+			name:    "embeddings request with conversations as input",
+			headers: map[string]string{":path": "/v1/embeddings"},
+			body: map[string]any{
+				"model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+				"input": []any{
+					[]any{map[string]any{"role": "query", "content": "first"}},
+					[]any{map[string]any{"role": "document", "content": "second"}},
+				},
+			},
+			want: &request.InferenceRequestBody{
+				Embeddings: &request.EmbeddingsRequest{
+					Messages: request.EmbeddingsMessages{
+						{{Role: "query", Content: request.Content{Raw: "first"}}},
+						{{Role: "document", Content: request.Content{Raw: "second"}}},
+					},
+				},
+				Payload: request.PayloadMap{
+					"model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+					"input": []any{
+						[]any{map[string]any{"role": "query", "content": "first"}},
+						[]any{map[string]any{"role": "document", "content": "second"}},
+					},
+				},
+			},
+		},
+		{
 			name:    "embeddings request missing input",
 			headers: map[string]string{":path": "/v1/embeddings"},
 			body: map[string]any{
 				"model": "text-embedding-3-small",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "embeddings request with empty messages",
+			headers: map[string]string{":path": "/v1/embeddings"},
+			body: map[string]any{
+				"model":    "text-embedding-3-small",
+				"messages": []any{},
 			},
 			wantErr: true,
 		},
