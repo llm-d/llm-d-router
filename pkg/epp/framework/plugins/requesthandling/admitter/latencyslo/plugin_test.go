@@ -111,9 +111,9 @@ func TestAdmit(t *testing.T) {
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
 				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 3))
+					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: true,
 		},
@@ -131,7 +131,7 @@ func TestAdmit(t *testing.T) {
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
 				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 			},
 			wantErr: true,
 		},
@@ -164,7 +164,7 @@ func TestAdmit(t *testing.T) {
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
 				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
@@ -186,7 +186,7 @@ func TestAdmit(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "sheddable, all invalid, running requests but one pod has zero dispatched — admit",
+			name:    "sheddable, all invalid, running requests but zero dispatched — reject",
 			request: makeSheddableRequest("100", "30"),
 			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
@@ -198,7 +198,7 @@ func TestAdmit(t *testing.T) {
 				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name:    "sheddable, all invalid, but cold pod exists — admit",
@@ -209,9 +209,9 @@ func TestAdmit(t *testing.T) {
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
 				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 3))
+					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: false,
 		},
@@ -224,9 +224,9 @@ func TestAdmit(t *testing.T) {
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
 				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(true, true, 20, 5, 80, 25, 3)) // valid
+					attrlatency.NewLatencyPredictionInfo(true, true, 20, 5, 80, 25, 0)) // valid
 			},
 			wantErr: false,
 		},
@@ -291,7 +291,7 @@ func TestAdmitNonFiniteSLOHeaders(t *testing.T) {
 			t.Run(value+"/"+tt.name, func(t *testing.T) {
 				endpoint := makeLatencyAdmissionEndpoint("pod1", 0.5, 5)
 				endpoint.Put(attrlatency.LatencyPredictionInfoDataKey,
-					attrlatency.NewLatencyPredictionInfo(false, false, -150, -40, 150, 40, 5))
+					attrlatency.NewLatencyPredictionInfo(false, false, -150, -40, 150, 40, 0))
 
 				err := plugin.Admit(context.Background(), tt.request, []fwksched.Endpoint{endpoint})
 				if (err != nil) != tt.wantErr {

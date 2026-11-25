@@ -100,7 +100,7 @@ func (p *LatencyAdmission) Consumes() fwkplugin.DataDependencies {
 //
 // Reject only when ALL of:
 //   - No endpoint has a valid prediction (all violate SLO)
-//   - No endpoint is idle (all have dispatched requests)
+//   - No endpoint is idle (all have dispatched or running requests)
 //   - No cold pod exists (predictions are reliable)
 func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx)
@@ -148,8 +148,8 @@ func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.Inferenc
 			if latencyInfo.IsValid() {
 				hasValid = true
 			}
-			// Idle pod: no dispatched requests — likely can serve the request.
-			if latencyInfo.DispatchedRequestCount() == 0 {
+			// Idle pod: neither dispatched nor running requests — likely can serve the request.
+			if latencyInfo.DispatchedRequestCount() == 0 && metrics.RunningRequestsSize == 0 {
 				hasIdle = true
 			}
 		}
