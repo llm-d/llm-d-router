@@ -716,6 +716,10 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 	return reqCtx
 }
 
+func normalizedStopReason(reqCtx *handlers.RequestContext) fwkrh.StopReason {
+	return reqCtx.StopReason.OrUnknown()
+}
+
 // HandleResponseBody is invoked by the director for every chunk received in a streaming
 // response, or exactly once for a non-streaming response.
 //
@@ -741,6 +745,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 			RequestID:        reqCtx.Request.ID,
 			EndOfStream:      true,
 			TerminationCause: cause,
+			StopReason:       normalizedStopReason(reqCtx),
 		}, reqCtx.TargetPod)
 	}
 
@@ -761,6 +766,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.StopReason = normalizedStopReason(reqCtx)
 		response.Completion = reqCtx.Completion
 		response.ReceivedTimestamp = reqCtx.RequestReceivedTimestamp
 		response.FirstTokenTimestamp = reqCtx.FirstTokenTimestamp()

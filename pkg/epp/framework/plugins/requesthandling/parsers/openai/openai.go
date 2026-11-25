@@ -312,14 +312,107 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 	return extractResponse(body)
 }
 
+// responseChoice holds the fields of one Chat Completions or Completions
+// choice that response parsing reads.
+type responseChoice struct {
+	Text         *string `json:"text"`
+	FinishReason string  `json:"finish_reason"`
+}
+
+// responseOutputItem holds the type of one Responses API output item.
+type responseOutputItem struct {
+	Type string `json:"type"`
+}
+
+type responseIncompleteDetails struct {
+	Reason string `json:"reason"`
+}
+
 // completionChoices holds the fields of a completions response that
 // ParsedResponse.Completion is built from.
 type completionChoices struct {
-	Object  string `json:"object"`
-	Choices []struct {
-		Text         *string `json:"text"`
-		FinishReason string  `json:"finish_reason"`
-	} `json:"choices"`
+	Object  string           `json:"object"`
+	Choices []responseChoice `json:"choices"`
+}
+
+// stopReasonFromChoices aggregates response choices into one stop reason. A
+// tool call in any choice wins; otherwise a normal termination in any choice
+// yields turn_ended; otherwise unknown. Responses with mixed choices therefore
+// report the signal that matters most for join detection.
+func stopReasonFromChoices(choices []responseChoice) fwkrh.StopReason {
+	result := fwkrh.StopReason("")
+	seen := false
+	for _, choice := range choices {
+		reason := strings.TrimSpace(choice.FinishReason)
+		if reason == "" {
+			continue
+		}
+		seen = true
+		switch parsers.NormalizeStopReason(reason) {
+		case fwkrh.StopReasonToolCall:
+			return fwkrh.StopReasonToolCall
+		case fwkrh.StopReasonTurnEnded:
+			result = fwkrh.StopReasonTurnEnded
+		default:
+			result = fwkrh.StopReasonUnknown
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return result
+}
+
+// responsesStopReason maps a Responses API status and output list into the
+// shared stop-reason vocabulary. A function-call output item means the turn
+// stopped to call a tool.
+func responsesStopReason(status string, output []responseOutputItem, incomplete responseIncompleteDetails) fwkrh.StopReason {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "failed" || status == "cancelled" {
+		return fwkrh.StopReasonUnknown
+	}
+	for _, item := range output {
+		if item.Type == "function_call" {
+			return fwkrh.StopReasonToolCall
+		}
+	}
+	if status == "" {
+		return ""
+	}
+	if status == "incomplete" {
+		return incompleteStopReason(incomplete.Reason)
+	}
+	return parsers.NormalizeStopReason(status)
+}
+
+func incompleteStopReason(reason string) fwkrh.StopReason {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_output_tokens", "model_context_window_exceeded":
+		return fwkrh.StopReasonTurnEnded
+	default:
+		return fwkrh.StopReasonUnknown
+	}
+}
+
+// responsesEventStopReason maps a terminal Responses API stream event. Some
+// providers omit response.status, so the event type is the fallback.
+func responsesEventStopReason(eventType, status string, output []responseOutputItem, incomplete responseIncompleteDetails) fwkrh.StopReason {
+	if eventType == "response.failed" {
+		return fwkrh.StopReasonUnknown
+	}
+	if reason := responsesStopReason(status, output, incomplete); reason != "" {
+		return reason
+	}
+	switch eventType {
+	case "response.completed":
+		return fwkrh.StopReasonTurnEnded
+	case "response.incomplete":
+		return incompleteStopReason(incomplete.Reason)
+	case "response.failed":
+		return fwkrh.StopReasonUnknown
+	default:
+		return ""
+	}
 }
 
 // completion returns the text of a completions response with exactly one choice
@@ -336,25 +429,73 @@ func (c *completionChoices) completion(bodyLen int) *fwkrh.Completion {
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(chunk)
-	return &fwkrh.ParsedResponse{
-		Usage:          usage,
-		StreamedEvents: countStreamEvents(chunk),
-	}, nil
-}
-
-// countStreamEvents counts the SSE data events in a chunk, excluding the terminator. An event
-// split across two chunks is counted with the half that carries the prefix; a split inside the
-// prefix drops the event and a split inside the terminator counts it, both a one-event error.
-func countStreamEvents(chunk []byte) int {
-	count := 0
+	// One pass collects the event count, usage, and stop reason. Usage keeps the
+	// last event because continuous-usage streams report cumulative totals, and
+	// the stop reason is the last terminal signal observed.
+	resp := &fwkrh.ParsedResponse{}
+	var usage *request.Usage
+	stopReason := fwkrh.StopReason("")
+	sawToolCall := false
 	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
 		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
-		if ok && !isStreamTerminator(content) {
-			count++
+		if !ok || isStreamTerminator(content) {
+			continue
+		}
+		resp.StreamedEvents++
+		var streamResponse struct {
+			Type     string             `json:"type"`
+			Choices  []responseChoice   `json:"choices"`
+			Item     responseOutputItem `json:"item"`
+			Usage    json.RawMessage    `json:"usage"`
+			Response struct {
+				Usage             json.RawMessage           `json:"usage"`
+				Status            string                    `json:"status"`
+				Output            []responseOutputItem      `json:"output"`
+				IncompleteDetails responseIncompleteDetails `json:"incomplete_details"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(content, &streamResponse); err != nil {
+			continue
+		}
+		if streamResponse.Item.Type == "function_call" {
+			sawToolCall = true
+			stopReason = fwkrh.StopReasonToolCall
+		}
+		if candidate := stopReasonFromChoices(streamResponse.Choices); candidate != "" {
+			stopReason = candidate
+		}
+		if isResponsesTerminalEvent(streamResponse.Type) {
+			candidate := responsesEventStopReason(streamResponse.Type, streamResponse.Response.Status, streamResponse.Response.Output, streamResponse.Response.IncompleteDetails)
+			if candidate == fwkrh.StopReasonTurnEnded && sawToolCall && streamResponse.Type == "response.completed" {
+				candidate = fwkrh.StopReasonToolCall
+			}
+			if candidate != "" {
+				stopReason = candidate
+			}
+		}
+		// Standard Chat Completions and vLLM report usage inline.
+		if len(streamResponse.Usage) > 0 {
+			if strings.HasPrefix(streamResponse.Type, "speech.audio.") {
+				if streamResponse.Type == "speech.audio.done" {
+					usage = extractRawUsage(streamResponse.Usage)
+				}
+			} else {
+				var parsed *request.Usage
+				if err := json.Unmarshal(streamResponse.Usage, &parsed); err == nil && parsed != nil {
+					usage = parsed
+				}
+			}
+		}
+		// Responses API reports final usage inside the terminal response object.
+		if len(streamResponse.Response.Usage) > 0 && isResponsesTerminalEvent(streamResponse.Type) {
+			if parsed := extractRawUsage(streamResponse.Response.Usage); parsed != nil {
+				usage = parsed
+			}
 		}
 	}
-	return count
+	resp.Usage = usage
+	resp.StopReason = stopReason
+	return resp, nil
 }
 
 // isStreamTerminator reports whether an SSE data payload is the [DONE] terminator, tolerating a
@@ -989,7 +1130,10 @@ func toInt(v any) int {
 // mismatch outside "usage" leaves Completion nil and does not fail usage.
 func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
 	var responseBody struct {
-		Usage map[string]any `json:"usage"`
+		Usage             map[string]any            `json:"usage"`
+		Status            string                    `json:"status"`
+		Output            []responseOutputItem      `json:"output"`
+		IncompleteDetails responseIncompleteDetails `json:"incomplete_details"`
 		completionChoices
 	}
 	var completion *fwkrh.Completion
@@ -1001,7 +1145,13 @@ func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
 	case !errors.As(err, &typeErr) || typeErr.Field == reqcommon.FieldUsage:
 		return nil, err
 	}
-	return &fwkrh.ParsedResponse{Usage: usageFromFields(responseBody.Usage), Completion: completion}, nil
+	reason := fwkrh.StopReason("")
+	if len(responseBody.Output) > 0 || responseBody.Status != "" {
+		reason = responsesStopReason(responseBody.Status, responseBody.Output, responseBody.IncompleteDetails)
+	} else {
+		reason = stopReasonFromChoices(responseBody.Choices)
+	}
+	return &fwkrh.ParsedResponse{Usage: usageFromFields(responseBody.Usage), Completion: completion, StopReason: reason}, nil
 }
 
 func extractUsage(responseBytes []byte) (*request.Usage, error) {
@@ -1056,73 +1206,6 @@ func usageFromFields(fields map[string]any) *request.Usage {
 	}
 
 	return &usage
-}
-
-// Example message if "stream_options": {"include_usage": "true"} is included in the request:
-// data: {"id":"...","object":"text_completion","created":1739400043,"model":"small-segment-lora-0","choices":[],
-// "usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}
-//
-// data: [DONE]
-//
-// Noticed that vLLM returns two entries in one response.
-// We need to strip the `data:` prefix and next Data: [DONE] from the message to fetch response data.
-//
-// If include_usage is not included in the request, `data: [DONE]` is returned separately, which
-// indicates end of streaming.
-//
-// For ResponsesAPI streaming, usage is nested in the response object of the
-// terminal event, which is response.completed, response.incomplete (for example
-// max_output_tokens reached) or response.failed:
-//
-//	event: response.completed
-//	data: {"response":{"usage":{"input_tokens":31,..},...},"type":"response.completed"}
-//
-// It extracts usage from those three events and from "speech.audio.done".
-func extractUsageStreaming(responseBytes []byte) *request.Usage {
-	// Keep the last usage event: a stream with continuous usage stats reports cumulative usage
-	// on every chunk, so a later event in the same body supersedes an earlier one.
-	var result *request.Usage
-	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
-	for line := range lines {
-		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
-		if !ok {
-			continue
-		}
-		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if isStreamTerminator(content) || !bytes.Contains(content, []byte("usage")) {
-			continue
-		}
-		var streamResponse struct {
-			Usage    json.RawMessage `json:"usage"`
-			Response struct {
-				Usage json.RawMessage `json:"usage"` // Delay JSON decoding until we know we have usage data
-			} `json:"response"`
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(content, &streamResponse); err != nil {
-			continue
-		}
-		// Standard ChatCompletion / vLLM usage format
-		if len(streamResponse.Usage) > 0 {
-			if strings.HasPrefix(streamResponse.Type, "speech.audio.") {
-				if streamResponse.Type == "speech.audio.done" {
-					return extractRawUsage(streamResponse.Usage)
-				}
-				continue
-			}
-			var usage *request.Usage
-			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
-				result = usage
-			}
-		}
-		// Responses API streaming format
-		if len(streamResponse.Response.Usage) > 0 && isResponsesTerminalEvent(streamResponse.Type) {
-			if usage := extractRawUsage(streamResponse.Response.Usage); usage != nil {
-				result = usage
-			}
-		}
-	}
-	return result
 }
 
 // isResponsesTerminalEvent reports whether a Responses API stream event ends

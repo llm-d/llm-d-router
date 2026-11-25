@@ -656,6 +656,22 @@ func TestAnthropicParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "tool_use_stop_reason",
+			body: []byte(`{"id": "msg_123", "type": "message", "stop_reason": "tool_use"}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonToolCall,
+			},
+		},
+		{
+			name: "turn_end_stop_reason",
+			body: []byte(`{"id": "msg_123", "type": "message", "stop_reason": "end_turn"}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
 			name:    "invalid JSON",
 			body:    []byte(`{malformed`),
 			wantErr: true,
@@ -710,6 +726,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 				},
 				DisjointInputTokens: &fwkrh.DisjointInputTokens{},
 				StreamedEvents:      1,
+				StopReason:          fwkrh.StopReasonTurnEnded,
 			},
 		},
 		{

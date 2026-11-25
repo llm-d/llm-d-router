@@ -271,13 +271,68 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 		return nil, nil //nolint:nilnil
 	}
 	if isEventStream(headers) {
-		return &fwkrh.ParsedResponse{Usage: extractStreamingUsage(body)}, nil
+		return parseStreamingResponse(body), nil
 	}
 	usage, err := parseGenerateResponseUsage(body)
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	return &fwkrh.ParsedResponse{Usage: usage, StopReason: parseGenerateResponseStopReason(body)}, nil
+}
+
+// parseGenerateResponseStopReason reads finish_reason from a /generate
+// response. With sampling_params.n above 1 the response is an array; the first
+// recognized sample wins.
+func parseGenerateResponseStopReason(body []byte) fwkrh.StopReason {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var samples []json.RawMessage
+		if err := json.Unmarshal(body, &samples); err == nil {
+			for _, sample := range samples {
+				reason := parseMetaInfoStopReason(sample)
+				if reason != "" && reason != fwkrh.StopReasonUnknown {
+					return reason
+				}
+			}
+			return fwkrh.StopReasonUnknown
+		}
+	}
+	return parseMetaInfoStopReason(body)
+}
+
+func parseMetaInfoStopReason(data []byte) fwkrh.StopReason {
+	var resp sgLangResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return fwkrh.StopReasonUnknown
+	}
+	return sglangStopReason(resp.MetaInfo.FinishReason)
+}
+
+func sglangStopReason(raw json.RawMessage) fwkrh.StopReason {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	if trimmed[0] == '"' {
+		var reason string
+		if err := json.Unmarshal(trimmed, &reason); err == nil {
+			if reason == "" {
+				return ""
+			}
+			return parsers.NormalizeStopReason(reason)
+		}
+		return fwkrh.StopReasonUnknown
+	}
+	var reason struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(trimmed, &reason); err != nil {
+		return fwkrh.StopReasonUnknown
+	}
+	if reason.Type == "" {
+		return ""
+	}
+	return parsers.NormalizeStopReason(reason.Type)
 }
 
 // parseGenerateResponseUsage reads usage from a non-streaming /generate
@@ -323,31 +378,31 @@ func isEventStream(headers map[string]string) bool {
 	return false
 }
 
-// extractStreamingUsage reads usage from SGLang SSE data lines.
-func extractStreamingUsage(body []byte) *request.Usage {
-	text := strings.TrimSpace(string(body))
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
+// parseStreamingResponse reads the terminal chunk's usage and finish reason in
+// one pass. Only the final chunk carries a non-null finish_reason.
+func parseStreamingResponse(body []byte) *fwkrh.ParsedResponse {
+	for line := range bytes.SplitSeq(body, []byte("\n")) {
+		data, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte(reqcommon.SSEDataPrefix))
 		if !ok {
 			continue
 		}
-		data = strings.TrimSpace(data)
-		if data == reqcommon.SSEDoneMarker {
+		data = bytes.TrimSpace(data)
+		if bytes.Equal(data, []byte(reqcommon.SSEDoneMarker)) {
 			continue
 		}
 		var resp sgLangResponse
-		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+		if err := json.Unmarshal(data, &resp); err != nil {
 			continue
 		}
-		// skip intermediate chunks; only the final chunk has a non-null finish_reason
 		if !hasJSONValue(resp.MetaInfo.FinishReason) {
 			continue
 		}
-		usage, _ := parseMetaInfoUsage([]byte(data))
-		return usage
+		return &fwkrh.ParsedResponse{
+			Usage:      metaInfoUsage(resp),
+			StopReason: sglangStopReason(resp.MetaInfo.FinishReason),
+		}
 	}
-	return nil
+	return &fwkrh.ParsedResponse{}
 }
 
 func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
@@ -355,8 +410,12 @@ func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
+	return metaInfoUsage(resp), nil
+}
+
+func metaInfoUsage(resp sgLangResponse) *request.Usage {
 	if resp.MetaInfo.PromptTokens == nil && resp.MetaInfo.CompletionTokens == nil {
-		return nil, nil //nolint:nilnil
+		return nil
 	}
 	u := &request.Usage{
 		PromptTokens:     intValue(resp.MetaInfo.PromptTokens),
@@ -368,7 +427,7 @@ func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
 			CachedTokens: *resp.MetaInfo.CachedTokens,
 		}
 	}
-	return u, nil
+	return u
 }
 
 func intValue(value *int) int {

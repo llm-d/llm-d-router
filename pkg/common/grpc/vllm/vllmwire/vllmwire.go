@@ -94,6 +94,7 @@ var (
 	seqFinishInfo = protoscan.FieldNum(&vllmpb.SequenceOutput{}, "finish_info")
 
 	finishNumOutputTokens  = protoscan.FieldNum(&vllmpb.FinishInfo{}, "num_output_tokens")
+	finishReason           = protoscan.FieldNum(&vllmpb.FinishInfo{}, "finish_reason")
 	finishKVTransferParams = protoscan.FieldNum(&vllmpb.FinishInfo{}, "kv_transfer_params")
 	finishECTransferParams = protoscan.FieldNum(&vllmpb.FinishInfo{}, "ec_transfer_params")
 	finishNumCachedTokens  = protoscan.FieldNum(&vllmpb.FinishInfo{}, "num_cached_tokens")

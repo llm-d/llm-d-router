@@ -1052,7 +1052,8 @@ func TestScanGenerateResponse(t *testing.T) {
 			},
 			want: ResponseInfo{
 				HasPromptInfo: true, NumPromptTokens: 64, HasOutputs: true,
-				HasFinishInfo: true, NumOutputTokens: 1,
+				HasFinishInfo: true, HasFinishReason: true, FinishReason: vllmpb.FinishInfo_LENGTH,
+				NumOutputTokens: 1,
 				HasCachedTokens: true, NumCachedTokens: 0, hasKVTransferParams: true, hasECTransferParams: true,
 			},
 		},
@@ -1061,7 +1062,10 @@ func TestScanGenerateResponse(t *testing.T) {
 			resp: &vllmpb.GenerateResponse{Outputs: &vllmpb.SequenceOutput{
 				FinishInfo: &vllmpb.FinishInfo{NumOutputTokens: 7, FinishReason: vllmpb.FinishInfo_STOP},
 			}},
-			want: ResponseInfo{HasOutputs: true, HasFinishInfo: true, NumOutputTokens: 7},
+			want: ResponseInfo{
+				HasOutputs: true, HasFinishInfo: true, HasFinishReason: true,
+				FinishReason: vllmpb.FinishInfo_STOP, NumOutputTokens: 7,
+			},
 		},
 	}
 

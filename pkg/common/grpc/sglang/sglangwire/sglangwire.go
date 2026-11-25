@@ -90,6 +90,11 @@ var (
 	metaComplTokens  = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "completion_tokens")
 	metaFinishReason = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "finish_reason")
 	metaCachedTokens = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "cached_tokens")
+
+	finishStop    = protoscan.FieldNum(&sglangapiv1.FinishReason{}, "stop")
+	finishLength  = protoscan.FieldNum(&sglangapiv1.FinishReason{}, "length")
+	finishAbort   = protoscan.FieldNum(&sglangapiv1.FinishReason{}, "abort")
+	finishUnknown = protoscan.FieldNum(&sglangapiv1.FinishReason{}, "unknown")
 )
 
 func init() {
@@ -467,6 +472,9 @@ type StreamItem struct {
 	// Finished reports that meta_info holds a finish_reason, which marks the
 	// terminal frame for Index.
 	Finished bool
+	// FinishReason is the terminal frame's finish_reason kind: stop, length,
+	// abort, or unknown. Empty on non-terminal frames.
+	FinishReason string
 	// PromptTokens is meta_info.prompt_tokens.
 	PromptTokens uint32
 	// CompletionTokens is meta_info.completion_tokens.
@@ -516,11 +524,31 @@ func scanResponse(b []byte, item *StreamItem) error {
 	})
 }
 
+func scanFinishReason(b []byte, item *StreamItem) error {
+	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, _, _ []byte) error {
+		if wireType != protowire.BytesType {
+			return nil
+		}
+		switch num {
+		case finishStop:
+			item.FinishReason = "stop"
+		case finishLength:
+			item.FinishReason = "length"
+		case finishAbort:
+			item.FinishReason = "abort"
+		case finishUnknown:
+			item.FinishReason = "unknown"
+		}
+		return nil
+	})
+}
+
 func scanMetaInfo(b []byte, item *StreamItem) error {
 	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		switch {
 		case num == metaFinishReason && wireType == protowire.BytesType:
 			item.Finished = true
+			return scanFinishReason(value, item)
 		case num == metaPromptTokens && wireType == protowire.VarintType:
 			v, _ := protowire.ConsumeVarint(value)
 			item.PromptTokens = uint32(v) //#nosec G115 -- uint32 field, protobuf truncates the same way

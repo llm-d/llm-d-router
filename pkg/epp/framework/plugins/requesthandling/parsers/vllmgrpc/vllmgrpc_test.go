@@ -634,6 +634,53 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 						CachedTokens: 5,
 					},
 				},
+				StopReason: fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
+			name: "Complete Response Length",
+			respMsg: &pb.GenerateResponse{
+				Response: &pb.GenerateResponse_Complete{
+					Complete: &pb.GenerateComplete{
+						FinishReason:     "length",
+						PromptTokens:     20,
+						CompletionTokens: 15,
+					},
+				},
+			},
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrequest.Usage{
+					PromptTokens:     20,
+					CompletionTokens: 15,
+					TotalTokens:      35,
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+				StopReason: fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
+			name: "Complete Response Abort",
+			respMsg: &pb.GenerateResponse{
+				Response: &pb.GenerateResponse_Complete{
+					Complete: &pb.GenerateComplete{
+						FinishReason:     "abort",
+						PromptTokens:     20,
+						CompletionTokens: 15,
+					},
+				},
+			},
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrequest.Usage{
+					PromptTokens:     20,
+					CompletionTokens: 15,
+					TotalTokens:      35,
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+				StopReason: fwkrh.StopReasonUnknown,
 			},
 		},
 		{

@@ -36,6 +36,8 @@ type ResponseInfo struct {
 	HasOutputs bool
 
 	HasFinishInfo   bool
+	HasFinishReason bool
+	FinishReason    vllmpb.FinishInfo_FinishReason
 	NumOutputTokens uint32
 	HasCachedTokens bool
 	NumCachedTokens uint32
@@ -131,6 +133,13 @@ func scanFinishInfo(b []byte, info *ResponseInfo) error {
 			}
 			v, _ := protowire.ConsumeVarint(value)
 			info.NumOutputTokens = uint32(v) //#nosec G115 -- uint32 field, protobuf truncates the same way
+		case finishReason:
+			if wt != protowire.VarintType {
+				return ErrMalformed
+			}
+			v, _ := protowire.ConsumeVarint(value)
+			info.HasFinishReason = true
+			info.FinishReason = vllmpb.FinishInfo_FinishReason(v) //#nosec G115 -- enum is int32, protobuf truncates the same way
 		case finishNumCachedTokens:
 			if wt != protowire.VarintType {
 				return ErrMalformed

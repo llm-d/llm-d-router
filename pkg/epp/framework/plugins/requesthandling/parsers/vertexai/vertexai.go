@@ -172,6 +172,9 @@ func (p *VertexAIParser) ParseResponse(ctx context.Context, body []byte, headers
 		if parsed.Usage != nil {
 			result.Usage = parsed.Usage
 		}
+		if parsed.StopReason != "" {
+			result.StopReason = parsed.StopReason
+		}
 		result.StreamedEvents += parsed.StreamedEvents
 	}
 	return result, errors.Join(errs...)

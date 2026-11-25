@@ -282,6 +282,9 @@ func (p *SGLangGRPCParser) ParseResponse(_ context.Context, body []byte, _ map[s
 		if !item.Finished {
 			return
 		}
+		if item.FinishReason != "" {
+			result.StopReason = parsers.NormalizeStopReason(item.FinishReason)
+		}
 		promptTokens := parsers.ClampToInt(item.PromptTokens)
 		completionTokens := parsers.ClampToInt(item.CompletionTokens)
 		if promptTokens > 0 || completionTokens > 0 {

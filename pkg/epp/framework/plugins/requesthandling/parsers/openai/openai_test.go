@@ -1991,6 +1991,77 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "chat_completion_tool_call_stop_reason",
+			body: []byte(`{
+				"object": "chat.completion",
+				"choices": [{"index": 0, "finish_reason": "tool_calls"}]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonToolCall,
+			},
+		},
+		{
+			name: "chat_completion_repetition_is_unknown",
+			body: []byte(`{
+				"object": "chat.completion",
+				"choices": [{"index": 0, "finish_reason": "repetition"}]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonUnknown,
+			},
+		},
+		{
+			name: "chat_completion_normal_stop_reason",
+			body: []byte(`{
+				"object": "chat.completion",
+				"choices": [{"index": 0, "finish_reason": "stop"}]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
+			name: "chat_completion_mixed_choices_prefer_tool_call",
+			body: []byte(`{
+				"object": "chat.completion",
+				"choices": [
+					{"index": 0, "finish_reason": "stop"},
+					{"index": 1, "finish_reason": "tool_calls"}
+				]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonToolCall,
+			},
+		},
+		{
+			name: "responses_api_failed_output_is_unknown",
+			body: []byte(`{
+				"object": "response",
+				"status": "failed",
+				"output": [{"type": "function_call"}]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonUnknown,
+			},
+		},
+		{
+			name: "responses_api_function_call_output",
+			body: []byte(`{
+				"object": "response",
+				"status": "completed",
+				"output": [{"type": "function_call"}]
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:      nil,
+				StopReason: fwkrh.StopReasonToolCall,
+			},
+		},
+		{
 			name: "Conversations API (uses input_tokens)",
 			body: []byte(`{
 				"object": "conversation",
@@ -2321,6 +2392,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					},
 				},
 				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonTurnEnded,
 			},
 		},
 		{
@@ -2341,6 +2413,16 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					TotalTokens:      13,
 				},
 				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
+			name:  "responses_api_incomplete_content_filter_is_unknown",
+			chunk: []byte("event: response.incomplete\ndata: " + `{"response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}},"type":"response.incomplete"}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonUnknown,
 			},
 		},
 		{
@@ -2353,6 +2435,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					TotalTokens:      10,
 				},
 				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonUnknown,
 			},
 		},
 		{
@@ -2365,6 +2448,35 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					TotalTokens:      49,
 				},
 				StreamedEvents: 2,
+				StopReason:     fwkrh.StopReasonTurnEnded,
+			},
+		},
+		{
+			name: "responses_api_function_call_output_item_before_completed",
+			chunk: []byte("event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}}` + "\n\n" +
+				"event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_1"}}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 2,
+				StopReason:     fwkrh.StopReasonToolCall,
+			},
+		},
+		{
+			name:  "chat_completion_tool_call_finish_reason",
+			chunk: []byte(`data: {"choices":[{"finish_reason":"tool_calls"}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonToolCall,
+			},
+		},
+		{
+			name:  "chat_completion_normal_finish_reason",
+			chunk: []byte(`data: {"choices":[{"finish_reason":"stop"}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+				StopReason:     fwkrh.StopReasonTurnEnded,
 			},
 		},
 		{

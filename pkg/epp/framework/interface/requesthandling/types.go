@@ -53,6 +53,32 @@ const (
 	TerminationCauseNotObserved TerminationCause = "not-observed"
 )
 
+// StopReason is the normalized reason a model response ended. Parsers map their
+// provider-specific finish_reason or stop_reason into this vocabulary once, so
+// response consumers do not parse provider wire formats. TerminationCause takes
+// precedence: when it is not natural, the response did not complete normally and
+// the stop reason describes only what was observed before the stream ended.
+type StopReason string
+
+const (
+	// StopReasonToolCall reports that the model stopped to call a tool.
+	StopReasonToolCall StopReason = "tool_call"
+	// StopReasonTurnEnded reports that the model finished the turn without a tool call.
+	StopReasonTurnEnded StopReason = "turn_ended"
+	// StopReasonUnknown reports a missing, malformed, or unsupported reason.
+	StopReasonUnknown StopReason = "unknown"
+)
+
+// OrUnknown returns the reason when one was observed and unknown otherwise.
+// A ParsedResponse leaves StopReason empty when no reason was observed; a
+// final Response is always populated with this method.
+func (r StopReason) OrUnknown() StopReason {
+	if r == "" {
+		return StopReasonUnknown
+	}
+	return r
+}
+
 // Response contains information from the response received to be passed to the Response requesthandling plugins
 type Response struct {
 	// RequestID is the unique identifier for the request; see scheduling.InferenceRequest.RequestID.
@@ -77,6 +103,11 @@ type Response struct {
 	StreamedEvents int
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
+	// StopReason is the normalized reason the response ended. It is set only on the
+	// end-of-stream call and is always normalized to unknown when no reason was
+	// observed. Check TerminationCause first: a non-natural cause means the stream
+	// did not complete normally.
+	StopReason StopReason
 	// Completion is set only on the end-of-stream call; see ParsedResponse.
 	Completion *Completion
 	// ReceivedTimestamp is when the EPP received the request. Set only at end of stream.
