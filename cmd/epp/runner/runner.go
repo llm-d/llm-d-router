@@ -256,7 +256,9 @@ func (r *Runner) WithCustomCollectors(collectors ...prometheus.Collector) *Runne
 
 func (r *Runner) Run(ctx context.Context) error {
 	// Setup a very basic logger in case command line argument parsing fails
-	logutil.InitSetupLogging("llm-d-epp")
+	// Request handlers log, so a stdout nobody reads must not stall them.
+	logutil.InitSetupLogging("llm-d-epp", logutil.NonBlockingStdout("llm-d-epp"))
+	defer logutil.Flush()
 
 	setupLog.Info(r.eppExecutableName+" build", "commit-sha", version.CommitSHA, "build-ref", version.BuildRef)
 
@@ -265,6 +267,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	pflag.Parse()
 
 	if err := opts.Complete(); err != nil {
+		setupLog.Error(err, "Failed to complete flags")
 		return err
 	}
 	if err := opts.Validate(); err != nil {
@@ -1487,7 +1490,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
 	g.Add("cross-replica-sync", func(ctx context.Context) error {
-		r.dlRuntime.StartCrossReplicaSync(r.servingCtx)
+		if err := r.dlRuntime.StartCrossReplicaSync(r.servingCtx); err != nil {
+			return err
+		}
 		<-ctx.Done()
 		return nil
 	})

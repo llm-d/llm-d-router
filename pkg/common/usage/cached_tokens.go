@@ -296,9 +296,11 @@ func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) er
 
 // CachedTokens reads the cached-token count out of a response's usage block,
 // which callers pass as the decoded value of the response's "usage" field. It
-// reports false when the block is absent or carries no count; vLLM sends the
-// details object as null when the count is zero, so callers that need a number
-// treat that as zero.
+// reports false when the block is absent or its details object carries no
+// number. A false result means no measurement applies: vLLM without
+// --enable-prompt-tokens-details sends no details object however many tokens
+// were cached, so a P/D response whose prefill leg reported none must relay
+// the decode worker's usage unchanged rather than substitute zero.
 func CachedTokens(block any) (int, bool) {
 	fields, ok := block.(map[string]any)
 	if !ok {

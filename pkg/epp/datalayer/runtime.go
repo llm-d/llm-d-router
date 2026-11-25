@@ -394,13 +394,27 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 }
 
 // Start is called to enable the Runtime to start processing data collection. It wires
-// Kubernetes notifications into the manager and starts cross-replica syncing.
+// Kubernetes notifications into the manager, starts cross-replica syncing and starts
+// the background work of polling sources that have any.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 	r.notificationSyncMu.Lock()
 	r.notificationSyncs = nil
 	r.notificationSyncMu.Unlock()
 
-	r.StartCrossReplicaSync(ctx)
+	if err := r.StartCrossReplicaSync(ctx); err != nil {
+		return err
+	}
+
+	for _, d := range r.dispatchers.Dispatchers() {
+		if id, ok := d.(*intervalDispatcher); ok {
+			d = id.PollingDispatcher
+		}
+		if s, ok := d.(fwkdl.StartablePollingSource); ok {
+			if err := s.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start polling source %s: %w", d.TypedName(), err)
+			}
+		}
+	}
 
 	notificationSyncs := make([]*notificationInitialSync, 0, r.notification.Count())
 	err := r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
@@ -449,12 +463,19 @@ func (*Runtime) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "datalayer", Name: "runtime"}
 }
 
-// StartCrossReplicaSync starts the shared cross-replica publishing loop.
-func (r *Runtime) StartCrossReplicaSync(ctx context.Context) {
+// StartCrossReplicaSync starts the configured cross-replica syncer, when it
+// implements CrossReplicaStarter, and the shared cross-replica publishing loop.
+func (r *Runtime) StartCrossReplicaSync(ctx context.Context) error {
 	if r.crossReplicaPub == nil {
-		return
+		return nil
+	}
+	if starter, ok := r.crossReplicaPub.syncer.(fwkdl.CrossReplicaStarter); ok {
+		if err := starter.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start cross-replica syncer: %w", err)
+		}
 	}
 	r.crossReplicaPub.start(ctx)
+	return nil
 }
 
 // NewEndpoint sets up data polling on the provided endpoint.

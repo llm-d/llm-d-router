@@ -27,6 +27,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -655,6 +656,46 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_WithMetrics(t *t
 	// Verify cleanup
 	_, err := router.getPredictedLatencyContextForRequest(request)
 	assert.Error(t, err)
+}
+
+func TestPredictedLatency_ResponseBody_TTFTSLOViolationCountsTimeSinceReceived(t *testing.T) {
+	// The request was dispatched one second ago and its first token came 700 ms later.
+	// Its TTFT SLO is 800 ms.
+	dispatched := time.Now().Add(-time.Second)
+	tests := []struct {
+		name           string
+		received       time.Time // when the EPP received the request
+		wantViolations float64
+	}{
+		{name: "received time not set", wantViolations: 0},
+		{name: "first token 750 ms after the request was received", received: dispatched.Add(-50 * time.Millisecond), wantViolations: 0},
+		{name: "first token 940 ms after the request was received", received: dispatched.Add(-240 * time.Millisecond), wantViolations: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := createTestRouter()
+			router.latencypredictor = new(mockPredictor)
+			endpoint := createTestEndpoint("test-pod", 1, 1, 1)
+			request := createTestInferenceRequest("test", 800, 0)
+			request.ReceivedTimestamp = tt.received
+
+			predictedLatencyCtx := newPredictedLatencyContext(request)
+			predictedLatencyCtx.requestReceivedTimestamp = dispatched
+			predictedLatencyCtx.ttft = 700
+			predictedLatencyCtx.ttftSLO = 800
+			predictedLatencyCtx.incomingModelName = testModelName
+			router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
+
+			violations := llmdSloViolationCounter.WithLabelValues("", "", testModelName, "", typeTTFT)
+			before := testutil.ToFloat64(violations)
+			router.ResponseBody(context.Background(), request, &fwkrh.Response{EndOfStream: true}, endpoint.GetMetadata())
+
+			assert.Equal(t, tt.wantViolations, testutil.ToFloat64(violations)-before)
+			// The ttft gauge stays the endpoint's TTFT, measured from PreRequest.
+			assert.Equal(t, 0.7, testutil.ToFloat64(llmdInferenceGauges.WithLabelValues("", "", testModelName, "", typeTTFT)))
+		})
+	}
 }
 
 func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NoSLOs(t *testing.T) {

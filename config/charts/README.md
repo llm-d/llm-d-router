@@ -289,7 +289,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, sglanggrpc-parser, sglanghttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.metricsDataSource.scheme` | Scheme EPP uses to scrape model server metrics (`http` or `https`). | `http` |
 | `router.epp.metricsDataSource.path` | URL path on model server pods that serves Prometheus metrics. | `/metrics` |
 | `router.epp.metricsDataSource.port` | Port override for model server metrics scrapes (1-65535), such as `8000` when inference uses gRPC on `50051`. Unset scrapes each endpoint's inference port. Do not set on multi-port data-parallel pools. | `null` |
@@ -474,7 +474,7 @@ Configuration for the backend model servers that EPP routes traffic to. These se
 | `router.modelServers.protocol` | Protocol used by model servers. Options: `[http, grpc]`. | `http` |
 | `router.modelServers.targetPorts` | Port(s) EPP routes traffic to on the model servers. | `[{number: 8000}]` |
 | `router.modelServers.targetPortNumber` | Legacy fallback port number for GKE health check policies. | `8000` |
-| `router.modelServers.grpcServiceName` | Service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `type=vllm` and `protocol=grpc`. Set `""` for overall server health or `"vllm.grpc.engine.VllmEngine"` for legacy `VllmEngine` servers. | `vllm.Inference` |
+| `router.modelServers.grpcServiceName` | Optional service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `protocol=grpc`. Empty omits `grpcServiceName` to query overall server health. | `""` |
 
 #### Complete Model Server Example
 

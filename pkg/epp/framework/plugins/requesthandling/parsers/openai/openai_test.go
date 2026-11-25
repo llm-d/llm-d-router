@@ -3171,7 +3171,7 @@ func TestOpenAIParser_ParseRequestTranscriptionsInvalidForms(t *testing.T) {
 	body, ct := buildVideoForm(t, videoFormPart{name: "model", value: "whisper-large-v3"})
 	invalidStream, invalidCT := buildVideoForm(t,
 		videoFormPart{name: "model", value: "whisper-large-v3"},
-		videoFormPart{name: "stream", value: "yes"})
+		videoFormPart{name: "stream", value: "maybe"})
 	if _, err := parser.ParseRequest(context.Background(), invalidStream, headersFor(invalidCT)); err == nil {
 		t.Error("ParseRequest accepted an invalid stream field")
 	}
@@ -3501,5 +3501,58 @@ func BenchmarkOpenAIParser_ParseResponse(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// The model servers parse a form boolean with pydantic, which accepts these
+// values in any letter case.
+func TestOpenAIParser_ParseRequestFormStream(t *testing.T) {
+	parser := NewOpenAIParser()
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"true", true}, {"True", true}, {"tRUE", true}, {"1", true}, {"t", true}, {"yes", true}, {"Y", true}, {"on", true},
+		{"false", false}, {"FALSE", false}, {"0", false}, {"f", false}, {"no", false}, {"NO", false}, {"n", false}, {"off", false},
+	} {
+		for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+			audio, ct := buildVideoForm(t,
+				videoFormPart{name: "model", value: "whisper-large-v3"},
+				videoFormPart{name: "stream", value: tc.value})
+			result, err := parser.ParseRequest(context.Background(), audio,
+				map[string]string{":path": path, reqcommon.HeaderContentType: ct})
+			if err != nil {
+				t.Fatalf("%s stream=%q: %v", path, tc.value, err)
+			}
+			if result.Body.Stream != tc.want {
+				t.Errorf("%s stream=%q: Stream = %v, want %v", path, tc.value, result.Body.Stream, tc.want)
+			}
+		}
+
+		edit, ct := buildMultipartBody(t, map[string]string{"prompt": "make it night", "stream": tc.value})
+		result, err := parser.ParseRequest(context.Background(), edit,
+			map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
+		if err != nil {
+			t.Fatalf("images edits stream=%q: %v", tc.value, err)
+		}
+		if result.Body.Stream != tc.want {
+			t.Errorf("images edits stream=%q: Stream = %v, want %v", tc.value, result.Body.Stream, tc.want)
+		}
+	}
+	for _, value := range []string{"maybe", " true", ""} {
+		edit, ct := buildMultipartBody(t, map[string]string{"prompt": "make it night", "stream": value})
+		if _, err := parser.ParseRequest(context.Background(), edit,
+			map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct}); err == nil {
+			t.Errorf("images edits accepted stream=%q", value)
+		}
+		for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+			audio, ct := buildVideoForm(t,
+				videoFormPart{name: "model", value: "whisper-large-v3"},
+				videoFormPart{name: "stream", value: value})
+			if _, err := parser.ParseRequest(context.Background(), audio,
+				map[string]string{":path": path, reqcommon.HeaderContentType: ct}); err == nil {
+				t.Errorf("%s accepted stream=%q", path, value)
+			}
+		}
 	}
 }

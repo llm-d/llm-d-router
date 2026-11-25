@@ -86,7 +86,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	var predictions []endpointPredictionResult
 	var err error
 	if scrapedEndpoints := scrapedEndpointsOnly(endpoints); len(scrapedEndpoints) > 0 {
-		predictions, err = pl.generatePredictions(ctx, predictedLatencyCtx, scrapedEndpoints)
+		predictions, err = pl.generatePredictions(ctx, request, predictedLatencyCtx, scrapedEndpoints)
 	}
 	if err == nil {
 		pl.updateRequestContextWithPredictions(predictedLatencyCtx, predictions)

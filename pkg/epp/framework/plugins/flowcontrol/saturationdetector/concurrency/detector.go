@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -37,6 +38,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -91,12 +93,22 @@ func newDetector(name string, cfg config, logger logr.Logger) *detector {
 		"maxConcurrency", cfg.maxConcurrency,
 		"maxTokenConcurrency", cfg.maxTokenConcurrency,
 		"headroom", cfg.headroom,
-		"failOpen", !cfg.failClosed)
+		"failOpen", !cfg.failClosed,
+		"endpointOverrides", len(cfg.endpointOverrides))
 
 	if cfg.headroom > 1.0 {
 		pluginLogger.Info("Unusually high headroom configured; verify value is a fraction, not a percentage",
 			"headroom", cfg.headroom,
 			"effectiveBurst", fmt.Sprintf("%.0f%%", cfg.headroom*100))
+	}
+	// A selector that matches no pod fails silently to the pool-level values, so the resolved
+	// selectors are logged for comparison against the pod labels.
+	for i, o := range cfg.endpointOverrides {
+		pluginLogger.Info("Endpoint override",
+			"index", i,
+			"selector", o.selector.String(),
+			"maxConcurrency", o.maxConcurrency,
+			"maxTokenConcurrency", o.maxTokenConcurrency)
 	}
 
 	return &detector{
@@ -122,6 +134,20 @@ func (d *detector) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: required,
 	}
+}
+
+// capacityFor returns the request and token capacity of an endpoint: the first endpoint
+// override whose selector matches the endpoint's labels, or the pool-level values.
+func (d *detector) capacityFor(meta *datalayer.EndpointMetadata) (requests, tokens int64) {
+	if meta != nil && len(d.config.endpointOverrides) > 0 {
+		set := labels.Set(meta.Labels)
+		for _, o := range d.config.endpointOverrides {
+			if o.selector.Matches(set) {
+				return o.maxConcurrency, o.maxTokenConcurrency
+			}
+		}
+	}
+	return d.config.maxConcurrency, d.config.maxTokenConcurrency
 }
 
 func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
@@ -175,16 +201,20 @@ func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 //
 //	Saturation = Total Inflight / Total Capacity.
 //
-// In "hybrid" mode saturation is instead evaluated per endpoint as
-// max(requestRatio, tokenRatio) and averaged across endpoints. Evaluating each
-// endpoint independently ensures an endpoint saturated on either dimension is
-// reflected in the pool signal.
+// In "hybrid" mode saturation is the largest of three terms: the per-endpoint
+// max(requestRatio, tokenRatio) averaged across endpoints, the aggregate request
+// ratio (including pending dispatches) and the aggregate token ratio. Evaluating
+// each endpoint independently ensures an endpoint saturated on either dimension is
+// reflected in the pool signal; the aggregate ratios cover endpoints whose
+// capacity exceeds the average.
 //
 // The inflight counts are read from the InFlightLoad attribute, which the
 // InFlightLoadProducer increments at dispatch and decrements on request
 // completion, so the signal already reflects completions with no scrape lag.
-func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
+func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
+	stage := flowcontrol.SaturationStageFromContext(ctx)
 	if len(endpoints) == 0 {
+		d.recordCapacity(stage, 0, 0)
 		return 1.0
 	}
 
@@ -197,10 +227,12 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 		}
 
 		endpointCount++
-		reqCapacity += d.config.maxConcurrency
-		tokCapacity += d.config.maxTokenConcurrency
+		meta := e.GetMetadata()
+		reqCap, tokCap := d.capacityFor(meta)
+		reqCapacity += reqCap
+		tokCapacity += tokCap
 
-		if e.GetMetadata() == nil {
+		if meta == nil {
 			continue
 		}
 
@@ -208,10 +240,11 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 		reqInflight += load.Requests
 		tokInflight += load.Tokens
 		hybridSatSum += max(
-			ratio(load.Requests, d.config.maxConcurrency),
-			ratio(load.Tokens, d.config.maxTokenConcurrency),
+			ratio(load.Requests, reqCap),
+			ratio(load.Tokens, tokCap),
 		)
 	}
+	d.recordCapacity(stage, reqCapacity, tokCapacity)
 	pendingDispatches := d.pendingDispatches.Load()
 
 	switch d.config.mode {
@@ -221,12 +254,26 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 		if endpointCount == 0 {
 			return 1.0
 		}
+		// The aggregate ratios cover endpoints whose capacity exceeds the average, and the
+		// request ratio also counts pending dispatches. With uniform capacities the token
+		// ratio never exceeds the per-endpoint average.
 		return max(
 			hybridSatSum/float64(endpointCount),
 			ratio(reqInflight+pendingDispatches, reqCapacity),
+			ratio(tokInflight, tokCapacity),
 		)
 	default:
 		return ratio(reqInflight+pendingDispatches, reqCapacity)
+	}
+}
+
+// recordCapacity exports the aggregate capacity in the unit(s) the configured mode evaluates.
+func (d *detector) recordCapacity(stage string, reqCapacity, tokCapacity int64) {
+	if d.config.mode != modeTokens {
+		metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, "requests", reqCapacity)
+	}
+	if d.config.mode != modeRequests {
+		metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, "tokens", tokCapacity)
 	}
 }
 
@@ -254,14 +301,15 @@ func (d *detector) Filter(
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
-	reqLimit := int64(float64(d.config.maxConcurrency) * (1.0 + d.config.headroom))
-	tokLimit := int64(float64(d.config.maxTokenConcurrency) * (1.0 + d.config.headroom))
 	countIncoming := d.config.mode == modeTokens || d.config.mode == modeHybrid
 
 	for _, e := range endpoints {
 		if e == nil {
 			continue
 		}
+		reqCap, tokCap := d.capacityFor(e.GetMetadata())
+		reqLimit := int64(float64(reqCap) * (1.0 + d.config.headroom))
+		tokLimit := int64(float64(tokCap) * (1.0 + d.config.headroom))
 		load := d.getLoad(e)
 		var incomingTokens int64
 		if countIncoming {

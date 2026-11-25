@@ -57,6 +57,9 @@ type EventBatch struct {
 	Timestamp        float64
 	Events           []GenericEvent
 	DataParallelRank *int
+	// SkippedTags holds the tag of each event the adapter dropped because it
+	// does not know the tag.
+	SkippedTags []string
 }
 
 // RawMessage holds the raw transport-level data from a received pub/sub message.

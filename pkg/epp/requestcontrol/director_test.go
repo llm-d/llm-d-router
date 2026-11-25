@@ -417,9 +417,11 @@ func TestVideoRawPayloadIsForwardedUnchanged(t *testing.T) {
 type mockAdmissionController struct {
 	admitErr        error
 	releaseDispatch func(requestID string)
+	admitPriorities []int
 }
 
-func (m *mockAdmissionController) Admit(context.Context, *handlers.RequestContext, int) error {
+func (m *mockAdmissionController) Admit(_ context.Context, _ *handlers.RequestContext, priority int) error {
+	m.admitPriorities = append(m.admitPriorities, priority)
 	return m.admitErr
 }
 
@@ -712,6 +714,21 @@ func TestDirector_HandleRequest(t *testing.T) {
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(1).
 		ObjRef()
+	ioFoodReviewZero := fwkapix.MakeV1InferenceObjective("ioFoodReviewZero").
+		CreationTimestamp(metav1.Unix(1000, 0)).
+		Priority(0).
+		ObjRef()
+
+	lineagePlugin, err := agentlineage.PluginFactory("agent-lineage-band-real", nil, nil)
+	require.NoError(t, err)
+	realLineage := lineagePlugin.(*agentlineage.Plugin)
+	// Seed the parent at band 5 directly; the Director-level cases below run
+	// the real plugin for the children.
+	require.NoError(t, realLineage.RequestHeader(context.Background(), &fwksched.InferenceRequest{
+		Headers:    map[string]string{agentlineage.OpenCodeSessionHeader: "R"},
+		FairnessID: "tenant-1",
+		Objectives: fwksched.RequestObjectives{Priority: 5},
+	}))
 
 	rewrite := &v1alpha2.InferenceModelRewrite{
 		ObjectMeta: metav1.ObjectMeta{
@@ -861,13 +878,15 @@ func TestDirector_HandleRequest(t *testing.T) {
 		screener                *mockScreener
 		emptyEndpoints          bool // If true, the director locates no endpoint candidates.
 		preRequestPlugins       []*mockPreRequestPlugin
-		requestHeaderPlugin     *mockRequestHeaderPlugin
+		requestHeaderPlugin     fwkrh.RequestHeaderProcessor
+		requestHeaders          map[string]string // Extra headers set on the incoming request.
 		wantMutatedBody         map[string]any
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
 		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		composeFairnessIDs      bool   // If true, enable requestHandler.composeFairnessIDs on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		wantAdmitPriority       *int   // If non-nil, asserted against the priority passed to Admit and carried on the request.
 		wantSpanFairnessID      string // If non-empty, asserted against request_orchestration span fairness ID.
 		wantSource              string // If non-empty, asserted against request_orchestration span source.
 		rewrites                []*v1alpha2.InferenceModelRewrite
@@ -1329,6 +1348,123 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantFairnessID:     "tenant-1",
 			wantSpanFairnessID: "tenant-1",
 			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "resolved band overrides the seeded priority at admission",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				// A distinct mock name: the scope-spec registry caches a
+				// plugin's declarations per typed name, and this case's mock
+				// produces one more key than the other agent-lineage mocks.
+				name:           "agent-lineage-band",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+				extraProduces:  []fwkplugin.DataKey{agentlineage.ResolvedBandKey},
+				modifyFn: func(req *fwksched.InferenceRequest) {
+					req.PutAttribute(agentlineage.ResolvedBandKey, 5)
+				},
+			},
+			wantFairnessID:     "root-abc",
+			wantSpanFairnessID: "root-abc",
+			wantSource:         tracing.AttributionSourceDerivedRoot,
+			wantAdmitPriority:  ptr.To(5),
+		},
+		{
+			name: "seeded priority passes through when no resolved band is published",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			wantAdmitPriority:      ptr.To(2),
+		},
+		{
+			name: "propagated body priority carries the resolved band",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			parser:                 newOpenAIParserWithPriorityPropagation(t),
+			propagatePriority:      true,
+			inferenceObjectiveName: objectiveName,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-lineage-band",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+				extraProduces:  []fwkplugin.DataKey{agentlineage.ResolvedBandKey},
+				modifyFn: func(req *fwksched.InferenceRequest) {
+					req.PutAttribute(agentlineage.ResolvedBandKey, 5)
+				},
+			},
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(5),
+			},
+			wantAdmitPriority: ptr.To(5),
+		},
+		{
+			name: "lineage child without an explicit objective inherits the parent band",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			requestHeaders: map[string]string{
+				agentlineage.OpenCodeSessionHeader: "S1",
+				agentlineage.ParentSessionHeader:   "R",
+			},
+			requestHeaderPlugin: realLineage,
+			wantFairnessID:      "tenant-1",
+			wantAdmitPriority:   ptr.To(5),
+		},
+		{
+			name: "lineage child with an explicit lower objective keeps it",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: "ioFoodReviewZero",
+			fairnessIDHeader:       "tenant-1",
+			requestHeaders: map[string]string{
+				agentlineage.OpenCodeSessionHeader: "S2",
+				agentlineage.ParentSessionHeader:   "R",
+				metadata.ObjectiveKey:              "ioFoodReviewZero",
+			},
+			requestHeaderPlugin: realLineage,
+			wantFairnessID:      "tenant-1",
+			wantAdmitPriority:   ptr.To(0),
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -2000,6 +2136,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		ds.ObjectiveSet(ioFoodReview)
 		ds.ObjectiveSet(ioFoodReviewResolve)
 		ds.ObjectiveSet(ioFoodReviewSheddable)
+		ds.ObjectiveSet(ioFoodReviewZero)
 		ds.ModelRewriteSet(rewrite)
 
 		scheme := runtime.NewScheme()
@@ -2039,7 +2176,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
 				var recorder *tracetest.SpanRecorder
-				if test.wantSource != "" {
+				if test.wantSource != "" || test.wantAdmitPriority != nil {
 					recorder = tracetest.NewSpanRecorder()
 					previousProvider := otel.GetTracerProvider()
 					provider := sdktrace.NewTracerProvider(
@@ -2094,6 +2231,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					ObjectiveKey:    test.inferenceObjectiveName,
 					TargetModelName: test.initialTargetModelName,
 				}
+				reqCtx.RequestReceivedTimestamp = time.Unix(100, 0)
 				var err error
 				reqCtx.Request.RawBody, err = json.Marshal(test.reqBodyMap)
 				if err != nil {
@@ -2112,6 +2250,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqCtx.Request.Headers[":path"] = "/v1/decisions"
 				}
 
+				for key, value := range test.requestHeaders {
+					reqCtx.Request.Headers[key] = value
+				}
 				if test.fairnessIDHeader != "" {
 					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
 				}
@@ -2129,7 +2270,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqTraceCtx := tracing.BeginRequestAttribution(ctx, test.fairnessIDHeader)
 					returnedReqCtx, err = director.HandleRequest(reqTraceCtx, reqCtx, parseResult.Body)
 				}
-				if parseErr == nil && test.wantSource != "" {
+				if parseErr == nil && (test.wantSource != "" || test.wantAdmitPriority != nil) {
 					wantID := test.wantSpanFairnessID
 					if wantID == "" {
 						wantID = reqcommon.DefaultFairnessID
@@ -2141,11 +2282,18 @@ func TestDirector_HandleRequest(t *testing.T) {
 						}
 						found = true
 						attrs := attribute.NewSet(span.Attributes()...)
-						id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
-						source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
-						require.True(t, hasID && hasSource, "attribution must be paired")
-						assert.Equal(t, wantID, id.AsString())
-						assert.Equal(t, test.wantSource, source.AsString())
+						if test.wantSource != "" {
+							id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+							source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
+							require.True(t, hasID && hasSource, "attribution must be paired")
+							assert.Equal(t, wantID, id.AsString())
+							assert.Equal(t, test.wantSource, source.AsString())
+						}
+						if test.wantAdmitPriority != nil {
+							priority, hasPriority := attrs.Value(attribute.Key("request_prio"))
+							require.True(t, hasPriority, "request_prio attribute must be set")
+							assert.Equal(t, int64(*test.wantAdmitPriority), priority.AsInt64(), "request_prio attribute mismatch")
+						}
 					}
 					require.True(t, found, "request orchestration span must exist")
 				}
@@ -2166,6 +2314,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if returnedReqCtx.SchedulingRequest != nil {
 					assert.Equal(t, reqCtx.Request.ID, returnedReqCtx.SchedulingRequest.RequestID,
 						"SchedulingRequest.RequestID should be the EPP request ID, not the x-request-id header")
+					assert.Equal(t, time.Unix(100, 0), returnedReqCtx.SchedulingRequest.ReceivedTimestamp)
 				}
 
 				if test.wantReqCtx != nil {
@@ -2184,6 +2333,16 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if test.wantFairnessID != "" {
 					require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")
 					assert.Equal(t, test.wantFairnessID, returnedReqCtx.SchedulingRequest.FairnessID, "SchedulingRequest.FairnessID mismatch")
+				}
+
+				if test.wantAdmitPriority != nil {
+					require.NotEmpty(t, test.mockAdmissionController.admitPriorities, "admission controller was never called")
+					assert.Equal(t, *test.wantAdmitPriority,
+						test.mockAdmissionController.admitPriorities[len(test.mockAdmissionController.admitPriorities)-1],
+						"priority passed to Admit mismatch")
+					assert.Equal(t, *test.wantAdmitPriority, returnedReqCtx.Priority, "reqCtx.Priority mismatch")
+					assert.Equal(t, *test.wantAdmitPriority, returnedReqCtx.SchedulingRequest.Objectives.Priority,
+						"SchedulingRequest.Objectives.Priority mismatch")
 				}
 
 				if test.wantMutatedBody != nil {

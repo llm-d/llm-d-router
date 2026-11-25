@@ -256,16 +256,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
-		RequestID:        reqCtx.Request.ID,
-		TargetModel:      reqCtx.TargetModelName,
-		Body:             inferenceRequestBody,
-		Headers:          reqCtx.Request.Headers,
-		FairnessID:       fairnessID,
-		Objectives:       requestObjectives,
-		RequestSizeBytes: reqCtx.RequestSize,
+		RequestID:         reqCtx.Request.ID,
+		TargetModel:       reqCtx.TargetModelName,
+		Body:              inferenceRequestBody,
+		Headers:           reqCtx.Request.Headers,
+		FairnessID:        fairnessID,
+		Objectives:        requestObjectives,
+		RequestSizeBytes:  reqCtx.RequestSize,
+		ReceivedTimestamp: reqCtx.RequestReceivedTimestamp,
 	}
 
-	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
+	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "seededPriority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
@@ -337,6 +338,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
 	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
+
+	// A plugin may publish a resolved band: the seeded objective priority, a
+	// parent's band, or the minimum of the two. Applying it here, before
+	// admission, finalizes the request's band: bands resolve once and queued
+	// requests never migrate across them.
+	if resolvedBand, ok := fwksched.ReadRequestAttribute[int](reqCtx.SchedulingRequest, agentlineage.ResolvedBandKey); ok {
+		priority = resolvedBand
+		reqCtx.Priority = resolvedBand
+		reqCtx.SchedulingRequest.Objectives.Priority = resolvedBand
+		span.SetAttributes(attribute.Int("request_prio", priority))
+	}
 
 	admitting = true
 	// Admit may block until flow control admits the request.

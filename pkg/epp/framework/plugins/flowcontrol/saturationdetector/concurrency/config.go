@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
 )
 
@@ -34,9 +36,10 @@ type apiConfig struct {
 	//
 	// This limit serves as the "ideal" request capacity for a single endpoint. The plugin aggregates
 	// the active requests across all endpoints and compares them against the aggregate pool capacity
-	// (Total Endpoints * MaxConcurrency) to compute PoolSaturation. When the pool approaches or
-	// exceeds this aggregate capacity, the Flow Controller triggers backpressure to buffer new
-	// traffic until capacity becomes available.
+	// (the sum of each endpoint's capacity; this value applies to endpoints matching no
+	// EndpointOverrides entry) to compute PoolSaturation. When the pool approaches or exceeds this
+	// aggregate capacity, the Flow Controller triggers backpressure to buffer new traffic until
+	// capacity becomes available.
 	//
 	// Defaults to 100 if unset.
 	MaxConcurrency *int64 `json:"maxConcurrency,omitempty"`
@@ -64,7 +67,8 @@ type apiConfig struct {
 	// - "requests": use discrete request counts for capacity accounting.
 	// - "tokens": use estimated token counts for capacity accounting.
 	// - "hybrid": evaluate each endpoint as the more constraining of its request and
-	//   token ratios; pool saturation is the average of these across endpoints.
+	//   token ratios; pool saturation is the largest of the average of these across
+	//   endpoints, the aggregate request ratio and the aggregate token ratio.
 	//
 	// Defaults to "requests" if unset.
 	ConcurrencyMode *concurrencyMode `json:"concurrencyMode,omitempty"`
@@ -73,7 +77,8 @@ type apiConfig struct {
 	//
 	// This is the "tokens" mode equivalent of MaxConcurrency. It represents the "ideal" token
 	// capacity per endpoint. It drives both the pool saturation calculation (for backpressure) and,
-	// combined with Headroom, the per-endpoint filtering limits (for routing).
+	// combined with Headroom, the per-endpoint filtering limits (for routing). This value applies
+	// to endpoints matching no EndpointOverrides entry.
 	//
 	// Defaults to 1000000 if unset.
 	MaxTokenConcurrency      *int64 `json:"maxTokenConcurrency,omitempty"`
@@ -87,6 +92,22 @@ type apiConfig struct {
 	//
 	// Defaults to true if unset.
 	FailOpen *bool `json:"failOpen,omitempty"`
+	// EndpointOverrides sets MaxConcurrency and MaxTokenConcurrency for endpoints whose pod
+	// labels match a selector, so a pool that mixes hardware classes can give each class its
+	// own capacity. Entries are evaluated in order and the first match applies; endpoints
+	// matching no entry use the pool-level values. A limit left unset in an entry keeps the
+	// pool-level value.
+	EndpointOverrides []apiEndpointOverride `json:"endpointOverrides,omitempty"`
+}
+
+// apiEndpointOverride is one entry of EndpointOverrides. The embedded label selector supplies
+// matchLabels and matchExpressions with Kubernetes semantics.
+type apiEndpointOverride struct {
+	metav1.LabelSelector
+	// MaxConcurrency is the request capacity of matching endpoints.
+	MaxConcurrency *int64 `json:"maxConcurrency,omitempty"`
+	// MaxTokenConcurrency is the token capacity of matching endpoints.
+	MaxTokenConcurrency *int64 `json:"maxTokenConcurrency,omitempty"`
 }
 
 // concurrencyMode is the concurrency detection mode.
@@ -123,6 +144,16 @@ type config struct {
 	inFlightLoadProducerName string
 	// failClosed makes the filter return no endpoints when every candidate is over its limit.
 	failClosed bool
+	// endpointOverrides are evaluated in order against an endpoint's labels; the first match
+	// supplies its capacities.
+	endpointOverrides []endpointOverride
+}
+
+// endpointOverride is a resolved EndpointOverrides entry with both limits populated.
+type endpointOverride struct {
+	selector            labels.Selector
+	maxConcurrency      int64
+	maxTokenConcurrency int64
 }
 
 // buildConfig applies the configuration lifecycle (defaulting and validation) and translates the
@@ -140,6 +171,17 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 		return nil, fmt.Errorf("invalid concurrency detector configuration: %w", err)
 	}
 
+	overrides := make([]endpointOverride, 0, len(safeCfg.EndpointOverrides))
+	for _, o := range safeCfg.EndpointOverrides {
+		// validateConfig has already parsed every selector.
+		selector, _ := metav1.LabelSelectorAsSelector(&o.LabelSelector)
+		overrides = append(overrides, endpointOverride{
+			selector:            selector,
+			maxConcurrency:      ptr.Deref(o.MaxConcurrency, *safeCfg.MaxConcurrency),
+			maxTokenConcurrency: ptr.Deref(o.MaxTokenConcurrency, *safeCfg.MaxTokenConcurrency),
+		})
+	}
+
 	return &config{
 		maxConcurrency:           *safeCfg.MaxConcurrency,
 		headroom:                 *safeCfg.Headroom,
@@ -147,6 +189,7 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 		maxTokenConcurrency:      *safeCfg.MaxTokenConcurrency,
 		inFlightLoadProducerName: safeCfg.InFlightLoadProducerName,
 		failClosed:               !*safeCfg.FailOpen,
+		endpointOverrides:        overrides,
 	}, nil
 }
 
@@ -190,6 +233,31 @@ func validateConfig(cfg *apiConfig) error {
 			// Valid
 		default:
 			errs = append(errs, fmt.Errorf("unsupported concurrencyMode: %q", *cfg.ConcurrencyMode))
+		}
+	}
+
+	for i, o := range cfg.EndpointOverrides {
+		if len(o.MatchLabels) == 0 && len(o.MatchExpressions) == 0 {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: matchLabels or matchExpressions is required", i))
+		} else if _, err := metav1.LabelSelectorAsSelector(&o.LabelSelector); err != nil {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: invalid selector: %w", i, err))
+		}
+		if o.MaxConcurrency == nil && o.MaxTokenConcurrency == nil {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxConcurrency or maxTokenConcurrency is required", i))
+		}
+		// An entry that sets only the limit the mode does not read would have no effect.
+		mode := ptr.Deref(cfg.ConcurrencyMode, defaultConcurrencyMode)
+		if mode == modeRequests && o.MaxConcurrency == nil && o.MaxTokenConcurrency != nil {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxTokenConcurrency has no effect in %q mode; set maxConcurrency", i, mode))
+		}
+		if mode == modeTokens && o.MaxTokenConcurrency == nil && o.MaxConcurrency != nil {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxConcurrency has no effect in %q mode; set maxTokenConcurrency", i, mode))
+		}
+		if o.MaxConcurrency != nil && *o.MaxConcurrency <= 0 {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxConcurrency must be strictly positive, got %d", i, *o.MaxConcurrency))
+		}
+		if o.MaxTokenConcurrency != nil && *o.MaxTokenConcurrency <= 0 {
+			errs = append(errs, fmt.Errorf("endpointOverrides[%d]: maxTokenConcurrency must be strictly positive, got %d", i, *o.MaxTokenConcurrency))
 		}
 	}
 
