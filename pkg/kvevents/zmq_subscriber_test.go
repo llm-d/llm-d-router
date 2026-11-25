@@ -755,6 +755,44 @@ func TestZMQSubscriber_UnavailableReplayIndexesLiveEvents(t *testing.T) {
 	assert.Equal(t, int32(1), h.buffer.requests.Load(), "the replay is retried only after the cooldown")
 }
 
+// A block indexed from live frames while the replay was unavailable is announced
+// again by the full replay that follows the cooldown. The replay must replace
+// that state, or the engine's single BlockRemoved is suppressed by a second
+// reference and the evicted block stays in the index. A frame that arrives
+// while the replay runs must still be indexed once the replay completes.
+func TestZMQSubscriber_FullReplayAfterLiveOnlyPeriodReplacesLiveState(t *testing.T) {
+	const (
+		cooldown    = 100 * time.Millisecond
+		replayDelay = 150 * time.Millisecond
+	)
+	t.Cleanup(kvevents.SetReplayCooldownForTest(cooldown))
+	h := newReplayHarnessWithBehavior(t, nil, true, 0, replayDelay, false)
+
+	// The proactive replay failed, so the pod is indexed from live frames alone.
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 20*time.Millisecond)
+
+	// The replay recovers and serves the engine's whole buffer, block 100 included.
+	h.buffer.set(
+		replayMessage{seq: 5, payload: buildDistinctBlockStoredPayload(t, 100)},
+		replayMessage{seq: 6, payload: buildDistinctBlockStoredPayload(t, 200)},
+	)
+	h.buffer.fail.Store(false)
+	time.Sleep(2 * cooldown)
+
+	requests := h.buffer.requests.Load()
+	h.send(t, 6, buildDistinctBlockStoredPayload(t, 200))
+	h.send(t, 7, buildDistinctBlockStoredPayload(t, 300))
+	require.Eventually(t, func() bool { return h.buffer.requests.Load() > requests },
+		5*time.Second, 20*time.Millisecond, "full replay expected after the cooldown")
+	require.Eventually(t, func() bool { return h.indexed(200) && h.indexed(300) },
+		5*time.Second, 20*time.Millisecond, "replayed and in-flight frames must be indexed")
+
+	h.send(t, 8, buildBlockRemovedPayload(t, 100))
+	require.Eventually(t, func() bool { return !h.indexed(100) }, 5*time.Second, 20*time.Millisecond,
+		"one remove must evict a block that is resident once")
+}
+
 func TestZMQSubscriber_SequenceResetClearsAndRebuildsPod(t *testing.T) {
 	h := newReplayHarness(t, nil, false)
 	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
