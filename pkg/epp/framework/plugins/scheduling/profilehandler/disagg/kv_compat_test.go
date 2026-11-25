@@ -109,6 +109,10 @@ func TestKVCompatPDDeciderDecision(t *testing.T) {
 			kvEndpoint("d", bylabel.RoleDecode, "k1", nil), []scheduling.Endpoint{kvEndpoint("p", bylabel.RolePrefill, "k2", nil)}, false},
 		{"decode endpoints do not count as prefill candidates", KVCompatPDDeciderParameters{},
 			kvEndpoint("d", bylabel.RoleDecode, "k1", nil), []scheduling.Endpoint{kvEndpoint("d2", bylabel.RoleDecode, "k1", nil)}, false},
+		{"strict decode-only endpoint with no compatible prefill declines", KVCompatPDDeciderParameters{},
+			kvEndpoint("d", bylabel.RoleDecode, "k1", nil), []scheduling.Endpoint{kvEndpoint("p", bylabel.RolePrefill, "k2", nil)}, false},
+		{"prefill-decode endpoint is its own compatible prefill", KVCompatPDDeciderParameters{},
+			kvEndpoint("d", bylabel.RolePrefillDecode, "k1", nil), []scheduling.Endpoint{kvEndpoint("p", bylabel.RolePrefill, "k2", nil)}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -119,6 +123,39 @@ func TestKVCompatPDDeciderDecision(t *testing.T) {
 			assert.Equal(t, tt.wantInner, inner.calls == 1, "the wrapped decider runs only when a compatible prefill endpoint exists")
 		})
 	}
+}
+
+func TestKVCompatPDDeciderRejectOnIncompatible(t *testing.T) {
+	decode := kvEndpoint("d", bylabel.RoleDecode, "k1", nil)
+	incompatiblePrefill := kvEndpoint("p", bylabel.RolePrefill, "k2", nil)
+	compatiblePrefill := kvEndpoint("p2", bylabel.RolePrefill, "k1", nil)
+
+	t.Run("forces disaggregation when no compatible prefill exists", func(t *testing.T) {
+		inner := &fakeDecider{result: true}
+		d := newKVCompatDecider(t, inner, KVCompatPDDeciderParameters{RejectOnIncompatible: true},
+			decode, incompatiblePrefill)
+		got := d.disaggregate(context.Background(), makeRequestWithTokens(2000), decode)
+		assert.True(t, got, "must return true to force the prefill profile to run and fail")
+		assert.Equal(t, 0, inner.calls, "the inner decider must not be called")
+	})
+
+	t.Run("delegates to inner when a compatible prefill exists", func(t *testing.T) {
+		inner := &fakeDecider{result: true}
+		d := newKVCompatDecider(t, inner, KVCompatPDDeciderParameters{RejectOnIncompatible: true},
+			decode, incompatiblePrefill, compatiblePrefill)
+		got := d.disaggregate(context.Background(), makeRequestWithTokens(2000), decode)
+		assert.True(t, got)
+		assert.Equal(t, 1, inner.calls)
+	})
+
+	t.Run("default false falls back to decode-only", func(t *testing.T) {
+		inner := &fakeDecider{result: true}
+		d := newKVCompatDecider(t, inner, KVCompatPDDeciderParameters{},
+			decode, incompatiblePrefill)
+		got := d.disaggregate(context.Background(), makeRequestWithTokens(2000), decode)
+		assert.False(t, got)
+		assert.Equal(t, 0, inner.calls)
+	})
 }
 
 func TestKVCompatPDDeciderReturnsWrappedAnswer(t *testing.T) {
@@ -198,7 +235,12 @@ func TestKVCompatFactories(t *testing.T) {
 	d := p.(*KVCompatPDDecider)
 	assert.Equal(t, plugin.TypedName{Type: KVCompatPDDeciderPluginType, Name: "compat"}, d.TypedName())
 	assert.Equal(t, stock.prefixMatchInfoDataKey(), d.prefixMatchInfoDataKey(), "the wrapped decider's prefix key is forwarded")
+	assert.False(t, d.rejectOnIncompatible, "rejectOnIncompatible defaults to false")
 	handle.AddPlugin("compat", d)
+
+	strict, err := KVCompatPDDeciderPluginFactory("strict", decode(`{"decider":"stock","rejectOnIncompatible":true}`), handle)
+	require.NoError(t, err)
+	assert.True(t, strict.(*KVCompatPDDecider).rejectOnIncompatible, "rejectOnIncompatible parsed from config")
 
 	fake, err := NewKVCompatPDDecider(&fakeDecider{}, KVCompatPDDeciderParameters{})
 	require.NoError(t, err)

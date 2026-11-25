@@ -49,12 +49,7 @@ const (
 )
 
 // prefillCapableRoles are the role label values of endpoints that can run prefill.
-var prefillCapableRoles = map[string]struct{}{
-	bylabel.RolePrefill:             {},
-	bylabel.RoleEncodePrefill:       {},
-	bylabel.RolePrefillDecode:       {},
-	bylabel.RoleEncodePrefillDecode: {},
-}
+var prefillCapableRoles = bylabel.PrefillCapableRoles()
 
 // KVCompatPDDeciderParameters configures the kv-compat-pd-decider.
 type KVCompatPDDeciderParameters struct {
@@ -70,6 +65,12 @@ type KVCompatPDDeciderParameters struct {
 	// ApprovedPairs lists "prefillKey->decodeKey" pairs that may exchange KV although their keys
 	// differ. An approval applies in the listed direction only.
 	ApprovedPairs []string `json:"approvedPairs,omitempty"`
+	// RejectOnIncompatible makes the decider force disaggregation when no compatible prefill
+	// exists, so the prefill profile produces no result and the request fails with an explicit
+	// error. Set this to true in strict P/D deployments where decode pods cannot run prefill.
+	// When false (the default), the decider declines disaggregation and the request is served
+	// decode-only, which works only if the decode pod can also prefill.
+	RejectOnIncompatible bool `json:"rejectOnIncompatible,omitempty"`
 }
 
 // KVCompatFilterParameters configures the kv-compat-filter.
@@ -140,9 +141,10 @@ func (r kvCompatRule) accepts(decodeLabels map[string]string, decodeKey, prefill
 // It keeps an index of the compatibility keys of prefill-capable endpoints, updated from endpoint
 // events, so a decision costs a few map lookups regardless of the pool size.
 type KVCompatPDDecider struct {
-	typedName plugin.TypedName
-	decider   deciderPlugin
-	rule      kvCompatRule
+	typedName            plugin.TypedName
+	decider              deciderPlugin
+	rule                 kvCompatRule
+	rejectOnIncompatible bool
 
 	mu sync.RWMutex
 	// endpoints holds the key and role of every endpoint seen in an endpoint event.
@@ -220,11 +222,12 @@ func NewKVCompatPDDecider(inner deciderPlugin, params KVCompatPDDeciderParameter
 		return nil, fmt.Errorf("%s: %w", KVCompatPDDeciderPluginType, err)
 	}
 	return &KVCompatPDDecider{
-		typedName:   plugin.TypedName{Type: KVCompatPDDeciderPluginType, Name: KVCompatPDDeciderPluginType},
-		decider:     inner,
-		rule:        rule,
-		endpoints:   map[fwkdl.ID]kvCompatEntry{},
-		prefillKeys: map[string]int{},
+		typedName:            plugin.TypedName{Type: KVCompatPDDeciderPluginType, Name: KVCompatPDDeciderPluginType},
+		decider:              inner,
+		rule:                 rule,
+		rejectOnIncompatible: params.RejectOnIncompatible,
+		endpoints:            map[fwkdl.ID]kvCompatEntry{},
+		prefillKeys:          map[string]int{},
 	}, nil
 }
 
@@ -248,7 +251,13 @@ func (d *KVCompatPDDecider) disaggregate(ctx context.Context, request *schedulin
 	}
 	if !d.hasCompatiblePrefill(endpoint.GetMetadata().Labels) {
 		recordKVCompatDeclined(d.typedName.Name)
-		log.FromContext(ctx).V(logging.DEBUG).Info("kv-compat-pd-decider: no prefill endpoint can exchange KV with the decode endpoint",
+		logger := log.FromContext(ctx)
+		if d.rejectOnIncompatible {
+			logger.V(logging.DEFAULT).Info("kv-compat-pd-decider: no compatible prefill, forcing disaggregation so the prefill profile fails explicitly",
+				"decode", endpoint.GetMetadata().ID)
+			return true
+		}
+		logger.V(logging.DEBUG).Info("kv-compat-pd-decider: no compatible prefill, falling back to decode-only",
 			"decode", endpoint.GetMetadata().ID)
 		return false
 	}
