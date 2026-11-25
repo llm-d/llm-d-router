@@ -183,6 +183,11 @@ type vllmConfig struct {
 	// server certificate. Use for self-signed certificates in development
 	// or when the cluster manages its own PKI.
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+	// PrefixCache enables the conversation-prefix render cache, which serves
+	// a request's previously rendered conversation prefix without a render
+	// round trip and renders only the new suffix asynchronously. See
+	// prefixCacheConfig.
+	PrefixCache *prefixCacheConfig `json:"prefixCache,omitempty"`
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's

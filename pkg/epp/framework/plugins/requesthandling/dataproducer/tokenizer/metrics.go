@@ -57,6 +57,18 @@ const (
 // request, and the metrics carry the per-request signal.
 const renderFailureLogInterval = 10 * time.Second
 
+// Values of the event label on prefixCacheEventsTotal.
+const (
+	prefixCacheEventBypass      = "bypass"
+	prefixCacheEventHitFull     = "hit_full"
+	prefixCacheEventHitPartial  = "hit_partial"
+	prefixCacheEventMiss        = "miss"
+	prefixCacheEventStore       = "store"
+	prefixCacheEventEvict       = "evict"
+	prefixCacheEventWarm        = "warm"
+	prefixCacheEventWarmFailure = "warm_failure"
+)
+
 var (
 	// renderDurationSeconds observes one render call per request, including a
 	// retry on an alternate endpoint. The buckets extend past the default 5s
@@ -83,13 +95,31 @@ var (
 		[]string{"plugin_type", "plugin_name", "backend", "reason"},
 	)
 
+	// prefixCacheEventsTotal counts conversation-prefix render cache
+	// transitions, by event.
+	prefixCacheEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "token_producer_prefix_cache_events_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of token-producer prefix-cache events, by event.", compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_type", "plugin_name", "event"},
+	)
+
 	registerOnce sync.Once
 )
+
+// recordPrefixCacheEvent counts one prefix-cache transition. An empty
+// pluginName keeps the label present for tests that build no plugin.
+func recordPrefixCacheEvent(pluginName, event string) {
+	prefixCacheEventsTotal.WithLabelValues(PluginType, pluginName, event).Inc()
+}
 
 func registerRenderMetrics() {
 	registerOnce.Do(func() {
 		metrics.Registry.MustRegister(renderDurationSeconds)
 		metrics.Registry.MustRegister(renderFailuresTotal)
+		metrics.Registry.MustRegister(prefixCacheEventsTotal)
 	})
 }
 
