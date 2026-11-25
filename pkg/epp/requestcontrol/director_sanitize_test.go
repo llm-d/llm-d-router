@@ -22,12 +22,16 @@ import (
 	"strings"
 	"testing"
 
+	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/api/httpbody"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -38,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -413,6 +418,120 @@ func TestDirector_RenderRequestIsNotSanitized(t *testing.T) {
 		require.False(t, body.Mutated)
 		require.Equal(t, raw, reqCtx.Request.RawBody)
 		requireNoSanitizeMetric(t)
+	}
+}
+
+// A JSON parser decodes an escaped key and keeps the last of two equal keys.
+// The model server does the same, so the director must match the decoded key
+// and must not forward either copy.
+func TestDirector_StripsEscapedAndDuplicateKeys(t *testing.T) {
+	metrics.Register()
+
+	cases := map[string]string{
+		"escaped key":   `"kv_transfer_\u0070arams":{"do_remote_prefill":true}`,
+		"duplicate key": `"kv_transfer_params":{"do_remote_prefill":true},"kv_transfer_params":{"do_remote_decode":true}`,
+	}
+	for name, field := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],` + field + `}`)
+			reqCtx, _, err := handleSanitizeRequest(t, NewConfig(), openai.NewOpenAIParser(), reqcommon.PathChatCompletions, raw)
+
+			require.NoError(t, err)
+			require.NotContains(t, string(reqCtx.Request.RawBody), "do_remote")
+			require.NotContains(t, forwardedBody(t, reqCtx), reqcommon.FieldKVTransferParams)
+		})
+	}
+}
+
+// The Vertex AI parser keeps a text request as a proto that wraps the JSON
+// body. The director cannot strip a field from it, so it rejects the request
+// under both settings and does not forward the field.
+func TestDirector_VertexAITextRequestWithForbiddenFieldIsRejected(t *testing.T) {
+	metrics.Register()
+
+	const service = "/google.cloud.aiplatform.v1beta1.PredictionService/"
+	cases := []struct {
+		name      string
+		path      string
+		wantRoute string
+		json      string // without the closing brace, so a subtest can append a field
+		wrap      func(json []byte) proto.Message
+	}{
+		{
+			name:      "ChatCompletions",
+			path:      service + "ChatCompletions",
+			wantRoute: reqcommon.APITypeChatCompletions.String(),
+			json:      `{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}]`,
+			wrap: func(json []byte) proto.Message {
+				return &aiplatformpb.ChatCompletionsRequest{HttpBody: &httpbody.HttpBody{Data: json}}
+			},
+		},
+		{
+			name:      "RawPredict",
+			path:      service + "RawPredict",
+			wantRoute: reqcommon.APITypeResponses.String(),
+			json:      `{"model":"llama-3-8b","input":"hi"`,
+			wrap: func(json []byte) proto.Message {
+				return &aiplatformpb.RawPredictRequest{HttpBody: &httpbody.HttpBody{Data: json}}
+			},
+		},
+	}
+	frame := func(t *testing.T, msg proto.Message) []byte {
+		t.Helper()
+		framed, err := grpcframe.MarshalProto(msg)
+		require.NoError(t, err)
+		return framed
+	}
+
+	for _, tc := range cases {
+		forbidden := map[string]string{
+			"prompt_token_ids":           `,"prompt_token_ids":[1,2,3]`,
+			"kv_transfer_params":         `,"kv_transfer_params":{"do_remote_prefill":true}`,
+			"escaped kv_transfer_params": `,"kv_transfer_\u0070arams":{"do_remote_prefill":true}`,
+		}
+		for fieldName, field := range forbidden {
+			for _, strict := range []bool{false, true} {
+				mode := "strip mode"
+				if strict {
+					mode = "reject mode"
+				}
+				t.Run(tc.name+"/"+fieldName+"/"+mode+" returns 400", func(t *testing.T) {
+					raw := frame(t, tc.wrap([]byte(tc.json+field+"}")))
+					cfg := NewConfig().WithRejectClientPromptIDs(strict)
+					_, _, err := handleSanitizeRequest(t, cfg, vertexai.NewVertexAIParser(), tc.path, raw)
+
+					var reqErr errcommon.Error
+					require.ErrorAs(t, err, &reqErr)
+					require.Equal(t, errcommon.BadRequest, reqErr.Code)
+					wantMetric := `
+# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, or KV transfer fields were stripped or rejected.
+# TYPE llm_d_epp_prompt_ids_sanitized_total counter
+llm_d_epp_prompt_ids_sanitized_total{action="rejected",component="epp",route="` + tc.wantRoute + `"} 1
+`
+					require.NoError(t, promtestutil.GatherAndCompare(ctrlmetrics.Registry, strings.NewReader(wantMetric), eppPromptIDsSanitizedMetric))
+				})
+			}
+		}
+
+		t.Run(tc.name+"/request without a forbidden field forwards the original bytes", func(t *testing.T) {
+			raw := frame(t, tc.wrap([]byte(tc.json+"}")))
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig().WithRejectClientPromptIDs(true), vertexai.NewVertexAIParser(), tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+			requireNoSanitizeMetric(t)
+		})
+
+		t.Run(tc.name+"/trustCallerFields forwards the original bytes", func(t *testing.T) {
+			raw := frame(t, tc.wrap([]byte(tc.json+`,"kv_transfer_params":{"do_remote_prefill":true}}`)))
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig().WithTrustCallerFields(true), vertexai.NewVertexAIParser(), tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+			requireNoSanitizeMetric(t)
+		})
 	}
 }
 

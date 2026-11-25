@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsTokenArrayCompletionsPrompt(t *testing.T) {
+func TestIsTokenArrayCompletionsPromptDecodedValues(t *testing.T) {
 	cases := []struct {
 		name   string
 		prompt any
@@ -40,13 +40,10 @@ func TestIsTokenArrayCompletionsPrompt(t *testing.T) {
 		{name: "mixed int and string", prompt: []any{json.Number("1"), "a"}, want: false},
 		{name: "negative int", prompt: []any{json.Number("-1")}, want: false},
 		{name: "non-integer float", prompt: []any{float64(1.5)}, want: false},
-		{name: "raw json token array", prompt: json.RawMessage(`[1,2,3]`), want: true},
-		{name: "raw json string prompt", prompt: json.RawMessage(`"hello"`), want: false},
-		{name: "raw json invalid", prompt: json.RawMessage(`{bad`), want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, IsTokenArrayCompletionsPrompt(tc.prompt))
+			require.Equal(t, tc.want, isTokenArrayCompletionsPrompt(tc.prompt))
 		})
 	}
 }

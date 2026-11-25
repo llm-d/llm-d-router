@@ -138,6 +138,33 @@ func TestHandleInference_RejectClientPromptIDsAlsoRejectsKVTransferParams(t *tes
 	require.InDelta(t, 1.0, got, 1e-9)
 }
 
+// A JSON parser decodes an escaped key and keeps the last of two equal keys.
+// The model server does the same, so the handler must match the decoded key and
+// must not keep either copy in Body or OriginalBody.
+func TestHandleInference_StripsEscapedAndDuplicateKeys(t *testing.T) {
+	cases := map[string]string{
+		"escaped key":   `"kv_transfer_\u0070arams":{"do_remote_prefill":true}`,
+		"duplicate key": `"kv_transfer_params":{"do_remote_prefill":true},"kv_transfer_params":{"do_remote_decode":true}`,
+	}
+	for name, field := range cases {
+		t.Run(name, func(t *testing.T) {
+			metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+			step := &capturingStep{}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			require.NoError(t, err)
+
+			raw := `{"model":"m","messages":[{"role":"user","content":"hi"}],` + field + `}`
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.NotNil(t, step.captured)
+			require.NotContains(t, step.captured.Body, reqcommon.FieldKVTransferParams)
+			require.NotContains(t, string(step.captured.OriginalBody), "do_remote")
+		})
+	}
+}
+
 func TestHandleInference_PreservesClientTokensOnDedicatedTokenRoutes(t *testing.T) {
 	cases := []struct {
 		name           string

@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -135,46 +134,39 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		model = m
 	}
 
-	var strippedTextFields []string
-	var clientKVTransferParams bool
+	// Not every step rebuilds the body, so client copies of router-owned
+	// fields are dropped once here.
+	var droppedFields []string
 	if reqcommon.IsExternalTextRoute(apiType, parsed[reqcommon.FieldPrompt]) {
-		found := reqcommon.FindExternalTextFields(parsed)
-		if len(found) > 0 {
+		if found := reqcommon.FindExternalTextFields(parsed); len(found) > 0 {
 			if s.rejectClientPromptIDs {
 				coordmetrics.IncPromptIDsSanitized(route, metricsutil.SanitizeActionRejected)
 				coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-				// Log field names only, never attacker-controlled values.
-				serverLog.V(logutil.DEFAULT).Info("rejected client-supplied text-route fields", "route", route, "fields", found)
+				// Field names only: the values are client-controlled.
+				serverLog.V(logutil.DEFAULT).Info("rejected client-supplied fields", "route", route, "fields", found)
 				rejectInference(serverLog, cw, apiType, http.StatusBadRequest,
 					fmt.Sprintf("client-supplied field %q is not allowed on %s", found[0], route))
 				return
 			}
-			strippedTextFields = reqcommon.StripExternalTextFields(parsed)
-			clientKVTransferParams = slices.Contains(strippedTextFields, reqcommon.FieldKVTransferParams)
+			droppedFields = reqcommon.StripExternalTextFields(parsed)
 			coordmetrics.IncPromptIDsSanitized(route, metricsutil.SanitizeActionStripped)
-			sanitizedBody, err := json.Marshal(parsed)
-			if err != nil {
-				coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
-				rejectInference(serverLog, cw, apiType, http.StatusInternalServerError, "failed to sanitize request body")
-				return
-			}
-			body = sanitizedBody
 		}
-	} else {
-		// kv_transfer_params tells a model server which pod to pull KV from, so
-		// only the KV connector and the EPP may write it, but not every step
-		// rebuilds the body, so a client copy is dropped once here.
-		_, clientKVTransferParams = parsed[reqcommon.FieldKVTransferParams]
-		if clientKVTransferParams {
-			delete(parsed, reqcommon.FieldKVTransferParams)
-			sanitizedBody, err := json.Marshal(parsed)
-			if err != nil {
-				coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
-				rejectInference(serverLog, cw, apiType, http.StatusInternalServerError, "failed to sanitize request body")
-				return
-			}
-			body = sanitizedBody
+	} else if _, ok := parsed[reqcommon.FieldKVTransferParams]; ok {
+		// A token route keeps the client token IDs. kv_transfer_params tells a
+		// model server which pod to pull KV from, so only the KV connector and
+		// the EPP may write it.
+		delete(parsed, reqcommon.FieldKVTransferParams)
+		droppedFields = []string{reqcommon.FieldKVTransferParams}
+	}
+	if len(droppedFields) > 0 {
+		// OriginalBody must not keep the dropped fields either.
+		sanitizedBody, err := json.Marshal(parsed)
+		if err != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
+			rejectInference(serverLog, cw, apiType, http.StatusInternalServerError, "failed to sanitize request body")
+			return
 		}
+		body = sanitizedBody
 	}
 	parseDuration = time.Since(parseStart)
 	parseDone = true
@@ -238,7 +230,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if converted.droppedTransferParams {
-			clientKVTransferParams = true
+			droppedFields = append(droppedFields, reqcommon.FieldECTransferParams)
 		}
 		reqCtx.GRPC = &pipeline.VLLMGRPCRequest{
 			Req: converted.req,
@@ -260,13 +252,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		// attacker-controlled content into the log.
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
 	}
-	if clientKVTransferParams {
-		// Presence only: the value carries a host, a port and a request id.
-		logger.V(logutil.DEFAULT).Info("dropped client-supplied kv_transfer_params")
-	}
-	if len(strippedTextFields) > 0 {
-		// Log field names only, never attacker-controlled values.
-		logger.V(logutil.DEFAULT).Info("stripped client-supplied text-route fields", "route", route, "fields", strippedTextFields)
+	if len(droppedFields) > 0 {
+		// Field names only: the values are client-controlled, and
+		// kv_transfer_params carries a host, a port and a request id.
+		logger.V(logutil.DEFAULT).Info("dropped client-supplied fields", "route", route, "fields", droppedFields)
 	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)

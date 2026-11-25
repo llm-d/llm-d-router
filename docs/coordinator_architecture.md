@@ -55,6 +55,7 @@ absorb further processing modes as they are added.
   - [RequestContext](#requestcontext)
   - [x-llm-d-epp-profile routing](#x-llm-d-epp-profile-routing)
 - [EPP integration](#epp-integration)
+  - [Caller fields](#caller-fields)
   - [Per-phase scheduling profiles](#per-phase-scheduling-profiles)
   - [Decode disaggregation deciders](#decode-disaggregation-deciders)
   - [Conditional decode handshake](#conditional-decode-handshake)
@@ -292,10 +293,18 @@ routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
 and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
 any other leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.
-A client-provided `kv_transfer_params` body field is dropped on the inference routes,
-which parse the body, because it names the pod a model server pulls KV from and
-`p2p-source-producer` treats a request that carries `remote_prefiller` as a decode request.
-The passthrough forwards the body verbatim, so the field reaches EPP on every other path.
+The inference routes parse the body and drop client copies of router-owned fields.
+The coordinator drops a client-provided `kv_transfer_params` on every inference route.
+The field names the pod a model server pulls KV from, and `p2p-source-producer` treats a
+request that carries `remote_prefiller` as a decode request.
+On the text routes (`/v1/chat/completions`, string `/v1/completions`, `/v1/messages`,
+`/v1/responses`) the coordinator also drops `prompt_token_ids`,
+`prompt_render_fingerprint`, `render_fingerprint`, and `input_ids`, because a worker uses
+client token IDs in place of the chat template.
+With `server.reject_client_prompt_ids: true`, a text request that carries one of these
+fields gets HTTP 400. The token routes keep client token IDs.
+The passthrough forwards the body verbatim, so the fields reach EPP on every other path.
+[Caller fields](#caller-fields) describes the EPP setting that this behavior requires.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -317,6 +326,23 @@ paths can be added later as new protocols are supported.
 The Endpoint Picker (EPP) selects the concrete vLLM pod for a request through the GAIE
 [endpoint picker protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol). The coordinator never addresses pods directly: it sends each
 phase call to the configured gateway, and the EPP picks the pod for that phase.
+
+### Caller fields
+
+The coordinator writes `kv_transfer_params` into the prefill and decode requests that it
+sends through the gateway. With `forward_prompt_token_ids`, a request also carries
+`kv_transfer_params.prompt_token_ids`. By default, an EPP treats each caller as
+an external client and drops these fields. Set `requestHandler.trustCallerFields` in the
+config of each EPP that receives coordinator requests:
+
+```yaml
+requestHandler:
+  trustCallerFields: true
+```
+
+Without this setting, the EPP drops the fields before the request reaches the worker.
+The EPP logs each drop, and `llm_d_epp_prompt_ids_sanitized_total` counts each drop on a
+text route. Use the setting only when clients cannot reach the EPP directly.
 
 ### Per-phase scheduling profiles
 

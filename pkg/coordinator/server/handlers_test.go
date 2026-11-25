@@ -719,7 +719,7 @@ func handlerLogLines(t *testing.T, run func()) []string {
 // The drop is logged by presence only: the value carries a host, a port and a
 // request id, so none of it may reach the log.
 func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
-	const dropped = "dropped client-supplied kv_transfer_params"
+	const dropped = "dropped client-supplied fields"
 	const host = "10.9.9.9"
 	cases := map[string]struct {
 		body     string

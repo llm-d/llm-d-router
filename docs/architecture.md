@@ -99,6 +99,32 @@ For example, `disaggregatedset-rollout-screener` with `revisionGating.affinity.p
 step 3 with no `dataProducers` entry; see its
 [producer setup](../pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout/README.md#producer-setup).
 
+Before request control starts, the EPP drops client copies of router-owned body fields:
+
+- On the text routes (`/v1/chat/completions`, string `/v1/completions`, `/v1/messages`,
+  `/v1/responses`) it drops `prompt_token_ids`, `prompt_render_fingerprint`,
+  `render_fingerprint`, `kv_transfer_params`, and `input_ids`. A worker uses client token
+  IDs in place of the chat template.
+- On the token routes (token-array `/v1/completions`, `/inference/v1/generate`,
+  `/generate`) it keeps the token IDs and drops `kv_transfer_params`.
+
+EPP plugins such as `p2p-source-producer` write `kv_transfer_params` after this step, so
+the drop does not affect them. Two `requestHandler` settings change the behavior, and
+they cannot both be `true`:
+
+```yaml
+requestHandler:
+  # Return HTTP 400 for a text request that carries one of the fields.
+  rejectClientPromptIDs: true
+  # Keep the fields. Use this only for an EPP that clients cannot reach directly,
+  # such as an EPP behind the Coordinator.
+  # trustCallerFields: true
+```
+
+The EPP cannot edit a Vertex AI gRPC request, so a Vertex AI text request that carries
+one of the fields gets HTTP 400 under both values of `rejectClientPromptIDs`. The EPP
+does not inspect native gRPC requests (`vllm.Inference`, `sglang.api.v1`).
+
 #### Scheduling
 
 Each scheduling profile runs the following stages. Multiple profiles may run for one request, such as separate prefill and decode profiles.

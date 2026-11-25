@@ -16,7 +16,14 @@ limitations under the License.
 
 package request
 
-import "encoding/json"
+// Top-level request fields that only a trusted caller may set on an external
+// text route. FieldPromptTokenIDs and FieldKVTransferParams are declared in
+// constants.go.
+const (
+	FieldPromptRenderFingerprint = "prompt_render_fingerprint"
+	FieldRenderFingerprint       = "render_fingerprint"
+	FieldInputIDs                = "input_ids"
+)
 
 // ExternalTextRouteSanitizedFields lists the top-level JSON fields that
 // untrusted clients must not supply on external text routes
@@ -32,17 +39,11 @@ var ExternalTextRouteSanitizedFields = []string{
 	FieldInputIDs,
 }
 
-// IsTokenArrayCompletionsPrompt reports whether a /v1/completions prompt value
-// is a token-ID array ([int, ...]) or batch of token-ID arrays ([[int, ...], ...]).
-// String prompts, string arrays, empty arrays, and malformed elements return false.
-func IsTokenArrayCompletionsPrompt(prompt any) bool {
-	if raw, ok := prompt.(json.RawMessage); ok {
-		var decoded any
-		if err := json.Unmarshal(raw, &decoded); err != nil {
-			return false
-		}
-		prompt = decoded
-	}
+// isTokenArrayCompletionsPrompt reports whether a decoded /v1/completions
+// prompt value is a token-ID array ([int, ...]) or batch of token-ID arrays
+// ([[int, ...], ...]). String prompts, string arrays, empty arrays, and
+// malformed elements return false.
+func isTokenArrayCompletionsPrompt(prompt any) bool {
 	arr, ok := prompt.([]any)
 	if !ok || len(arr) == 0 {
 		return false
@@ -71,16 +72,17 @@ func isNonEmptyIntArray(arr []any) bool {
 	return true
 }
 
-// IsExternalTextRoute reports whether apiType with the given completions prompt
-// value is an external text route subject to prompt-token and KV-transfer field
-// sanitization. Dedicated token routes (/inference/v1/generate, /generate, and
-// token-array /v1/completions) return false.
+// IsExternalTextRoute reports whether apiType with the given decoded
+// completions prompt value is an external text route subject to prompt-token
+// and KV-transfer field sanitization. Dedicated token routes
+// (/inference/v1/generate, /generate, and token-array /v1/completions) return
+// false.
 func IsExternalTextRoute(apiType APIType, completionsPrompt any) bool {
 	switch apiType {
 	case APITypeChatCompletions, APITypeMessages, APITypeResponses:
 		return true
 	case APITypeCompletions:
-		return !IsTokenArrayCompletionsPrompt(completionsPrompt)
+		return !isTokenArrayCompletionsPrompt(completionsPrompt)
 	default:
 		return false
 	}
