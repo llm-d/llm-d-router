@@ -69,4 +69,7 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 	// servers ignore it) and the response to the coordinator/client
 	// (topology-stamp-handler's own output) unfiltered.
 	assert.False(t, IsSystemOwnedHeader("x-llm-d-peer-topology"))
+	// Upstream model servers legitimately emit Retry-After on 429s; keeping it out of
+	// OutputInjectionHeaders preserves those headers in HandleResponseHeaders.
+	assert.False(t, IsSystemOwnedHeader(errcommon.RetryAfterHeaderKey))
 }

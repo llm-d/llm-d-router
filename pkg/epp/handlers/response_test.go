@@ -1472,6 +1472,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 				metadata.DestinationEndpointKey: "10.2.0.5:8080",               // should be stripped
 				"content-length":                "500",                         // should be stripped
 				"x-llm-d-peer-topology":         "host=node12,zone=us-east1-a", // stamped by topology-stamp-handler, must reach the coordinator
+				errcommon.RetryAfterHeaderKey:   "5",                           // upstream model-server Retry-After must pass through unchanged
 			},
 		},
 	}
@@ -1490,6 +1491,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
 	assert.Equal(t, "host=node12,zone=us-east1-a", gotHeaders["x-llm-d-peer-topology"])
+	assert.Equal(t, "5", gotHeaders[errcommon.RetryAfterHeaderKey])
 }
 
 func TestGenerateResponseHeaders_FlowQueueDuration(t *testing.T) {
