@@ -657,7 +657,7 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 
 func TestRenderStep_CompletionsTokenArray_AboveUint32Rejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Fatal("render service should not be called for an invalid token array prompt")
+		t.Errorf("render service should not be called for an invalid token array prompt")
 	}))
 	defer server.Close()
 

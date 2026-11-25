@@ -170,9 +170,9 @@ The render step routes to one of three upstream paths depending on the original 
 |--------------------------|----------------------------------------------|-----------------------------------------------|
 | `/v1/chat/completions`   | `POST <rendering_service_address>/v1/chat/completions/render` | never                                         |
 | `/v1/responses`          | `POST <rendering_service_address>/v1/responses/render` | never                                         |
-| `/v1/completions`        | `POST <rendering_service_address>/v1/completions/render`      | `prompt` is already a token array (`[]int`)   |
+| `/v1/completions`        | `POST <rendering_service_address>/v1/completions/render`      | `prompt` is already a token array (`[]uint32`)   |
 
-Batched completions prompts (`[]string` and `[][]int`) are rejected by the coordinator before the upstream call.
+Batched completions prompts (`[]string` and `[][]uint32`) are rejected by the coordinator before the upstream call.
 
 The `/v1/responses/render` endpoint returns the same response shape as `/v1/chat/completions/render` (a single JSON object); `/v1/completions/render` returns a one-element JSON array of that same object. The coordinator handles both shapes; the asymmetry is documented per subsection below.
 
@@ -332,7 +332,7 @@ Measured with Qwen3-VL-32B and one 640x448 JPEG, the render response is 575,449 
 
 ### 2.B `/v1/completions/render`
 
-Used only when `reqCtx.Body["prompt"]` is a string. If the prompt is already a token array (`[]int`), the render step short-circuits and the upstream service is not called.
+Used only when `reqCtx.Body["prompt"]` is a string. If the prompt is already a token array (`[]uint32`), the render step short-circuits and the upstream service is not called.
 
 #### Request
 
@@ -390,7 +390,7 @@ The coordinator only reads `[0].token_ids`. All other fields (`request_id`, `sam
 #### Output (mutates RequestContext)
 
 - `reqCtx.TokenIDs` = `[14990, 1879]`
-- `reqCtx.Body["prompt"]` is rewritten from the original string to the same `[]int` so downstream stages see a token-array prompt.
+- `reqCtx.Body["prompt"]` is rewritten from the original string to the same `[]uint32` so downstream stages see a token-array prompt.
 - `reqCtx.MultimodalEntries` is left untouched (always empty for `/v1/completions`).
 
 When render is skipped because `prompt` is already a token array, `reqCtx.TokenIDs` is populated directly from the input array and `reqCtx.Body["prompt"]` is left as-is.
