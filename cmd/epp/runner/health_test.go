@@ -22,8 +22,10 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -465,45 +467,106 @@ func TestHealthServer_StandbyLogging(t *testing.T) {
 	}
 }
 
+type pipeAddr struct{}
+
+func (pipeAddr) Network() string { return "pipe" }
+func (pipeAddr) String() string  { return "pipe" }
+
+// pipeListener pairs net.Pipe connections in memory so grpc.Server and
+// grpc.ClientConn run inside testing/synctest without OS sockets.
+type pipeListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newPipeListener() *pipeListener {
+	return &pipeListener{
+		conns:  make(chan net.Conn),
+		closed: make(chan struct{}),
+	}
+}
+
+func (l *pipeListener) Dial(ctx context.Context) (net.Conn, error) {
+	client, server := net.Pipe()
+	select {
+	case l.conns <- server:
+		return client, nil
+	case <-l.closed:
+		_ = client.Close()
+		_ = server.Close()
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		_ = client.Close()
+		_ = server.Close()
+		return nil, ctx.Err()
+	}
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *pipeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr { return pipeAddr{} }
+
 // Envoy health-checks on a reused connection and sends keepalive pings every 15s with no
 // active stream, so the server must accept pings that frequent without sending GOAWAY.
 func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
 	t.Parallel()
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	var isLeader atomic.Bool
-	isLeader.Store(true)
-	srv := newHealthGRPCServer(testr.New(t), &mockDatastore{}, &isLeader, nil, false, nil, nil)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
+	synctest.Test(t, func(t *testing.T) {
+		lis := newPipeListener()
+		var isLeader atomic.Bool
+		isLeader.Store(true)
+		srv := newHealthGRPCServer(testr.New(t), &mockDatastore{}, &isLeader, nil, false, nil, nil)
+		serveDone := make(chan struct{})
+		go func() {
+			defer close(serveDone)
+			_ = srv.Serve(lis)
+		}()
+		defer func() {
+			srv.Stop()
+			<-serveDone
+		}()
 
-	// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
-	conn, err := grpc.NewClient(lis.Addr().String(),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+		// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
+		conn, err := grpc.NewClient("passthrough:///pipe",
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				return lis.Dial(ctx)
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
 
-	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer checkCancel()
-	if _, err := healthPb.NewHealthClient(conn).Check(checkCtx, &healthPb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
-		t.Fatalf("Check failed: %v (code %v)", err, status.Code(err))
-	}
-	if state := conn.GetState(); state != connectivity.Ready {
-		t.Fatalf("connection state after Check = %v, want Ready", state)
-	}
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer checkCancel()
+		if _, err := healthPb.NewHealthClient(conn).Check(checkCtx, &healthPb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
+			t.Fatalf("Check failed: %v (code %v)", err, status.Code(err))
+		}
+		if state := conn.GetState(); state != connectivity.Ready {
+			t.Fatalf("connection state after Check = %v, want Ready", state)
+		}
 
-	// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 70*time.Second)
-	defer waitCancel()
-	start := time.Now()
-	if conn.WaitForStateChange(waitCtx, connectivity.Ready) {
-		t.Fatalf("idle connection left Ready after %v (state %v): server rejected 15s keepalive pings with GOAWAY too_many_pings",
-			time.Since(start).Round(time.Second), conn.GetState())
-	}
+		// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 70*time.Second)
+		defer waitCancel()
+		start := time.Now()
+		if conn.WaitForStateChange(waitCtx, connectivity.Ready) {
+			t.Fatalf("idle connection left Ready after %v (state %v): server rejected 15s keepalive pings with GOAWAY too_many_pings",
+				time.Since(start).Round(time.Second), conn.GetState())
+		}
+	})
 }
