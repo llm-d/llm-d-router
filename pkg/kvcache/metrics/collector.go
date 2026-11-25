@@ -131,12 +131,12 @@ var (
 			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
 			compbasemetrics.ALPHA),
 	}, []string{cacheKindLabel, reasonLabel})
-	// KVEventUnknownTagsSkipped counts events skipped because the engine
-	// adapter does not know their tag.
+	// KVEventUnknownTagsSkipped counts skipped tags, including recovery events
+	// whose payload the adapter cannot interpret.
 	KVEventUnknownTagsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_events_unknown_tags_skipped_total",
 		Help: metricsutil.HelpMsgWithStability(
-			"Total number of KV-cache events skipped because the engine adapter does not know their tag",
+			"Total number of KV-cache events skipped because the adapter does not support their tag or recovery payload",
 			compbasemetrics.ALPHA),
 	}, []string{tagLabel})
 
@@ -219,7 +219,7 @@ func Collectors() []prometheus.Collector {
 	}
 }
 
-// RecordUnknownTagSkipped counts one event skipped for an unknown tag and
+// RecordUnknownTagSkipped counts one tag from the adapter's skipped list and
 // returns the tag label value it was counted under, which differs from tag
 // when the tag is empty or the limiter folds it.
 func RecordUnknownTagSkipped(tag string) string {

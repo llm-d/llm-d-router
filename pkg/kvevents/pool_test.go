@@ -2197,16 +2197,29 @@ func (a *skippedTagsAdapter) ParseMessage(*RawMessage) (string, string, EventBat
 
 func (a *skippedTagsAdapter) ShardingKey(*RawMessage) string { return "pod-1" }
 
+func TestIndexConsumerTracesRecoveryEvents(t *testing.T) {
+	var lines []string
+	logger := funcr.New(func(_, line string) { lines = append(lines, line) }, funcr.Options{Verbosity: logging.TRACE})
+	pool, _, _ := newTestPool(t, 4)
+	err := pool.ProcessEvents(log.IntoContext(t.Context(), logger), EventSource{Endpoint: "pod-1"}, EventBatch{
+		Events: []GenericEvent{&RecoveryUnitStoredEvent{}, &RecoveryUnitRemovedEvent{}},
+	})
+	require.NoError(t, err)
+	output := strings.Join(lines, "\n")
+	assert.Contains(t, output, string(EventTypeRecoveryUnitStored))
+	assert.Contains(t, output, string(EventTypeRecoveryUnitRemoved))
+}
+
 // TestProcessRawMessage_ReportsSkippedTags verifies that every skipped event is
 // counted under its tag while the log line appears once per tag per pool.
 func TestProcessRawMessage_ReportsSkippedTags(t *testing.T) {
-	const tagA, tagB = "PoolTestUnknownA", "PoolTestUnknownB"
+	const tagA, tagB = "PoolTestUnknownA", string(EventTypeRecoveryUnitStored)
 
 	// The default funcr verbosity drops V(1) and above, so a captured line
 	// was logged at the level operators see without raising verbosity.
 	var skipLogs []string
 	logger := funcr.New(func(_, args string) {
-		if strings.Contains(args, "Skipping KV events with an unknown tag") {
+		if strings.Contains(args, "Skipping unsupported KV events") {
 			skipLogs = append(skipLogs, args)
 		}
 	}, funcr.Options{})

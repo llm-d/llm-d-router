@@ -30,7 +30,9 @@ const (
 	// EventTypeBlockRemoved indicates blocks were evicted from cache.
 	EventTypeBlockRemoved EventType = "BlockRemoved"
 	// EventTypeAllBlocksCleared indicates entire cache was cleared.
-	EventTypeAllBlocksCleared EventType = "AllBlocksCleared"
+	EventTypeAllBlocksCleared    EventType = "AllBlocksCleared"
+	EventTypeRecoveryUnitStored  EventType = "RecoveryUnitStored"
+	EventTypeRecoveryUnitRemoved EventType = "RecoveryUnitRemoved"
 )
 
 const (
@@ -57,8 +59,8 @@ type EventBatch struct {
 	Timestamp        float64
 	Events           []GenericEvent
 	DataParallelRank *int
-	// SkippedTags holds the tag of each event the adapter dropped because it
-	// does not know the tag.
+	// SkippedTags lists each skipped tag in wire order, including unrecognized
+	// tags and vLLM recovery events with unsupported payloads.
 	SkippedTags []string
 }
 
@@ -158,3 +160,39 @@ type AllBlocksClearedEvent struct {
 func (e *AllBlocksClearedEvent) Type() EventType {
 	return EventTypeAllBlocksCleared
 }
+
+// RecoveryUnitHash preserves the producer's full binary or integer checkpoint key.
+// Bytes is nonempty for binary keys. Both forms are comparable as Go map keys.
+type RecoveryUnitHash struct {
+	Integer uint64
+	Bytes   string
+}
+
+// RecoveryUnit identifies a resumable recurrent checkpoint on one engine.
+type RecoveryUnit struct {
+	UnitHash  RecoveryUnitHash
+	NumTokens int
+	// Frontier marks the exact request endpoint inside a block. A false value
+	// identifies a checkpoint at a block boundary.
+	Frontier bool
+}
+
+// RecoveryUnitStoredEvent reports newly resumable state on the publishing engine.
+type RecoveryUnitStoredEvent struct {
+	RecoveryUnit
+	SessionID *string
+}
+
+func (*RecoveryUnitStoredEvent) Type() EventType { return EventTypeRecoveryUnitStored }
+
+// RecoveryUnitRemovedEvent reports why state stopped being resumable.
+type RecoveryUnitRemovedEvent struct {
+	RecoveryUnit
+	Cause string
+	// Tier is the unit's last eviction ranking, if the producer ranked it.
+	Tier *string
+	// NumBlocks is set when the eviction selected this unit and freed blocks.
+	NumBlocks *int
+}
+
+func (*RecoveryUnitRemovedEvent) Type() EventType { return EventTypeRecoveryUnitRemoved }
