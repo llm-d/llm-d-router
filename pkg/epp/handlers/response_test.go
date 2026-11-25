@@ -1313,6 +1313,21 @@ func TestUsageFrameFilterForwardsLongLineEarly(t *testing.T) {
 	require.Equal(t, "z\n\n"+usageStreamDone, string(f.filter([]byte("z\n\n"+usageStreamFrame+usageStreamDone), true)))
 }
 
+// A line held across many chunks must not be re-copied on every chunk: the
+// held buffer keeps its spare capacity, so allocations stay logarithmic in the
+// number of chunks rather than one per chunk.
+func TestUsageFrameFilterHoldsLineWithoutCopyingPerChunk(t *testing.T) {
+	const chunks = 200
+	piece := []byte("xxxxxxxxxxxxxxxxxxxx")
+	allocs := testing.AllocsPerRun(5, func() {
+		var f usageFrameFilter
+		for range chunks {
+			f.filter(piece, false)
+		}
+	})
+	require.Less(t, allocs, float64(chunks/4), "a held line was re-copied on every chunk")
+}
+
 func TestDropRequestedUsageFrame(t *testing.T) {
 	t.Parallel()
 

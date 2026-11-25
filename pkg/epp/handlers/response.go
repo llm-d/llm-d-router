@@ -252,12 +252,12 @@ type usageFrameFilter struct {
 	dropBlank bool
 }
 
-// filter returns the bytes of chunk to forward. It copies only when a line is
-// dropped; otherwise the result is a prefix of chunk, or of the held line
-// followed by chunk.
+// filter returns the bytes of chunk to forward, copying only to drop a line or
+// to hold a partial one.
 func (f *usageFrameFilter) filter(chunk []byte, endOfStream bool) []byte {
 	data := chunk
-	if len(f.carry) > 0 {
+	hadCarry := len(f.carry) > 0
+	if hadCarry {
 		data = append(f.carry, data...)
 		f.carry = nil
 	}
@@ -270,13 +270,26 @@ func (f *usageFrameFilter) filter(chunk []byte, endOfStream bool) []byte {
 		whole := n > 0
 		if !whole {
 			if !endOfStream && !f.passing && len(rest) <= maxUsageFrameBytes {
-				f.carry = bytes.Clone(rest)
+				if pos == 0 && hadCarry {
+					// data grew from the hold, so retaining it keeps the spare
+					// capacity and the next chunk appends in place.
+					f.carry = data
+				} else {
+					f.carry = bytes.Clone(rest)
+				}
 				break
 			}
 			n = len(rest)
 		}
 		line := rest[:n]
-		drop := f.drop(line)
+		// An oversized partial line is forwarded before its end arrives, so it
+		// cannot be dropped; checking it would scan and parse truncated JSON.
+		var drop bool
+		if !whole && !endOfStream {
+			f.dropBlank = false
+		} else {
+			drop = f.drop(line)
+		}
 		if !whole {
 			f.passing = !endOfStream
 		}
