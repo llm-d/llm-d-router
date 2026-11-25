@@ -464,9 +464,9 @@ func TestRequestHeader_TeamRateWindowOverridesDefault(t *testing.T) {
 	for i := range 10 {
 		require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), "request %d", i)
 	}
-	requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
+	_ = requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
 	clock.t = clock.t.Add(5 * time.Second)
-	requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
+	_ = requireCode(t, p.RequestHeader(t.Context(), newRequest("team-r", 10, 10)), errcommon.ResourceExhausted)
 }
 
 // TestRequestHeader_OutsideContractTakesNoRate verifies that a downgraded or rejected request does
