@@ -388,8 +388,6 @@ func (p *Pool) WindowIndex() kvblock.Index {
 	return p.windowIndex
 }
 
-// slidingWindowGroup reports whether the pod's group is a sliding-window group
-// with a known window size.
 // windowStoreBlockSize is the engine block size of a sliding-window store. A
 // CPU-tier store comes as a placeholder with block_size 0 and no tokens; it
 // copies GPU blocks, so it takes the size the group's GPU stores reported.
@@ -405,6 +403,8 @@ func (p *Pool) windowStoreBlockSize(podIdentifier string, ev *BlockStoredEvent) 
 	return engineBlockSize(ev)
 }
 
+// slidingWindowGroup reports whether the pod's group is a sliding-window group
+// with a known window size.
 func (p *Pool) slidingWindowGroup(podIdentifier string, groupIdx *int) bool {
 	if groupIdx == nil {
 		return false
