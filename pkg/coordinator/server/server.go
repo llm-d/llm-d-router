@@ -194,15 +194,16 @@ func WithWorkerProtocol(protocol string) Option {
 }
 
 type Server struct {
-	httpServer         *http.Server
-	pipeline           *pipeline.Pipeline
-	workerProtocol     string
-	maxRequestBodySize int64
-	passthrough        *passthroughHandler
-	secureServing      bool
-	certPath           string
-	tls                tlsProfile
-	draining           atomic.Bool
+	httpServer            *http.Server
+	pipeline              *pipeline.Pipeline
+	workerProtocol        string
+	maxRequestBodySize    int64
+	rejectClientPromptIDs bool
+	passthrough           *passthroughHandler
+	secureServing         bool
+	certPath              string
+	tls                   tlsProfile
+	draining              atomic.Bool
 }
 
 func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client, opts ...Option) (*Server, error) {
@@ -231,13 +232,14 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 		return nil, err
 	}
 	s := &Server{
-		pipeline:           p,
-		workerProtocol:     config.WorkerProtocolHTTP,
-		maxRequestBodySize: maxBodySize,
-		passthrough:        passthrough,
-		secureServing:      cfg.SecureServing,
-		certPath:           cfg.CertPath,
-		tls:                profile,
+		pipeline:              p,
+		workerProtocol:        config.WorkerProtocolHTTP,
+		maxRequestBodySize:    maxBodySize,
+		rejectClientPromptIDs: cfg.RejectClientPromptIDs,
+		passthrough:           passthrough,
+		secureServing:         cfg.SecureServing,
+		certPath:              cfg.CertPath,
+		tls:                   profile,
 	}
 	for _, opt := range opts {
 		if opt != nil {

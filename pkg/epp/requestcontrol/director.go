@@ -42,6 +42,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -240,6 +241,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Record the client-facing model for every request, including forwarded-unchanged ones.
 	reqCtx.IncomingModelName = inferenceRequestBody.Model
+
+	// Sanitize external text routes before model rewrite, token-producer, and
+	// PreRequest plugins (p2psource, forwardtokens, selectivekv) run so
+	// untrusted caller fields cannot steer tokenization or KV transfer.
+	if err := d.sanitizeExternalTextRequest(ctx, inferenceRequestBody); err != nil {
+		return reqCtx, err
+	}
 
 	if err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
@@ -471,6 +479,69 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, err
 	}
 	return reqCtx, nil
+}
+
+// sanitizeExternalTextRequest strips (or rejects with 400 when
+// rejectClientPromptIDs is enabled) client-supplied prompt-token, fingerprint,
+// and KV-transfer fields on external text routes before token-producer or
+// PreRequest plugins run. Internal EPPs behind a trusted Coordinator opt out
+// via requestHandler.trustCallerFields. Dedicated token routes (/generate,
+// /inference/v1/generate, token-array /v1/completions, and token gRPC
+// services) are preserved unchanged.
+func (d *Director) sanitizeExternalTextRequest(ctx context.Context, body *fwkrequest.InferenceRequestBody) error {
+	if d.requestControlPlugins.TrustCallerFields() {
+		return nil
+	}
+	route, ok := externalTextRouteName(body)
+	if !ok {
+		return nil
+	}
+	payload, ok := body.Payload.(fwkrequest.PayloadMap)
+	if !ok {
+		return nil
+	}
+	found := reqcommon.FindExternalTextFields(payload)
+	if len(found) == 0 {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+	if d.requestControlPlugins.RejectClientPromptIDs() {
+		metrics.RecordPromptIDsSanitized(route, metricsutil.SanitizeActionRejected)
+		// Log field names only, never attacker-controlled values.
+		logger.V(logutil.DEFAULT).Info("rejected client-supplied text-route fields", "route", route, "fields", found)
+		return errcommon.Error{
+			Code: errcommon.BadRequest,
+			Msg:  fmt.Sprintf("client-supplied field %q is not allowed on %s", found[0], route),
+		}
+	}
+	var stripped []string
+	body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
+		stripped = reqcommon.StripExternalTextFields(m)
+	})
+	metrics.RecordPromptIDsSanitized(route, metricsutil.SanitizeActionStripped)
+	logger.V(logutil.DEFAULT).Info("stripped client-supplied text-route fields", "route", route, "fields", stripped)
+	return nil
+}
+
+// externalTextRouteName returns the bounded route label when body represents
+// an external text route (/v1/chat/completions, string /v1/completions,
+// /v1/messages, or /v1/responses).
+func externalTextRouteName(body *fwkrequest.InferenceRequestBody) (string, bool) {
+	if body == nil || body.RenderRequest {
+		return "", false
+	}
+	switch {
+	case body.ChatCompletions != nil:
+		return reqcommon.APITypeChatCompletions.String(), true
+	case body.Messages != nil:
+		return reqcommon.APITypeMessages.String(), true
+	case body.Responses != nil:
+		return reqcommon.APITypeResponses.String(), true
+	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) == 0:
+		return reqcommon.APITypeCompletions.String(), true
+	default:
+		return "", false
+	}
 }
 
 // escapeFairnessTenant percent-encodes the characters that would otherwise make

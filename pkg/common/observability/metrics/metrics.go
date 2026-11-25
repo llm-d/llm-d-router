@@ -51,6 +51,15 @@ const (
 	DisaggPathEncodePrefillDecode = "encode-prefill-decode"
 )
 
+// Prompt-ID sanitization metric label values shared by the coordinator and EPP.
+const (
+	SanitizeComponentCoordinator = "coordinator"
+	SanitizeComponentEPP         = "epp"
+
+	SanitizeActionStripped = "stripped"
+	SanitizeActionRejected = "rejected"
+)
+
 // HelpMsgWithStability is a helper function to create a help message with stability level.
 func HelpMsgWithStability(msg string, stability compbasemetrics.StabilityLevel) string {
 	return fmt.Sprintf("[%v] %v", stability, msg)

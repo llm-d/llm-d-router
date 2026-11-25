@@ -17,11 +17,13 @@ limitations under the License.
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -128,17 +131,54 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	// kv_transfer_params tells a model server which pod to pull KV from, so
-	// only the KV connector and the EPP may write it, but not every step
-	// rebuilds the body, so a client copy is dropped once here.
-	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
-	delete(parsed, reqcommon.FieldKVTransferParams)
-	parseDuration = time.Since(parseStart)
-	parseDone = true
-
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
 	}
+
+	var strippedTextFields []string
+	var clientKVTransferParams bool
+	if reqcommon.IsExternalTextRoute(apiType, parsed[reqcommon.FieldPrompt]) {
+		found := reqcommon.FindExternalTextFields(parsed)
+		if len(found) > 0 {
+			if s.rejectClientPromptIDs {
+				coordmetrics.IncPromptIDsSanitized(route, metricsutil.SanitizeActionRejected)
+				coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+				// Log field names only, never attacker-controlled values.
+				serverLog.V(logutil.DEFAULT).Info("rejected client-supplied text-route fields", "route", route, "fields", found)
+				rejectInference(serverLog, cw, apiType, http.StatusBadRequest,
+					fmt.Sprintf("client-supplied field %q is not allowed on %s", found[0], route))
+				return
+			}
+			strippedTextFields = reqcommon.StripExternalTextFields(parsed)
+			clientKVTransferParams = slices.Contains(strippedTextFields, reqcommon.FieldKVTransferParams)
+			coordmetrics.IncPromptIDsSanitized(route, metricsutil.SanitizeActionStripped)
+			sanitizedBody, err := json.Marshal(parsed)
+			if err != nil {
+				coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
+				rejectInference(serverLog, cw, apiType, http.StatusInternalServerError, "failed to sanitize request body")
+				return
+			}
+			body = sanitizedBody
+		}
+	} else {
+		// kv_transfer_params tells a model server which pod to pull KV from, so
+		// only the KV connector and the EPP may write it, but not every step
+		// rebuilds the body, so a client copy is dropped once here.
+		_, clientKVTransferParams = parsed[reqcommon.FieldKVTransferParams]
+		if clientKVTransferParams {
+			delete(parsed, reqcommon.FieldKVTransferParams)
+			sanitizedBody, err := json.Marshal(parsed)
+			if err != nil {
+				coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
+				rejectInference(serverLog, cw, apiType, http.StatusInternalServerError, "failed to sanitize request body")
+				return
+			}
+			body = sanitizedBody
+		}
+	}
+	parseDuration = time.Since(parseStart)
+	parseDone = true
+
 	stream, err = reqcommon.StreamRequested(parsed)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
@@ -223,6 +263,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	if clientKVTransferParams {
 		// Presence only: the value carries a host, a port and a request id.
 		logger.V(logutil.DEFAULT).Info("dropped client-supplied kv_transfer_params")
+	}
+	if len(strippedTextFields) > 0 {
+		// Log field names only, never attacker-controlled values.
+		logger.V(logutil.DEFAULT).Info("stripped client-supplied text-route fields", "route", route, "fields", strippedTextFields)
 	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)

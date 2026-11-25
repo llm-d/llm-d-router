@@ -50,6 +50,14 @@ type Config struct {
 	// when true the EPP passes the client's input-control headers to the chosen
 	// endpoint (a multi-cluster hub's cluster EPPs).
 	ForwardInputControlHeaders bool
+	// RejectClientPromptIDs mirrors requestHandler.rejectClientPromptIDs: when
+	// true the director rejects external text-route requests that carry
+	// forbidden prompt-token, fingerprint, or KV-transfer fields with 400.
+	RejectClientPromptIDs bool
+	// TrustCallerFields mirrors requestHandler.trustCallerFields: when true the
+	// director skips external text-route field sanitization (for internal EPPs
+	// behind a trusted Coordinator).
+	TrustCallerFields bool
 	// DataProducerPhases places the producers listed in
 	// requestHandler.dataProducers, keyed by plugin name, in
 	// DataProducerPhaseRequestHandling. Producers not listed are absent.

@@ -57,6 +57,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},
 		{"server.drain_timeout", cfg.Server.DrainTimeout, time.Duration(0)},
 		{"server.max_request_body_size", cfg.Server.MaxRequestBodySize, int64(DefaultMaxRequestBodySize)},
+		{"server.reject_client_prompt_ids", cfg.Server.RejectClientPromptIDs, false},
 		{"gateway.max_idle_conns_per_host", cfg.Gateway.MaxIdleConnsPerHost, 100},
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
 		{"gateway.timeout", cfg.Gateway.Timeout, 60 * time.Second},
@@ -117,6 +118,12 @@ func TestLoadEnvOverride(t *testing.T) {
 		envVal string
 		check  func(*Config) (got, want any)
 	}{
+		{
+			name:   "server.reject_client_prompt_ids",
+			envKey: "COORDINATOR_SERVER_REJECT_CLIENT_PROMPT_IDS",
+			envVal: "true",
+			check:  func(c *Config) (any, any) { return c.Server.RejectClientPromptIDs, true },
+		},
 		{
 			name:   "top-level scalar",
 			envKey: "COORDINATOR_LOG_LEVEL",

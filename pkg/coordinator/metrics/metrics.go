@@ -198,6 +198,7 @@ func allCollectors() []resettableCollector {
 		mediaDownloadDuration,
 		responseSize,
 		promptTokenMismatchTotal,
+		promptIDsSanitizedTotal,
 	}
 }
 

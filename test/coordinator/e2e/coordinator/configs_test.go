@@ -115,6 +115,7 @@ plugins:
 - type: max-score-picker
 - type: header-profile-handler
 requestHandler:
+  trustCallerFields: true
   parsers:
   - pluginRef: openai-parser
   - pluginRef: vllmhttp-parser
@@ -160,6 +161,7 @@ plugins:
 - type: max-score-picker
 - type: single-profile-handler
 requestHandler:
+  trustCallerFields: true
   parsers:
   - pluginRef: openai-parser
   - pluginRef: vllmhttp-parser
@@ -185,6 +187,7 @@ plugins:
 - type: max-score-picker
 - type: single-profile-handler
 requestHandler:
+  trustCallerFields: true
   parsers:
   - pluginRef: openai-parser
   - pluginRef: vllmhttp-parser

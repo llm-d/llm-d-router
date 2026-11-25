@@ -64,6 +64,15 @@ type Config struct {
 	// streamed response whose client did not. Off by default so the body is
 	// untouched.
 	requestStreamUsage bool
+
+	// rejectClientPromptIDs rejects external text-route requests that carry
+	// forbidden prompt-token, fingerprint, or KV-transfer fields with 400
+	// instead of stripping them.
+	rejectClientPromptIDs bool
+
+	// trustCallerFields disables external text-route field sanitization for
+	// internal EPPs behind a trusted Coordinator.
+	trustCallerFields bool
 }
 
 // WithPropagatePriority enables or disables injecting the resolved request
@@ -90,6 +99,32 @@ func (c *Config) WithComposeFairnessIDs(composeFairnessIDs bool) *Config {
 // response whose client did not.
 func (c *Config) WithRequestStreamUsage(requestStreamUsage bool) *Config {
 	c.requestStreamUsage = requestStreamUsage
+	return c
+}
+
+// RejectClientPromptIDs reports whether the director rejects external
+// text-route requests carrying forbidden client fields with 400.
+func (c *Config) RejectClientPromptIDs() bool {
+	return c.rejectClientPromptIDs
+}
+
+// WithRejectClientPromptIDs enables or disables rejecting external text-route
+// requests carrying forbidden client fields with 400 instead of stripping them.
+func (c *Config) WithRejectClientPromptIDs(reject bool) *Config {
+	c.rejectClientPromptIDs = reject
+	return c
+}
+
+// TrustCallerFields reports whether the director preserves caller-supplied
+// prompt-token and KV-transfer fields on text routes.
+func (c *Config) TrustCallerFields() bool {
+	return c.trustCallerFields
+}
+
+// WithTrustCallerFields enables or disables skipping external text-route field
+// sanitization for internal EPPs behind a trusted Coordinator.
+func (c *Config) WithTrustCallerFields(trust bool) *Config {
+	c.trustCallerFields = trust
 	return c
 }
 

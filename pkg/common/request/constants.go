@@ -64,37 +64,39 @@ const (
 	HeaderStatus       = "status"
 
 	FieldKVTransferParams = "kv_transfer_params"
-	// FieldPromptTokenIDs is the kv_transfer_params field carrying
-	// pre-tokenized prompt token IDs.
-	FieldPromptTokenIDs       = "prompt_token_ids"
-	FieldECTransferParams     = "ec_transfer_params"
-	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
-	FieldMaxTokens            = "max_tokens"
-	FieldMaxCompletionTokens  = "max_completion_tokens"
-	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
-	FieldMaxNewTokens         = "max_new_tokens"    // Used by vLLM-Omni audio/speech
-	FieldMinTokens            = "min_tokens"
-	FieldPrompt               = "prompt"
-	FieldStream               = "stream"
-	FieldStreamOptions        = "stream_options"
-	FieldIncludeUsage         = "include_usage"          // stream_options field: emit a final usage-only frame
-	FieldContinuousUsageStats = "continuous_usage_stats" // stream_options field: vLLM emits usage on every frame
-	FieldEcho                 = "echo"
-	FieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- request field name, not a credential
-	FieldTools                = "tools"
-	FieldToolChoice           = "tool_choice"
-	FieldResponseFormat       = "response_format"
-	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args" // sampling_params field: vLLM reads kv_transfer_params from it
-	FieldN                    = "n"
-	FieldCacheSalt            = "cache_salt"
-	FieldPriority             = "priority"
-	FieldDoRemotePrefill      = "do_remote_prefill"
-	FieldDoRemoteDecode       = "do_remote_decode"
-	FieldRemoteBlockIDs       = "remote_block_ids"
-	FieldRemoteEngineID       = "remote_engine_id"
-	FieldRemoteHost           = "remote_host"
-	FieldRemotePort           = "remote_port"
+	// FieldPromptTokenIDs is the field carrying pre-tokenized prompt token IDs.
+	FieldPromptTokenIDs          = "prompt_token_ids"
+	FieldPromptRenderFingerprint = "prompt_render_fingerprint"
+	FieldRenderFingerprint       = "render_fingerprint"
+	FieldInputIDs                = "input_ids"
+	FieldECTransferParams        = "ec_transfer_params"
+	FieldECDescriptorMetadata    = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
+	FieldMaxTokens               = "max_tokens"
+	FieldMaxCompletionTokens     = "max_completion_tokens"
+	FieldMaxOutputTokens         = "max_output_tokens" // Used by Responses API
+	FieldMaxNewTokens            = "max_new_tokens"    // Used by vLLM-Omni audio/speech
+	FieldMinTokens               = "min_tokens"
+	FieldPrompt                  = "prompt"
+	FieldStream                  = "stream"
+	FieldStreamOptions           = "stream_options"
+	FieldIncludeUsage            = "include_usage"          // stream_options field: emit a final usage-only frame
+	FieldContinuousUsageStats    = "continuous_usage_stats" // stream_options field: vLLM emits usage on every frame
+	FieldEcho                    = "echo"
+	FieldTruncatePromptTokens    = "truncate_prompt_tokens" //#nosec G101 -- request field name, not a credential
+	FieldTools                   = "tools"
+	FieldToolChoice              = "tool_choice"
+	FieldResponseFormat          = "response_format"
+	FieldSamplingParams          = "sampling_params"
+	FieldExtraArgs               = "extra_args" // sampling_params field: vLLM reads kv_transfer_params from it
+	FieldN                       = "n"
+	FieldCacheSalt               = "cache_salt"
+	FieldPriority                = "priority"
+	FieldDoRemotePrefill         = "do_remote_prefill"
+	FieldDoRemoteDecode          = "do_remote_decode"
+	FieldRemoteBlockIDs          = "remote_block_ids"
+	FieldRemoteEngineID          = "remote_engine_id"
+	FieldRemoteHost              = "remote_host"
+	FieldRemotePort              = "remote_port"
 	// OffloadingConnector P2P tier roles, carried inside kv_transfer_params. The
 	// role is encoded by the nesting key, named for the remote party it
 	// describes: remote_decoder on the prefill request, remote_prefiller on the

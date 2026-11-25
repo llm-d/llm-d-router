@@ -47,17 +47,18 @@ const BytesPerMB = 1024 * 1024
 const DefaultMaxRequestBodySize = 64 // 64 MB
 
 type ServerConfig struct {
-	ListenAddr         string        `mapstructure:"listen_addr"`
-	MetricsPort        int           `mapstructure:"metrics_port"` // default 9090; non-positive disables the endpoint
-	MetricsCertDir     string        `mapstructure:"metrics_cert_dir"`
-	SecureServing      bool          `mapstructure:"secure_serving"`
-	CertPath           string        `mapstructure:"cert_path"`
-	TLSMinVersion      string        `mapstructure:"tls_min_version"`
-	TLSCipherSuites    []string      `mapstructure:"tls_cipher_suites"`
-	ReadTimeout        time.Duration `mapstructure:"read_timeout"`
-	ShutdownTimeout    time.Duration `mapstructure:"shutdown_timeout"`
-	DrainTimeout       time.Duration `mapstructure:"drain_timeout"`
-	MaxRequestBodySize int64         `mapstructure:"max_request_body_size"`
+	ListenAddr            string        `mapstructure:"listen_addr"`
+	MetricsPort           int           `mapstructure:"metrics_port"` // default 9090; non-positive disables the endpoint
+	MetricsCertDir        string        `mapstructure:"metrics_cert_dir"`
+	SecureServing         bool          `mapstructure:"secure_serving"`
+	CertPath              string        `mapstructure:"cert_path"`
+	TLSMinVersion         string        `mapstructure:"tls_min_version"`
+	TLSCipherSuites       []string      `mapstructure:"tls_cipher_suites"`
+	ReadTimeout           time.Duration `mapstructure:"read_timeout"`
+	ShutdownTimeout       time.Duration `mapstructure:"shutdown_timeout"`
+	DrainTimeout          time.Duration `mapstructure:"drain_timeout"`
+	MaxRequestBodySize    int64         `mapstructure:"max_request_body_size"`
+	RejectClientPromptIDs bool          `mapstructure:"reject_client_prompt_ids"`
 }
 
 type GatewayConfig struct {
@@ -123,6 +124,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("server.shutdown_timeout", 25*time.Second)
 	v.SetDefault("server.drain_timeout", 0)
 	v.SetDefault("server.max_request_body_size", DefaultMaxRequestBodySize)
+	v.SetDefault("server.reject_client_prompt_ids", false)
 	v.SetDefault("gateway.max_idle_conns_per_host", 100)
 	v.SetDefault("gateway.idle_conn_timeout", 90*time.Second)
 	v.SetDefault("gateway.timeout", 60*time.Second)

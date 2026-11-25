@@ -40,6 +40,13 @@ func IncRequestErrorTotal(modelName, errorCode string) {
 	requestErrorTotal.WithLabelValues(boundModel(modelName), errorCode).Inc()
 }
 
+// IncPromptIDsSanitized increments prompt_ids_sanitized_total when ingress
+// strips or rejects client-supplied prompt-token, fingerprint, or KV-transfer
+// fields on an external text route.
+func IncPromptIDsSanitized(route, action string) {
+	promptIDsSanitizedTotal.WithLabelValues(metricsutil.SanitizeComponentCoordinator, boundRoute(route), action).Inc()
+}
+
 // RecordRequestDuration observes an end-to-end request latency.
 func RecordRequestDuration(modelName string, d time.Duration) {
 	requestDuration.WithLabelValues(boundModel(modelName)).Observe(d.Seconds())

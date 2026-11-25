@@ -92,6 +92,15 @@ var (
 		},
 		modelLabel,
 	)
+
+	promptIDsSanitizedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "prompt_ids_sanitized_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of external text-route requests where client-supplied prompt token, fingerprint, or KV transfer fields were stripped or rejected.", compbasemetrics.ALPHA),
+		},
+		[]string{"component", "route", "action"},
+	)
 )
 
 // Pipeline step family. Recorded by the pipeline executor around every

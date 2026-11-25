@@ -145,6 +145,7 @@ lifecycle handled by the router.
 | `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `streaming` | Time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Time per output token for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Inter-token latency for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_prompt_ids_sanitized_total` | Counter | `component`, `route`, `action` | External text requests where EPP stripped or rejected client prompt token IDs, render fingerprints, or KV transfer fields. |
 
 Requests answered locally by a responder, such as `GET /v1/models`, are not counted in
 `llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
