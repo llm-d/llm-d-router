@@ -242,10 +242,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// Record the client-facing model for every request, including forwarded-unchanged ones.
 	reqCtx.IncomingModelName = inferenceRequestBody.Model
 
-	// Sanitize external text routes before model rewrite, token-producer, and
+	// Remove untrusted client fields before model rewrite, token-producer, and
 	// PreRequest plugins (p2psource, forwardtokens, selectivekv) run so
 	// untrusted caller fields cannot steer tokenization or KV transfer.
-	if err := d.sanitizeExternalTextRequest(ctx, inferenceRequestBody); err != nil {
+	if err := d.sanitizeClientFields(ctx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
 
@@ -481,19 +481,22 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
-// sanitizeExternalTextRequest strips (or rejects with 400 when
-// rejectClientPromptIDs is enabled) client-supplied prompt-token, fingerprint,
-// and KV-transfer fields on external text routes before token-producer or
-// PreRequest plugins run. Internal EPPs behind a trusted Coordinator opt out
-// via requestHandler.trustCallerFields. Dedicated token routes (/generate,
-// /inference/v1/generate, token-array /v1/completions, and token gRPC
-// services) are preserved unchanged.
-func (d *Director) sanitizeExternalTextRequest(ctx context.Context, body *fwkrequest.InferenceRequestBody) error {
+// sanitizeClientFields removes request fields that only a trusted caller may
+// set, before token-producer or PreRequest plugins run. An EPP behind a trusted
+// Coordinator opts out with requestHandler.trustCallerFields.
+//
+// On external text routes it strips the client-supplied prompt-token,
+// fingerprint, and KV-transfer fields, or rejects the request with 400 when
+// rejectClientPromptIDs is enabled. On dedicated HTTP token routes it keeps the
+// client token IDs and drops kv_transfer_params. It does not sanitize gRPC
+// token services.
+func (d *Director) sanitizeClientFields(ctx context.Context, body *fwkrequest.InferenceRequestBody) error {
 	if d.requestControlPlugins.TrustCallerFields() {
 		return nil
 	}
 	route, ok := externalTextRouteName(body)
 	if !ok {
+		dropTokenRouteKVTransferParams(ctx, body)
 		return nil
 	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)
@@ -542,6 +545,40 @@ func externalTextRouteName(body *fwkrequest.InferenceRequestBody) (string, bool)
 	default:
 		return "", false
 	}
+}
+
+// isTokenRoute reports whether body is a dedicated token route: a generate
+// request (/inference/v1/generate, /generate) or a token-array /v1/completions
+// request.
+func isTokenRoute(body *fwkrequest.InferenceRequestBody) bool {
+	if body == nil || body.RenderRequest {
+		return false
+	}
+	return body.Generate != nil || (body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0)
+}
+
+// dropTokenRouteKVTransferParams removes a client-supplied kv_transfer_params
+// on a dedicated token route. The client token IDs stay, because sending them
+// is the purpose of the route. kv_transfer_params tells a model server which
+// pod to pull KV from, so only the Coordinator, the EPP plugins, and the
+// sidecar may write it. The field is dropped and never rejected, as in the
+// Coordinator.
+func dropTokenRouteKVTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
+	if !isTokenRoute(body) {
+		return
+	}
+	payload, ok := body.Payload.(fwkrequest.PayloadMap)
+	if !ok {
+		return
+	}
+	if _, present := payload[reqcommon.FieldKVTransferParams]; !present {
+		return
+	}
+	body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
+		delete(m, reqcommon.FieldKVTransferParams)
+	})
+	// Presence only: the value carries a host, a port and a request id.
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropped client-supplied kv_transfer_params")
 }
 
 // escapeFairnessTenant percent-encodes the characters that would otherwise make

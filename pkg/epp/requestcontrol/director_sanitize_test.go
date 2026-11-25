@@ -284,84 +284,135 @@ func TestDirector_RejectClientPromptIDsAlsoRejectsKVTransferParams(t *testing.T)
 	require.Contains(t, reqErr.Msg, reqcommon.FieldKVTransferParams)
 }
 
-func TestDirector_PreservesDedicatedTokenRoutesAndRenderRequests(t *testing.T) {
+// handleSanitizeRequest parses raw with parser and runs it through a
+// single-pod Director that uses cfg.
+func handleSanitizeRequest(t *testing.T, cfg *Config, parser fwkrh.Parser, path string, raw []byte) (*handlers.RequestContext, *fwkrequest.InferenceRequestBody, error) {
+	t.Helper()
+	metrics.Reset()
+	dir, ctx := newSinglePodDirector(t, newSanitizeScheduleResult())
+	dir.requestControlPlugins = *cfg.WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
+
+	headers := map[string]string{":path": path}
+	parsed, err := parser.ParseRequest(ctx, raw, headers)
+	require.NoError(t, err)
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{ID: "req-sanitize", Headers: headers, RawBody: raw},
+		Parser:  parser,
+	}
+	_, err = dir.HandleRequest(ctx, reqCtx, parsed.Body)
+	return reqCtx, parsed.Body, err
+}
+
+func forwardedBody(t *testing.T, reqCtx *handlers.RequestContext) map[string]any {
+	t.Helper()
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(reqCtx.Request.RawBody, &out))
+	return out
+}
+
+func requireNoSanitizeMetric(t *testing.T) {
+	t.Helper()
+	require.NoError(t, promtestutil.GatherAndCompare(ctrlmetrics.Registry, strings.NewReader(""), eppPromptIDsSanitizedMetric))
+}
+
+// A dedicated token route keeps the client token IDs, because sending them is
+// the purpose of the route. It drops kv_transfer_params, which only the
+// Coordinator, the EPP plugins, and the sidecar may write.
+func TestDirector_TokenRoutesKeepTokenIDsAndDropKVTransferParams(t *testing.T) {
 	metrics.Register()
 
+	const clientKV = `,"kv_transfer_params":{"do_remote_prefill":true}`
 	cases := []struct {
-		name           string
-		path           string
-		parser         fwkrh.Parser
-		body           string
-		preservedField string
+		name      string
+		path      string
+		parser    fwkrh.Parser
+		body      string // without the closing brace, so a subtest can append clientKV
+		keptField string
 	}{
 		{
-			name:           "vLLM HTTP generate",
-			path:           reqcommon.PathVLLMGenerate,
-			parser:         vllmhttp.NewVllmHTTPParser(),
-			body:           `{"model":"llama-3-8b","token_ids":[1,2,3],"prompt_token_ids":[1,2,3]}`,
-			preservedField: reqcommon.FieldPromptTokenIDs,
+			name:      "vLLM HTTP generate",
+			path:      reqcommon.PathVLLMGenerate,
+			parser:    vllmhttp.NewVllmHTTPParser(),
+			body:      `{"model":"llama-3-8b","token_ids":[1,2,3],"prompt_token_ids":[1,2,3]`,
+			keptField: reqcommon.FieldPromptTokenIDs,
 		},
 		{
-			name:           "SGLang HTTP generate",
-			path:           reqcommon.PathSGLangGenerate,
-			parser:         sglanghttp.NewSGLangHTTPParser(),
-			body:           `{"model":"llama-3-8b","input_ids":[10,20,30]}`,
-			preservedField: reqcommon.FieldInputIDs,
+			name:      "SGLang HTTP generate",
+			path:      reqcommon.PathSGLangGenerate,
+			parser:    sglanghttp.NewSGLangHTTPParser(),
+			body:      `{"model":"llama-3-8b","input_ids":[10,20,30]`,
+			keptField: reqcommon.FieldInputIDs,
 		},
 		{
-			name:           "token-array completions",
-			path:           reqcommon.PathCompletions,
-			parser:         openai.NewOpenAIParser(),
-			body:           `{"model":"llama-3-8b","prompt":[1,2,3],"prompt_token_ids":[1,2,3]}`,
-			preservedField: reqcommon.FieldPromptTokenIDs,
+			name:      "token-array completions",
+			path:      reqcommon.PathCompletions,
+			parser:    openai.NewOpenAIParser(),
+			body:      `{"model":"llama-3-8b","prompt":[1,2,3],"prompt_token_ids":[1,2,3]`,
+			keptField: reqcommon.FieldPromptTokenIDs,
 		},
 		{
-			name:           "batch token-array completions",
-			path:           reqcommon.PathCompletions,
-			parser:         openai.NewOpenAIParser(),
-			body:           `{"model":"llama-3-8b","prompt":[[1,2],[3,4]],"prompt_token_ids":[1,2]}`,
-			preservedField: reqcommon.FieldPromptTokenIDs,
-		},
-		{
-			name:           "chat completions render",
-			path:           "/v1/chat/completions/render",
-			parser:         openai.NewOpenAIParser(),
-			body:           `{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"prompt_token_ids":[1,2,3]}`,
-			preservedField: reqcommon.FieldPromptTokenIDs,
+			name:      "batch token-array completions",
+			path:      reqcommon.PathCompletions,
+			parser:    openai.NewOpenAIParser(),
+			body:      `{"model":"llama-3-8b","prompt":[[1,2],[3,4]],"prompt_token_ids":[1,2]`,
+			keptField: reqcommon.FieldPromptTokenIDs,
 		},
 	}
 
 	for _, tc := range cases {
 		for _, strict := range []bool{false, true} {
-			mode := "strip"
+			mode := "strip mode"
 			if strict {
-				mode = "reject"
+				mode = "reject mode"
 			}
-			t.Run(tc.name+"/"+mode, func(t *testing.T) {
-				metrics.Reset()
-				dir, ctx := newSinglePodDirector(t, newSanitizeScheduleResult())
-				dir.requestControlPlugins = *NewConfig().
-					WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
-					WithRejectClientPromptIDs(strict)
+			t.Run(tc.name+"/"+mode+" drops client kv_transfer_params and keeps token IDs", func(t *testing.T) {
+				cfg := NewConfig().WithRejectClientPromptIDs(strict)
+				reqCtx, body, err := handleSanitizeRequest(t, cfg, tc.parser, tc.path, []byte(tc.body+clientKV+"}"))
 
-				headers := map[string]string{":path": tc.path}
-				raw := []byte(tc.body)
-				parsed, err := tc.parser.ParseRequest(ctx, raw, headers)
-				require.NoError(t, err)
-				reqCtx := &handlers.RequestContext{
-					Request: &handlers.Request{ID: "req-tok", Headers: headers, RawBody: raw},
-					Parser:  tc.parser,
-				}
-
-				_, err = dir.HandleRequest(ctx, reqCtx, parsed.Body)
-				require.NoError(t, err)
-				require.False(t, parsed.Body.Mutated)
-				var out map[string]any
-				require.NoError(t, json.Unmarshal(reqCtx.Request.RawBody, &out))
-				require.Contains(t, out, tc.preservedField)
-				require.NoError(t, promtestutil.GatherAndCompare(ctrlmetrics.Registry, strings.NewReader(""), eppPromptIDsSanitizedMetric))
+				require.NoError(t, err, "a token route drops the field and never returns 400")
+				require.True(t, body.Mutated)
+				out := forwardedBody(t, reqCtx)
+				require.NotContains(t, out, reqcommon.FieldKVTransferParams)
+				require.Contains(t, out, tc.keptField)
+				requireNoSanitizeMetric(t)
 			})
 		}
+
+		t.Run(tc.name+"/request without kv_transfer_params forwards the original bytes", func(t *testing.T) {
+			raw := []byte(tc.body + "}")
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig(), tc.parser, tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+			requireNoSanitizeMetric(t)
+		})
+
+		t.Run(tc.name+"/trustCallerFields keeps kv_transfer_params", func(t *testing.T) {
+			raw := []byte(tc.body + clientKV + "}")
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig().WithTrustCallerFields(true), tc.parser, tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+		})
+	}
+}
+
+// A render request goes to the render endpoint and not to a model server, so
+// the director does not sanitize it.
+func TestDirector_RenderRequestIsNotSanitized(t *testing.T) {
+	metrics.Register()
+
+	raw := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"prompt_token_ids":[1,2,3],"kv_transfer_params":{"do_remote_prefill":true}}`)
+	for _, strict := range []bool{false, true} {
+		cfg := NewConfig().WithRejectClientPromptIDs(strict)
+		reqCtx, body, err := handleSanitizeRequest(t, cfg, openai.NewOpenAIParser(), "/v1/chat/completions/render", raw)
+
+		require.NoError(t, err)
+		require.False(t, body.Mutated)
+		require.Equal(t, raw, reqCtx.Request.RawBody)
+		requireNoSanitizeMetric(t)
 	}
 }
 

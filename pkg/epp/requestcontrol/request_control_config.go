@@ -70,8 +70,8 @@ type Config struct {
 	// instead of stripping them.
 	rejectClientPromptIDs bool
 
-	// trustCallerFields disables external text-route field sanitization for
-	// internal EPPs behind a trusted Coordinator.
+	// trustCallerFields disables client field sanitization on text routes and
+	// token routes for internal EPPs behind a trusted Coordinator.
 	trustCallerFields bool
 }
 
@@ -116,13 +116,13 @@ func (c *Config) WithRejectClientPromptIDs(reject bool) *Config {
 }
 
 // TrustCallerFields reports whether the director preserves caller-supplied
-// prompt-token and KV-transfer fields on text routes.
+// prompt-token and KV-transfer fields on text routes and token routes.
 func (c *Config) TrustCallerFields() bool {
 	return c.trustCallerFields
 }
 
-// WithTrustCallerFields enables or disables skipping external text-route field
-// sanitization for internal EPPs behind a trusted Coordinator.
+// WithTrustCallerFields enables or disables skipping client field sanitization
+// for internal EPPs behind a trusted Coordinator.
 func (c *Config) WithTrustCallerFields(trust bool) *Config {
 	c.trustCallerFields = trust
 	return c

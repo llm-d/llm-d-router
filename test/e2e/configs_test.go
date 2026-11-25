@@ -141,7 +141,8 @@ schedulingProfiles:
 
 // generatePrefillConfig is the prefill-only EPP config for /inference/v1/generate.
 // Uses single-profile-handler so the EPP routes directly to prefill pods without
-// requiring a decode stage.
+// requiring a decode stage. The test sends prefill bodies that carry
+// kv_transfer_params, as a Coordinator does, so this EPP trusts caller fields.
 const generatePrefillConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
@@ -150,6 +151,7 @@ plugins:
 - type: max-score-picker
 - type: single-profile-handler
 requestHandler:
+  trustCallerFields: true
   parsers:
    - pluginRef: vllmhttp-parser 
 schedulingProfiles:

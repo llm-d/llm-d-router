@@ -55,8 +55,8 @@ type Config struct {
 	// forbidden prompt-token, fingerprint, or KV-transfer fields with 400.
 	RejectClientPromptIDs bool
 	// TrustCallerFields mirrors requestHandler.trustCallerFields: when true the
-	// director skips external text-route field sanitization (for internal EPPs
-	// behind a trusted Coordinator).
+	// director skips client field sanitization on text routes and token routes
+	// (for internal EPPs behind a trusted Coordinator).
 	TrustCallerFields bool
 	// DataProducerPhases places the producers listed in
 	// requestHandler.dataProducers, keyed by plugin name, in

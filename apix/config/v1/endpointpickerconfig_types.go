@@ -422,11 +422,11 @@ type RequestHandlerConfig struct {
 	RejectClientPromptIDs bool `json:"rejectClientPromptIDs,omitempty"`
 
 	// +optional
-	// TrustCallerFields, when true, preserves caller-supplied kv_transfer_params
-	// and prompt-token fields on text routes. Enable this only when a trusted
-	// ingress component such as the Coordinator sits in front of the EPP and
-	// sanitizes external client requests. Mutually exclusive with
-	// RejectClientPromptIDs.
+	// TrustCallerFields, when true, preserves caller-supplied prompt-token and
+	// fingerprint fields on text routes, and kv_transfer_params on text routes
+	// and dedicated token routes. Enable this only when a trusted ingress
+	// component such as the Coordinator sits in front of the EPP and sanitizes
+	// external client requests. Mutually exclusive with RejectClientPromptIDs.
 	TrustCallerFields bool `json:"trustCallerFields,omitempty"`
 
 	// +optional

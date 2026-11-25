@@ -393,8 +393,9 @@ type RequestHandlerConfig struct {
 	RejectClientPromptIDs bool `json:"rejectClientPromptIDs,omitempty"`
 
 	// +optional
-	// TrustCallerFields, when true, preserves caller-supplied kv_transfer_params
-	// and prompt-token fields on text routes for internal EPPs behind a trusted
+	// TrustCallerFields, when true, preserves caller-supplied prompt-token and
+	// fingerprint fields on text routes, and kv_transfer_params on text routes
+	// and dedicated token routes, for internal EPPs behind a trusted
 	// Coordinator. Mutually exclusive with RejectClientPromptIDs.
 	TrustCallerFields bool `json:"trustCallerFields,omitempty"`
 }
