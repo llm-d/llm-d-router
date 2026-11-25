@@ -22,7 +22,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -37,6 +36,7 @@ import (
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -467,65 +467,15 @@ func TestHealthServer_StandbyLogging(t *testing.T) {
 	}
 }
 
-type pipeAddr struct{}
-
-func (pipeAddr) Network() string { return "pipe" }
-func (pipeAddr) String() string  { return "pipe" }
-
-// pipeListener pairs net.Pipe connections in memory so grpc.Server and
-// grpc.ClientConn run inside testing/synctest without OS sockets.
-type pipeListener struct {
-	conns  chan net.Conn
-	closed chan struct{}
-	once   sync.Once
-}
-
-func newPipeListener() *pipeListener {
-	return &pipeListener{
-		conns:  make(chan net.Conn),
-		closed: make(chan struct{}),
-	}
-}
-
-func (l *pipeListener) Dial(ctx context.Context) (net.Conn, error) {
-	client, server := net.Pipe()
-	select {
-	case l.conns <- server:
-		return client, nil
-	case <-l.closed:
-		_ = client.Close()
-		_ = server.Close()
-		return nil, net.ErrClosed
-	case <-ctx.Done():
-		_ = client.Close()
-		_ = server.Close()
-		return nil, ctx.Err()
-	}
-}
-
-func (l *pipeListener) Accept() (net.Conn, error) {
-	select {
-	case c := <-l.conns:
-		return c, nil
-	case <-l.closed:
-		return nil, net.ErrClosed
-	}
-}
-
-func (l *pipeListener) Close() error {
-	l.once.Do(func() { close(l.closed) })
-	return nil
-}
-
-func (l *pipeListener) Addr() net.Addr { return pipeAddr{} }
-
 // Envoy health-checks on a reused connection and sends keepalive pings every 15s with no
 // active stream, so the server must accept pings that frequent without sending GOAWAY.
 func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		lis := newPipeListener()
+		// An in-memory listener keeps all I/O inside the bubble; goroutines blocked on a real
+		// socket would stop the fake clock from advancing.
+		lis := bufconn.Listen(1 << 16)
 		var isLeader atomic.Bool
 		isLeader.Store(true)
 		srv := newHealthGRPCServer(testr.New(t), &mockDatastore{}, &isLeader, nil, false, nil, nil)
@@ -542,7 +492,7 @@ func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
 		// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
 		conn, err := grpc.NewClient("passthrough:///pipe",
 			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-				return lis.Dial(ctx)
+				return lis.DialContext(ctx)
 			}),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
