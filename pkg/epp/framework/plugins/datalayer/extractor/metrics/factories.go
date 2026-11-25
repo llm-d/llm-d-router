@@ -105,6 +105,10 @@ type (
 		// DefaultEngine specifies which engine to use as the default for unlabeled Pods.
 		// Can be any engine name from EngineConfigs. Defaults to "vllm".
 		DefaultEngine string `json:"defaultEngine"`
+		// FilterByRank filters scraped families to each endpoint's RankIndex using
+		// the engine's rankLabelName even when RankByHeader is false. Enable this
+		// for multi-port pools whose ranks share one scraped /metrics port.
+		FilterByRank bool `json:"filterByRank,omitempty"`
 		// EngineConfigs defines metric specifications for specific engine types.
 		// Built-in configs (vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
 		EngineConfigs []engineConfigParams `json:"engineConfigs"`
@@ -359,6 +363,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 		return nil, err
 	}
 	extractor.typedName.Name = name
+	extractor.filterByRank = params.FilterByRank
 	return extractor, nil
 }
 

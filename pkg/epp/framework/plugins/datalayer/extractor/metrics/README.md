@@ -33,6 +33,8 @@ A model server that runs several engines in one Pod exposes one series per engin
 
 An endpoint that is one of several data-parallel ranks behind its Pod's port (see [Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md)) reads only its own rank's series. The extractor drops every series whose rank label names a different rank than the endpoint's data-parallel rank, then applies the rules above to the series left, which is the rank's own value for each per-engine family. Series without the rank label are kept. The engine config's `rankLabelName` sets the rank label; the built-in `vllm` config uses `engine` and the `sglang` config uses `dp_rank`, and the other built-in configs set none, so their rank endpoints read the combined Pod values.
 
+Multi-port pools whose ranks share one scraped `/metrics` port can enable per-rank filtering with `filterByRank: true`. For example, an SGLang Rust server pool serves gRPC on per-rank ports and exposes all ranks on rank 0's HTTP port. Pair `metrics-data-source` `port` with `filterByRank: true` so each rank endpoint reads only its own `dp_rank` series.
+
 A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration, and `customMetrics` entries without `aggregation` read one series. A `customMetrics` entry with `aggregation: sum` adds every matching series.
 
 ## Attributes produced
@@ -89,6 +91,7 @@ The plugin config supports:
 
 -   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`.
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
+-   `filterByRank`: Filter scraped families to each endpoint's `RankIndex` by `rankLabelName`, even when endpoints use distinct ports. Defaults to `false`. Set to `true` when multi-port ranks share one scraped `/metrics` port.
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engineConfig can set `rankLabelName`, the label naming the data-parallel rank of a series (see [Families with several series](#families-with-several-series)).
     Each engineConfig can include `customMetrics` entries.

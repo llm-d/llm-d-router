@@ -58,9 +58,9 @@ type metricsDatasourceParams struct {
 	Path string `json:"path"`
 	// Port, when set, overrides the endpoint's inference port for metrics retrieval.
 	// Use when the model server exposes metrics on a port other than the InferencePool target port.
-	// The override applies to every endpoint of the source. Do not set it on pools with
-	// multiple target ports (data-parallel ranks): each rank must be scraped on its own
-	// port, and a single override would point all ranks at the same one.
+	// The override applies to every endpoint of the source. On pools with multiple target ports,
+	// set it only when that single port publishes per-rank labeled series (for example, SGLang's
+	// rank-0 HTTP /metrics port with dp_rank) and pair it with core-metrics-extractor's filterByRank: true.
 	Port *int `json:"port,omitempty"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
 	InsecureSkipVerify bool `json:"insecureSkipVerify"`

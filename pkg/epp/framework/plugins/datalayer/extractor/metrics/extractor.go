@@ -63,6 +63,7 @@ type Extractor struct {
 	typedName      fwkplugin.TypedName
 	registry       *MappingRegistry
 	engineLabelKey string
+	filterByRank   bool
 }
 
 // NewCoreMetricsExtractor returns a new model server protocol (MSP) metrics extractor,
@@ -146,7 +147,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	if !ok {
 		return fmt.Errorf("no mapping found for engine type %q and no default mapping registered", engineType)
 	}
-	if meta := ep.GetMetadata(); meta != nil && meta.RankByHeader && mapping.RankLabel != "" {
+	if meta := ep.GetMetadata(); meta != nil && (meta.RankByHeader || ext.filterByRank) && mapping.RankLabel != "" {
 		families = rankSeries(families, mapping.RankLabel, strconv.Itoa(meta.RankIndex))
 	}
 
