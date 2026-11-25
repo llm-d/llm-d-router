@@ -16,211 +16,61 @@ limitations under the License.
 
 package e2e
 
-import "fmt"
+import (
+	_ "embed"
+	"fmt"
+)
 
-// Simple EPP configuration for running without P/D
-const simpleConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: approx-prefix-cache-producer
-  parameters:
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: decode-filter
-- type: max-score-picker
-- type: single-profile-handler
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`
+// Simple EPP configuration for running without P/D.
+//
+//go:embed testdata/configs/simple.yaml
+var simpleConfig string
 
 // modelRolloutConfig adds models-responder, which screens requests by the model
 // lists the Pods report.
-const modelRolloutConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: models-responder
-- type: decode-filter
-- type: max-score-picker
-- type: single-profile-handler
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-`
+//
+//go:embed testdata/configs/model-rollout.yaml
+var modelRolloutConfig string
 
 // epdEncodeDecodeConfig configures E/PD (encode + P/D) using disagg-profile-handler.
 // The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
-const epdEncodeDecodeConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: encode-filter
-- type: decode-filter
-- type: max-score-picker
-- type: disagg-profile-handler
-  parameters:
-    deciders:
-      encode: always-disagg-multimodal-decider
-- type: always-disagg-multimodal-decider
-schedulingProfiles:
-- name: encode
-  plugins:
-  - pluginRef: encode-filter
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-`
+//
+//go:embed testdata/configs/epd-encode-decode.yaml
+var epdEncodeDecodeConfig string
 
 // epdConfig configures E/P/D (encode + prefill + decode) using disagg-profile-handler.
 // The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
-const epdConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: encode-filter
-- type: prefill-filter
-- type: decode-filter
-- type: approx-prefix-cache-producer
-  parameters:
-    blockSizeTokens: 16
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: max-score-picker
-- type: disagg-profile-handler
-  parameters:
-    deciders:
-      encode: always-disagg-multimodal-decider
-      prefill: prefix-based-pd-decider
-- type: always-disagg-multimodal-decider
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
-schedulingProfiles:
-- name: encode
-  plugins:
-  - pluginRef: encode-filter
-- name: prefill
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`
+//
+//go:embed testdata/configs/epd.yaml
+var epdConfig string
 
 // generateEncodeConfig is the encode-only EPP config for /inference/v1/generate.
 // Uses single-profile-handler so the EPP routes directly to encode pods without
 // requiring a decode stage.
-const generateEncodeConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: vllmhttp-parser
-- type: encode-filter
-- type: max-score-picker
-- type: single-profile-handler
-requestHandler:
-  parsers:
-   - pluginRef: vllmhttp-parser 
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: encode-filter
-  - pluginRef: max-score-picker
-`
+//
+//go:embed testdata/configs/generate-encode.yaml
+var generateEncodeConfig string
 
 // generatePrefillConfig is the prefill-only EPP config for /inference/v1/generate.
 // Uses single-profile-handler so the EPP routes directly to prefill pods without
 // requiring a decode stage.
-const generatePrefillConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: vllmhttp-parser
-- type: prefill-filter
-- type: max-score-picker
-- type: single-profile-handler
-requestHandler:
-  parsers:
-   - pluginRef: vllmhttp-parser 
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-`
+//
+//go:embed testdata/configs/generate-prefill.yaml
+var generatePrefillConfig string
 
-// EPP configuration for running with P/D using the unified disagg-profile-handler
+// EPP configuration for running with P/D using the unified disagg-profile-handler.
 // pdConfig uses vllmhttp-parser as the request handler so the EPP can parse
 // both OpenAI-style and /inference/v1/generate (token-in) traffic. The parser
 // delegates non-generate paths to the embedded OpenAI parser, so existing
 // chat/completions tests are unaffected.
-const pdConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: vllmhttp-parser
-- type: approx-prefix-cache-producer
-  parameters:
-    blockSizeTokens: 16
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: prefill-filter
-- type: decode-filter
-- type: max-score-picker
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
-- type: disagg-profile-handler
-  parameters:
-    deciders:
-      prefill: prefix-based-pd-decider
-schedulingProfiles:
-- name: prefill
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`
+//
+//go:embed testdata/configs/pd.yaml
+var pdConfig string
 
-// EPP configuration for running decode-only using disagg-profile-handler (no prefill, no encode)
-const decodeOnlyConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: approx-prefix-cache-producer
-  parameters:
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: encode-filter
-- type: prefill-filter
-- type: decode-filter
-- type: max-score-picker
-- type: disagg-profile-handler
-schedulingProfiles:
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`
+// EPP configuration for running decode-only using disagg-profile-handler (no prefill, no encode).
+//
+//go:embed testdata/configs/decode-only.yaml
+var decodeOnlyConfig string
 
 // renderURL is the vllm-render Service URL for the token-producer plugin. The
 // renderer is shared across parallel processes and lives in the base namespace,
@@ -306,28 +156,12 @@ schedulingProfiles:
 `, renderURL())
 }
 
-// EPP configuration for running scale model server test
-const scaleConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: max-score-picker
-- type: single-profile-handler
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: max-score-picker
-`
+// EPP configuration for running scale model server test.
+//
+//go:embed testdata/configs/scale.yaml
+var scaleConfig string
 
-// EPP configuration for running with vLLM Data Parallel support
-const dataParallelConfig = `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: decode-filter
-- type: max-score-picker
-- type: single-profile-handler
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-`
+// EPP configuration for running with vLLM Data Parallel support.
+//
+//go:embed testdata/configs/data-parallel.yaml
+var dataParallelConfig string

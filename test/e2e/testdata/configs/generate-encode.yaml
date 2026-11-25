@@ -1,0 +1,15 @@
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: vllmhttp-parser
+- type: encode-filter
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parsers:
+  - pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: encode-filter
+  - pluginRef: max-score-picker
