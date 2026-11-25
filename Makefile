@@ -360,9 +360,9 @@ bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requir
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke
-bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-benchtime=1x) to catch runtime rot
+bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-race -short -benchtime=1x) to catch runtime rot
 	@printf "\033[33;1m==== Running Flow Control Benchmark Smoke ====\033[0m\n"
-	$(BUILDER_RUN) 'go test -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
+	$(BUILDER_RUN) 'go test -race -short -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
 
 .PHONY: post-deploy-test
 post-deploy-test: ## Run post deployment tests

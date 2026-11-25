@@ -386,16 +386,29 @@ func evictionScenarios(full bool) []evictionScenario {
 // Set EVICTION_BENCH_FULL=1 for the full matrix and EVICTION_BENCH_TABLE=1 to print a markdown
 // summary table after the run.
 func BenchmarkEvictionDynamics(b *testing.B) {
-	if testing.Short() {
-		b.Skip("eviction dynamics benchmark skipped in -short mode")
-	}
-
 	// Reset so -count>1 repeats do not accumulate rows from earlier runs.
 	evictionTableMu.Lock()
 	evictionTable = nil
 	evictionTableMu.Unlock()
 
-	for _, sc := range evictionScenarios(os.Getenv("EVICTION_BENCH_FULL") != "") {
+	var scenarios []evictionScenario
+	if testing.Short() {
+		// Run one representative scenario in -short mode so make bench-smoke exercises
+		// the reclamation loop without running the full 22-scenario sweep.
+		scenarios = []evictionScenario{{
+			capacity:  20,
+			preload:   20,
+			hpCeiling: 0.9,
+			maxRevoc:  2,
+			profile:   profileConcurrency,
+			grace:     matchedGrace(profileConcurrency),
+			burst:     burstSingle,
+		}}
+	} else {
+		scenarios = evictionScenarios(os.Getenv("EVICTION_BENCH_FULL") != "")
+	}
+
+	for _, sc := range scenarios {
 		b.Run(sc.name(), func(b *testing.B) {
 			agg := &scenarioAgg{}
 			for range b.N {
