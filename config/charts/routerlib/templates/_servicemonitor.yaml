@@ -1,9 +1,13 @@
 {{- define "llm-d-epp.service-monitor" -}}
 {{- $monitoringProviderName := include "llm-d-router.monitoring.provider.name" . | lower -}}
 {{- if and .Values.router.monitoring.prometheus.enabled (eq $monitoringProviderName "prometheusoperator") }}
+{{- $kind := .Values.router.monitoring.prometheus.kind | default "ServiceMonitor" -}}
+{{- if not (has $kind (list "ServiceMonitor" "PodMonitor")) -}}
+{{- fail (printf ".Values.router.monitoring.prometheus.kind must be one of [ServiceMonitor, PodMonitor], got %q" $kind) -}}
+{{- end }}
 ---
 apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
+kind: {{ $kind }}
 metadata:
   name: {{ include "llm-d-router.name" . }}-monitor
   namespace: {{ .Release.Namespace }}
@@ -13,9 +17,15 @@ metadata:
     {{- . | toYaml | nindent 4 }}
     {{- end }}
 spec:
+  {{- if eq $kind "PodMonitor" }}
+  podMetricsEndpoints:
+  - interval: {{ .Values.router.monitoring.interval }}
+    port: "metrics"
+  {{- else }}
   endpoints:
   - interval: {{ .Values.router.monitoring.interval }}
     port: "http-metrics"
+  {{- end }}
     path: "/metrics"
     {{- if .Values.router.monitoring.prometheus.auth.enabled }}
     authorization:
@@ -23,14 +33,23 @@ spec:
         key: token
         name: {{ include "llm-d-router.metricsReaderSecretName" . }}
     {{- end }}
+  {{- if eq $kind "PodMonitor" }}
+  {{- /* A PodMonitor selects the EPP pods themselves, so it also scrapes pods that are not Ready, such as the standby replicas in leader-election mode, which the EPP Service leaves out. jobLabel names the pod selector label, whose value is <release>-epp: the same job as the ServiceMonitor's. */}}
+  jobLabel: {{ include "llm-d-router.selectorLabels" . | fromYaml | keys | first }}
+  {{- else }}
   {{- /* jobLabel names a Service label whose value becomes the scrape job; the selector requires it on every Service. */}}
   jobLabel: app.kubernetes.io/name
+  {{- end }}
   namespaceSelector:
     matchNames:
     - {{ .Release.Namespace }}
   selector:
     matchLabels:
+      {{- if eq $kind "PodMonitor" }}
+      {{- include "llm-d-router.selectorLabels" . | nindent 6 }}
+      {{- else }}
       {{- include "llm-d-router.labels" . | nindent 6 }}
+      {{- end }}
 ---
 {{- end }}
 {{- end }}

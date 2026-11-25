@@ -288,9 +288,15 @@ monitoring:
     name: ""
     gmp:
       autopilot: false
-  # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
+  # A Prometheus Operator ServiceMonitor (or PodMonitor, see kind) is created when enabled for
+  # EPP metrics collection
   prometheus:
     enabled: false
+    # ServiceMonitor scrapes the EPP metrics Services, which list Ready pods only. PodMonitor
+    # selects the EPP pods directly, so it also scrapes pods that are not Ready, such as the
+    # standby replicas in leader-election mode. Both give the scrape job <release>-epp.
+    # Options: ["ServiceMonitor", "PodMonitor"].
+    kind: ServiceMonitor
     auth:
       # Set to false to allow unauthenticated /metrics access. Required for annotation-based
       # Prometheus scraping and Istio metrics-merging, which do not send Bearer tokens.
@@ -300,7 +306,7 @@ monitoring:
       # Empty means <base>-metrics-reader-secret, where <base> is router.fullnameOverride
       # in the standalone chart when set, else the release name. Set a name to override it.
       secretName: ""
-    # additional labels for the ServiceMonitor
+    # additional labels for the ServiceMonitor or PodMonitor
     extraLabels: {}
 
 tracing:

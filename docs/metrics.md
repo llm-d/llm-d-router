@@ -59,7 +59,8 @@ kubectl create clusterrolebinding <release>-metrics-reader \
     --serviceaccount=<namespace>:<scraper-sa>
 ```
 
-The charts create this grant themselves for the ServiceMonitor and GMP PodMonitoring they render
+The charts create this grant themselves for the ServiceMonitor (or PodMonitor, with
+`router.monitoring.prometheus.kind=PodMonitor`) and GMP PodMonitoring they render
 when `router.monitoring.prometheus.enabled` is `true`.
 
 ### Model server / engine

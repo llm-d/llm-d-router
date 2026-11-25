@@ -336,6 +336,51 @@ if grep -q -- '^kind: ServiceMonitor$' "${gmp_monitoring_render_output}"; then
   exit 1
 fi
 
+echo "Verifying the EPP PodMonitor selects the EPP pods of a release under one job..."
+# chart:inferencePool.create. The gateway chart always creates its InferencePool.
+for podmonitor_case in llm-d-router-gateway:true llm-d-router-standalone:true llm-d-router-standalone:false; do
+  chart="${podmonitor_case%%:*}" pool_create="${podmonitor_case#*:}"
+  podmonitor_render_output="${TEMP_DIR}/${chart}-podmonitor-${pool_create}-render.yaml"
+  podmonitor_render_command="${HELM} template pm-job ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=${pool_create} --set router.epp.replicas=2 --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.kind=PodMonitor > ${podmonitor_render_output}"
+  echo "Executing: ${podmonitor_render_command}"
+  eval "${podmonitor_render_command}"
+  if [ "$(grep -c -- '^kind: PodMonitor$' "${podmonitor_render_output}")" -ne 1 ]; then
+    echo "${podmonitor_case}: router.monitoring.prometheus.kind=PodMonitor did not render exactly one PodMonitor"
+    exit 1
+  fi
+  if grep -q -- '^kind: ServiceMonitor$' "${podmonitor_render_output}"; then
+    echo "${podmonitor_case}: router.monitoring.prometheus.kind=PodMonitor also rendered a ServiceMonitor"
+    exit 1
+  fi
+  epp_pods='select((.kind == "Deployment" or .kind == "StatefulSet") and .metadata.name == "pm-job-epp") | .spec.template'
+  for kv in $("${YQ}" -N 'select(.kind == "PodMonitor") | .spec.selector.matchLabels | to_entries | .[] | .key + "=" + .value' "${podmonitor_render_output}"); do
+    if [ "$(KEY="${kv%%=*}" "${YQ}" -N "${epp_pods} | .metadata.labels[strenv(KEY)]" "${podmonitor_render_output}")" != "${kv#*=}" ]; then
+      echo "${podmonitor_case}: PodMonitor selector ${kv} does not match the EPP pod template"
+      exit 1
+    fi
+  done
+  pm_job_label=$("${YQ}" -N 'select(.kind == "PodMonitor") | .spec.jobLabel' "${podmonitor_render_output}")
+  job_value=$(JOB_LABEL="${pm_job_label}" "${YQ}" -N "${epp_pods} | .metadata.labels[strenv(JOB_LABEL)]" "${podmonitor_render_output}")
+  if [ "${job_value}" != "pm-job-epp" ]; then
+    echo "${podmonitor_case}: PodMonitor jobLabel '${pm_job_label}' must give the EPP pods the job pm-job-epp, got: ${job_value}"
+    exit 1
+  fi
+  pm_port=$("${YQ}" -N 'select(.kind == "PodMonitor") | .spec.podMetricsEndpoints[0].port' "${podmonitor_render_output}")
+  if [ -z "$(PORT="${pm_port}" "${YQ}" -N "${epp_pods} | .spec.containers[] | select(.name == \"epp\") | .ports[] | select(.name == strenv(PORT)) | .name" "${podmonitor_render_output}")" ]; then
+    echo "${podmonitor_case}: PodMonitor port '${pm_port}' is not a port of the EPP container"
+    exit 1
+  fi
+  pm_secret=$("${YQ}" -N 'select(.kind == "PodMonitor") | .spec.podMetricsEndpoints[0].authorization.credentials.name' "${podmonitor_render_output}")
+  if [ "$(SECRET="${pm_secret}" "${YQ}" -N 'select(.kind == "Secret" and .metadata.name == strenv(SECRET)) | .metadata.name' "${podmonitor_render_output}")" != "${pm_secret}" ]; then
+    echo "${podmonitor_case}: PodMonitor authorization Secret '${pm_secret}' is not rendered"
+    exit 1
+  fi
+done
+if "${HELM}" template bad-kind "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.kind=Foo > /dev/null 2>&1; then
+  echo "router.monitoring.prometheus.kind=Foo rendered; it must fail"
+  exit 1
+fi
+
 declare -A test_cases_llm_d_router_standalone
 
 # llm_d_router_standalone Helm Chart test cases

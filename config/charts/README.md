@@ -538,6 +538,7 @@ Configures metrics scraping via Prometheus (compatible with Google Managed Prome
 | :--- | :--- | :--- |
 | `router.monitoring.provider.name` | Metrics provider. Options: `[gmp, prometheusoperator]`. | `prometheusoperator` |
 | `router.monitoring.provider.gmp.autopilot` | Set to `true` if deploying GMP on GKE Autopilot. | `false` |
+| `router.monitoring.prometheus.kind` | With `prometheusoperator`, the scrape object to render: `ServiceMonitor` (scrapes the EPP metrics Services, Ready pods only) or `PodMonitor` (scrapes the EPP pods directly, including the not-Ready standby replicas in leader-election mode). | `ServiceMonitor` |
 | `router.tracing.enabled` | Enable OpenTelemetry tracing for EPP. | `false` |
 | `router.tracing.otelExporterEndpoint` | OTLP gRPC collector endpoint. | `http://localhost:4317` |
 | `router.tracing.sampling.sampler` | Trace sampler type. | `parentbased_traceidratio` |
@@ -547,6 +548,14 @@ With `prometheusoperator`, the ServiceMonitor takes the scrape `job` from the EP
 `app.kubernetes.io/name` label, `<release>-epp`. All EPP replicas of a release share that job,
 including the per-replica Services of GKE preferred backends; the `service` and `instance`
 labels tell the replicas apart.
+
+A Service lists only Ready pods, so in leader-election mode (`router.epp.replicas` above 1
+without cross-replica state) the ServiceMonitor scrapes the leader alone. Set
+`router.monitoring.prometheus.kind=PodMonitor` to scrape the standby replicas too, for example to
+see that they are warm before a leader handover. The PodMonitor selects the EPP pods by their
+selector label and takes the job from it, so the job is still `<release>-epp`; the `pod` and
+`instance` labels tell the replicas apart. Its endpoint uses the pod's `metrics` port and the same
+authorization as the ServiceMonitor.
 
 When tracing is enabled, EPP request-associated spans carry `llm_d.epp.fairness.id` and
 `llm_d.epp.fairness.source` together. The value is the fairness identity the EPP resolved
