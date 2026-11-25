@@ -85,6 +85,7 @@ const (
 	FieldToolChoice           = "tool_choice"
 	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
+	FieldExtraArgs            = "extra_args" // sampling_params field: vLLM reads kv_transfer_params from it
 	FieldN                    = "n"
 	FieldCacheSalt            = "cache_salt"
 	FieldPriority             = "priority"

@@ -312,29 +312,93 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	return raw, parsed, true
 }
 
-// deleteCallerPDFlags removes kv_transfer_params.do_remote_prefill and
-// do_remote_decode, keeping the other keys as raw bytes, and reports whether
-// either was present. The P/D connectors set both flags themselves. A caller's
-// do_remote_prefill on a decoder-only request makes vLLM's NIXL scheduler assert.
+// deleteCallerPDFlags removes a caller's do_remote_prefill and do_remote_decode
+// from kv_transfer_params and from sampling_params.extra_args.kv_transfer_params,
+// which vLLM's generate route reads, and reports whether either was present.
+// The P/D connectors set both flags themselves. A caller's do_remote_prefill on
+// a decoder-only request makes vLLM's NIXL scheduler assert.
 func deleteCallerPDFlags(body map[string]any) bool {
-	rawParams, _ := body[reqcommon.FieldKVTransferParams].(json.RawMessage)
-	var params map[string]json.RawMessage
-	if json.Unmarshal(rawParams, &params) != nil {
-		return false
+	removed := false
+	if params, ok := body[reqcommon.FieldKVTransferParams].(json.RawMessage); ok {
+		if cleaned, stripped := stripPDFlags(params); stripped {
+			removed = true
+			if cleaned == nil {
+				delete(body, reqcommon.FieldKVTransferParams)
+			} else {
+				body[reqcommon.FieldKVTransferParams] = cleaned
+			}
+		}
 	}
-	_, hasPrefill := params[reqcommon.FieldDoRemotePrefill]
-	_, hasDecode := params[reqcommon.FieldDoRemoteDecode]
+	return deleteExtraArgsPDFlags(body) || removed
+}
+
+func deleteExtraArgsPDFlags(body map[string]any) bool {
+	switch samplingParams := body[reqcommon.FieldSamplingParams].(type) {
+	case map[string]any:
+		extraArgs, _ := samplingParams[reqcommon.FieldExtraArgs].(map[string]any)
+		params, _ := extraArgs[reqcommon.FieldKVTransferParams].(map[string]any)
+		_, hasPrefill := params[reqcommon.FieldDoRemotePrefill]
+		_, hasDecode := params[reqcommon.FieldDoRemoteDecode]
+		delete(params, reqcommon.FieldDoRemotePrefill)
+		delete(params, reqcommon.FieldDoRemoteDecode)
+		return hasPrefill || hasDecode
+	case json.RawMessage:
+		var samplingFields, extraArgs map[string]json.RawMessage
+		if json.Unmarshal(samplingParams, &samplingFields) != nil ||
+			json.Unmarshal(samplingFields[reqcommon.FieldExtraArgs], &extraArgs) != nil {
+			return false
+		}
+		cleaned, stripped := stripPDFlags(extraArgs[reqcommon.FieldKVTransferParams])
+		if !stripped {
+			return false
+		}
+		if cleaned == nil {
+			delete(extraArgs, reqcommon.FieldKVTransferParams)
+		} else {
+			extraArgs[reqcommon.FieldKVTransferParams] = cleaned
+		}
+		rawExtraArgs, err := json.Marshal(extraArgs)
+		if err != nil {
+			return false
+		}
+		samplingFields[reqcommon.FieldExtraArgs] = rawExtraArgs
+		rawSampling, err := json.Marshal(samplingFields)
+		if err != nil {
+			return false
+		}
+		body[reqcommon.FieldSamplingParams] = json.RawMessage(rawSampling)
+		return true
+	}
+	return false
+}
+
+// stripPDFlags returns params without do_remote_prefill and do_remote_decode,
+// or nil when no other key is left, and whether either flag was present. Params
+// that cannot name a flag, such as one holding only prompt_token_ids, are not decoded.
+func stripPDFlags(params json.RawMessage) (json.RawMessage, bool) {
+	if !bytes.Contains(params, []byte(reqcommon.FieldDoRemotePrefill)) &&
+		!bytes.Contains(params, []byte(reqcommon.FieldDoRemoteDecode)) && !escapesKeyChar(params) {
+		return params, false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(params, &fields) != nil {
+		return params, false
+	}
+	_, hasPrefill := fields[reqcommon.FieldDoRemotePrefill]
+	_, hasDecode := fields[reqcommon.FieldDoRemoteDecode]
 	if !hasPrefill && !hasDecode {
-		return false
+		return params, false
 	}
-	delete(params, reqcommon.FieldDoRemotePrefill)
-	delete(params, reqcommon.FieldDoRemoteDecode)
-	if len(params) == 0 {
-		delete(body, reqcommon.FieldKVTransferParams)
-	} else if cleaned, err := json.Marshal(params); err == nil {
-		body[reqcommon.FieldKVTransferParams] = json.RawMessage(cleaned)
+	delete(fields, reqcommon.FieldDoRemotePrefill)
+	delete(fields, reqcommon.FieldDoRemoteDecode)
+	if len(fields) == 0 {
+		return nil, true
 	}
-	return true
+	cleaned, err := json.Marshal(fields)
+	if err != nil {
+		return params, false
+	}
+	return cleaned, true
 }
 
 // decoderOnlyRequest returns r with deleteCallerPDFlags applied,
@@ -391,8 +455,9 @@ func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p 
 	return cloneRequestWithBody(r.Context(), r, raw), true
 }
 
-// escapesKeyChar reports whether raw holds a \u escape of a character in
-// kv_transfer_params. Those characters are U+005F and U+0061 to U+007A.
+// escapesKeyChar reports whether raw holds a \u escape of '_' or a lower-case
+// letter, U+005F or U+0061 to U+007A, which spell kv_transfer_params and both
+// P/D flags.
 func escapesKeyChar(raw []byte) bool {
 	for {
 		i := bytes.Index(raw, []byte(`\u00`))
@@ -407,7 +472,7 @@ func escapesKeyChar(raw []byte) bool {
 }
 
 // readBody reads r.Body into one buffer sized from r.ContentLength. The cap
-// stops a false Content-Length from reserving a large buffer.
+// bounds what a client reserves by sending the header and withholding the body.
 func readBody(r *http.Request) ([]byte, error) {
 	const maxPresize = 4 << 20
 	if r.ContentLength <= 0 || r.ContentLength > maxPresize {

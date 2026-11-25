@@ -1332,6 +1332,91 @@ func TestServer_DecoderOnlyPassthroughDropsFlagsUnderEscapedKey(t *testing.T) {
 	}
 }
 
+// vLLM's generate route reads kv_transfer_params from sampling_params.extra_args
+// too, and a flag name can be spelled with an escape.
+func TestServer_DecoderOnlyPassthroughDropsNestedAndEscapedFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		want string
+	}{
+		{
+			"generate extra_args",
+			reqcommon.PathVLLMGenerate,
+			`{"token_ids":[1],"sampling_params":{"max_tokens":1,"extra_args":{"kv_transfer_params":{"do_remote_prefill":true,"other":1},"x":2}}}`,
+			`{"token_ids":[1],"sampling_params":{"max_tokens":1,"extra_args":{"kv_transfer_params":{"other":1},"x":2}}}`,
+		},
+		{
+			"generate extra_args holding only flags",
+			reqcommon.PathVLLMGenerate,
+			`{"token_ids":[1],"sampling_params":{"extra_args":{"kv_transfer_params":{"do_remote_decode":true}}}}`,
+			`{"token_ids":[1],"sampling_params":{"extra_args":{}}}`,
+		},
+		{
+			"escaped flag name",
+			reqcommon.PathChatCompletions,
+			`{"model":"m","messages":[],"kv_transfer_params":{"do\u005fremote_prefill":true,"other":1}}`,
+			`{"model":"m","messages":[],"kv_transfer_params":{"other":1}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			var forwarded string
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				forwarded = string(raw)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+
+			s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(tt.path))(httptest.NewRecorder(), req)
+
+			assert.JSONEq(t, tt.want, forwarded)
+		})
+	}
+}
+
+// A body parsed with inspected fields holds sampling_params as decoded values.
+func TestDeleteCallerPDFlagsDecodedSamplingParams(t *testing.T) {
+	body := map[string]any{reqcommon.FieldSamplingParams: map[string]any{
+		reqcommon.FieldExtraArgs: map[string]any{
+			reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldDoRemotePrefill: true, "other": 1},
+		},
+	}}
+
+	assert.True(t, deleteCallerPDFlags(body))
+	assert.Equal(t, map[string]any{reqcommon.FieldSamplingParams: map[string]any{
+		reqcommon.FieldExtraArgs: map[string]any{reqcommon.FieldKVTransferParams: map[string]any{"other": 1}},
+	}}, body)
+}
+
+// A body that cannot name kv_transfer_params is forwarded as sent without
+// being decoded, so one Go cannot parse still reaches the engine.
+func TestServer_DecoderOnlyPassthroughSkipsDecodingWithoutKey(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+	var forwarded string
+	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		forwarded = string(raw)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	const body = `{"model":"m","messages":[{"role":"user","content":"hi"}],"temperature":NaN}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, body, forwarded)
+}
+
 // The data-parallel proxy forwards a request with a source before
 // decodeWithP2PSource could rebuild kv_transfer_params, so its flags are
 // removed first.
