@@ -1643,6 +1643,53 @@ func TestProcessor(t *testing.T) {
 				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
 			})
 
+			t.Run("should drop unpartitioned detector capacity series once stages are evaluated", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "unpartitioned-capacity-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlDetectorCapacity(detector, flowcontrol.SaturationStageFromContext(ctx), "requests", 1)
+					return 1.0
+				}
+
+				// Empty pool: the detector is evaluated without a stage.
+				h.endpointCandidates.Candidates = nil
+				h.processor.dispatchCycle(context.Background())
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				assert.NotContains(t, capacityStages(t, detector), "", "unpartitioned series should have been deleted")
+			})
+
+			t.Run("should drop a stage's detector capacity series once the stage empties", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "emptied-stage-capacity-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlDetectorCapacity(detector, flowcontrol.SaturationStageFromContext(ctx), "requests", 1)
+					return 1.0
+				}
+
+				// Both stages record a series, then prefill empties.
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+				h.processor.dispatchCycle(context.Background())
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				// Stage cleanup deletes the stage for every detector, so a parallel test's empty
+				// partition can remove this detector's series too; asserting absence is race-free.
+				assert.NotContains(t, capacityStages(t, detector), flowcontrol.SaturationStagePrefill,
+					"the emptied prefill stage's series should have been deleted")
+			})
+
 			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
 				t.Parallel()
 				h := newTestHarness(t, testCleanupTick)
@@ -2442,4 +2489,28 @@ func (f *fakeBandSelectionPolicy) Rank(_ context.Context, _ flowcontrol.BandSele
 
 func (f *fakeBandSelectionPolicy) RecordDispatch(_ context.Context, priority int) {
 	f.dispatched = append(f.dispatched, priority)
+}
+
+// capacityStages returns the stage label of every llm_d_epp_flow_control_detector_capacity
+// series recorded for detector.
+func capacityStages(t *testing.T, detector string) []string {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var stages []string
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_detector_capacity" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				labels[lp.GetName()] = lp.GetValue()
+			}
+			if labels["detector"] == detector {
+				stages = append(stages, labels["stage"])
+			}
+		}
+	}
+	return stages
 }
