@@ -365,7 +365,7 @@ func IsClientCancellation(ctx context.Context, err error) bool {
 // two in sync.
 func classifyExecutionPath(started, executed map[string]bool, doneBy, cancelledIn string) (string, bool) {
 	// A conditional-decode probe is the decode phase unless it deferred to
-	// prefill (412) or the client abandoned it before the worker answered; in
+	// prefill (cache miss) or the client abandoned it before the worker answered; in
 	// those cases the decode phase is the decode step, so the path is unknown
 	// until that step starts.
 	probeDeferred := executed["conditional-decode"] && doneBy != "conditional-decode"

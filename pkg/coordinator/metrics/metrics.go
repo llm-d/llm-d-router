@@ -66,10 +66,11 @@ const (
 	UpstreamDecode            = "decode"
 )
 
-// Result label values for conditional_decode_probes_total. Served covers 2xx/3xx
-// (the worker answered the request inline). Deferred is exactly HTTP 412 (cache
-// miss, pipeline continues). Error covers any other 4xx/5xx: the worker's
-// response is still streamed to the client, but the outcome is not a hit.
+// Result label values for conditional_decode_probes_total. Deferred is a cache
+// miss, as the conditional-decode step defines it (pipeline continues). Served
+// covers any other 2xx/3xx (the worker answered the request inline). Error
+// covers any other 4xx/5xx: the worker's response is still streamed to the
+// client, but the outcome is not a hit.
 // TransportError covers a round-trip failure before headers arrive
 // (connection refused, timeout, TCP reset); no worker response was received
 // and the proxy answered the client 502.

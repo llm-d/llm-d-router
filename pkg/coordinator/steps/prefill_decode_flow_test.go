@@ -722,17 +722,19 @@ func TestResponseHeaders_FlowFromConditionalDecodeMiss(t *testing.T) {
 		probeRevision string
 		forceStream   bool
 	}{
-		{name: "412 carries the revision", probeRevision: "revision-b"},
-		{name: "412 without the revision", probeRevision: ""},
-		{name: "forced 412 carries the revision", probeRevision: "revision-b", forceStream: true},
+		{name: "miss carries the revision", probeRevision: "revision-b"},
+		{name: "miss without the revision", probeRevision: ""},
+		{name: "forced miss carries the revision", probeRevision: "revision-b", forceStream: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runConditionalDecodeMissHeaderFlow(t, tc.probeRevision, tc.forceStream)
+			forEachMissStatus(t, func(t *testing.T, status int) {
+				runConditionalDecodeMissHeaderFlow(t, status, tc.probeRevision, tc.forceStream)
+			})
 		})
 	}
 }
 
-func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string, forceStream bool) {
+func runConditionalDecodeMissHeaderFlow(t *testing.T, missStatus int, probeRevision string, forceStream bool) {
 	t.Helper()
 	var prefillHeaders, decodeHeaders http.Header
 	var probeStream any
@@ -746,7 +748,7 @@ func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string, forc
 			if probeRevision != "" {
 				w.Header().Set("X-LLM-D-Disagg-Revision", probeRevision)
 			}
-			w.WriteHeader(http.StatusPreconditionFailed)
+			w.WriteHeader(missStatus)
 
 		case r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhasePrefill:
 			prefillHeaders = r.Header.Clone()

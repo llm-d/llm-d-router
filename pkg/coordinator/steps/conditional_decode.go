@@ -88,15 +88,15 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	// A served probe is checked as decode's reply is; body is a clone, so an
-	// injected include_usage does not reach the decode step after a 412. On a
-	// 412 nothing is written, so the writer stays idle.
+	// injected include_usage does not reach the decode step after a cache miss.
+	// On a cache miss nothing is written, so the writer stays idle.
 	parity, injectedUsage := setupParity(ConditionalDecodeStepName, s.promptTokenParity, logger, reqCtx, body)
 
 	probeHeaders := map[string]string{routing.PreferHeader: routing.PreferIfAvailable}
 	var cacheMiss bool
 	var forceStreamResult string
 	onProbeResponse := func(resp *http.Response) error {
-		if err := deferOnPreconditionFailed(reqCtx, resp); err != nil {
+		if err := deferOnCacheMiss(reqCtx, resp); err != nil {
 			cacheMiss = true
 			return err
 		}
@@ -123,12 +123,12 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 				headers:  probeHeaders,
 				onResponse: func(resp *http.Response) error {
 					forcedStatus = resp.StatusCode
-					return deferOnPreconditionFailed(reqCtx, resp)
+					return deferOnCacheMiss(reqCtx, resp)
 				},
 			}
 			result, _, err := tryForceStream(ctx, logger, s.gwClient, s.budget, leg, reqCtx, body, shape, parity)
 			if errors.Is(err, errCacheMiss) {
-				logger.V(logutil.DEFAULT).Info("probe deferred (412), continuing pipeline")
+				logger.V(logutil.DEFAULT).Info("probe deferred, continuing pipeline", "status", forcedStatus)
 				return nil
 			}
 			if result == "" {
@@ -160,7 +160,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	if cacheMiss {
-		logger.V(logutil.DEFAULT).Info("probe deferred (412), continuing pipeline")
+		logger.V(logutil.DEFAULT).Info("probe deferred, continuing pipeline", "status", out.Status)
 		return nil
 	}
 	if out.TransportErr != nil {
@@ -174,12 +174,19 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
-// deferOnPreconditionFailed returns errCacheMiss when the worker defers the
-// probe with HTTP 412, after capturing the response headers the later steps
+// isCacheMiss reports whether status is EPP's answer that no decode worker can
+// serve the probe from its KV cache: 412, or 204 from an EPP that answers a
+// miss without an error status.
+func isCacheMiss(status int) bool {
+	return status == http.StatusNoContent || status == http.StatusPreconditionFailed
+}
+
+// deferOnCacheMiss returns errCacheMiss when the worker defers the probe with
+// a cache-miss status, after capturing the response headers the later steps
 // forward and recording the deferred result. It returns nil for any other
 // status.
-func deferOnPreconditionFailed(reqCtx *pipeline.RequestContext, resp *http.Response) error {
-	if resp.StatusCode != http.StatusPreconditionFailed {
+func deferOnCacheMiss(reqCtx *pipeline.RequestContext, resp *http.Response) error {
+	if !isCacheMiss(resp.StatusCode) {
 		return nil
 	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
@@ -187,9 +194,9 @@ func deferOnPreconditionFailed(reqCtx *pipeline.RequestContext, resp *http.Respo
 	return errCacheMiss
 }
 
-// probeResult is the probe result for a status other than 412: a worker error
-// for any other 4xx/5xx, whose response still reaches the client, and served
-// otherwise.
+// probeResult is the probe result for a status that is not a cache miss: a
+// worker error for any other 4xx/5xx, whose response still reaches the client,
+// and served otherwise.
 func probeResult(status int) string {
 	if status >= http.StatusBadRequest {
 		return coordmetrics.ProbeResultError

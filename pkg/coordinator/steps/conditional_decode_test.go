@@ -25,16 +25,20 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -375,36 +379,69 @@ func TestConditionalDecodeStep_CacheHit_Streaming(t *testing.T) {
 	}
 }
 
-func TestConditionalDecodeStep_CacheMiss_412(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusPreconditionFailed)
-		_, _ = w.Write([]byte("no cache available"))
-	}))
-	defer srv.Close()
-
-	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-	step, _ := NewConditionalDecodeStep(gwClient, nil)
-
-	recorder := httptest.NewRecorder()
-	reqCtx := &pipeline.RequestContext{
-		RequestID:      "req-1",
-		OriginalPath:   testChatCompletionsPath,
-		Body:           map[string]any{"model": "test"},
-		ResponseWriter: recorder,
+// forEachMissStatus runs test once for each status the step handles as a cache
+// miss.
+func forEachMissStatus(t *testing.T, test func(t *testing.T, status int)) {
+	t.Helper()
+	for _, status := range []int{http.StatusNoContent, http.StatusPreconditionFailed} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) { test(t, status) })
 	}
+}
 
-	err := step.Execute(context.Background(), reqCtx)
-	if err != nil {
-		t.Fatalf("expected nil error on cache miss, got %v", err)
-	}
+// A miss, answered with 204 or 412, continues the pipeline, writes nothing and
+// counts as deferred.
+func TestConditionalDecodeStep_CacheMiss(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "204", status: http.StatusNoContent},
+		{name: "412 with a body", status: http.StatusPreconditionFailed, body: "no cache available"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}))
+			defer srv.Close()
 
-	result := recorder.Result()
-	if result.StatusCode != http.StatusOK {
-		t.Fatalf("expected recorder default 200 (nothing written), got %d", result.StatusCode)
-	}
-	respBody, _ := io.ReadAll(result.Body)
-	if len(respBody) != 0 {
-		t.Fatalf("expected empty response body on cache miss, got: %s", string(respBody))
+			reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+
+			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+			step, _ := NewConditionalDecodeStep(gwClient, nil)
+
+			recorder := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:      "req-1",
+				OriginalPath:   testChatCompletionsPath,
+				Body:           map[string]any{"model": "test"},
+				ResponseWriter: recorder,
+			}
+
+			capture, records := captureLogger(logutil.DEFAULT)
+
+			err := step.Execute(log.IntoContext(context.Background(), capture), reqCtx)
+			if err != nil {
+				t.Fatalf("expected nil error on cache miss, got %v", err)
+			}
+
+			result := recorder.Result()
+			if result.StatusCode != http.StatusOK {
+				t.Fatalf("expected recorder default 200 (nothing written), got %d", result.StatusCode)
+			}
+			respBody, _ := io.ReadAll(result.Body)
+			if len(respBody) != 0 {
+				t.Fatalf("expected empty response body on cache miss, got: %s", string(respBody))
+			}
+			require.Equal(t, 1, countRecords(records(), "probe deferred"), "one log line for a miss: %v", records())
+			require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
+			for _, other := range []string{coordmetrics.ProbeResultServed, coordmetrics.ProbeResultError} {
+				require.InDelta(t, 0.0, probeCount(t, reg, other), 1e-9, "a miss must not count as %q", other)
+			}
+		})
 	}
 }
 
