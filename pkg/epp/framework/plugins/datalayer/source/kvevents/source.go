@@ -222,19 +222,43 @@ func (s *Source) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if meta.Address == "" {
 		return nil
 	}
-	cfg := s.config.PodDiscoveryConfig
-	socket := func(port int) string {
-		return "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port+meta.GetRankIndex()))
+	zmqEndpoint, replay, snapshot := SubscriberEndpoints(meta, s.config.PodDiscoveryConfig)
+	return s.subscribers.EnsureSubscriber(s.ctx, key, PodIdentifier(meta),
+		zmqEndpoint, replay, snapshot, s.config.TopicFilter, true)
+}
+
+// PodIdentifier returns the per-endpoint KV-block index key for pod-discovery
+// subscriptions. Each engine publishes KV events on its own socket; when a pod
+// serves several ranks behind one port, the rank suffix keeps each rank's
+// blocks distinct in the index.
+func PodIdentifier(meta *fwkdl.EndpointMetadata) string {
+	id := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
+	if meta.RankByHeader {
+		id += "/rank-" + strconv.Itoa(meta.RankIndex)
 	}
-	replay, snapshot := "", ""
-	if port := cfg.EffectiveReplayPort(); port > 0 {
-		replay = socket(port)
+	return id
+}
+
+// SubscriberEndpoints returns the endpoint's KV-events, replay, and snapshot
+// socket addresses; an empty replay or snapshot address disables that path.
+// An endpoint with ZMQPort gets no replay or snapshot address: those ports
+// follow the configured port plus rank offset and can belong to another engine
+// on the same address.
+func SubscriberEndpoints(meta *fwkdl.EndpointMetadata, cfg *events.PodDiscoveryConfig) (zmqEndpoint, replayEndpoint, snapshotEndpoint string) {
+	if meta.ZMQPort > 0 {
+		return "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(meta.ZMQPort)), "", ""
 	}
-	if cfg.SnapshotSocketPort > 0 {
-		snapshot = socket(cfg.SnapshotSocketPort)
+	// vLLM offsets each engine's publisher ports by its data-parallel rank,
+	// which RankIndex holds (global when a data-parallel group spans pods).
+	offset := meta.GetRankIndex()
+	zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(cfg.SocketPort+offset))
+	if replayPort := cfg.EffectiveReplayPort(); replayPort > 0 {
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+offset))
 	}
-	return s.subscribers.EnsureSubscriber(s.ctx, key, fmt.Sprintf("%s:%s", meta.Address, meta.Port),
-		socket(cfg.SocketPort), replay, snapshot, s.config.TopicFilter, true)
+	if snapshotPort := cfg.SnapshotSocketPort; snapshotPort > 0 {
+		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+offset))
+	}
+	return zmqEndpoint, replayEndpoint, snapshotEndpoint
 }
 
 // ProcessEvents delivers a batch to every consumer. A resync batch reaches
