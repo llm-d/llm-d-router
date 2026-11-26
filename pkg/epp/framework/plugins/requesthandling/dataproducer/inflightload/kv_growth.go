@@ -80,8 +80,8 @@ type kvGrowthRequest struct {
 	seenOutput    [2]float64
 	scrapedOutput float64
 	// observed reports that the request ended at a known full length: the model server completed
-	// the response, the request's own output limit did not cut it off, and it generated one
-	// sequence.
+	// the response and reported its usage, the request's own output limit did not cut it off, and
+	// it generated one sequence.
 	observed bool
 }
 
@@ -91,9 +91,9 @@ type kvGrowthRequest struct {
 // A running request holds c_i tokens, its uncached prompt plus the tokens it has generated. Each
 // of its m_i sequences keeps growing while it decodes, by at most the r_i tokens left under the
 // request's output cap, and the request frees the c_i tokens when it ends. How long it still runs
-// is read from the survival function S of recent output lengths (Kaplan-Meier: completed requests
-// are observed lengths, running ones and those cut short are known to be longer than what they
-// streamed). After t more tokens the expected change in occupancy is
+// is read from the survival function S of recent output lengths (Kaplan-Meier: requests that
+// completed with reported usage are observed lengths, the others are known to be longer than what
+// they streamed). After t more tokens the expected change in occupancy is
 //
 //	sum_i [ S_i(t) * (c_i + m_i * min(t, r_i)) - c_i ] + S(t) * (p + m * t)
 //
@@ -252,9 +252,10 @@ func (r *kvGrowthRequest) outputScraped(scrapedAt time.Time, streamed float64) f
 	return r.scrapedOutput
 }
 
-// finish records the end of a request. completionTokens is the reported usage; when it is zero
-// the request counts at its streamed tokens. completed reports that the model server ended the
-// response on its own; a stream cut short is known only to be longer than what it streamed.
+// finish records the end of a request. completionTokens is the reported usage, zero when the
+// response carried none. completed reports that the model server ended the response on its own. A
+// stream cut short, or one that reported no usage, is known only to be longer than what it
+// streamed.
 func (k *kvGrowth) finish(requestID string, completionTokens int64, completed bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -269,9 +270,12 @@ func (k *kvGrowth) finish(requestID string, completionTokens int64, completed bo
 		r.output.Store(completionTokens)
 	}
 	output := float64(r.output.Load())
-	// A request cut off by its own cap would have run longer under a larger one. The sequences of
-	// a request end at different lengths, and only their total is reported.
-	r.observed = completed && r.sequences == 1 && (output < r.outputCap || r.outputCap >= k.maxOutputTokens)
+	// Without reported usage the length is a count of stream events, which falls short of the
+	// tokens when the model server sends several in one event. A request cut off by its own cap
+	// would have run longer under a larger one. The sequences of a request end at different
+	// lengths, and only their total is reported.
+	r.observed = completed && completionTokens > 0 && r.sequences == 1 &&
+		(output < r.outputCap || r.outputCap >= k.maxOutputTokens)
 	if output == 0 {
 		// A request that ends without output carries no length: an error status, a route whose
 		// response is not processed, a stream cut before its first token. It leaves the sample.

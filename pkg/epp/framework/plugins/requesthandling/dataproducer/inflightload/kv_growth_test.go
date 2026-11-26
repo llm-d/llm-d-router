@@ -436,20 +436,27 @@ func TestKVGrowth_Projected(t *testing.T) {
 	}
 }
 
-// A stream that completes without a usage block counts at the most tokens it streamed.
-func TestKVGrowth_CompletionWithoutUsageCountsStreamedTokens(t *testing.T) {
-	k := newKVGrowth(0, 4)
-	k.minWindow, k.minPrior = 2, 0
-	k.add("a", "no-usage", 8, 8, 4, 1, 1)
-	k.progress("no-usage", 2, chunkTime)
+// A stream that completes without a usage block is not a known length: a model server can send
+// several tokens in one stream event. It counts as longer than the most tokens it streamed.
+func TestKVGrowth_CompletionWithoutUsageIsLongerThanItStreamed(t *testing.T) {
+	k := newKVGrowth(0, 8)
+	k.minWindow, k.minPrior = 3, 0
+	// The requests carry no prompt, so the projection is their output alone.
+	k.add("a", "no-usage", 0, 0, 8, 1, 1)
+	k.progress("no-usage", 3, chunkTime)
 	k.progress("no-usage", 1, chunkTime)
 	k.finish("no-usage", 0, true)
-	k.progress("no-usage", 4, chunkTime) // a chunk after the end of the request is not recorded
-	k.add("a", "running", 8, 8, 4, 1, 1)
+	k.progress("no-usage", 5, chunkTime) // a chunk after the end of the request is not recorded
+	k.add("a", "usage", 0, 0, 8, 1, 1)
+	k.progress("usage", 2, chunkTime)
+	k.finish("usage", 2, true)
+	k.add("a", "running", 0, 0, 8, 1, 1)
 	k.progress("running", 0, chunkTime)
 
-	// S = [1, 1, 0, 0]: two tokens ahead the running request has grown by 2 and the next adds 10.
-	require.Equal(t, int64(12), projectedAfterScrapes(k, "a"))
+	// At 2 tokens two requests were still running and one of them ended; the stream without usage
+	// is not known to have ended at 3. S = [1, 1, .5, .5, .5, .5, .5, .5]: eight tokens ahead the
+	// running request and the next one each hold 8 tokens with a chance of one half.
+	require.Equal(t, int64(8), projectedAfterScrapes(k, "a"))
 }
 
 // A request that ends without output, such as an error status the model server delivers in full,
