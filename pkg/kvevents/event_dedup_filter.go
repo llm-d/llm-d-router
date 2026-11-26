@@ -27,17 +27,11 @@ const noGroupIdx = -1
 
 // noDataParallelRank is the sentinel data-parallel rank used in a dedup scope.
 //
-// On current main the index identity (kvblock.PodEntry) is pod-level and does
-// NOT distinguish data-parallel ranks, so every scope uses this sentinel and
-// reference counts aggregate across ranks — which is exactly what the pod-level
-// index requires (a block is still resident on the pod until every rank has
-// removed it). The value matches PR #370's NoDataParallelRank (-1) convention.
-//
-// TODO(#370): once DataParallelRank is propagated onto EventBatch and into
-// PodEntry, source the rank from the event in pool.go so the dedup scope
-// becomes DP-aware in lockstep with the (then DP-aware) index identity. No
-// change to this file is required — only the scope construction at the call
-// sites.
+// With pod discovery, rank endpoints encode their rank in podIdentifier
+// (<address>:<port>/rank-<RankIndex>). Each rank therefore gets its own dedup
+// bucket and index entry without a separate rank field. In the deprecated
+// global zmqEndpoint mode, ranks share one <address>:<port> identifier and this
+// sentinel aggregates reference counts at pod granularity.
 const noDataParallelRank = -1
 
 // groupIdxOrNoGroup maps an optional event group index to the dedup-scope int,
@@ -49,11 +43,10 @@ func groupIdxOrNoGroup(groupIdx *int) int {
 	return *groupIdx
 }
 
-// blockScope identifies the set of block reference counts that share a single
-// index eviction identity for one pod. Its fields mirror the dimensions of
-// kvblock.PodEntry that determine which stored entry an eviction targets: pod,
-// device tier, KV-cache group, and (in future, see noDataParallelRank)
-// data-parallel rank.
+// blockScope identifies the block reference counts that share one index
+// eviction identity. Its fields mirror kvblock.PodEntry: podIdentifier (which
+// includes the rank suffix for rank endpoints), device tier, KV-cache group,
+// and dataParallelRank (see noDataParallelRank).
 type blockScope struct {
 	podIdentifier    string
 	deviceTier       string
