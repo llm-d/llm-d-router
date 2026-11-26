@@ -241,7 +241,7 @@ func (w *deferredCommitWriter) WriteHeader(statusCode int) {
 	}
 	// Informational 1xx statuses precede the final status. Recording them would
 	// freeze initial headers early and mark the response failed via isHTTPError.
-	if statusCode >= http.StatusContinue && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols {
+	if isInformationalStatus(statusCode) {
 		return
 	}
 	if !w.wroteHeader {
@@ -499,9 +499,18 @@ func (w *responseWriterWithBuffer) WriteHeader(statusCode int) {
 		return
 	}
 
-	if w.statusCode == 0 {
+	// A 1xx precedes the final status; recording it would hide that status
+	// and fail the attempt via isHTTPError before cache_threshold is checked.
+	if w.statusCode == 0 && !isInformationalStatus(statusCode) {
 		w.statusCode = statusCode
 	}
+}
+
+// isInformationalStatus reports whether statusCode is a non-final 1xx status,
+// which net/http and httputil.ReverseProxy pass to WriteHeader before the
+// final one. 101 Switching Protocols is final.
+func isInformationalStatus(statusCode int) bool {
+	return statusCode >= http.StatusContinue && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols
 }
 
 func (w *responseWriterWithBuffer) Flush() {

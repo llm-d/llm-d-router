@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -427,6 +428,83 @@ func TestSharedStorage_UpstreamErrorForwardsHeaders(t *testing.T) {
 			header := recorder.Result().Header
 			require.Equal(t, "application/json", header.Get("Content-Type"))
 			require.Equal(t, "failed", header.Get("X-Upstream-Stage"))
+		})
+	}
+}
+
+// TestSharedStorage_StreamingDecodeFirstInformationalStatus covers a decoder
+// that sends a 1xx informational response (here 103 Early Hints) before its
+// final 200. The reverse proxy relays the 1xx through WriteHeader, and the final
+// status follows it (RFC 9110, section 15.2), so the attempt must still be
+// inspected for cache_threshold and fall back to prefill.
+func TestSharedStorage_StreamingDecodeFirstInformationalStatus(t *testing.T) {
+	const (
+		roleEvent      = `data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"
+		stopEvent      = `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n"
+		thresholdEvent = `data: {"choices":[{"delta":{},"finish_reason":"cache_threshold"}]}` + "\n\n"
+	)
+	var prefillCalls, decodeCalls atomic.Int32
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		prefillCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer prefill.Close()
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		first := decodeCalls.Add(1) == 1
+		w.Header().Set("Link", "</style.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Del("Link")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if first {
+			_, _ = io.WriteString(w, roleEvent+thresholdEvent)
+			return
+		}
+		_, _ = io.WriteString(w, roleEvent+stopEvent)
+	}))
+	defer decoder.Close()
+
+	decodeURL, err := url.Parse(decoder.URL)
+	require.NoError(t, err)
+	srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+	srv.logger = log.Log
+	srv.decoderProxy = srv.createDecoderProxyHandler(decodeURL, false)
+	prefillHostPort := strings.TrimPrefix(prefill.URL, "http://")
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.handleSharedStorage(w, r, prefillHostPort, reqcommon.APITypeChatCompletions)
+	}))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+reqcommon.PathChatCompletions, "application/json", strings.NewReader(streamingDecodeFirstBody))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, int32(1), prefillCalls.Load(), "cache_threshold attempt did not fall back to prefill")
+	require.Equal(t, roleEvent+stopEvent, string(got))
+}
+
+func TestResponseWriterWithBufferRecordsFinalStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []int
+		want     int
+	}{
+		{name: "100 then 200", statuses: []int{http.StatusContinue, http.StatusOK}, want: http.StatusOK},
+		{name: "103 then 200", statuses: []int{http.StatusEarlyHints, http.StatusOK}, want: http.StatusOK},
+		{name: "100 and 103 then 400", statuses: []int{http.StatusContinue, http.StatusEarlyHints, http.StatusBadRequest}, want: http.StatusBadRequest},
+		{name: "101 is final", statuses: []int{http.StatusSwitchingProtocols}, want: http.StatusSwitchingProtocols},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newResponseWriterWithBuffer(httptest.NewRecorder())
+			for _, code := range tt.statuses {
+				w.WriteHeader(code)
+			}
+			require.Equal(t, tt.want, w.getStatusCode())
 		})
 	}
 }
