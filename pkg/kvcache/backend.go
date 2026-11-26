@@ -47,6 +47,10 @@ func DefaultKVCacheBackendConfig() []*KVCacheBackendConfig {
 		{Name: "storage", Weight: 0.6},
 		{Name: "shared_storage", Weight: 0.4},
 		{Name: "object_store", Weight: 0.2},
+		// SGLang's DISK and EXTERNAL storage media. SGLang reports every
+		// HiCache storage backend's blocks as EXTERNAL.
+		{Name: "disk", Weight: 0.6},
+		{Name: "external", Weight: 0.4},
 	}
 }
 

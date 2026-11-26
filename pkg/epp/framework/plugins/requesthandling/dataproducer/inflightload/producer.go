@@ -804,8 +804,10 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 		// The event match compares the request's token ids with the engine's,
 		// so estimated ids would never complete a request.
 		tokenized = fwkplugin.ConsumedData{
-			Type:    fwkrequest.TokenizedRequest{},
-			Matches: fwkplugin.MatchKeyValues(map[string]string{"backend": tokenproducer.BackendVLLM}),
+			Type: fwkrequest.TokenizedRequest{},
+			Matches: fwkplugin.MatchKeyValues(map[string]string{
+				tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+			}),
 		}
 	}
 	return fwkplugin.DataDependencies{

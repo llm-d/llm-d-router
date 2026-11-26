@@ -51,9 +51,14 @@ type EndpointMetadata struct {
 	// separate from Labels so request-shaping data never becomes a
 	// selector key — and selector labels are never stamped onto requests.
 	Attributes map[string]string
-	// RankIndex is this endpoint's position in the pool's TargetPorts,
-	// identifying the pod-local rank in multi-port deployments.
+	// RankIndex is the pod-local rank of this endpoint: its position in the
+	// pool's TargetPorts, or its data-parallel rank when RankByHeader is set.
 	RankIndex int
+	// RankByHeader reports that the model server serves several data-parallel
+	// ranks behind Port and runs a request on the rank that the
+	// x-data-parallel-rank request header names. The EPP sends RankIndex in
+	// that header.
+	RankByHeader bool
 	// ZMQPort is the exact KV-events socket port, overriding the
 	// configured socket port plus RankIndex. Zero means unset.
 	ZMQPort int
@@ -82,15 +87,16 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 			Name:      epm.ID.Name,
 			Namespace: epm.ID.Namespace,
 		},
-		Name:        epm.Name,
-		Address:     epm.Address,
-		NodeAddress: epm.NodeAddress,
-		Port:        epm.Port,
-		MetricsHost: epm.MetricsHost,
-		Labels:      clonedLabels,
-		Attributes:  clonedAttributes,
-		RankIndex:   epm.RankIndex,
-		ZMQPort:     epm.ZMQPort,
+		Name:         epm.Name,
+		Address:      epm.Address,
+		NodeAddress:  epm.NodeAddress,
+		Port:         epm.Port,
+		MetricsHost:  epm.MetricsHost,
+		Labels:       clonedLabels,
+		Attributes:   clonedAttributes,
+		RankIndex:    epm.RankIndex,
+		RankByHeader: epm.RankByHeader,
+		ZMQPort:      epm.ZMQPort,
 	}
 }
 
@@ -107,6 +113,7 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		epm.Port == other.Port &&
 		epm.MetricsHost == other.MetricsHost &&
 		epm.RankIndex == other.RankIndex &&
+		epm.RankByHeader == other.RankByHeader &&
 		epm.ZMQPort == other.ZMQPort &&
 		maps.Equal(epm.Labels, other.Labels) &&
 		maps.Equal(epm.Attributes, other.Attributes)

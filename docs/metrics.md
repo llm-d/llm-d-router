@@ -146,11 +146,13 @@ Requests answered locally by a responder, such as `GET /v1/models`, are not coun
 
 The `api_surface` label identifies generation APIs with the values `messages`,
 `chat_completions`, `completions`, `responses`, `vllm_generate`, and `sglang_generate`.
+`vllm_generate` also covers the gRPC methods `vllm.Inference/Generate` and
+`vllm.Inference/GenerateStream`, and `sglang_generate` covers `sglang.api.v1.SglangService/Generate`.
 Responses item reads (`/v1/responses/{id}`), auxiliary token-count and render routes,
-vLLM gRPC `Generate`, Vertex AI paths, and missing or unrecognized paths use `unknown`. EPP captures
-the surface from the incoming path before routing can rewrite it. The corresponding
-request span carries `llm_d.epp.api_surface`, including requests without tools and
-requests rejected during parsing.
+`vllm.grpc.engine.VllmEngine` gRPC methods, Vertex AI paths, and missing or unrecognized paths
+use `unknown`. EPP captures the surface from the incoming path before routing can rewrite it.
+The corresponding request span carries `llm_d.epp.api_surface`, including requests without
+tools and requests rejected during parsing.
 
 Request volume and errors per second can be queried separately by surface:
 
@@ -411,14 +413,28 @@ Ready, the series keeps its last value.
 
 ### Scheduler
 
-These metrics are owned by EPP scheduler instrumentation.
+These metrics are owned by EPP scheduler instrumentation. Their declarations in
+[`zz_generated.scheduler_metrics.go`](../pkg/epp/metrics/zz_generated.scheduler_metrics.go)
+and the table below are generated from
+[`scheduler-metrics.yaml`](../pkg/common/observability/semconv/registry/scheduler-metrics.yaml).
+Edit the registry and run `make update-telemetry`; `make verify-telemetry` checks for drift.
+The registry supplies Prometheus names, histogram boundaries, and positional label order.
+Generation requires the `llm_d_epp_` name prefix and unique label positions covering `0..n-1`.
+Metric descriptions supply the Prometheus help text and the documentation. The registry's
+`unit` and `stability` fields are metadata and are not consumed by these templates. Collectors
+retain their `ALPHA` help prefix; unit suffixes come from `metric_name`.
+Other sections of this catalog are maintained manually.
+
+<!-- BEGIN GENERATED SCHEDULER METRICS -->
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
-| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
-| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Total number of scheduling attempts. |
+| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency distribution in seconds. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Total number of failed scheduling attempts, by reason. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Total number of candidate endpoints removed by scheduling filters, by scheduler profile, plugin type and plugin name. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
+
+<!-- END GENERATED SCHEDULER METRICS -->
 
 Each scheduler invocation records an attempt and latency, including failures.
 
@@ -874,6 +890,27 @@ for a different window. An ID is missed when all of its requests went to a repli
 before Prometheus scraped it. To check the rules after editing them, run
 `promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
+#### Checking a gateway
+
+To check that a gateway sets the fairness ID and overwrites client values, send three requests
+through it and read `llm_d_epp_fairness_id_resolved_total` across the EPP replicas:
+
+1. A request from a known tenant, whose client sends neither header name. The series with that
+   tenant's ID and `source="header"` increases.
+2. A request from the same tenant, whose client sets both header names to a value no tenant uses.
+   The same series increases, and no series with the client's value as `fairness_id` appears.
+3. If the gateway admits callers it has no ID for, a request from such a caller with the same
+   client value. The request is counted under `default-flow` or under the ID the gateway assigns to
+   such callers, and no series with the client's value appears.
+
+Use one client value on every run, because a value that gets through takes a slot under the label
+cap.
+
+The steps describe a pool that does not derive agent identities and leaves
+`requestHandler.composeFairnessIDs` disabled. They need room under the label cap: if
+`llm_d_epp_fairness_id_overflow_total` increases during a step, the ID may have been counted as
+`other`, and the step is inconclusive.
+
 ### Program-aware fairness
 
 These metrics are owned by the `program-aware-fairness` Flow Control policy. They require the
@@ -1002,6 +1039,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
 | `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector`, `stage` | Candidate endpoints with missing or stale metrics. |
 | `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
+| `llm_d_epp_flow_control_detector_capacity` | Gauge | `detector`, `stage`, `unit` | Aggregate capacity of the endpoints a `concurrency-detector` evaluated, from its most recent evaluation: the sum of per-endpoint `maxConcurrency` (`unit="requests"`) or `maxTokenConcurrency` (`unit="tokens"`), with `endpointOverrides` applied. Only the unit(s) the detector's `concurrencyMode` evaluates are exported. `stage` as for `llm_d_epp_flow_control_detector_saturation`. Interleaved (`prefill-decode`) endpoints are in both stage partitions, so their capacity is reported under both `stage="prefill"` and `stage="decode"` and summing across stages double counts them. Defined only when flow control is enabled. |
 | `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
 | `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
 | `llm_d_epp_flow_control_global_capacity_utilization_requests` | Gauge | `inference_pool` | Global request capacity use. |

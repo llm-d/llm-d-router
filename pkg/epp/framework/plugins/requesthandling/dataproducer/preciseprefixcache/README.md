@@ -23,8 +23,11 @@ Pipeline per request:
 - (`PreRequest`) Speculative-index the selected endpoint(s) with TTL eviction.
 - (`EndpointExtractor`) Per-pod ZMQ subscriber lifecycle on add/delete.
 
-Requires `TokenizedPrompt` on the request — set by a `token-producer`
-upstream. No-op otherwise.
+Requires `TokenizedPrompt` on the request from a `token-producer` that emits exact
+engine tokens (`exact_tokens: "true"`). Configure `backend: vllm` for text pools or
+`backend: passthrough` for pre-tokenized pools. EPP rejects `backend: estimate` at
+startup so byte-packed pseudo-tokens never enter the KV-block index. A request with
+no `TokenizedPrompt` is a no-op.
 
 ## Parameters
 
@@ -107,6 +110,26 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+### Cache tiers
+
+Each KV event names the medium that holds its blocks. The index stores the
+medium lowercased as the block's device tier, and
+`indexerConfig.kvCacheBackendConfigs` sets each tier's scoring weight. A tier
+with no configured weight scores 0. A configured list replaces the defaults in
+`kvcache.DefaultKVCacheBackendConfig()`.
+
+SGLang publishes these media:
+
+| SGLang medium | Device tier | Blocks |
+|---------------|-------------|--------|
+| `GPU` | `gpu` | device memory |
+| `CPU_PINNED` | `cpu_pinned` | HiCache host memory |
+| `EXTERNAL` | `external` | HiCache storage, for every `--hicache-storage-backend`; requires an SGLang build with [sgl-project/sglang#50154](https://github.com/sgl-project/sglang/pull/50154) |
+| `DISK` | `disk` | defined by SGLang but not published |
+
+A `kvCacheBackendConfigs` for SGLang pods lists `cpu_pinned` to score
+host-memory blocks; a `cpu` entry does not match them.
 
 ### Shared event input
 

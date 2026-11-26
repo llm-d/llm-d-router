@@ -184,6 +184,15 @@ ServiceMonitor that reads it must use this helper.
 {{- end -}}
 {{- end -}}
 
+{{- define "llm-d-router.epp.extProcPort" -}}
+{{- $flags := .Values.router.epp.flags | default dict -}}
+{{- if hasKey $flags "grpc-port" -}}
+{{- index $flags "grpc-port" -}}
+{{- else -}}
+{{- .Values.router.epp.extProcPort | default 9002 -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 ext_proc upstream host the proxy uses to reach EPP. Loopback in sidecar mode;
 the discovery or EPP Service FQDN in service mode.
@@ -520,7 +529,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (.Values.router.epp.extProcPort | default 9002) | quote }}
+              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (include "llm-d-router.epp.extProcPort" .) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}
@@ -531,6 +540,33 @@ services:
     {{- range $servicePort := $servicePorts }}
     {{ $servicePort }}: {{ $servicePort }}
     {{- end }}
+{{- end -}}
+
+{{/*
+Container image reference for an image values block with registry, repository, tag and an
+optional digest. Called with (dict "image" <block> "path" "<values path>"); the path names the
+block in render errors.
+
+A non-empty digest pins the image and replaces the tag: registry/repository@digest. The tag is
+dropped rather than kept as registry/repository:tag@digest because CRI-O (containers/image)
+rejects references that carry both. The digest must follow the OCI grammar
+(algorithm:encoded), and a sha256 digest must be 64 lowercase hex characters, so a typo fails the
+render instead of the image pull.
+*/}}
+{{- define "llm-d-router.image" -}}
+{{- $image := .image -}}
+{{- $digest := toString ($image.digest | default "") -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^[a-z0-9]+([+._-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$" $digest) -}}
+{{- fail (printf ".Values.%s.digest must be an OCI digest such as sha256:<64 hex characters>, got %q" .path $digest) -}}
+{{- end -}}
+{{- if and (hasPrefix "sha256:" $digest) (not (regexMatch "^sha256:[a-f0-9]{64}$" $digest)) -}}
+{{- fail (printf ".Values.%s.digest must be sha256: followed by 64 lowercase hex characters, got %q" .path $digest) -}}
+{{- end -}}
+{{- printf "%s/%s@%s" $image.registry $image.repository $digest -}}
+{{- else -}}
+{{- printf "%s/%s:%s" $image.registry $image.repository (toString $image.tag) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

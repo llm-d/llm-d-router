@@ -17,15 +17,20 @@ limitations under the License.
 package contextlengthaware
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -585,6 +590,37 @@ func TestContextLengthAwareScore(t *testing.T) {
 	assert.Less(t, scores[endpoints[2]], 0.3, "out-of-range fallback must be strictly below 0.3")
 	assert.Greater(t, scores[endpoints[1]], scores[endpoints[2]], "in-range match should outscore out-of-range fallback")
 	assert.Equal(t, 0.5, scores[endpoints[3]], "no label should score 0.5")
+}
+
+func TestContextLengthAwareTraceLogsAtTraceVerbosity(t *testing.T) {
+	var logged []string
+	logger := funcr.New(func(_, args string) {
+		logged = append(logged, args)
+	}, funcr.Options{Verbosity: logging.TRACE})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "in-range"},
+			"10.0.0.1",
+			map[string]string{DefaultContextLengthLabel: "0-1000"}),
+	}
+	plugin := NewContextLengthAware("trace-logs", &contextLengthAwareParameters{
+		Label:           DefaultContextLengthLabel,
+		EnableFiltering: true,
+	})
+
+	plugin.Filter(ctx, createHundredTokenRequest(), endpoints)
+	plugin.Score(ctx, createHundredTokenRequest(), endpoints)
+
+	output := strings.Join(logged, "\n")
+	for _, msg := range []string{
+		"Filtering endpoints by context length",
+		"Filtered endpoints",
+		"Scoring endpoints by context length",
+		"Scored endpoints",
+	} {
+		assert.Contains(t, output, msg)
+	}
 }
 
 func TestParseContextRange(t *testing.T) {

@@ -538,13 +538,30 @@ func TestKVEventPrefillCompletion_SingleEngineCompletesOnItsOwnEvents(t *testing
 	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }
 
-func TestKVEventPrefillCompletion_RequiresVLLMTokenBackend(t *testing.T) {
+func TestKVEventPrefillCompletion_RequiresExactTokens(t *testing.T) {
 	t.Parallel()
 	dep := newKVEventsProducer(t, "kv-backend").Consumes().Required[tokenproducer.TokenizedPromptDataKey]
 	consumed, ok := dep.(fwkplugin.ConsumedData)
 	require.True(t, ok, "the tokenized request dependency carries a producer matcher")
-	require.NoError(t, consumed.Matches(map[string]string{"backend": tokenproducer.BackendVLLM}))
-	require.Error(t, consumed.Matches(map[string]string{"backend": tokenproducer.BackendEstimate}))
+	require.NoError(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     tokenproducer.BackendVLLM,
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+	}))
+	require.NoError(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     tokenproducer.BackendPassthrough,
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+	}))
+	require.NoError(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     "sglang",
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+	}))
+	require.Error(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     tokenproducer.BackendEstimate,
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensFalse,
+	}))
+	require.Error(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend: tokenproducer.BackendVLLM,
+	}))
 }
 
 func TestKVEventPrefillCompletion_OffByDefault(t *testing.T) {
