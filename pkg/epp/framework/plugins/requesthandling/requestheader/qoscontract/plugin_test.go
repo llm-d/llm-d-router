@@ -58,6 +58,8 @@ func testParams() Parameters {
 		{ID: "team-b", Class: "batch", MaxConcurrency: 1, MaxPromptTokens: 1000, MaxOutputTokens: 100},
 		{ID: "team-d", Class: "batch", DailyTokens: 500},
 		{ID: "team-r", Class: "batch", MaxReqsPerSec: 1},
+		{ID: "team-i", Class: "batch", MaxInputTokensPerSec: 100},
+		{ID: "team-u", Class: "batch", MaxUncachedTokensPerSec: 100},
 	}
 	return p
 }
@@ -136,8 +138,9 @@ func TestFactory(t *testing.T) {
 	raw := `{"classes":[{"name":"critical","priority":100},{"name":"batch","priority":-1}],
 		"defaultTeam":{"class":"batch"},
 		"rateWindow":"2s",
-		"teams":[{"id":"a","class":"critical","maxConcurrency":3,"dailyTokens":1000,"maxReqsPerSec":5,"rateWindow":"10s"},
-			{"id":"b","class":"batch","maxReqsPerSec":5}]}`
+		"teams":[{"id":"a","class":"critical","maxConcurrency":3,"dailyTokens":1000,"maxReqsPerSec":5,"rateWindow":"10s",
+				"maxInputTokensPerSec":100,"maxUncachedTokensPerSec":50},
+			{"id":"b","class":"batch","maxReqsPerSec":5,"maxInputTokensPerSec":100}]}`
 	got, err := PluginFactory("qos", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil)
 	require.NoError(t, err)
 	p := got.(*Plugin)
@@ -149,6 +152,11 @@ func TestFactory(t *testing.T) {
 	assert.Equal(t, 2*time.Second, p.teams["b"].rate.window, "a team without rateWindow uses the plugin's")
 	assert.Len(t, p.teams["b"].rate.times, 10)
 	assert.Nil(t, p.defaultTeam.rate, "no rate commit, no window")
+	assert.InDelta(t, 1000, p.teams["a"].inputRate.capacity, 1e-9, "the burst is the rate over the team's rateWindow")
+	assert.InDelta(t, 500, p.teams["a"].uncachedRate.capacity, 1e-9)
+	assert.InDelta(t, 200, p.teams["b"].inputRate.capacity, 1e-9, "the burst is the rate over the plugin's rateWindow")
+	assert.Nil(t, p.teams["b"].uncachedRate, "no token-rate commit, no bucket")
+	assert.Nil(t, p.defaultTeam.inputRate)
 	assert.True(t, p.reportOnly, "decisions are recorded, not applied, unless mode is enforce-limits")
 }
 
@@ -174,6 +182,10 @@ func TestFactory_InvalidConfig(t *testing.T) {
 		"zero team rate window":     `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxReqsPerSec":1,"rateWindow":"0s"}]}`,
 		"bad rate window":           `{"rateWindow":"soon","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
 		"default team rate":         `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a","maxReqsPerSec":0.5}}`,
+		"negative input rate":       `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxInputTokensPerSec":-1}]}`,
+		"negative uncached rate":    `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxUncachedTokensPerSec":-1}]}`,
+		"input rate allows none":    `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxInputTokensPerSec":0.5}]}`,
+		"uncached rate allows none": `{"rateWindow":"100ms","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a","maxUncachedTokensPerSec":5}}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -489,6 +501,157 @@ func TestRequestHeader_OutsideContractTakesNoRate(t *testing.T) {
 	over := newRequest("team-a", 10, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), over))
 	assert.Equal(t, 10, servedPriority(over), "a completed request keeps its place in the window")
+}
+
+// inputLevel and uncachedLevel return the level of a team's token-rate bucket, as of its last refill.
+func inputLevel(p *Plugin, team string) float64 {
+	st := p.teams[team]
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.inputRate.level
+}
+
+func uncachedLevel(p *Plugin, team string) float64 {
+	st := p.teams[team]
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.uncachedRate.level
+}
+
+// cacheHit returns a team's running cache-hit ratio.
+func cacheHit(p *Plugin, team string) float64 {
+	st := p.teams[team]
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.cacheHit
+}
+
+// completeCached completes req with usage that reports cached of its prompt tokens as cached.
+func completeCached(p *Plugin, req *fwksched.InferenceRequest, prompt, completion, cached int) {
+	resp := &fwkrh.Response{EndOfStream: true}
+	resp.Usage.PromptTokens = prompt
+	resp.Usage.CompletionTokens = completion
+	resp.Usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{CachedTokens: cached}
+	p.ResponseBody(context.Background(), req, resp, nil)
+}
+
+func TestRequestHeader_OverInputRateDowngradesOneClass(t *testing.T) {
+	p, clock := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[0].MaxConcurrency = 0
+		params.Teams[0].MaxInputTokensPerSec = 1000 // a burst of 1000 over the 1s window
+	})
+	for i := range 2 {
+		req := newRequest("team-a", 400, 10)
+		require.NoError(t, p.RequestHeader(t.Context(), req))
+		require.Equal(t, 100, servedPriority(req), "request %d", i)
+	}
+	over := newRequest("team-a", 400, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), over))
+	assert.Equal(t, 10, servedPriority(over), "200 tokens are left and the request needs 400")
+	assert.InDelta(t, 200, inputLevel(p, "team-a"), 1e-9, "a downgraded request takes no tokens")
+
+	clock.t = clock.t.Add(200 * time.Millisecond)
+	next := newRequest("team-a", 400, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), next))
+	assert.Equal(t, 100, servedPriority(next), "0.2s refills 200 tokens")
+}
+
+func TestRequestHeader_LowestClassOverInputRateRejects(t *testing.T) {
+	p, clock := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[4].RateWindow = &metav1.Duration{Duration: 10 * time.Second} // 100/s, a burst of 1000
+	})
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-i", 500, 10)))
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-i", 400, 10)), "the team rateWindow sets a burst of 1000")
+
+	e := requireCode(t, p.RequestHeader(t.Context(), newRequest("team-i", 400, 10)), errcommon.ResourceExhausted)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonOverQuota), e.Headers[errcommon.RequestDroppedReasonHeaderKey])
+	assert.Equal(t, "batch", e.Headers[ClassHeader])
+	assert.Equal(t, "3", e.Headers[RetryAfterHeader], "100 tokens are left, the other 300 refill in 3s")
+
+	clock.t = clock.t.Add(3 * time.Second)
+	require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-i", 400, 10)), "the rejection took no tokens")
+}
+
+func TestInputRateSettlesToReportedPromptTokens(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	refunded := newRequest("team-i", 80, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), refunded))
+	assert.InDelta(t, 20, inputLevel(p, "team-i"), 1e-9)
+	complete(p, refunded, 30, 10)
+	assert.InDelta(t, 70, inputLevel(p, "team-i"), 1e-9, "the 50 tokens the estimate overstated come back")
+
+	overrun := newRequest("team-i", 50, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), overrun))
+	complete(p, overrun, 200, 10)
+	assert.InDelta(t, -130, inputLevel(p, "team-i"), 1e-9, "the 150 tokens the estimate understated are a debt")
+
+	e := requireCode(t, p.RequestHeader(t.Context(), newRequest("team-i", 10, 10)), errcommon.ResourceExhausted)
+	assert.Equal(t, "2", e.Headers[RetryAfterHeader], "the debt and the request refill in 1.4s")
+}
+
+func TestTokenRatesRefundAbandonedRequestsInFull(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	input, uncached := newRequest("team-i", 80, 10), newRequest("team-u", 80, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), input))
+	require.NoError(t, p.RequestHeader(t.Context(), uncached))
+	require.InDelta(t, 20, inputLevel(p, "team-i"), 1e-9)
+	require.InDelta(t, 20, uncachedLevel(p, "team-u"), 1e-9)
+
+	p.RequestAbandoned(t.Context(), input)
+	p.RequestAbandoned(t.Context(), uncached)
+	assert.InDelta(t, 100, inputLevel(p, "team-i"), 1e-9)
+	assert.InDelta(t, 100, uncachedLevel(p, "team-u"), 1e-9)
+}
+
+func TestRequestHeader_OutsideContractTakesNoTokens(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[0].MaxConcurrency = 0
+		params.Teams[0].MaxInputTokensPerSec = 1000
+	})
+	oversized := newRequest("team-a", 5000, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), oversized))
+	require.Equal(t, 10, servedPriority(oversized))
+	complete(p, oversized, 5000, 10)
+	assert.InDelta(t, 1000, inputLevel(p, "team-a"), 1e-9, "a downgraded request is neither charged nor settled")
+}
+
+func TestUncachedRateLearnsTheCacheHitRatio(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[5].RateWindow = &metav1.Duration{Duration: 10 * time.Second} // 100/s, a burst of 1000
+	})
+	first := newRequest("team-u", 500, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), first))
+	assert.InDelta(t, 500, uncachedLevel(p, "team-u"), 1e-9, "no ratio is observed yet: the whole prompt is reserved")
+
+	completeCached(p, first, 500, 10, 450)
+	assert.InDelta(t, 950, uncachedLevel(p, "team-u"), 1e-9, "settled to the 50 uncached tokens")
+	assert.InDelta(t, 0.09, cacheHit(p, "team-u"), 1e-9, "a response with 90% cached moves the ratio a tenth of the way")
+
+	next := newRequest("team-u", 500, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), next))
+	assert.InDelta(t, 950-455, uncachedLevel(p, "team-u"), 1e-9, "500 * (1 - 0.09) is reserved")
+}
+
+func TestUncachedRateWithoutCachedTokensChargesThePrompt(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	req := newRequest("team-u", 50, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), req))
+	complete(p, req, 80, 10)
+	assert.InDelta(t, 20, uncachedLevel(p, "team-u"), 1e-9, "the whole reported prompt of 80 is uncached")
+	assert.Zero(t, cacheHit(p, "team-u"), "a response without cached tokens leaves the ratio unchanged")
+}
+
+func TestCacheHitRatioLearnsFromTrafficOutsideTheContract(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) {
+		params.Teams[0].MaxConcurrency = 0
+		params.Teams[0].MaxUncachedTokensPerSec = 1000
+	})
+	oversized := newRequest("team-a", 5000, 10)
+	require.NoError(t, p.RequestHeader(t.Context(), oversized))
+	require.Equal(t, 10, servedPriority(oversized))
+	completeCached(p, oversized, 5000, 10, 5000)
+	assert.InDelta(t, 0.1, cacheHit(p, "team-a"), 1e-9, "the cache behaviour of downgraded traffic is the team's too")
+	assert.InDelta(t, 1000, uncachedLevel(p, "team-a"), 1e-9, "a downgraded request is neither charged nor settled")
 }
 
 func TestRequestHeader_LowestClassOverConcurrencyRejects(t *testing.T) {
@@ -816,6 +979,13 @@ func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
 			decide(newRequest("team-r", 10, 10), "batch", "", decisionRejectedRate, reasonRate)
 			clock.t = clock.t.Add(time.Second)
 			decide(newRequest("team-r", 10, 10), "batch", "batch", decisionWithinContract, "")
+
+			// team-i has an input-token rate of 100 per second. A would-be rejection must take no
+			// tokens: 0.4s later the bucket holds 20 + 40, enough for the next 50.
+			decide(newRequest("team-i", 80, 10), "batch", "batch", decisionWithinContract, "")
+			decide(newRequest("team-i", 50, 10), "batch", "", decisionRejectedInputRate, reasonInputRate)
+			clock.t = clock.t.Add(400 * time.Millisecond)
+			decide(newRequest("team-i", 50, 10), "batch", "batch", decisionWithinContract, "")
 		})
 	}
 }
@@ -907,6 +1077,50 @@ func TestDecisionReason(t *testing.T) {
 			setup:       []*fwksched.InferenceRequest{newRequest("team-r", 10, 10)},
 			req:         newRequest("team-r", 10, 10),
 			servedClass: "", decision: decisionRejectedRate, reason: reasonRate,
+		},
+		{
+			name:   "downgraded over input-token rate",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 0; p.Teams[0].MaxInputTokensPerSec = 100 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 80, 10)},
+			req:         newRequest("team-a", 50, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonInputRate,
+		},
+		{
+			name:   "downgraded over uncached-token rate",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 0; p.Teams[0].MaxUncachedTokensPerSec = 100 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 80, 10)},
+			req:         newRequest("team-a", 50, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonUncachedRate,
+		},
+		{
+			name: "request rate is reported before input-token rate",
+			mutate: func(p *Parameters) {
+				p.Teams[0].MaxConcurrency, p.Teams[0].MaxReqsPerSec, p.Teams[0].MaxInputTokensPerSec = 0, 1, 100
+			},
+			team: "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 80, 10)},
+			req:         newRequest("team-a", 50, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonRate,
+		},
+		{
+			name: "input-token rate is reported before uncached-token rate",
+			mutate: func(p *Parameters) {
+				p.Teams[0].MaxConcurrency, p.Teams[0].MaxInputTokensPerSec, p.Teams[0].MaxUncachedTokensPerSec = 0, 100, 100
+			},
+			team: "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 80, 10)},
+			req:         newRequest("team-a", 50, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonInputRate,
+		},
+		{
+			name: "rejected over input-token rate", team: "team-i",
+			setup:       []*fwksched.InferenceRequest{newRequest("team-i", 80, 10)},
+			req:         newRequest("team-i", 50, 10),
+			servedClass: "", decision: decisionRejectedInputRate, reason: reasonInputRate,
+		},
+		{
+			name: "rejected over uncached-token rate", team: "team-u",
+			setup:       []*fwksched.InferenceRequest{newRequest("team-u", 80, 10)},
+			req:         newRequest("team-u", 50, 10),
+			servedClass: "", decision: decisionRejectedUncachedRate, reason: reasonUncachedRate,
 		},
 		{
 			name: "rejected over daily budget", team: "team-d",

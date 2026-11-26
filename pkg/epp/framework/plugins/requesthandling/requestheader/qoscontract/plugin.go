@@ -17,7 +17,8 @@ limitations under the License.
 // Package qoscontract provides a RequestHeaderProcessor plugin that enforces per-team QoS
 // contracts before flow control: it maps a team to a service class (a priority band), and moves
 // traffic outside the team's contract (its size limits and its commits) to the next lower class.
-// The commits are concurrency, a daily token budget and a request rate.
+// The commits are concurrency, a daily token budget, a request rate, and input and uncached
+// prompt-token rates.
 package qoscontract
 
 import (
@@ -53,20 +54,27 @@ const (
 
 	defaultTeamID = "default"
 
-	decisionWithinContract      = "within_contract"
-	decisionDowngraded          = "downgraded"
-	decisionRejectedConcurrency = "rejected_concurrency"
-	decisionRejectedSize        = "rejected_size"
-	decisionRejectedDaily       = "rejected_daily"
-	decisionRejectedRate        = "rejected_rate"
+	decisionWithinContract       = "within_contract"
+	decisionDowngraded           = "downgraded"
+	decisionRejectedConcurrency  = "rejected_concurrency"
+	decisionRejectedSize         = "rejected_size"
+	decisionRejectedDaily        = "rejected_daily"
+	decisionRejectedRate         = "rejected_rate"
+	decisionRejectedInputRate    = "rejected_input_rate"
+	decisionRejectedUncachedRate = "rejected_uncached_rate"
 
 	// The reason label names the limit a downgraded or rejected request exceeded. When it exceeds
-	// several, the first of size, daily budget, concurrency and request rate is reported, the same
-	// order that picks the rejection.
-	reasonSize        = "size"
-	reasonDaily       = "daily"
-	reasonConcurrency = "concurrency"
-	reasonRate        = "rate"
+	// several, the first of size, daily budget, concurrency, request rate, input-token rate and
+	// uncached-token rate is reported, the same order that picks the rejection.
+	reasonSize         = "size"
+	reasonDaily        = "daily"
+	reasonConcurrency  = "concurrency"
+	reasonRate         = "rate"
+	reasonInputRate    = "input_rate"
+	reasonUncachedRate = "uncached_rate"
+
+	// cacheHitAlpha is the weight of one completed request in a team's running cache-hit ratio.
+	cacheHitAlpha = 0.1
 )
 
 var (
@@ -89,6 +97,13 @@ type teamState struct {
 	// rate holds the team's within-contract admissions for its MaxReqsPerSec commit. Nil when the
 	// team has no rate commit.
 	rate *slidingWindow
+	// inputRate and uncachedRate hold the team's MaxInputTokensPerSec and MaxUncachedTokensPerSec
+	// commits. Nil when the team has no such commit.
+	inputRate    *tokenBucket
+	uncachedRate *tokenBucket
+	// cacheHit is the running average of the share of prompt tokens served from the prefix cache,
+	// over the team's completed requests that reported it. It starts at 0, the worst case.
+	cacheHit float64
 }
 
 // hold is the accounting held for one request until it completes.
@@ -98,6 +113,9 @@ type hold struct {
 	reserved    float64
 	// prompt is the estimated prompt tokens, charged for a stream cut before its usage chunk.
 	prompt float64
+	// inputReserved and uncachedReserved are the tokens taken from the team's token-rate buckets.
+	inputReserved    float64
+	uncachedReserved float64
 	// committed is true when the request was served within the contract and so holds a
 	// concurrency slot and a daily-budget charge.
 	committed bool
@@ -153,10 +171,18 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 	for i, c := range params.Classes {
 		classIndex[c.Name] = i
 	}
+	start := now()
 	newState := func(cfg TeamConfig) *teamState {
 		st := &teamState{cfg: cfg, classIndex: classIndex[cfg.Class]}
 		if cfg.MaxReqsPerSec > 0 {
 			st.rate = newSlidingWindow(rateLimit(cfg, params.RateWindow.Duration))
+		}
+		window := rateWindowOf(cfg, params.RateWindow.Duration)
+		if cfg.MaxInputTokensPerSec > 0 {
+			st.inputRate = newTokenBucket(cfg.MaxInputTokensPerSec, window, start)
+		}
+		if cfg.MaxUncachedTokensPerSec > 0 {
+			st.uncachedRate = newTokenBucket(cfg.MaxUncachedTokensPerSec, window, start)
 		}
 		return st
 	}
@@ -242,7 +268,13 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	overDaily := team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens
 	overConcurrency := team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency
 	overRate := team.rate != nil && team.rate.full(now)
-	served, decision, withinContract := committed, decisionWithinContract, !overSize && !overDaily && !overConcurrency && !overRate
+	// The uncached tokens are not known before the response: the request is charged its prompt
+	// less the team's observed cache-hit ratio, and settled to the reported uncached tokens.
+	inputCost, uncachedCost := float64(prompt), float64(prompt)*(1-team.cacheHit)
+	overInputRate := team.inputRate != nil && !team.inputRate.fits(now, inputCost)
+	overUncachedRate := team.uncachedRate != nil && !team.uncachedRate.fits(now, uncachedCost)
+	served, decision := committed, decisionWithinContract
+	withinContract := !overSize && !overDaily && !overConcurrency && !overRate && !overInputRate && !overUncachedRate
 	reason := ""
 	switch {
 	case overSize:
@@ -253,13 +285,26 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 		reason = reasonConcurrency
 	case overRate:
 		reason = reasonRate
+	case overInputRate:
+		reason = reasonInputRate
+	case overUncachedRate:
+		reason = reasonUncachedRate
 	}
+	var inputReserved, uncachedReserved float64
 	switch {
 	case withinContract:
 		team.inflight++
 		team.dailyUsed += cost
 		if team.rate != nil {
 			team.rate.add(now)
+		}
+		if team.inputRate != nil {
+			team.inputRate.take(inputCost)
+			inputReserved = inputCost
+		}
+		if team.uncachedRate != nil {
+			team.uncachedRate.take(uncachedCost)
+			uncachedReserved = uncachedCost
 		}
 		inflightRequests.WithLabelValues(team.cfg.ID).Set(float64(team.inflight))
 	case team.classIndex+1 < len(p.classes):
@@ -273,15 +318,26 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	case overConcurrency:
 		team.mu.Unlock()
 		return p.reject(team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
-	default: // over the request rate
+	case overRate:
 		retryAfter := team.rate.retryAfter(now)
 		team.mu.Unlock()
 		return p.reject(team, committed, decisionRejectedRate, reason, p.quotaError(team, committed.Name, retryAfter, "request rate limit reached"))
+	case overInputRate:
+		retryAfter := team.inputRate.retryAfter(inputCost)
+		team.mu.Unlock()
+		return p.reject(team, committed, decisionRejectedInputRate, reason, p.quotaError(team, committed.Name, retryAfter, "input token rate limit reached"))
+	default: // over the uncached-token rate
+		retryAfter := team.uncachedRate.retryAfter(uncachedCost)
+		team.mu.Unlock()
+		return p.reject(team, committed, decisionRejectedUncachedRate, reason, p.quotaError(team, committed.Name, retryAfter, "uncached token rate limit reached"))
 	}
 	team.mu.Unlock()
 
 	contractDecisions.WithLabelValues(team.cfg.ID, committed.Name, served.Name, decision, reason, p.mode()).Inc()
-	rec := &hold{team: team, servedClass: served.Name, reserved: cost, prompt: float64(prompt), committed: withinContract, day: budgetDay}
+	rec := &hold{
+		team: team, servedClass: served.Name, reserved: cost, prompt: float64(prompt), committed: withinContract, day: budgetDay,
+		inputReserved: inputReserved, uncachedReserved: uncachedReserved,
+	}
 	// The hold is settled exactly once: by RequestAbandoned when the request leaves the director
 	// before dispatch, otherwise at end of stream, which the handler forces for every dispatched
 	// request, completed or not.
@@ -343,7 +399,7 @@ func (p *Plugin) RequestAbandoned(_ context.Context, request *scheduling.Inferen
 	p.finish(request.RequestID, nil)
 }
 
-// ResponseBody settles the reservation at end of stream; see settledCost.
+// ResponseBody settles the reservation at end of stream; see settled.
 func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
@@ -351,68 +407,111 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	p.finish(request.RequestID, response)
 }
 
-// settledCost returns the weighted tokens a dispatched request is charged at end of stream:
+// settlement is what a dispatched request is charged at end of stream.
+type settlement struct {
+	// cost is the weighted tokens, charged to the daily budget.
+	cost float64
+	// input is the prompt tokens, charged to the input-token rate.
+	input float64
+	// uncached is the prompt tokens not served from the prefix cache, charged to the
+	// uncached-token rate.
+	uncached float64
+}
+
+// settled returns what a dispatched request is charged at end of stream:
 //   - an error status from the model server with no usage is charged nothing;
 //   - a request with usage or streamed events is charged its prompt (the reported input tokens,
 //     else the estimate) plus its output (the reported output tokens, else the streamed events),
 //     however the stream ended. Usage can be partial: an Anthropic stream reports input tokens in
 //     message_start and output tokens only in the final message_delta, so a stream cut between
-//     them falls back to the streamed events for its output;
+//     them falls back to the streamed events for its output. Its uncached tokens are the prompt
+//     less the reported cached tokens, or the whole prompt when the model server reports none;
 //   - a stream cut short (client disconnect, eviction, error) with neither is charged nothing;
 //   - a natural end with neither, or a request whose response the EPP does not observe, keeps
-//     the reservation, the only estimate available.
-func (p *Plugin) settledCost(rec *hold, response *requesthandling.Response) float64 {
+//     the reservations, the only estimate available.
+func (p *Plugin) settled(rec *hold, response *requesthandling.Response) settlement {
 	usage := response.Usage
 	hasUsage := usage.PromptTokens > 0 || usage.CompletionTokens > 0
 	switch {
 	case !hasUsage && rec.errorStatus.Load():
-		return 0
+		return settlement{}
 	case hasUsage || response.StreamedEvents > 0:
 		prompt := rec.prompt
+		uncached := prompt
 		if usage.PromptTokens > 0 {
 			prompt = float64(usage.PromptTokens)
+			uncached = prompt
+			if usage.PromptTokenDetails != nil {
+				uncached = math.Max(0, prompt-float64(usage.PromptTokenDetails.CachedTokens))
+			}
 		}
 		output := usage.CompletionTokens
 		if output <= 0 {
 			output = response.StreamedEvents
 		}
-		return prompt + p.outputWeight*float64(output)
+		return settlement{cost: prompt + p.outputWeight*float64(output), input: prompt, uncached: uncached}
 	case response.TerminationCause == requesthandling.TerminationCauseClientDisconnect,
 		response.TerminationCause == requesthandling.TerminationCauseEvicted,
 		response.TerminationCause == requesthandling.TerminationCauseError:
-		return 0
+		return settlement{}
 	default:
-		return rec.reserved
+		return settlement{cost: rec.reserved, input: rec.inputReserved, uncached: rec.uncachedReserved}
 	}
 }
 
-// finish settles a request exactly once. For a committed request it releases the concurrency slot
-// and, when the reservation was made on the current UTC day, settles the daily charge. A nil response, for a request that was never dispatched, refunds
-// the reservation in full.
+// cacheHitRatio returns the share of the reported prompt tokens served from the prefix cache, or
+// false when the response does not report it.
+func cacheHitRatio(response *requesthandling.Response) (float64, bool) {
+	usage := response.Usage
+	if usage.PromptTokens <= 0 || usage.PromptTokenDetails == nil {
+		return 0, false
+	}
+	return math.Min(1, math.Max(0, float64(usage.PromptTokenDetails.CachedTokens)/float64(usage.PromptTokens))), true
+}
+
+// finish settles a request exactly once. For a committed request it releases the concurrency slot,
+// settles the daily charge when the reservation was made on the current UTC day, and settles the
+// token-rate charges. A nil response, for a request that was never dispatched, refunds the
+// reservations in full. Every response that reports its cached tokens, committed or not, updates
+// the team's cache-hit ratio.
 func (p *Plugin) finish(requestID string, response *requesthandling.Response) {
 	v, ok := p.holds.LoadAndDelete(requestID)
 	if !ok {
 		return
 	}
 	rec := v.(*hold)
-	actual := 0.0
+	var actual settlement
+	hitRatio, hasHitRatio := 0.0, false
 	if response != nil {
-		actual = p.settledCost(rec, response)
+		actual = p.settled(rec, response)
+		hitRatio, hasHitRatio = cacheHitRatio(response)
 	}
 	team := rec.team
-	if rec.committed {
+	if rec.committed || hasHitRatio {
+		now := p.now()
 		team.mu.Lock()
-		team.inflight--
-		// A reservation from an earlier UTC day was charged to that day's budget, which has been
-		// reset since: its refund or overrun must not move today's budget.
-		if team.dailyDay == rec.day {
-			team.dailyUsed = math.Max(0, team.dailyUsed-(rec.reserved-actual))
+		if rec.committed {
+			team.inflight--
+			// A reservation from an earlier UTC day was charged to that day's budget, which has
+			// been reset since: its refund or overrun must not move today's budget.
+			if team.dailyDay == rec.day {
+				team.dailyUsed = math.Max(0, team.dailyUsed-(rec.reserved-actual.cost))
+			}
+			if team.inputRate != nil {
+				team.inputRate.settle(now, rec.inputReserved-actual.input)
+			}
+			if team.uncachedRate != nil {
+				team.uncachedRate.settle(now, rec.uncachedReserved-actual.uncached)
+			}
+			inflightRequests.WithLabelValues(team.cfg.ID).Set(float64(team.inflight))
 		}
-		inflightRequests.WithLabelValues(team.cfg.ID).Set(float64(team.inflight))
+		if hasHitRatio {
+			team.cacheHit += cacheHitAlpha * (hitRatio - team.cacheHit)
+		}
 		team.mu.Unlock()
 	}
-	if actual > 0 {
-		chargedTokens.WithLabelValues(team.cfg.ID, rec.servedClass).Add(actual)
+	if actual.cost > 0 {
+		chargedTokens.WithLabelValues(team.cfg.ID, rec.servedClass).Add(actual.cost)
 	}
 }
 

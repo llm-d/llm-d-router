@@ -49,8 +49,8 @@ type ClassConfig struct {
 }
 
 // TeamConfig is one team's QoS contract. Zero-valued limits are unenforced. MaxConcurrency,
-// DailyTokens and MaxReqsPerSec are the team's commits, and MaxPromptTokens and MaxOutputTokens
-// its size limits:
+// DailyTokens, MaxReqsPerSec, MaxInputTokensPerSec and MaxUncachedTokensPerSec are the team's
+// commits, and MaxPromptTokens and MaxOutputTokens its size limits:
 // traffic outside any of them moves one class down, and is rejected in the lowest class.
 type TeamConfig struct {
 	ID string `json:"id"`
@@ -72,8 +72,18 @@ type TeamConfig struct {
 	// floor(MaxReqsPerSec * RateWindow) requests are served at the team's class in any window.
 	// 0 is unlimited.
 	MaxReqsPerSec float64 `json:"maxReqsPerSec,omitempty"`
-	// RateWindow is the sliding window MaxReqsPerSec is measured over. Unset uses the plugin's
-	// RateWindow.
+	// MaxInputTokensPerSec is the committed prompt-token rate, a token bucket that refills at this
+	// rate and holds at most MaxInputTokensPerSec * RateWindow tokens, the largest burst. A request
+	// takes its estimated prompt tokens and is settled to the reported prompt tokens when it
+	// completes. 0 is unlimited.
+	MaxInputTokensPerSec float64 `json:"maxInputTokensPerSec,omitempty"`
+	// MaxUncachedTokensPerSec is the committed rate of prompt tokens not served from the prefix
+	// cache, a token bucket like MaxInputTokensPerSec. A request takes its estimated prompt tokens
+	// less the team's observed cache-hit ratio and is settled to the reported prompt tokens less
+	// the reported cached tokens. 0 is unlimited.
+	MaxUncachedTokensPerSec float64 `json:"maxUncachedTokensPerSec,omitempty"`
+	// RateWindow is the sliding window MaxReqsPerSec is measured over, and the burst of
+	// MaxInputTokensPerSec and MaxUncachedTokensPerSec. Unset uses the plugin's RateWindow.
 	RateWindow *metav1.Duration `json:"rateWindow,omitempty"`
 }
 
@@ -89,8 +99,8 @@ type Parameters struct {
 	// DefaultOutputReservation is the output tokens reserved for a request that sets no output
 	// cap and whose team sets no MaxOutputTokens.
 	DefaultOutputReservation int64 `json:"defaultOutputReservation,omitempty"`
-	// RateWindow is the sliding window a team's MaxReqsPerSec is measured over, unless the team
-	// sets its own. Default 1s.
+	// RateWindow is the sliding window a team's MaxReqsPerSec is measured over, and the burst of its
+	// token rates, unless the team sets its own. Default 1s.
 	RateWindow metav1.Duration `json:"rateWindow,omitempty"`
 	// Classes are ordered from highest to lowest. Traffic outside the contract moves to the next
 	// class.
@@ -172,11 +182,21 @@ func validateTeam(t *TeamConfig, classes map[string]struct{}, defaultWindow time
 	if _, ok := classes[t.Class]; !ok {
 		return fmt.Errorf("unknown class %q", t.Class)
 	}
-	if t.MaxConcurrency < 0 || t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 || t.MaxReqsPerSec < 0 {
+	if t.MaxConcurrency < 0 || t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 || t.MaxReqsPerSec < 0 ||
+		t.MaxInputTokensPerSec < 0 || t.MaxUncachedTokensPerSec < 0 {
 		return errors.New("limits must be >= 0")
 	}
 	if t.RateWindow != nil && t.RateWindow.Duration <= 0 {
 		return fmt.Errorf("rateWindow must be > 0, got %s", t.RateWindow.Duration)
+	}
+	window := rateWindowOf(*t, defaultWindow)
+	for _, r := range []struct {
+		name string
+		rate float64
+	}{{"maxInputTokensPerSec", t.MaxInputTokensPerSec}, {"maxUncachedTokensPerSec", t.MaxUncachedTokensPerSec}} {
+		if r.rate > 0 && r.rate*window.Seconds() < 1 {
+			return fmt.Errorf("%s %v over rateWindow %s allows no token: use a larger rateWindow", r.name, r.rate, window)
+		}
 	}
 	if t.MaxReqsPerSec == 0 {
 		return nil
@@ -194,10 +214,7 @@ func validateTeam(t *TeamConfig, classes map[string]struct{}, defaultWindow time
 // rateLimit returns the sliding window a team's request rate is measured over and the requests
 // it allows in that window.
 func rateLimit(t TeamConfig, defaultWindow time.Duration) (window time.Duration, limit int) {
-	window = defaultWindow
-	if t.RateWindow != nil {
-		window = t.RateWindow.Duration
-	}
+	window = rateWindowOf(t, defaultWindow)
 	// The epsilon keeps a product such as 0.29 * 100 = 28.999999999999996 from flooring to 28. The
 	// clamp keeps a huge product from overflowing int; validation rejects it.
 	n := math.Floor(t.MaxReqsPerSec*window.Seconds() + 1e-9)
@@ -205,4 +222,12 @@ func rateLimit(t TeamConfig, defaultWindow time.Duration) (window time.Duration,
 		return window, maxRateWindowRequests + 1
 	}
 	return window, int(n)
+}
+
+// rateWindowOf returns the team's rate window: its own, else the plugin's.
+func rateWindowOf(t TeamConfig, defaultWindow time.Duration) time.Duration {
+	if t.RateWindow != nil {
+		return t.RateWindow.Duration
+	}
+	return defaultWindow
 }
