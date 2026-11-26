@@ -27,6 +27,19 @@ Scoring rules:
 When `enableFiltering` is `true`, pods whose range does not contain the
 request's routing length are also filtered out.
 
+With a positive `escapeProbability` and filtering enabled, labeled in-range
+candidates are preferred exclusively. If none remain, one random draw permits
+longer ranges with the configured probability. Requests cannot escape to shorter
+ranges. Zero preserves default filtering and one always permits upward escape.
+Unlabeled endpoints and endpoints without metadata retain their general-purpose
+behavior when no labeled match remains, including when escape is not selected.
+Invalid range labels are excluded. Escape is not restricted to an adjacent range.
+Label every candidate when the escape policy must govern every destination.
+
+Place this plugin after availability filters. It only selects among candidates
+it receives and does not restore endpoints removed by an earlier filter.
+
+
 #### Pod Label Format
 
 ```yaml
@@ -38,6 +51,7 @@ metadata:
 **Parameters:**
 - `label` (string, optional, default: `"llm-d.ai/context-length-range"`): Pod label key carrying the `"min-max"` range.
 - `enableFiltering` (bool, optional, default: `false`): Also act as a filter, removing out-of-range pods before scoring.
+- `escapeProbability` (float64, optional, default: `0`): Probability in `[0,1]` of allowing longer ranges when no labeled match remains. Only applies with `enableFiltering: true`.
 - `reusableTokensProducerName` (string, optional): Name of the
   `p2p-source-producer` instance whose `ReusablePrefixTokens` request attribute
   is subtracted from the total prompt length. Requires a `label` other than
@@ -340,3 +354,35 @@ estimates supplied by its backend. It does not inspect GPU model, MIG layout,
 free memory, or DCGM metrics, and a token estimate alone does not guarantee a
 request fits in accelerator memory. Use `enableFiltering: false` when the ranges
 express a preference instead of a strict eligibility rule.
+
+### Probabilistic upward escape
+
+```yaml
+plugins:
+- type: utilization-detector
+- type: utilization-filter
+  name: available
+  parameters:
+    fallbackOnEmpty: false
+    conditions:
+    - metric: waiting-queue
+      maxValue: 1
+- type: context-length-aware
+  name: context-router
+  parameters:
+    label: llm-d.ai/context-length-range
+    enableFiltering: true
+    escapeProbability: 0.1
+- type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: utilization-detector
+  - pluginRef: available
+  - pluginRef: context-router
+  - pluginRef: max-score-picker
+```
+
+The detector is placed before the length filter so default injection does not
+append it afterward. The same ordering applies to a custom saturation detector
+that implements Filter. Scoring rules apply to the surviving endpoints.
