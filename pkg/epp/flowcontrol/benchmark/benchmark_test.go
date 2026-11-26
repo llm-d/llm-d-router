@@ -42,7 +42,13 @@ import (
 // and concurrent connections.
 func BenchmarkFlowController_PerformanceMatrix(b *testing.B) {
 	if testing.Short() {
-		b.Skip("skipping PerformanceMatrix in short mode")
+		// Run one representative backpressure coordinate in -short mode so make bench-smoke
+		// exercises the matrix harness without running all 16 coordinates.
+		matrix := benchMatrix{limit: 1, priorities: 1, flows: 10, concurrency: 10}
+		b.Run(matrix.name(), func(b *testing.B) {
+			runMatrixCoordinate(b, matrix)
+		})
+		return
 	}
 	limits := []egressConcurrencyLimit{0, 1, 100}
 	priorities := []priorityLevels{1, 8}
