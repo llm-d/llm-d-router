@@ -19,8 +19,10 @@ package vllminference
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -764,6 +766,114 @@ func TestVllmInferenceParser_RewriteModelName(t *testing.T) {
 
 		_, err = parser.RewriteModelName(fwkrequest.PayloadBytes(grpctest.FramePayload(t, []byte{0x12, 0x05, 'a'})), "m")
 		require.ErrorIs(t, err, vllmwire.ErrMalformed)
+	})
+}
+
+func TestVllmInferenceParser_RewriteModelName_BaseModelsConfig(t *testing.T) {
+	newConfigured := func(t *testing.T) *VllmInferenceParser {
+		t.Helper()
+		plugin, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(
+			`{"baseModels":["meta-llama/Llama-3.1-8B","Qwen/Qwen3-0.6B"]}`)), nil)
+		require.NoError(t, err)
+		parser, ok := plugin.(*VllmInferenceParser)
+		require.True(t, ok)
+		return parser
+	}
+
+	t.Run("adapter target on a base-model request writes lora_name and keeps model", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "Qwen/Qwen3-0.6B",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel(), "vLLM's gRPC server accepts only base model names in model")
+		require.Equal(t, "sql-lora", decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an adapter request rewrites lora_name", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:    "Qwen/Qwen3-0.6B",
+			LoraName: "sql-lora",
+			Prompt:   &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "code-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel())
+		require.Equal(t, "code-lora", decoded.GetLoraName())
+	})
+
+	t.Run("base-model target on an adapter request rewrites model and clears lora_name", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:    "Qwen/Qwen3-0.6B",
+			LoraName: "sql-lora",
+			Prompt:   &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "meta-llama/Llama-3.1-8B")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "meta-llama/Llama-3.1-8B", decoded.GetModel())
+		require.Empty(t, decoded.GetLoraName())
+	})
+
+	t.Run("base-model target on a base-model request rewrites model", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "alias-model",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "Qwen/Qwen3-0.6B")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel())
+		require.Empty(t, decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an alias request writes the only base model", func(t *testing.T) {
+		plugin, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(
+			`{"baseModels":["Qwen/Qwen3-0.6B"]}`)), nil)
+		require.NoError(t, err)
+		parser := plugin.(*VllmInferenceParser)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "my-alias",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel(), "vLLM rejects an alias in model")
+		require.Equal(t, "sql-lora", decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an alias request with several base models is an error", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "my-alias",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		_, err = parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.ErrorContains(t, err, "cannot resolve base model")
+	})
+
+	t.Run("factory rejects invalid parameters", func(t *testing.T) {
+		_, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(`{"baseModels":`)), nil)
+		require.ErrorContains(t, err, "parameters")
 	})
 }
 
