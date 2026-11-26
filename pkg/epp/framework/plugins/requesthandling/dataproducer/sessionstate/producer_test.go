@@ -19,22 +19,30 @@ package sessionstate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
 	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
+
+var testRequestSeq atomic.Uint64
 
 func newTestProducer(t *testing.T) *Producer {
 	t.Helper()
@@ -46,7 +54,9 @@ func newTestProducer(t *testing.T) *Producer {
 }
 
 func requestWithAgentIdentity(agentIdentity string) *fwksched.InferenceRequest {
-	request := &fwksched.InferenceRequest{}
+	request := &fwksched.InferenceRequest{
+		RequestID: fmt.Sprintf("test-req-%d", testRequestSeq.Add(1)),
+	}
 	request.PutAttribute(agentidentity.AgentIdentityKey, agentIdentity)
 	return request
 }
@@ -80,10 +90,17 @@ func TestFactoryAndProduces(t *testing.T) {
 	producer := newTestProducer(t)
 
 	assert.Equal(t, fwkplugin.TypedName{Type: SessionStateProducerType, Name: SessionStateProducerType}, producer.TypedName())
-	expectedKey := SessionStateDataKey.WithNonEmptyProducerName(SessionStateProducerType)
-	produced, ok := producer.Produces()[expectedKey]
+	producedMap := producer.Produces()
+	expectedSessionKey := SessionStateDataKey.WithNonEmptyProducerName(SessionStateProducerType)
+	produced, ok := producedMap[expectedSessionKey]
 	require.True(t, ok)
 	assert.IsType(t, SessionState{}, produced)
+
+	expectedEndpointKey := EndpointSessionsDataKey.WithNonEmptyProducerName(SessionStateProducerType)
+	producedEndpoint, ok := producedMap[expectedEndpointKey]
+	require.True(t, ok)
+	assert.IsType(t, EndpointSessions{}, producedEndpoint)
+
 	assert.Equal(t, defaultEvictionTTL, producer.evictionTTL)
 	assert.Equal(t, defaultEvictionSweepInterval, producer.evictionSweepInterval)
 
@@ -509,4 +526,536 @@ func TestFairnessPolicyCanConsumeSessionState(t *testing.T) {
 		producer.TypedName().String(),
 		consumer.TypedName().String(),
 	}, ordered)
+}
+
+type recordingRegistrar struct {
+	registrations []fwkdl.PendingRegistration
+}
+
+func (r *recordingRegistrar) Register(reg fwkdl.PendingRegistration) error {
+	r.registrations = append(r.registrations, reg)
+	return nil
+}
+
+func resultWithNamedEndpoint(name string) *fwksched.SchedulingResult {
+	return &fwksched.SchedulingResult{
+		PrimaryProfileName: "primary",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"primary": {
+				TargetEndpoints: []fwksched.Endpoint{
+					fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+						ID: types.NamespacedName{Namespace: "default", Name: name},
+					}, fwkdl.NewMetrics(), fwkdl.NewAttributes()),
+				},
+			},
+			"secondary": {
+				TargetEndpoints: []fwksched.Endpoint{
+					fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+						ID: types.NamespacedName{Namespace: "default", Name: "other-pod"},
+					}, fwkdl.NewMetrics(), fwkdl.NewAttributes()),
+				},
+			},
+		},
+	}
+}
+
+func TestRegisterDependencies(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	registrar := &recordingRegistrar{}
+	require.NoError(t, producer.RegisterDependencies(registrar))
+	require.Len(t, registrar.registrations, 1)
+
+	reg := registrar.registrations[0]
+	assert.Equal(t, sourcenotifications.EndpointNotificationSourceType, reg.SourceType)
+	assert.Equal(t, producer.TypedName(), reg.Owner)
+	assert.Same(t, producer, reg.Extractor)
+	assert.NotNil(t, reg.DefaultSource)
+}
+
+func TestPreRequestBindsEndpointAndTracksFootprint(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	producer := newTestProducer(t)
+
+	// Turn 1 dispatches on pod-a and finishes naturally with TotalTokens.
+	req1 := requestWithAgentIdentity("session-a")
+	req1.RequestID = "req-1"
+	req1.RequestSizeBytes = 400 // 100 estimated tokens
+	require.NoError(t, producer.RequestHeader(ctx, req1))
+	require.NoError(t, producer.PreRequest(ctx, req1, resultWithNamedEndpoint("pod-a")))
+
+	state, ok := ReadSessionState(req1)
+	require.True(t, ok)
+	assert.Equal(t, "session-a", state.SessionID)
+	assert.Equal(t, "default/pod-a", state.Endpoint)
+	assert.Equal(t, int64(100), state.InFlightTokens)
+	assert.Equal(t, int64(100), state.ContextSize())
+
+	resp1 := finalResponse(fwkrh.TerminationCauseNatural, 100, 150)
+	resp1.Usage.TotalTokens = 250
+	producer.ResponseBody(ctx, req1, resp1, nil)
+	state, ok = ReadSessionState(req1)
+	require.True(t, ok)
+	assert.Zero(t, state.InFlightTokens)
+	assert.Equal(t, int64(250), state.ContextTokens)
+	assert.Equal(t, int64(250), state.ContextSize())
+
+	// Two parallel turns run simultaneously; one aborts without leaking InFlightTokens.
+	req2 := requestWithAgentIdentity("session-a")
+	req2.RequestID = "req-2"
+	req2.RequestSizeBytes = 2000 // 500 estimated tokens
+	require.NoError(t, producer.RequestHeader(ctx, req2))
+	require.NoError(t, producer.PreRequest(ctx, req2, resultWithNamedEndpoint("pod-a")))
+
+	req3 := requestWithAgentIdentity("session-a")
+	req3.RequestID = "req-3"
+	req3.RequestSizeBytes = 800 // 200 estimated tokens
+	require.NoError(t, producer.RequestHeader(ctx, req3))
+	require.NoError(t, producer.PreRequest(ctx, req3, resultWithNamedEndpoint("pod-a")))
+
+	state, ok = ReadSessionState(req2)
+	require.True(t, ok)
+	assert.Equal(t, int64(2), state.InFlightRequests)
+	assert.Equal(t, int64(700), state.InFlightTokens)
+	assert.Equal(t, int64(700), state.ContextSize())
+
+	producer.ResponseBody(ctx, req3, finalResponse(fwkrh.TerminationCauseError, 10, 0), nil)
+	state, ok = ReadSessionState(req2)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), state.InFlightRequests)
+	assert.Equal(t, int64(500), state.InFlightTokens)
+	assert.Equal(t, int64(250), state.ContextTokens)
+
+	// Moving to pod-b updates the binding and cleans pod-a's index.
+	req4 := requestWithAgentIdentity("session-a")
+	req4.RequestID = "req-4"
+	req4.RequestSizeBytes = 400 // 100 estimated tokens
+	require.NoError(t, producer.RequestHeader(ctx, req4))
+	require.NoError(t, producer.PreRequest(ctx, req4, resultWithNamedEndpoint("pod-b")))
+
+	assert.Empty(t, registryBucketSessions(&producer.registry, "default/pod-a"))
+	podB := registryBucketSessions(&producer.registry, "default/pod-b")
+	require.Len(t, podB, 1)
+	assert.Equal(t, "session-a", podB[0].SessionID)
+	assert.Equal(t, "default/pod-b", podB[0].Endpoint)
+
+	producer.ResponseBody(ctx, req2, finalResponse(fwkrh.TerminationCauseClientDisconnect, 0, 0), nil)
+	resp4 := finalResponse(fwkrh.TerminationCauseNatural, 300, 40)
+	resp4.Usage.TotalTokens = 340
+	producer.ResponseBody(ctx, req4, resp4, nil)
+	state, ok = ReadSessionState(req4)
+	require.True(t, ok)
+	assert.Zero(t, state.InFlightRequests)
+	assert.Zero(t, state.InFlightTokens)
+	assert.Equal(t, int64(340), state.ContextTokens)
+}
+
+func peekSessions(ep fwkdl.Endpoint) ([]SessionState, bool) {
+	view, ok := PeekEndpointSessions(ep)
+	if !ok {
+		return nil, false
+	}
+	return view.Sessions(), true
+}
+
+func TestExtractEndpointLifecycleAndStaleDelete(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	producer := newTestProducer(t)
+
+	// Safe reads when endpoint or attributes are nil or absent, and zero-ID metadata is ignored.
+	_, ok := PeekEndpointSessions(nil)
+	assert.False(t, ok)
+	_, ok = PeekEndpointSessions(&nilAttrsEndpoint{})
+	assert.False(t, ok)
+
+	zeroEp := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{}, nil)
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: zeroEp}))
+	_, ok = PeekEndpointSessions(zeroEp)
+	assert.False(t, ok)
+
+	podAID := types.NamespacedName{Namespace: "default", Name: "pod-a"}
+	epA := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podAID}, nil)
+	_, ok = PeekEndpointSessions(epA)
+	assert.False(t, ok)
+
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: epA}))
+	sessions, ok := peekSessions(epA)
+	require.True(t, ok)
+	assert.Empty(t, sessions)
+
+	req := requestWithAgentIdentity("session-a")
+	req.RequestID = "req-1"
+	req.RequestSizeBytes = 400
+	require.NoError(t, producer.RequestHeader(ctx, req))
+	require.NoError(t, producer.PreRequest(ctx, req, resultWithNamedEndpoint("pod-a")))
+	resp := finalResponse(fwkrh.TerminationCauseNatural, 100, 50)
+	resp.Usage.TotalTokens = 150
+	producer.ResponseBody(ctx, req, resp, nil)
+
+	sessions, ok = peekSessions(epA)
+	require.True(t, ok)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "session-a", sessions[0].SessionID)
+	assert.Equal(t, int64(150), sessions[0].ContextTokens)
+
+	// NewEndpointSessions.Clone returns an independent slice copy.
+	cloned := NewEndpointSessions(sessions).Clone().(EndpointSessions)
+	cloned.Sessions()[0].ContextTokens = 9999
+	sessionsAfter, ok := peekSessions(epA)
+	require.True(t, ok)
+	assert.Equal(t, int64(150), sessionsAfter[0].ContextTokens)
+
+	// Updating the same Endpoint object in place preserves existing bindings.
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: epA}))
+	sessionsAfterInPlace, ok := peekSessions(epA)
+	require.True(t, ok)
+	require.Len(t, sessionsAfterInPlace, 1)
+
+	// Replacing pod-a with a new Endpoint object unbinds sessions from the old pod
+	// while keeping their context history, and ignores the delayed delete for epA.
+	epAReplaced := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podAID}, nil)
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: epAReplaced}))
+
+	oldSessionState, ok := ReadSessionState(req)
+	require.True(t, ok)
+	assert.Empty(t, oldSessionState.Endpoint, "replacement endpoint object must unbind sessions from the old pod")
+	assert.Equal(t, int64(150), oldSessionState.ContextTokens)
+	sessionsOnFreshReplacement, ok := peekSessions(epAReplaced)
+	require.True(t, ok)
+	assert.Empty(t, sessionsOnFreshReplacement)
+
+	reqReplacement := requestWithAgentIdentity("session-b")
+	reqReplacement.RequestID = "req-2"
+	reqReplacement.RequestSizeBytes = 800
+	require.NoError(t, producer.RequestHeader(ctx, reqReplacement))
+	require.NoError(t, producer.PreRequest(ctx, reqReplacement, resultWithNamedEndpoint("pod-a")))
+	respReplacement := finalResponse(fwkrh.TerminationCauseNatural, 200, 40)
+	respReplacement.Usage.TotalTokens = 240
+	producer.ResponseBody(ctx, reqReplacement, respReplacement, nil)
+
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: epA}))
+	sessionsAfterStale, ok := peekSessions(epAReplaced)
+	require.True(t, ok)
+	require.Len(t, sessionsAfterStale, 1, "stale delete must not unbind sessions on replaced endpoint")
+	assert.Equal(t, "session-b", sessionsAfterStale[0].SessionID)
+
+	// Matching delete clears Endpoint while preserving ContextTokens.
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: epAReplaced}))
+	sessionsAfterDelete, ok := peekSessions(epAReplaced)
+	require.True(t, ok)
+	assert.Empty(t, sessionsAfterDelete)
+
+	liveState, ok := ReadSessionState(reqReplacement)
+	require.True(t, ok)
+	assert.Empty(t, liveState.Endpoint)
+	assert.Equal(t, int64(240), liveState.ContextTokens)
+}
+
+func TestExtractConcurrentReplaceAndStaleDelete(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	podID := types.NamespacedName{Namespace: "default", Name: "pod-a"}
+
+	for range 200 {
+		producer := newTestProducer(t)
+		oldEp := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, nil)
+		newEp := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, nil)
+		require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: oldEp}))
+
+		start := make(chan struct{})
+		doneDelete := make(chan struct{})
+		go func() {
+			defer close(doneDelete)
+			<-start
+			_ = producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: oldEp})
+		}()
+
+		close(start)
+		require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: newEp}))
+
+		// Once newEp's EventAddOrUpdate returns, newEp is live for scheduling;
+		// an overlapping or duplicate EventDelete for oldEp must not unbind it.
+		req := requestWithAgentIdentity("session-new")
+		req.RequestID = "req-new"
+		req.RequestSizeBytes = 400
+		require.NoError(t, producer.RequestHeader(ctx, req))
+		require.NoError(t, producer.PreRequest(ctx, req, resultWithNamedEndpoint("pod-a")))
+		<-doneDelete
+
+		require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: oldEp}))
+		sessions, ok := peekSessions(newEp)
+		require.True(t, ok)
+		require.Len(t, sessions, 1, "concurrent or late delete of oldEp must never unbind newEp")
+	}
+}
+
+type nilAttrsEndpoint struct{}
+
+func (e *nilAttrsEndpoint) GetMetadata() *fwkdl.EndpointMetadata   { return nil }
+func (e *nilAttrsEndpoint) UpdateMetadata(*fwkdl.EndpointMetadata) {}
+func (e *nilAttrsEndpoint) GetAttributes() fwkdl.AttributeMap      { return nil }
+func (e *nilAttrsEndpoint) GetMetrics() *fwkdl.Metrics             { return nil }
+func (e *nilAttrsEndpoint) UpdateMetrics(*fwkdl.Metrics)           {}
+func (e *nilAttrsEndpoint) String() string                         { return "" }
+
+type multiHookSessionConsumer struct {
+	fwkfcmocks.MockFairnessPolicy
+	lastScoreState SessionState
+	lastScoreEps   []SessionState
+	lastSatEps     []SessionState
+}
+
+var (
+	_ fwkfc.FairnessPolicy     = &multiHookSessionConsumer{}
+	_ fwkfc.SaturationDetector = &multiHookSessionConsumer{}
+	_ fwksched.Scorer          = &multiHookSessionConsumer{}
+	_ fwkplugin.ConsumerPlugin = &multiHookSessionConsumer{}
+)
+
+func (c *multiHookSessionConsumer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			SessionStateDataKey:     SessionState{},
+			EndpointSessionsDataKey: EndpointSessions{},
+		},
+	}
+}
+
+func (c *multiHookSessionConsumer) Category() fwksched.ScorerCategory {
+	return fwksched.Affinity
+}
+
+func (c *multiHookSessionConsumer) Saturation(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+	c.lastSatEps = nil
+	for _, ep := range endpoints {
+		if sessions, ok := peekSessions(ep); ok {
+			c.lastSatEps = append(c.lastSatEps, sessions...)
+		}
+	}
+	return 0
+}
+
+func (c *multiHookSessionConsumer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	c.lastScoreState, _ = ReadSessionState(request)
+	c.lastScoreEps = nil
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
+	for _, ep := range endpoints {
+		if sessions, ok := peekSessions(&scopedDLEndpoint{ep}); ok {
+			c.lastScoreEps = append(c.lastScoreEps, sessions...)
+		}
+		scores[ep] = 1.0
+	}
+	return scores
+}
+
+// scopedDLEndpoint adapts a scoped scheduling.Endpoint to datalayer.Endpoint
+// so tests can exercise PeekEndpointSessions directly on scoped endpoints.
+type scopedDLEndpoint struct {
+	fwksched.Endpoint
+}
+
+func (s *scopedDLEndpoint) UpdateMetadata(*fwkdl.EndpointMetadata) {}
+func (s *scopedDLEndpoint) UpdateMetrics(*fwkdl.Metrics)           {}
+func (s *scopedDLEndpoint) GetAttributes() fwkdl.AttributeMap      { return s.Endpoint }
+
+func TestMultiHookConsumerAutoCreationDAGAndScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	handle := fwkplugin.NewEppHandle(ctx, nil)
+	identityProvider, err := agentidentity.PluginFactory(agentidentity.PluginType, nil, handle)
+	require.NoError(t, err)
+	handle.AddPlugin(identityProvider.TypedName().Name, identityProvider)
+
+	consumer := &multiHookSessionConsumer{
+		MockFairnessPolicy: fwkfcmocks.MockFairnessPolicy{
+			TypedNameV: fwkplugin.TypedName{Type: "multi-hook", Name: "consumer"},
+		},
+	}
+	handle.AddPlugin(consumer.TypedName().Name, consumer)
+
+	defaultProducers := map[string]string{
+		SessionStateDataKey.String():     SessionStateProducerType,
+		EndpointSessionsDataKey.String(): SessionStateProducerType,
+	}
+	factories := map[string]fwkplugin.FactoryFunc{
+		SessionStateProducerType: Factory,
+	}
+	require.NoError(t, eppdatalayer.CreateMissingDataProducers(ctx, defaultProducers, factories, handle))
+
+	plg := handle.Plugin(SessionStateProducerType)
+	require.NotNil(t, plg, "CreateMissingDataProducers must instantiate session-state-producer")
+	producer, ok := plg.(*Producer)
+	require.True(t, ok)
+
+	ordered, err := eppdatalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		identityProvider.TypedName().String(),
+		producer.TypedName().String(),
+		consumer.TypedName().String(),
+	}, ordered)
+
+	eppdatalayer.RegisterScopeSpecs(handle.GetAllPlugins())
+
+	runtime := eppdatalayer.NewRuntime(0)
+	require.NoError(t, producer.RegisterDependencies(runtime))
+	require.NoError(t, runtime.Configure(nil, logr.Discard()))
+
+	ep := runtime.NewEndpoint(ctx, &fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{Namespace: "default", Name: "pod-a"},
+	})
+	require.NotNil(t, ep)
+
+	req1 := requestWithAgentIdentity("session-a")
+	req1.RequestID = "req-1"
+	req1.RequestSizeBytes = 400
+	require.NoError(t, producer.RequestHeader(ctx, req1))
+	require.NoError(t, producer.PreRequest(ctx, req1, resultWithNamedEndpoint("pod-a")))
+	resp1 := finalResponse(fwkrh.TerminationCauseNatural, 100, 20)
+	resp1.Usage.TotalTokens = 120
+	producer.ResponseBody(ctx, req1, resp1, nil)
+
+	// Saturation reads EndpointSessions on the datalayer Endpoint.
+	_ = consumer.Saturation(ctx, []fwkdl.Endpoint{ep})
+	require.Len(t, consumer.lastSatEps, 1)
+	assert.Equal(t, "session-a", consumer.lastSatEps[0].SessionID)
+	assert.Equal(t, int64(120), consumer.lastSatEps[0].ContextTokens)
+
+	// A follow-up request reads both ReadSessionState and PeekEndpointSessions under ScopeRequest + ScopeEndpoints.
+	req2 := requestWithAgentIdentity("session-a")
+	req2.RequestID = "req-2"
+	require.NoError(t, producer.RequestHeader(ctx, req2))
+	schedEp := fwksched.NewEndpointFromSnapshot(ep.GetMetadata(), ep.GetMetrics(), ep.GetAttributes())
+
+	scopedReq, scopedEps, violations := eppdatalayer.ScopeInvocation(
+		logr.Discard(), "Scorer", consumer, req2, []fwksched.Endpoint{schedEp},
+	)
+	_ = consumer.Score(ctx, scopedReq, scopedEps)
+	assert.NoError(t, violations.Write())
+	assert.Equal(t, "session-a", consumer.lastScoreState.SessionID)
+	assert.Equal(t, "default/pod-a", consumer.lastScoreState.Endpoint)
+	assert.Equal(t, int64(120), consumer.lastScoreState.ContextTokens)
+	require.Len(t, consumer.lastScoreEps, 1)
+	assert.Equal(t, "session-a", consumer.lastScoreEps[0].SessionID)
+
+	// An undeclared plugin must not read either attribute under ScopeRequest / ScopeEndpoints.
+	undeclared := &fwkfcmocks.MockFairnessPolicy{
+		TypedNameV: fwkplugin.TypedName{Type: "undeclared", Name: "undeclared"},
+	}
+	eppdatalayer.RegisterScopeSpecs([]fwkplugin.Plugin{undeclared})
+	deniedReq, deniedEps, _ := eppdatalayer.ScopeInvocation(
+		logr.Discard(), "Scorer", undeclared, req2, []fwksched.Endpoint{schedEp},
+	)
+	_, deniedSessionOK := ReadSessionState(deniedReq)
+	assert.False(t, deniedSessionOK)
+	_, deniedEndpointOK := PeekEndpointSessions(&scopedDLEndpoint{deniedEps[0]})
+	assert.False(t, deniedEndpointOK)
+
+	runtime.ReleaseEndpoint(ep)
+	_ = consumer.Saturation(ctx, []fwkdl.Endpoint{ep})
+	assert.Empty(t, consumer.lastSatEps)
+}
+
+func TestLatePreRequestAfterEndpointDeleteDoesNotCreateZombieBinding(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	producer := newTestProducer(t)
+	runtime := eppdatalayer.NewRuntime(0)
+	require.NoError(t, producer.RegisterDependencies(runtime))
+	require.NoError(t, runtime.Configure(nil, logr.Discard()))
+
+	podID := types.NamespacedName{Namespace: "default", Name: "pod-0"}
+	epA := runtime.NewEndpoint(ctx, &fwkdl.EndpointMetadata{ID: podID})
+	require.NotNil(t, epA)
+
+	req := requestWithAgentIdentity("session-1")
+	req.RequestID = "req-late"
+	req.RequestSizeBytes = 1600 // 400 estimated tokens
+	require.NoError(t, producer.RequestHeader(ctx, req))
+
+	// pod-0 leaves the pool before an already-scheduled request executes PreRequest.
+	runtime.ReleaseEndpoint(epA)
+	require.NoError(t, producer.PreRequest(ctx, req, resultWithNamedEndpoint("pod-0")))
+	resp := finalResponse(fwkrh.TerminationCauseNatural, 300, 100)
+	resp.Usage.TotalTokens = 400
+	producer.ResponseBody(ctx, req, resp, nil)
+
+	state, ok := ReadSessionState(req)
+	require.True(t, ok)
+	assert.Empty(t, state.Endpoint, "late dispatch onto a deleted endpoint must remain unbound")
+	assert.Equal(t, int64(1), state.TurnsTaken)
+	assert.Equal(t, int64(400), state.ContextTokens)
+
+	// A restarted pod under the same NamespacedName starts with an empty view.
+	epA2 := runtime.NewEndpoint(ctx, &fwkdl.EndpointMetadata{ID: podID})
+	require.NotNil(t, epA2)
+	view, ok := PeekEndpointSessions(epA2)
+	require.True(t, ok)
+	assert.Empty(t, view.Sessions())
+	assert.Zero(t, view.TotalContextTokens())
+}
+
+func TestEndpointSessionsViewAggregatesAndLookup(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	producer := newTestProducer(t)
+	podID := types.NamespacedName{Namespace: "default", Name: "pod-a"}
+	epA := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, nil)
+	require.NoError(t, producer.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: epA}))
+
+	view, ok := PeekEndpointSessions(epA)
+	require.True(t, ok)
+	assert.Empty(t, view.Sessions())
+	assert.Zero(t, view.TotalContextTokens())
+
+	// Dispatch two sessions and verify aggregates and per-session lookup.
+	req1 := requestWithAgentIdentity("s1")
+	req1.RequestID = "req-1"
+	req1.RequestSizeBytes = 1200 // 300 tokens
+	require.NoError(t, producer.RequestHeader(ctx, req1))
+	require.NoError(t, producer.PreRequest(ctx, req1, resultWithNamedEndpoint("pod-a")))
+
+	req2 := requestWithAgentIdentity("s2")
+	req2.RequestID = "req-2"
+	req2.RequestSizeBytes = 800 // 200 tokens
+	require.NoError(t, producer.RequestHeader(ctx, req2))
+	require.NoError(t, producer.PreRequest(ctx, req2, resultWithNamedEndpoint("pod-a")))
+
+	assert.Len(t, view.Sessions(), 2)
+	assert.Equal(t, int64(500), view.TotalContextTokens())
+
+	s1State, found := view.Session("s1")
+	require.True(t, found)
+	assert.Equal(t, int64(300), s1State.InFlightTokens)
+	_, found = view.Session("missing")
+	assert.False(t, found)
+
+	// Finish both turns and check updated totals.
+	resp1 := finalResponse(fwkrh.TerminationCauseNatural, 300, 50)
+	resp1.Usage.TotalTokens = 350
+	producer.ResponseBody(ctx, req1, resp1, nil)
+
+	resp2 := finalResponse(fwkrh.TerminationCauseNatural, 200, 40)
+	resp2.Usage.TotalTokens = 240
+	producer.ResponseBody(ctx, req2, resp2, nil)
+
+	assert.Equal(t, int64(590), view.TotalContextTokens())
+
+	// Starting a larger in-flight turn on s1 raises TotalContextTokens.
+	req1b := requestWithAgentIdentity("s1")
+	req1b.RequestID = "req-1b"
+	req1b.RequestSizeBytes = 2000 // 500 in-flight > 350 context
+	require.NoError(t, producer.RequestHeader(ctx, req1b))
+	require.NoError(t, producer.PreRequest(ctx, req1b, resultWithNamedEndpoint("pod-a")))
+
+	assert.Equal(t, int64(740), view.TotalContextTokens())
 }

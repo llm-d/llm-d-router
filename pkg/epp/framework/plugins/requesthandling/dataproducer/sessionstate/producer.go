@@ -24,11 +24,15 @@ import (
 	"fmt"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
@@ -65,12 +69,15 @@ var (
 	_ fwkrh.ResponseBodyProcessor  = &Producer{}
 	_ fwkrh.RequestAbandoned       = &Producer{}
 	_ fwkplugin.ConsumerPlugin     = &Producer{}
+	_ fwkdl.Registrant             = &Producer{}
+	_ fwkdl.EndpointExtractor      = (*Producer)(nil)
 )
 
 // Producer tracks session history within one EPP instance.
 type Producer struct {
-	typedName fwkplugin.TypedName
-	dk        fwkplugin.DataKey
+	typedName          fwkplugin.TypedName
+	dk                 fwkplugin.DataKey
+	endpointSessionsDK fwkplugin.DataKey
 
 	registry SessionStateRegistry
 
@@ -96,6 +103,7 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 	p := &Producer{
 		typedName:             fwkplugin.TypedName{Type: SessionStateProducerType, Name: name},
 		dk:                    SessionStateDataKey.WithNonEmptyProducerName(name),
+		endpointSessionsDK:    EndpointSessionsDataKey.WithNonEmptyProducerName(name),
 		evictionTTL:           time.Duration(params.EvictionTTLSeconds * float64(time.Second)),
 		evictionSweepInterval: time.Duration(params.EvictionSweepSeconds * float64(time.Second)),
 	}
@@ -110,9 +118,12 @@ func (p *Producer) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-// Produces declares the SessionState request attribute written by this producer.
+// Produces declares the request and endpoint attributes written by this producer.
 func (p *Producer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{p.dk: SessionState{}}
+	return map[fwkplugin.DataKey]any{
+		p.dk:                 SessionState{},
+		p.endpointSessionsDK: EndpointSessions{},
+	}
 }
 
 // Consumes declares agent identity as a required input. The agent-identity
@@ -122,6 +133,50 @@ func (p *Producer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{agentidentity.AgentIdentityKey: ""},
 	}
+}
+
+// RegisterDependencies subscribes the producer to endpoint lifecycle events so
+// it can attach session views to new endpoints and unbind sessions when an
+// endpoint leaves the pool.
+func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
+	p.registry.EnableEndpointTracking()
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      p.TypedName(),
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType,
+			sourcenotifications.EndpointNotificationSourceType,
+		),
+	})
+}
+
+// Extract attaches EndpointSessions views on endpoint creation or update and
+// clears session bindings when an endpoint is removed.
+func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
+	if event.Endpoint == nil {
+		return nil
+	}
+	id := metadataEndpointID(event.Endpoint.GetMetadata())
+	if id == "" {
+		return nil
+	}
+
+	switch event.Type {
+	case fwkdl.EventDelete:
+		if !p.registry.UnregisterEndpoint(id, event.Endpoint) {
+			log.FromContext(ctx).V(logging.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", id)
+			break
+		}
+		log.FromContext(ctx).V(logging.DEFAULT).Info("Cleared session bindings for deleted endpoint", "endpoint", id)
+	case fwkdl.EventAddOrUpdate:
+		view := p.registry.RegisterEndpoint(id, event.Endpoint)
+		if attrs := event.Endpoint.GetAttributes(); attrs != nil {
+			attrs.Put(p.endpointSessionsDK, view)
+		}
+		log.FromContext(ctx).V(logging.DEBUG).Info("Attached session view attribute to endpoint", "key", p.endpointSessionsDK.String(), "endpoint", id)
+	}
+	return nil
 }
 
 // RequestHeader marks the session as seen and publishes its state before flow
@@ -152,20 +207,35 @@ func (p *Producer) RequestAbandoned(_ context.Context, request *fwksched.Inferen
 	p.registry.ReleasePending(request.RequestID)
 }
 
-// PreRequest records one dispatched turn. A request counts once even when
-// several profiles run.
-func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
+// PreRequest records one dispatched turn, binds the primary profile's picked
+// endpoint when present, and charges the prompt token estimate into
+// InFlightTokens. A request counts once even when several profiles run.
+func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) error {
 	identity, ok := readAgentIdentity(request)
 	if !ok {
 		return nil
 	}
 
-	p.registry.RecordDispatch(identity, request.RequestID)
+	p.registry.RecordDispatch(identity, request.RequestID, primaryEndpointID(result), EstimatePromptTokens(request.RequestSizeBytes))
 	return nil
 }
 
-// ResponseBody updates session counters after the response lifecycle ends.
-// Only naturally completed responses contribute completion and token totals.
+func primaryEndpointID(result *fwksched.SchedulingResult) string {
+	endpoint := result.PrimaryEndpoint()
+	if endpoint == nil {
+		return ""
+	}
+	return metadataEndpointID(endpoint.GetMetadata())
+}
+
+func metadataEndpointID(md *fwkdl.EndpointMetadata) string {
+	if md == nil || (md.ID.Namespace == "" && md.ID.Name == "") {
+		return ""
+	}
+	return md.ID.String()
+}
+
+// ResponseBody settles the turn after the response lifecycle ends.
 func (p *Producer) ResponseBody(
 	_ context.Context,
 	request *fwksched.InferenceRequest,
@@ -186,10 +256,12 @@ func (p *Producer) ResponseBody(
 	}
 	p.registry.RecordResponse(
 		identity,
+		request.RequestID,
 		response.TerminationCause == fwkrh.TerminationCauseNatural,
 		TurnUsage{
 			InputTokens:  int64(response.Usage.PromptTokens),
 			OutputTokens: int64(response.Usage.CompletionTokens),
+			TotalTokens:  int64(response.Usage.TotalTokens),
 			CachedTokens: cachedTokens,
 		},
 	)
