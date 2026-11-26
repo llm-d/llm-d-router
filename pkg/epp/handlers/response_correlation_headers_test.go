@@ -18,33 +18,40 @@ package handlers
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
-// responseHeaders collects the generated response headers, lowercasing keys and
-// counting repeats so a duplicate emission is visible.
+// responseHeaders resolves the correlation headers the way Process does, then
+// collects the generated response headers, lowercasing keys and counting repeats
+// so a duplicate emission is visible.
 func responseHeaders(ctx context.Context, t *testing.T, s *StreamingServer, reqCtx *RequestContext) (map[string]string, map[string]int) {
 	t.Helper()
 
+	reqCtx.correlationHeaders = s.correlationResponseHeaders(ctx, reqCtx)
+
 	values := make(map[string]string)
 	counts := make(map[string]int)
-	for _, h := range s.generateResponseHeaders(ctx, reqCtx) {
+	for _, h := range s.generateResponseHeaders(reqCtx) {
 		key := strings.ToLower(h.Header.Key)
 		values[key] = string(h.Header.RawValue)
 		counts[key]++
@@ -286,4 +293,180 @@ func TestProcessReturnsRequestIDOnlyWhenResolved(t *testing.T) {
 			require.NotEmpty(t, got[0], "a request without an x-request-id gets the generated one")
 		})
 	}
+}
+
+// immediateResponseHeaders returns the headers set on the ImmediateResponse of
+// the single reply sent on the stream.
+func immediateResponseHeaders(t *testing.T, sent []*extProcPb.ProcessingResponse) (map[string]string, map[string]int) {
+	t.Helper()
+
+	require.Len(t, sent, 1, "expected exactly one reply")
+	imm := sent[0].GetImmediateResponse()
+	require.NotNil(t, imm, "reply must be an ImmediateResponse")
+	require.NotNil(t, imm.Headers, "ImmediateResponse must carry a header mutation")
+
+	values := make(map[string]string)
+	counts := make(map[string]int)
+	for _, h := range imm.Headers.SetHeaders {
+		key := strings.ToLower(h.Header.Key)
+		values[key] = string(h.Header.RawValue)
+		counts[key]++
+	}
+	return values, counts
+}
+
+// getRequestHeaders is a bodyless GET carrying a client request ID, the shape a
+// Responder answers and the shape that reaches no response phase.
+func getRequestHeaders(requestID string) *extProcPb.ProcessingRequest {
+	headers := []*configPb.HeaderValue{
+		{Key: ":method", Value: http.MethodGet},
+		{Key: ":path", Value: "/v1/models"},
+	}
+	if requestID != "" {
+		headers = append(headers, &configPb.HeaderValue{Key: reqcommon.RequestIDHeaderKey, Value: requestID})
+	}
+	return &extProcPb.ProcessingRequest{
+		Request: &extProcPb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: &extProcPb.HttpHeaders{
+				Headers:     &configPb.HeaderMap{Headers: headers},
+				EndOfStream: true,
+			},
+		},
+	}
+}
+
+// A request EPP rejects or answers itself is the one a user reports, so those
+// replies carry the same correlation headers as a routed response. They end the
+// exchange with an ImmediateResponse, which never reaches
+// generateResponseHeaders.
+func TestProcessImmediateResponsesCarryCorrelationHeaders(t *testing.T) {
+	const requestID = "req-from-client"
+
+	for _, tc := range []struct {
+		name       string
+		responder  *testResponder
+		wantStatus envoyTypePb.StatusCode
+	}{
+		{
+			name: "EPP rejects the request",
+			responder: &testResponder{err: errcommon.Error{
+				Code: errcommon.ServiceUnavailable,
+				Msg:  "model data unavailable",
+			}},
+			wantStatus: envoyTypePb.StatusCode_ServiceUnavailable,
+		},
+		{
+			name: "EPP answers the request itself",
+			responder: &testResponder{response: &fwkrh.LocalResponse{
+				StatusCode: http.StatusOK,
+				Headers:    map[string]string{reqcommon.HeaderContentType: reqcommon.ContentTypeJSON},
+				Body:       []byte(`{"object":"list"}`),
+			}},
+			wantStatus: envoyTypePb.StatusCode_OK,
+		},
+		{
+			name: "a responder's own request ID does not reach the client twice",
+			responder: &testResponder{response: &fwkrh.LocalResponse{
+				StatusCode: http.StatusOK,
+				Headers:    map[string]string{reqcommon.RequestIDHeaderKey: "req-from-responder"},
+			}},
+			wantStatus: envoyTypePb.StatusCode_OK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample())))
+
+			server := NewStreamingServer(&responderTestDatastore{}, &mockDirector{}, nil, 0)
+			server.SetResponders([]fwkrh.Responder{tc.responder})
+			server.SetTraceparentResponseHeader(true)
+			process := &responderProcessServer{request: getRequestHeaders(requestID)}
+
+			require.NoError(t, server.Process(process))
+
+			require.Equal(t, tc.wantStatus, process.sentResponses[0].GetImmediateResponse().Status.Code)
+			got, counts := immediateResponseHeaders(t, process.sentResponses)
+
+			assert.Equal(t, requestID, got[reqcommon.RequestIDHeaderKey])
+			assert.Equal(t, 1, counts[reqcommon.RequestIDHeaderKey], "client must receive exactly one x-request-id")
+			assert.NotEmpty(t, got[reqcommon.TraceparentHeaderKey], "reply must point at the request trace")
+			assert.Equal(t, 1, counts[reqcommon.TraceparentHeaderKey])
+		})
+	}
+}
+
+// A request shed by flow control is answered from the state machine, which holds
+// no server and no context, so it reads the headers resolved on the request.
+func TestEvictedResponseCarriesCorrelationHeaders(t *testing.T) {
+	useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample())))
+
+	ctx, span := tracing.Tracer("test").Start(context.Background(), "request", trace.WithSpanKind(trace.SpanKindServer))
+	defer span.End()
+
+	server := &StreamingServer{requestIDResponseHeader: true, traceparentResponseHeader: true}
+	reqCtx := &RequestContext{
+		requestState:      requestEvicted,
+		resolvedRequestID: "req-evicted",
+	}
+	reqCtx.correlationHeaders = server.correlationResponseHeaders(ctx, reqCtx)
+
+	srv := &mockProcessServer{}
+	require.NoError(t, reqCtx.updateStateAndSendIfNeeded(srv, logr.Discard(), span))
+
+	got, counts := immediateResponseHeaders(t, srv.sentResponses)
+
+	assert.Equal(t, "req-evicted", got[reqcommon.RequestIDHeaderKey])
+	assert.Equal(t, 1, counts[reqcommon.RequestIDHeaderKey])
+	assert.Contains(t, got[reqcommon.TraceparentHeaderKey], span.SpanContext().TraceID().String())
+	// The eviction reason and content type the reply already carried are kept.
+	assert.Equal(t, reqcommon.ContentTypeJSON, got[reqcommon.HeaderContentType])
+}
+
+// An ImmediateResponse built before the request ID is resolved, such as a stream
+// that fails on its first body chunk, has nothing to correlate and must not gain
+// an empty header.
+func TestAppendCorrelationHeadersWithoutResolvedRequest(t *testing.T) {
+	imm := &extProcPb.ImmediateResponse{}
+	appendCorrelationHeaders(&RequestContext{}, imm)
+	assert.Nil(t, imm.Headers, "no correlation headers means no mutation at all")
+
+	appendCorrelationHeaders(&RequestContext{correlationHeaders: []*configPb.HeaderValueOption{{
+		Header: &configPb.HeaderValue{Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("req-1")},
+	}}}, nil)
+}
+
+// formatTraceparent stands in for an Inject call on the W3C propagator, so it
+// has to render exactly what that propagator writes, including which flag bits
+// survive: masking the sampled bit alone would drop the random-trace-ID flag.
+func TestFormatTraceparentMatchesW3CPropagator(t *testing.T) {
+	traceID, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	require.NoError(t, err)
+	spanID, err := trace.SpanIDFromHex("00f067aa0b0902b7")
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name  string
+		flags trace.TraceFlags
+	}{
+		{name: "no flags"},
+		{name: "sampled", flags: trace.FlagsSampled},
+		{name: "random trace ID", flags: trace.FlagsRandom},
+		{name: "sampled and random", flags: trace.FlagsSampled | trace.FlagsRandom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    traceID,
+				SpanID:     spanID,
+				TraceFlags: tc.flags,
+			}))
+
+			carrier := propagation.MapCarrier{}
+			propagation.TraceContext{}.Inject(ctx, carrier)
+
+			require.Equal(t, carrier.Get(reqcommon.TraceparentHeaderKey), formatTraceparent(ctx))
+		})
+	}
+}
+
+func TestFormatTraceparentEmptyWithoutSpanContext(t *testing.T) {
+	assert.Empty(t, formatTraceparent(context.Background()))
 }

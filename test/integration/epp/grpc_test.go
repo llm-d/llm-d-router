@@ -181,10 +181,13 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 		},
 		{
-			name:               "no backend pods available",
-			requests:           fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			name: "no backend pods available",
+			requests: fwkepp.ReqHeaderOnly(map[string]string{
+				"content-type":               "application/json",
+				reqcommon.RequestIDHeaderKey: testRequestID,
+			}),
 			pods:               nil,
-			wantResponses:      ExpectRejectNoEndpoints(),
+			wantResponses:      ExpectRejectNoEndpoints(testRequestID),
 			ignoreErrorMessage: true,
 		},
 
@@ -218,7 +221,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				eppharness.P(0, 0, 0.2, "foo"),
 				eppharness.P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 			},
-			wantResponses:      ExpectRejectNoEndpoints(),
+			wantResponses:      ExpectRejectNoEndpoints(testRequestID),
 			ignoreErrorMessage: true,
 		},
 

@@ -65,6 +65,7 @@ func (s *StreamingServer) tryRespondLocally(ctx context.Context, reqCtx *Request
 			continue
 		}
 		reqCtx.localResp = immediateResponse(resp)
+		appendCorrelationHeaders(reqCtx, reqCtx.localResp.GetImmediateResponse())
 		reqCtx.requestState = requestAnsweredLocal
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("EPP answered request locally",
 			"responder", responder.TypedName(), "path", request.Path)

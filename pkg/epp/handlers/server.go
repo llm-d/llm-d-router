@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
@@ -248,6 +249,13 @@ type RequestContext struct {
 	// Request.Headers, which routing paths that answer before the client headers
 	// are copied (a bodyless GET) leave unset.
 	resolvedRequestID string
+
+	// correlationHeaders carry resolvedRequestID and the request span's trace
+	// context back to the client. Resolved once the root span starts, so every
+	// reply quotes the same values, including the ImmediateResponse paths that
+	// never reach generateResponseHeaders. Empty until then, and whenever neither
+	// header is enabled.
+	correlationHeaders []*configPb.HeaderValueOption
 
 	// Envoy ext_proc protocol state.
 	requestState         streamRequestState
@@ -717,6 +725,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				),
 			)
 
+			// Both inputs are settled now, and every reply from here on quotes them.
+			reqCtx.correlationHeaders = s.correlationResponseHeaders(ctx, reqCtx)
+
 			// Tag every log line of this request with the trace it belongs to.
 			ctx = tracing.LoggerWithSpanContext(ctx, span)
 			logger = log.FromContext(ctx)
@@ -909,7 +920,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			}
 			reqCtx.requestState = responseReceived
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
-			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(ctx, reqCtx)
+			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
 			reqCtx.responseHeadersReceivedAt = respHeadersReceivedAt
 			reqCtx.responseProcessingDuration += time.Since(respHeadersReceivedAt)
 
@@ -965,6 +976,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if err != nil {
 				return err
 			}
+			appendCorrelationHeaders(reqCtx, resp.GetImmediateResponse())
 			if err := srv.Send(resp); err != nil {
 				if ctx.Err() == context.Canceled {
 					logger.V(logutil.DEBUG).Info("Request stream cancelled while sending response")
@@ -1123,6 +1135,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		if err != nil {
 			return err
 		}
+		appendCorrelationHeaders(r, resp.GetImmediateResponse())
 		return srv.Send(resp)
 	}
 

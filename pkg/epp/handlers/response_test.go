@@ -1477,7 +1477,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 		},
 	}
 
-	results := server.generateResponseHeaders(context.Background(), reqCtx)
+	results := server.generateResponseHeaders(reqCtx)
 
 	gotHeaders := make(map[string]string)
 	for _, h := range results {
@@ -1534,7 +1534,7 @@ func TestGenerateResponseHeaders_FlowQueueDuration(t *testing.T) {
 			}
 
 			gotHeaders := make(map[string]string)
-			for _, h := range server.generateResponseHeaders(context.Background(), reqCtx) {
+			for _, h := range server.generateResponseHeaders(reqCtx) {
 				gotHeaders[h.Header.Key] = string(h.Header.RawValue)
 			}
 
@@ -2139,7 +2139,7 @@ func TestGenerateResponseHeaderResponseStripsFailedStage(t *testing.T) {
 		routing.FailedStageHeader: routing.StagePrefill,
 		"content-type":            "application/json",
 	}}}
-	mutation := server.generateResponseHeaderResponse(context.Background(), withMarker).
+	mutation := server.generateResponseHeaderResponse(withMarker).
 		GetResponseHeaders().GetResponse().GetHeaderMutation()
 	require.Equal(t, []string{routing.FailedStageHeader}, mutation.GetRemoveHeaders())
 	_, present := setValue(mutation, routing.FailedStageHeader)
@@ -2151,7 +2151,7 @@ func TestGenerateResponseHeaderResponseStripsFailedStage(t *testing.T) {
 	withoutMarker := &RequestContext{Response: &Response{Headers: map[string]string{
 		"content-type": "application/json",
 	}}}
-	mutation = server.generateResponseHeaderResponse(context.Background(), withoutMarker).
+	mutation = server.generateResponseHeaderResponse(withoutMarker).
 		GetResponseHeaders().GetResponse().GetHeaderMutation()
 	assert.Empty(t, mutation.GetRemoveHeaders())
 	value, present = setValue(mutation, "content-type")

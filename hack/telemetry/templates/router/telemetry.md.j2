@@ -51,6 +51,9 @@ returned.
 A request ID the model server sets in its own response is dropped in favour of
 the resolved value, so the client receives a single `x-request-id`.
 
+Every reply carries the headers, including the ones the EPP produces itself for a
+request it rejects, sheds under load, or answers locally.
+
 ## Attributes
 
 {% for group in ctx.groups if group.id == "registry.llm_d" %}

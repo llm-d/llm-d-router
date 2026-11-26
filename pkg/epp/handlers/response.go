@@ -27,8 +27,7 @@ import (
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -386,8 +385,8 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 // response plugins ran. The failed-stage marker the plugins read is left out,
 // and removed from the upstream set when the response carried one, so the
 // client never sees it.
-func (s *StreamingServer) generateResponseHeaderResponse(ctx context.Context, reqCtx *RequestContext) *extProcPb.ProcessingResponse {
-	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(ctx, reqCtx)}
+func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(reqCtx)}
 	if _, ok := reqCtx.Response.Headers[routing.FailedStageHeader]; ok {
 		mutation.RemoveHeaders = []string{routing.FailedStageHeader}
 	}
@@ -423,7 +422,7 @@ func generateResponseBodyResponses(responseBodyBytes []byte, setEoS bool, dynami
 	return responses
 }
 
-func (s *StreamingServer) generateResponseHeaders(ctx context.Context, reqCtx *RequestContext) []*configPb.HeaderValueOption {
+func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*configPb.HeaderValueOption {
 	// can likely refactor these two bespoke headers to be updated in PostDispatch, to centralize logic.
 	headers := []*configPb.HeaderValueOption{
 		{
@@ -435,27 +434,8 @@ func (s *StreamingServer) generateResponseHeaders(ctx context.Context, reqCtx *R
 		},
 	}
 
-	// Return the IDs the client needs to quote in a bug report: the request ID
-	// that EPP's logs and spans carry, and the trace the operator then opens.
-	returnsRequestID := s.requestIDResponseHeader && reqCtx.resolvedRequestID != ""
-	if returnsRequestID {
-		headers = append(headers, &configPb.HeaderValueOption{
-			Header: &configPb.HeaderValue{
-				Key:      reqcommon.RequestIDHeaderKey,
-				RawValue: []byte(reqCtx.resolvedRequestID),
-			},
-		})
-	}
-	if s.traceparentResponseHeader {
-		if traceparent := injectedTraceparent(ctx); traceparent != "" {
-			headers = append(headers, &configPb.HeaderValueOption{
-				Header: &configPb.HeaderValue{
-					Key:      reqcommon.TraceparentHeaderKey,
-					RawValue: []byte(traceparent),
-				},
-			})
-		}
-	}
+	headers = append(headers, reqCtx.correlationHeaders...)
+	returnsRequestID := isCorrelationHeader(reqCtx, reqcommon.RequestIDHeaderKey)
 
 	// Stamp the flow control queue duration ahead of the streamed body so it reaches the client before the
 	// first token. Absent when flow control did not process the request; zero means a dispatch with no
@@ -489,12 +469,78 @@ func (s *StreamingServer) generateResponseHeaders(ctx context.Context, reqCtx *R
 	return headers
 }
 
-// injectedTraceparent returns the W3C traceparent for the span active in ctx, or
-// an empty string when the span context is not valid (tracing disabled). Only
-// traceparent is taken from the propagator: baggage and tracestate may carry
-// internal values, which do not belong in a client response.
-func injectedTraceparent(ctx context.Context) string {
-	carrier := make(propagation.MapCarrier, 3)
-	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	return carrier.Get(reqcommon.TraceparentHeaderKey)
+// correlationResponseHeaders returns the headers that tie a reply back to EPP's
+// logs and traces: the resolved request ID, and the request span's trace context
+// when it is configured to leave the cluster. Both are fixed for the life of the
+// root span, so this is resolved once per request.
+func (s *StreamingServer) correlationResponseHeaders(ctx context.Context, reqCtx *RequestContext) []*configPb.HeaderValueOption {
+	var headers []*configPb.HeaderValueOption
+	if s.requestIDResponseHeader && reqCtx.resolvedRequestID != "" {
+		headers = append(headers, &configPb.HeaderValueOption{
+			Header: &configPb.HeaderValue{
+				Key:      reqcommon.RequestIDHeaderKey,
+				RawValue: []byte(reqCtx.resolvedRequestID),
+			},
+		})
+	}
+	if s.traceparentResponseHeader {
+		if traceparent := formatTraceparent(ctx); traceparent != "" {
+			headers = append(headers, &configPb.HeaderValueOption{
+				Header: &configPb.HeaderValue{
+					Key:      reqcommon.TraceparentHeaderKey,
+					RawValue: []byte(traceparent),
+				},
+			})
+		}
+	}
+	return headers
+}
+
+// appendCorrelationHeaders attaches the correlation headers to an
+// ImmediateResponse. EPP ends an exchange this way when it rejects a request,
+// sheds it under load, or answers it locally, none of which reach
+// generateResponseHeaders, so without this the replies a user quotes in a bug
+// report are the ones carrying no request ID. A value already set under one of
+// these keys is dropped, so the client receives one of each.
+func appendCorrelationHeaders(reqCtx *RequestContext, imm *extProcPb.ImmediateResponse) {
+	if imm == nil || len(reqCtx.correlationHeaders) == 0 {
+		return
+	}
+	if imm.Headers == nil {
+		imm.Headers = &extProcPb.HeaderMutation{}
+	}
+	existing := imm.Headers.SetHeaders
+	merged := make([]*configPb.HeaderValueOption, 0, len(existing)+len(reqCtx.correlationHeaders))
+	for _, header := range existing {
+		if isCorrelationHeader(reqCtx, header.GetHeader().GetKey()) {
+			continue
+		}
+		merged = append(merged, header)
+	}
+	merged = append(merged, reqCtx.correlationHeaders...)
+	imm.Headers.SetHeaders = merged
+}
+
+// isCorrelationHeader reports whether key is one EPP sets itself for this request.
+func isCorrelationHeader(reqCtx *RequestContext, key string) bool {
+	for _, header := range reqCtx.correlationHeaders {
+		if strings.EqualFold(header.GetHeader().GetKey(), key) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatTraceparent renders the W3C trace context of the span in ctx, or an empty
+// string when the span context is not valid (tracing disabled). The propagator is
+// not used: it also serializes tracestate and baggage, which can hold internal
+// values that do not belong in a client response. "00" is the trace context
+// version, and the flag mask is the one the W3C propagator writes.
+func formatTraceparent(ctx context.Context) string {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return ""
+	}
+	flags := sc.TraceFlags() & (trace.FlagsSampled | trace.FlagsRandom)
+	return "00-" + sc.TraceID().String() + "-" + sc.SpanID().String() + "-" + flags.String()
 }

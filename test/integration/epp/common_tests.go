@@ -19,6 +19,7 @@ package epp
 
 import (
 	"encoding/json"
+	"strings"
 
 	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -50,6 +51,10 @@ func buildEnvoyHeaders(headers map[string]string) []*envoyCorev3.HeaderValue {
 	}
 	return hList
 }
+
+// testRequestID is the x-request-id the shared request generators set, so a
+// sequence that supplies its own headers can assert the same value coming back.
+const testRequestID = "test-request-id"
 
 // ReqSubset creates a request sequence with Envoy Endpoint Metadata.
 // This simulates the "Subset Load Balancing" flow where EPP picks a specific pod IP.
@@ -207,34 +212,33 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 }
 
 // ExpectReject asserts that the EPP immediately rejected the request with the given code and message,
-// serialized in the OpenAI error envelope.
-func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader()))
+// serialized in the OpenAI error envelope. requestID is the x-request-id the rejection must carry back,
+// which is what a user quotes when reporting the failure.
+func ExpectReject(code envoyTypePb.StatusCode, msg, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{jsonContentTypeHeader()}, requestIDResponseHeader(requestID)...)
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), headers...))
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
-func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
-		&envoyCorev3.HeaderValueOption{
+func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		jsonContentTypeHeader(),
+		{
 			Header: &envoyCorev3.HeaderValue{
 				Key:      errcommon.RequestDroppedReasonHeaderKey,
 				RawValue: []byte(reason),
 			},
-		}))
+		},
+	}, requestIDResponseHeader(requestID)...)
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), headers...))
 }
 
 // ExpectRejectNoEndpoints asserts that the EPP rejected the request because no endpoint can serve it.
 // The error message is left empty; set ignoreErrorMessage on the test case.
-func ExpectRejectNoEndpoints() []*extProcPb.ProcessingResponse {
+func ExpectRejectNoEndpoints(requestID string) []*extProcPb.ProcessingResponse {
 	code := envoyTypePb.StatusCode_ServiceUnavailable
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, ""), jsonContentTypeHeader(),
-		&envoyCorev3.HeaderValueOption{
-			Header: &envoyCorev3.HeaderValue{
-				Key:      errcommon.RequestDroppedReasonHeaderKey,
-				RawValue: []byte(errcommon.RequestDroppedReasonNoEndpoints),
-			},
-		}))
+	return ExpectRejectWithDropReason(code, "", errcommon.RequestDroppedReasonNoEndpoints, requestID)
 }
 
 // rejectGRPCStatus is the gRPC status the EPP sets on a rejection, by HTTP status.
@@ -295,8 +299,9 @@ type openAIErrorFields struct {
 
 // ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
 // given code and message, serialized in the Anthropic error envelope.
-func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader()))
+func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{jsonContentTypeHeader()}, requestIDResponseHeader(requestID)...)
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), headers...))
 }
 
 func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {
@@ -338,6 +343,23 @@ func requestIDResponseHeader(requestID string) []*envoyCorev3.HeaderValueOption 
 		Key:      reqcommon.RequestIDHeaderKey,
 		RawValue: []byte(requestID),
 	}}}
+}
+
+// requestIDOf returns the x-request-id a built request sequence carries, for
+// sequences that number each request rather than reusing testRequestID.
+func requestIDOf(requests []*extProcPb.ProcessingRequest) string {
+	for _, req := range requests {
+		for _, header := range req.GetRequestHeaders().GetHeaders().GetHeaders() {
+			if !strings.EqualFold(header.GetKey(), reqcommon.RequestIDHeaderKey) {
+				continue
+			}
+			if raw := header.GetRawValue(); len(raw) > 0 {
+				return string(raw)
+			}
+			return header.GetValue()
+		}
+	}
+	return ""
 }
 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
@@ -464,20 +486,23 @@ func commonTestCases(prio func(int) int) []testCase {
 			},
 		},
 		{
-			name:               "no backend pods available",
-			requests:           fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			name: "no backend pods available",
+			requests: fwkepp.ReqHeaderOnly(map[string]string{
+				"content-type":               "application/json",
+				reqcommon.RequestIDHeaderKey: testRequestID,
+			}),
 			pods:               nil,
-			wantResponses:      ExpectRejectNoEndpoints(),
+			wantResponses:      ExpectRejectNoEndpoints(testRequestID),
 			ignoreErrorMessage: true,
 		},
 		{
 			name: "request missing model field",
 			requests: fwkepp.ReqRaw(
-				map[string]string{"content-type": "application/json"},
+				map[string]string{"content-type": "application/json", reqcommon.RequestIDHeaderKey: testRequestID},
 				`{"prompt":"hello world"}`,
 			),
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-				"model not found in request body"),
+				"model not found in request body", testRequestID),
 		},
 	}
 }

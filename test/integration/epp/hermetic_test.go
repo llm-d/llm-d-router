@@ -151,7 +151,7 @@ dataLayer:
 				{
 					name: "invalid json body",
 					requests: fwkepp.ReqRaw(
-						map[string]string{"hi": "mom"},
+						map[string]string{"hi": "mom", reqcommon.RequestIDHeaderKey: testRequestID},
 						"no healthy upstream",
 					),
 					pods: []eppharness.PodState{
@@ -160,6 +160,7 @@ dataLayer:
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
 						"error extracting request body: invalid character 'o' in literal null (expecting 'u')",
+						testRequestID,
 					),
 				},
 				{
@@ -205,38 +206,46 @@ dataLayer:
 					name: "images edits: non-multipart content-type rejected",
 					requests: fwkepp.ReqRaw(
 						map[string]string{
-							":path":        "/v1/images/edits",
-							"content-type": "application/json",
+							":path":                      "/v1/images/edits",
+							"content-type":               "application/json",
+							reqcommon.RequestIDHeaderKey: testRequestID,
 						},
 						`{"model":"my-model","prompt":"edit"}`,
 					),
 					wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-						"images edits request must have a multipart/form-data content-type"),
+						"images edits request must have a multipart/form-data content-type", testRequestID),
 				},
 				{
-					name:               "no backend pods available",
-					requests:           fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+					name: "no backend pods available",
+					requests: fwkepp.ReqHeaderOnly(map[string]string{
+						"content-type":               "application/json",
+						reqcommon.RequestIDHeaderKey: testRequestID,
+					}),
 					pods:               nil,
-					wantResponses:      ExpectRejectNoEndpoints(),
+					wantResponses:      ExpectRejectNoEndpoints(testRequestID),
 					ignoreErrorMessage: true,
 				},
 				{
 					name: "request missing model field",
 					requests: fwkepp.ReqRaw(
-						map[string]string{"content-type": "application/json"},
+						map[string]string{"content-type": "application/json", reqcommon.RequestIDHeaderKey: testRequestID},
 						`{"prompt":"hello world"}`,
 					),
 					wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-						"model not found in request body"),
+						"model not found in request body", testRequestID),
 				},
 				{
 					name: "messages API rejection uses the Anthropic envelope",
 					requests: fwkepp.ReqRaw(
-						map[string]string{":path": "/v1/messages", "content-type": "application/json"},
+						map[string]string{
+							":path":                      "/v1/messages",
+							"content-type":               "application/json",
+							reqcommon.RequestIDHeaderKey: testRequestID,
+						},
 						`{"model":"my-model","max_tokens":8}`,
 					),
 					wantResponses: ExpectRejectAnthropic(envoyTypePb.StatusCode_BadRequest,
-						"no parser registered matching path suffix for: /v1/messages"),
+						"no parser registered matching path suffix for: /v1/messages", testRequestID),
 				},
 
 				// --- Subsetting & Metadata ---
@@ -269,7 +278,7 @@ dataLayer:
 						eppharness.P(0, 0, 0.2, "foo"),
 						eppharness.P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
-					wantResponses:      ExpectRejectNoEndpoints(),
+					wantResponses:      ExpectRejectNoEndpoints(testRequestID),
 					ignoreErrorMessage: true,
 				},
 
