@@ -171,7 +171,7 @@ func TestStandaloneChart(t *testing.T) {
 			// so a restarted EPP would stay out of rotation for minutes.
 			noTrafficInterval := tc.healthCheckNoTrafficInterval
 			if noTrafficInterval == "" {
-				noTrafficInterval = healthCheckInterval
+				noTrafficInterval = "1s"
 			}
 			if !strings.Contains(envoy, " no_traffic_interval: "+noTrafficInterval+"\n") {
 				t.Fatalf("Envoy health-check no_traffic_interval must be %s", noTrafficInterval)
@@ -251,8 +251,8 @@ func TestStandaloneChartDefaults(t *testing.T) {
 			if !strings.Contains(envoy, "failure_mode_allow: true") {
 				t.Fatal("unset fail-open must preserve the chart default")
 			}
-			if !strings.Contains(envoy, " no_traffic_interval: 10s\n") {
-				t.Fatal("unset no_traffic_interval must follow the health-check interval")
+			if !strings.Contains(envoy, " no_traffic_interval: 1s\n") || !strings.Contains(envoy, " healthy_threshold: 1\n") {
+				t.Fatal("a restarted EPP must be admitted about 1s after it serves")
 			}
 			return
 		}
