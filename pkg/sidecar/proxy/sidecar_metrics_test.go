@@ -1636,6 +1636,101 @@ func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
 	}
 }
 
+// sequentialPrefillHandlers runs the P2P and shared storage P/D paths, which both
+// buffer a prefill response before dispatching decode.
+var sequentialPrefillHandlers = map[string]func(s *Server, w http.ResponseWriter, r *http.Request, prefillHostPort string){
+	"p2p": func(s *Server, w http.ResponseWriter, r *http.Request, prefillHostPort string) {
+		s.handleP2P(w, r, prefillHostPort, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillHostPort), port: p2pConnectorPort}},
+			reqcommon.APITypeChatCompletions)
+	},
+	"shared storage": func(s *Server, w http.ResponseWriter, r *http.Request, prefillHostPort string) {
+		s.handleSharedStorage(w, r, prefillHostPort, reqcommon.APITypeChatCompletions)
+	},
+}
+
+func TestSequentialPrefillConnectionClosedMidBody(t *testing.T) {
+	for name, handle := range sequentialPrefillHandlers {
+		t.Run(name, func(t *testing.T) {
+			spans := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// Declaring more than is written makes the server close the
+				// connection after the partial body.
+				w.Header().Set("Content-Length", "400")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"choices":[`)
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+			s.logger = log.Log
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after a prefill failure")
+			})
+
+			before := snapshotStageMetrics(t)
+			req := chatRequest(t, textChatBody())
+			// Under a server context the reverse proxy panics with
+			// http.ErrAbortHandler when the body copy fails.
+			req = withContextLogger(s, req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{})))
+			rw := httptest.NewRecorder()
+			require.NotPanics(t, func() { handle(s, rw, req, prefillURL.Host) })
+
+			assert.Equal(t, http.StatusBadGateway, rw.Code)
+			var errBody reqcommon.OpenAIErrorResponse
+			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
+			assert.Equal(t, "server_error", errBody.Error.Type)
+			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+
+			// Shared storage does not start a prefill span.
+			if name == "p2p" {
+				var prefillSpan sdktrace.ReadOnlySpan
+				for _, span := range spans.Ended() {
+					if span.Name() == "prefill" {
+						prefillSpan = span
+					}
+				}
+				require.NotNil(t, prefillSpan, "the prefill span must end")
+				assert.Equal(t, codes.Error, prefillSpan.Status().Code)
+			}
+		})
+	}
+}
+
+func TestSequentialPrefillClientDisconnectMidBody(t *testing.T) {
+	for name, handle := range sequentialPrefillHandlers {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			s := NewProxy(Config{Port: "0"})
+			s.logger = log.Log
+			// The client leaves while the prefill body is arriving, and the
+			// reverse proxy aborts the body copy.
+			s.prefillerProxies.Add("prefill:8000", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"choices":[`)
+				cancel()
+				panic(http.ErrAbortHandler)
+			}))
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after the client left")
+			})
+
+			before := snapshotStageMetrics(t)
+			req := withContextLogger(s, chatRequest(t, textChatBody()).WithContext(ctx))
+			rw := httptest.NewRecorder()
+			require.NotPanics(t, func() { handle(s, rw, req, "prefill:8000") })
+
+			assert.Empty(t, rw.Body.String(), "nothing is sent to a client that left")
+			assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
+		})
+	}
+}
+
 func TestHandleNIXLV2SerialInterruptedPrefillErrorRetry(t *testing.T) {
 	tests := []struct {
 		name         string
