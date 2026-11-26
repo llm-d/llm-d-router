@@ -2839,9 +2839,21 @@ func TestProcessRawMessage_DecodeErrorIncrementsDroppedMetric(t *testing.T) {
 	}
 }
 
-func TestProcessEventBatch_ProcessingLagMetric(t *testing.T) {
+type timestampAdapter struct {
+	timestamp float64
+}
+
+func (a *timestampAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "pod-a", "test-model", EventBatch{Timestamp: a.timestamp}, nil
+}
+
+func (a *timestampAdapter) ShardingKey(*RawMessage) string { return "pod-a" }
+
+func TestProcessRawMessage_ProcessingLagMetric(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, _, _ := newTestPool(t, 16)
+	adapter := &timestampAdapter{}
+	pool.adapter = adapter
 
 	readLagCount := func() (uint64, float64) {
 		var m dto.Metric
@@ -2850,21 +2862,28 @@ func TestProcessEventBatch_ProcessingLagMetric(t *testing.T) {
 	}
 
 	countBefore, sumBefore := readLagCount()
-	// Timestamp == 0 must not observe processing lag.
-	pool.processEventBatch(ctx, &EventBatch{Timestamp: 0}, "10.0.9.2:8000", "test-model")
+	// Timestamp == 0 does not observe processing lag.
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model"})
 	countZero, _ := readLagCount()
 	assert.Equal(t, countBefore, countZero)
 
-	// Positive past timestamp observes >= 0 lag.
-	pastTS := float64(time.Now().Add(-200*time.Millisecond).UnixNano()) / 1e9
-	pool.processEventBatch(ctx, &EventBatch{Timestamp: pastTS}, "10.0.9.2:8000", "test-model")
+	// Replayed batches skip processing lag even with a historical timestamp.
+	adapter.timestamp = float64(time.Now().Add(-time.Hour).UnixNano()) / 1e9
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model", replayed: true})
+	countReplay, sumReplay := readLagCount()
+	assert.Equal(t, countBefore, countReplay)
+	assert.InDelta(t, sumBefore, sumReplay, 1e-9)
+
+	// Positive past timestamp on a live batch observes >= 0 lag.
+	adapter.timestamp = float64(time.Now().Add(-200*time.Millisecond).UnixNano()) / 1e9
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model"})
 	countAfter, sumAfter := readLagCount()
 	assert.Equal(t, countBefore+1, countAfter)
 	assert.GreaterOrEqual(t, sumAfter-sumBefore, 0.15)
 
 	// Future timestamp clamps observed lag at 0 rather than negative.
-	futureTS := float64(time.Now().Add(10*time.Second).UnixNano()) / 1e9
-	pool.processEventBatch(ctx, &EventBatch{Timestamp: futureTS}, "10.0.9.2:8000", "test-model")
+	adapter.timestamp = float64(time.Now().Add(10*time.Second).UnixNano()) / 1e9
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model"})
 	countFuture, sumFuture := readLagCount()
 	assert.Equal(t, countAfter+1, countFuture)
 	assert.InDelta(t, sumAfter, sumFuture, 1e-9)

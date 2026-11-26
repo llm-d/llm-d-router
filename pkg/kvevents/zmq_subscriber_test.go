@@ -48,40 +48,17 @@ func buildEventBatchPayload(t *testing.T) []byte {
 
 func buildEventPayload(t *testing.T, events ...[]any) []byte {
 	t.Helper()
-
-	rawEvents := make([]msgpack.RawMessage, 0, len(events))
-	for _, event := range events {
-		rawEvent, err := msgpack.Marshal(event)
-		require.NoError(t, err)
-		rawEvents = append(rawEvents, rawEvent)
-	}
-
-	// EventBatch is array-encoded: [TS, Events, DataParallelRank]
-	batch := []any{
-		1234567890.0, // TS
-		rawEvents,    // Events
-		nil,          // DataParallelRank
-	}
-
-	var buf bytes.Buffer
-	enc := msgpack.NewEncoder(&buf)
-	enc.UseArrayEncodedStructs(true)
-	require.NoError(t, enc.Encode(batch))
-	return buf.Bytes()
+	return buildEventPayloadAt(t, 1234567890.0, events...)
 }
 
 func buildDistinctBlockStoredPayload(t *testing.T, blockHash uint64) []byte {
 	t.Helper()
 
-	tokens := make([]uint32, 64)
-	for i := range tokens {
-		tokens[i] = uint32(blockHash) + uint32(i) + 1 //#nosec G115 -- test data is small
-	}
 	return buildEventPayload(t, []any{
 		string(kvevents.EventTypeBlockStored),
 		[]uint64{blockHash},
 		uint64(0),
-		tokens,
+		makeTestTokens(blockHash),
 		64,
 	})
 }
@@ -1288,4 +1265,96 @@ func TestZMQSubscriber_DecodeErrorSeriesCleanedUpOnRemove(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		assert.Empty(c, gatherDropped(c)[podID])
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestZMQSubscriber_ReplayAndSnapshotSkipProcessingLagMetric(t *testing.T) {
+	readLag := func() (uint64, float64) {
+		var m dto.Metric
+		require.NoError(t, metrics.EventsProcessingLag.Write(&m))
+		return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+	}
+
+	t.Run("gap_replay", func(t *testing.T) {
+		h := newReplayHarness(t, nil, false)
+		countBefore, sumBefore := readLag()
+
+		// Live seq=0 with timestamp 0 skips lag so only the post-replay live frame increments it.
+		h.send(t, 0, buildEventPayloadAt(t, 0, []any{
+			string(kvevents.EventTypeBlockStored),
+			[]uint64{100},
+			uint64(0),
+			makeTestTokens(100),
+			64,
+		}))
+		require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+
+		h.buffer.set(
+			replayMessage{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+			replayMessage{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+		)
+		h.send(t, 2, buildDistinctBlockStoredPayload(t, 300))
+		require.Eventually(t, func() bool { return h.indexed(200) && h.indexed(300) },
+			5*time.Second, 50*time.Millisecond)
+
+		countAfterReplay, sumAfterReplay := readLag()
+		assert.Equal(t, countBefore, countAfterReplay)
+		assert.InDelta(t, sumBefore, sumAfterReplay, 1e-9)
+
+		recentTS := float64(time.Now().UnixNano()) / 1e9
+		h.send(t, 3, buildEventPayloadAt(t, recentTS, []any{
+			string(kvevents.EventTypeBlockStored),
+			[]uint64{400},
+			uint64(0),
+			makeTestTokens(400),
+			64,
+		}))
+		require.Eventually(t, func() bool { return h.indexed(400) }, 5*time.Second, 50*time.Millisecond)
+
+		countAfterLive, sumAfterLive := readLag()
+		assert.Equal(t, countAfterReplay+1, countAfterLive)
+		assert.Less(t, sumAfterLive-sumAfterReplay, 10.0)
+	})
+
+	t.Run("snapshot_rebuild", func(t *testing.T) {
+		countBefore, sumBefore := readLag()
+		h, _ := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
+
+		h.send(t, 5, buildDistinctBlockStoredPayload(t, 999))
+		require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+
+		countAfterSnapshot, sumAfterSnapshot := readLag()
+		assert.Equal(t, countBefore, countAfterSnapshot)
+		assert.InDelta(t, sumBefore, sumAfterSnapshot, 1e-9)
+	})
+}
+
+func makeTestTokens(blockHash uint64) []uint32 {
+	tokens := make([]uint32, 64)
+	for i := range tokens {
+		tokens[i] = uint32(blockHash) + uint32(i) + 1 //#nosec G115 -- test data is small
+	}
+	return tokens
+}
+
+func buildEventPayloadAt(t *testing.T, timestamp float64, events ...[]any) []byte {
+	t.Helper()
+
+	rawEvents := make([]msgpack.RawMessage, 0, len(events))
+	for _, event := range events {
+		rawEvent, err := msgpack.Marshal(event)
+		require.NoError(t, err)
+		rawEvents = append(rawEvents, rawEvent)
+	}
+
+	batch := []any{
+		timestamp,
+		rawEvents,
+		nil,
+	}
+
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	enc.UseArrayEncodedStructs(true)
+	require.NoError(t, enc.Encode(batch))
+	return buf.Bytes()
 }

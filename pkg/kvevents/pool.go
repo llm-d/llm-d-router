@@ -521,6 +521,9 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	if msg.SourceEndpoint != "" {
 		podID = msg.SourceEndpoint
 	}
+	if !msg.replayed && batch.Timestamp > 0 {
+		observeProcessingLag(batch.Timestamp)
+	}
 	if tracingActive {
 		span.SetAttributes(
 			semconv.LLMDKVCacheEventsPodID(podID),
@@ -774,17 +777,18 @@ func (p *Pool) handleDeviceTierUpdate(
 	return true
 }
 
+func observeProcessingLag(timestamp float64) {
+	sec, nsec := math.Modf(timestamp)
+	eventTime := time.Unix(int64(sec), int64(nsec*float64(time.Second)))
+	lag := time.Since(eventTime).Seconds()
+	if lag < 0 {
+		lag = 0
+	}
+	metrics.EventsProcessingLag.Observe(lag)
+}
+
 // processEventBatch processes a batch of events using type switches.
 func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) {
-	if batch.Timestamp > 0 {
-		sec, nsec := math.Modf(batch.Timestamp)
-		eventTime := time.Unix(int64(sec), int64(nsec*float64(time.Second)))
-		lag := time.Since(eventTime).Seconds()
-		if lag < 0 {
-			lag = 0
-		}
-		metrics.EventsProcessingLag.Observe(lag)
-	}
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	log.FromContext(ctx).V(logging.TRACE).Info("Processing event batch",
 		"podID", podIdentifier,

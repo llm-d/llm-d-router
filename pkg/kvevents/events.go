@@ -83,6 +83,8 @@ type RawMessage struct {
 	resync bool
 	// resyncAbort marks a resync reset that drops a partial rebuild.
 	resyncAbort bool
+	// replayed marks batches delivered from a replay or snapshot rebuild.
+	replayed bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and
