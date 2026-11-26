@@ -28,6 +28,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	usagecommon "github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -126,9 +127,11 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, errors.New("invalid messages request: must have at least one message")
 	}
 	result.Messages = &messagesReq
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		result.Stream = true
+	stream, err := reqcommon.StreamRequested(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("invalid messages stream field: %w", err)
 	}
+	result.Stream = stream
 
 	return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: false}, nil
 }
@@ -186,7 +189,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	tokens.add(usg)
 	var usage request.Usage
 	tokens.apply(&usage)
-	usage.CompletionTokens = jsonInt(usg, reqcommon.FieldOutputTokens)
+	usage.CompletionTokens, _ = usagecommon.Count(usg[reqcommon.FieldOutputTokens])
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	return &usage, nil
@@ -207,16 +210,16 @@ type inputTokens struct {
 }
 
 func (t *inputTokens) add(usg map[string]any) {
-	if input := jsonInt(usg, reqcommon.FieldInputTokens); input > 0 {
+	if input, _ := usagecommon.Count(usg[reqcommon.FieldInputTokens]); input > 0 {
 		t.input = input
 	}
-	if read, ok := jsonIntPresent(usg, reqcommon.FieldCacheReadInputTokens); ok {
+	if read, ok := usagecommon.Count(usg[reqcommon.FieldCacheReadInputTokens]); ok {
 		t.hasRead = true
 		if read > 0 {
 			t.cacheRead = read
 		}
 	}
-	if creation := jsonInt(usg, reqcommon.FieldCacheCreationInputTokens); creation > 0 {
+	if creation, _ := usagecommon.Count(usg[reqcommon.FieldCacheCreationInputTokens]); creation > 0 {
 		t.cacheCreation = creation
 	}
 }
@@ -232,18 +235,6 @@ func (t inputTokens) apply(usage *request.Usage) {
 	if t.hasRead {
 		usage.PromptTokenDetails = &request.PromptTokenDetails{CachedTokens: t.cacheRead}
 	}
-}
-
-func jsonInt(m map[string]any, key string) int {
-	v, _ := m[key].(float64)
-	return int(v)
-}
-
-// jsonIntPresent reports the integer stored under key and whether the key was
-// present, so a caller can tell an explicit zero from a missing field.
-func jsonIntPresent(m map[string]any, key string) (int, bool) {
-	v, ok := m[key].(float64)
-	return int(v), ok
 }
 
 // parseStreamResponse reads the usage of one stream chunk. message_start and
@@ -299,7 +290,7 @@ func parseStreamResponse(chunk []byte) *fwkrh.ParsedResponse {
 			if event.Usage != nil {
 				hasUsage = true
 				tokens.add(event.Usage)
-				completion = jsonInt(event.Usage, reqcommon.FieldOutputTokens)
+				completion, _ = usagecommon.Count(event.Usage[reqcommon.FieldOutputTokens])
 			}
 		}
 	}

@@ -36,6 +36,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	usagecommon "github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -202,7 +203,11 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		extractedBody.Model = model
 	}
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
-	extractedBody.Stream = isStreamingRequest(apiType, bodyMap)
+	stream, err := isStreamingRequest(apiType, bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s stream field: %w", apiType, err)
+	}
+	extractedBody.Stream = stream
 	return &fwkrh.ParseResult{Body: extractedBody, JSONValidated: true, SkipResponseProcessing: false}, nil
 }
 
@@ -219,15 +224,18 @@ var envelopeRawFields = map[string][]string{
 	audioSpeechAPI: {reqcommon.FieldInput, reqcommon.FieldInstructions, "ref_audio", "ref_audio_2"},
 }
 
-func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		return true
+// isStreamingRequest also reports streaming for a speech request whose
+// stream_format names a streaming format.
+func isStreamingRequest(apiType string, bodyMap map[string]any) (bool, error) {
+	stream, err := reqcommon.StreamRequested(bodyMap)
+	if err != nil {
+		return false, err
 	}
-	if apiType != audioSpeechAPI {
-		return false
+	if stream || apiType != audioSpeechAPI {
+		return stream, nil
 	}
 	streamFormat, _ := bodyMap["stream_format"].(string)
-	return streamFormat == "sse" || streamFormat == "audio"
+	return streamFormat == "sse" || streamFormat == "audio", nil
 }
 
 func tokenInputField(body *request.InferenceRequestBody) string {
@@ -966,25 +974,6 @@ func voiceField(raw json.RawMessage) (string, error) {
 	return s, nil
 }
 
-// toInt coerces a JSON-decoded number-ish value into an int. JSON numbers
-// land as float64 after json.Unmarshal into map[string]any; some
-// non-conforming providers emit strings. Anything else is ignored so that
-// usage extraction stays best-effort rather than panicking.
-func toInt(v any) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case json.Number:
-		i, _ := n.Int64()
-		return int(i)
-	case string:
-		if f, err := strconv.ParseFloat(n, 64); err == nil {
-			return int(f)
-		}
-	}
-	return 0
-}
-
 // extractResponse reads usage and completion text in one decode. A type
 // mismatch outside "usage" leaves Completion nil and does not fail usage.
 func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
@@ -1026,7 +1015,7 @@ func usageFromFields(fields map[string]any) *request.Usage {
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
 	for _, inputTokens := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
 		if v, ok := fields[inputTokens]; ok && v != nil {
-			usage.PromptTokens = toInt(v)
+			usage.PromptTokens, _ = usagecommon.Count(v)
 			break
 		}
 	}
@@ -1034,7 +1023,7 @@ func usageFromFields(fields map[string]any) *request.Usage {
 	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
 	for _, outputTokens := range []string{reqcommon.FieldCompletionTokens, reqcommon.FieldOutputTokens} {
 		if v, ok := fields[outputTokens]; ok && v != nil {
-			usage.CompletionTokens = toInt(v)
+			usage.CompletionTokens, _ = usagecommon.Count(v)
 			break
 		}
 	}
@@ -1043,8 +1032,9 @@ func usageFromFields(fields map[string]any) *request.Usage {
 	for _, details := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
 		if detailsMap, ok := fields[details].(map[string]any); ok {
 			if cachedTokens, ok := detailsMap[reqcommon.FieldCachedTokens]; ok {
+				cached, _ := usagecommon.Count(cachedTokens)
 				usage.PromptTokenDetails = &request.PromptTokenDetails{
-					CachedTokens: toInt(cachedTokens),
+					CachedTokens: cached,
 				}
 			}
 		}
@@ -1052,7 +1042,7 @@ func usageFromFields(fields map[string]any) *request.Usage {
 
 	// total_tokens field name is consistent across all API types.
 	if v, ok := fields[reqcommon.FieldTotalTokens]; ok && v != nil {
-		usage.TotalTokens = toInt(v)
+		usage.TotalTokens, _ = usagecommon.Count(v)
 	}
 
 	return &usage
@@ -1110,8 +1100,7 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 				}
 				continue
 			}
-			var usage *request.Usage
-			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
+			if usage := extractRawUsage(streamResponse.Usage); usage != nil {
 				result = usage
 			}
 		}

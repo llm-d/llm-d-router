@@ -36,6 +36,7 @@ func TestPromptTokens(t *testing.T) {
 		{name: "messages input_tokens int", block: map[string]any{"input_tokens": 9}, want: 9, ok: true},
 		// vLLM reports the cached part of a Messages prompt beside input_tokens, not inside it.
 		{name: "messages with cache split", block: map[string]any{"input_tokens": 3.0, "cache_read_input_tokens": 40.0, "cache_creation_input_tokens": 5.0}, want: 48, ok: true},
+		{name: "messages with string buckets", block: map[string]any{"input_tokens": "3", "cache_read_input_tokens": "40", "cache_creation_input_tokens": "5"}, want: 48, ok: true},
 		{name: "chat prompt_tokens ignores messages cache fields", block: map[string]any{"prompt_tokens": 12.0, "cache_read_input_tokens": 40.0}, want: 12, ok: true},
 		{name: "output only (messages delta)", block: map[string]any{"output_tokens": 5.0}, ok: false},
 		{name: "not an object", block: nil, ok: false},
@@ -288,5 +289,38 @@ func TestResponseWriter_PassthroughReadFrom(t *testing.T) {
 	}
 	if rec.body.String() != body || seen != 6 {
 		t.Fatalf("ReadFrom passthrough: body %q seen %d", rec.body.String(), seen)
+	}
+}
+
+func TestCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  int
+		ok    bool
+	}{
+		{name: "float64", value: float64(25), want: 25, ok: true},
+		{name: "fractional rejected", value: float64(25.7)},
+		{name: "negative rejected", value: float64(-5)},
+		{name: "int", value: 30, want: 30, ok: true},
+		{name: "json.Number", value: json.Number("35"), want: 35, ok: true},
+		{name: "json.Number decimal form", value: json.Number("40.0"), want: 40, ok: true},
+		{name: "json.Number exponent form", value: json.Number("4e1"), want: 40, ok: true},
+		{name: "string from a non-conforming provider", value: "45", want: 45, ok: true},
+		{name: "string decimal form", value: "45.0", want: 45, ok: true},
+		{name: "non-numeric string rejected", value: "many"},
+		{name: "infinity rejected", value: "Infinity"},
+		{name: "not a number rejected", value: "NaN"},
+		{name: "out-of-range string rejected", value: "1e300"},
+		{name: "absent", value: nil},
+		{name: "bool rejected", value: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := Count(tt.value)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("Count(%v) = (%d, %v), want (%d, %v)", tt.value, got, ok, tt.want, tt.ok)
+			}
+		})
 	}
 }

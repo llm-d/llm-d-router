@@ -157,8 +157,10 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 	if n, ok := reqcommon.OutputTokenLimit(bodyMap, reqcommon.APITypeVLLMGenerate); ok {
 		body.MaxOutputTokens = ptr.To(int64(n))
 	}
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		body.Stream = true
+	stream, err := reqcommon.StreamRequested(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("invalid generate stream field: %w", err)
 	}
+	body.Stream = stream
 	return &fwkrh.ParseResult{Body: body, SkipResponseProcessing: false}, nil
 }

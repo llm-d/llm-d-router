@@ -227,6 +227,16 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "stream flag that is not a boolean is rejected",
+			headers: map[string]string{":path": "/v1/completions"},
+			body: map[string]any{
+				"model":  "test",
+				"prompt": "test prompt",
+				"stream": "true",
+			},
+			wantErr: true,
+		},
+		{
 			name:    "completions request with array of strings prompt",
 			headers: map[string]string{":path": "/v1/completions"},
 			body: map[string]any{

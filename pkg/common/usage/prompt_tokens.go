@@ -16,7 +16,23 @@ limitations under the License.
 
 package usage
 
-import reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+import (
+	"encoding/json"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+)
+
+// Count reads a JSON-decoded token count. A count a non-conforming provider
+// emits as a string is converted to json.Number first; a value
+// NonNegativeInt rejects reads as absent rather than an error, so a
+// malformed count does not fail the response.
+func Count(value any) (int, bool) {
+	if s, ok := value.(string); ok {
+		value = json.Number(s)
+	}
+	n, err := reqcommon.NonNegativeInt(value)
+	return n, err == nil
+}
 
 // UsageBlock returns the usage object a decoded response or stream event
 // carries. It is the top-level "usage" for chat, completions, generate, and
@@ -52,14 +68,14 @@ func PromptTokens(block any) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	if n, ok := intValue(fields[reqcommon.FieldPromptTokens]); ok {
+	if n, ok := Count(fields[reqcommon.FieldPromptTokens]); ok {
 		return n, true
 	}
-	n, ok := intValue(fields[reqcommon.FieldInputTokens])
+	n, ok := Count(fields[reqcommon.FieldInputTokens])
 	if !ok {
 		return 0, false
 	}
-	read, _ := intValue(fields[reqcommon.FieldCacheReadInputTokens])
-	created, _ := intValue(fields[reqcommon.FieldCacheCreationInputTokens])
+	read, _ := Count(fields[reqcommon.FieldCacheReadInputTokens])
+	created, _ := Count(fields[reqcommon.FieldCacheCreationInputTokens])
 	return n + read + created, true
 }
