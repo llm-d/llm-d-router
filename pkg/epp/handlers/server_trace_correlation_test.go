@@ -57,6 +57,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -269,6 +270,84 @@ func TestProcessRefreshesRequestSpanAfterDirectorResolvesFairness(t *testing.T) 
 			require.True(t, hasID && hasSource, "fairness attribution must be paired")
 			require.Equal(t, "agent-7", id.AsString())
 			require.Equal(t, tracing.AttributionSourceAgentIdentity, source.AsString())
+		})
+	}
+}
+
+// Baggage is client-controlled, so only allowlisted entries reach the request
+// span, and they leave the attributes the EPP sets alone.
+func TestProcessRecordsAllowlistedBaggageOnRequestSpan(t *testing.T) {
+	longValue := strings.Repeat("v", maxBaggageAttributeValueLen+10)
+	clientBaggage := "focus.workload.id=support_bot,focus.task.id=" + longValue + ",other.key=ignored"
+
+	for _, tt := range []struct {
+		name    string
+		keys    []string
+		baggage string
+		want    map[string]string
+	}{
+		{name: "empty allowlist", baggage: clientBaggage},
+		{
+			name:    "allowlisted keys",
+			keys:    []string{"focus.workload.id", " focus.task.id ", "focus.outcome.id", ""},
+			baggage: clientBaggage,
+			want: map[string]string{
+				"focus.workload.id": "support_bot",
+				"focus.task.id":     longValue[:maxBaggageAttributeValueLen],
+			},
+		},
+		{
+			// The cap falls inside the two-byte rune, which is dropped whole.
+			name:    "value cut on a rune boundary",
+			keys:    []string{"focus.workload.id"},
+			baggage: "focus.workload.id=" + strings.Repeat("v", maxBaggageAttributeValueLen-1) + "%C3%A9",
+			want:    map[string]string{"focus.workload.id": strings.Repeat("v", maxBaggageAttributeValueLen-1)},
+		},
+		{
+			name:    "allowlisted EPP attribute names",
+			keys:    []string{string(semconv.LLMDEPPFairnessIDKey), string(semconv.LLMDEPPAPISurfaceKey)},
+			baggage: string(semconv.LLMDEPPFairnessIDKey) + "=spoofed," + string(semconv.LLMDEPPAPISurfaceKey) + "=spoofed",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			useTracerProvider(t, sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+				sdktrace.WithSpanProcessor(recorder),
+			))
+			tracing.InitTextMapPropagator()
+
+			server := NewStreamingServer(nil, nil, nil, 0)
+			server.SetTraceBaggageKeys(tt.keys)
+			srv := &scriptedProcessServer{ctx: context.Background(), reqs: []*extProcPb.ProcessingRequest{newRequestHeaders(map[string]string{
+				":path":                    reqcommon.PathCompletions,
+				metadata.FlowFairnessIDKey: "tenant-a",
+				"baggage":                  tt.baggage,
+			})}}
+			require.NoError(t, server.Process(srv))
+
+			var requestSpans []sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				if span.Name() == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+
+			attrs := attribute.NewSet(requestSpans[0].Attributes()...)
+			for _, key := range []string{"focus.workload.id", "focus.task.id", "focus.outcome.id", "other.key"} {
+				value, ok := attrs.Value(attribute.Key(key))
+				want, wanted := tt.want[key]
+				require.Equal(t, wanted, ok, "attribute %q", key)
+				require.Equal(t, want, value.AsString(), "attribute %q", key)
+			}
+
+			id, _ := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+			source, _ := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
+			surface, _ := attrs.Value(semconv.LLMDEPPAPISurfaceKey)
+			require.Equal(t, "tenant-a", id.AsString())
+			require.Equal(t, tracing.AttributionSourceHeader, source.AsString())
+			require.Equal(t, "completions", surface.AsString())
 		})
 	}
 }

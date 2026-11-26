@@ -121,6 +121,7 @@ type Options struct {
 	//
 	logging.LoggingOptions              // Logging configuration.
 	Tracing                    bool     // Enables emitting traces.
+	TraceBaggageKeys           []string // W3C Baggage keys recorded as attributes on the request span.
 	EnableToolCallingTelemetry bool     // Enables tool-calling request and response telemetry.
 	HealthChecking             bool     // Enables health checking.
 	MetricsPort                uint16   // The metrics port exposed by EPP.
@@ -264,6 +265,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	opts.LoggingOptions.AddFlags(fs) // Add logging flags.
 
 	fs.BoolVar(&opts.Tracing, "tracing", opts.Tracing, "Enables emitting traces.")
+	fs.StringSliceVar(&opts.TraceBaggageKeys, "trace-baggage-keys", opts.TraceBaggageKeys,
+		"Comma-separated W3C Baggage keys to record as attributes on the request span, each named after its key. "+
+			"Baggage is set by the client, so list only keys that are safe to export. Empty records none.")
 	fs.BoolVar(&opts.EnableToolCallingTelemetry, "enable-tool-calling-telemetry", opts.EnableToolCallingTelemetry, "Enable tool-calling request and response telemetry.")
 	fs.BoolVar(&opts.HealthChecking, "health-checking", opts.HealthChecking, "Enables health checking.")
 	fs.Uint16Var(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")

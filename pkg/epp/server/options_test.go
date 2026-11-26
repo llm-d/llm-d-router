@@ -47,6 +47,15 @@ func TestToolCallingTelemetryOption(t *testing.T) {
 	require.True(t, opts.EnableToolCallingTelemetry)
 }
 
+func TestTraceBaggageKeysOption(t *testing.T) {
+	opts := NewOptions()
+	require.Empty(t, opts.TraceBaggageKeys)
+	fs := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--trace-baggage-keys=workload.id,task.id"}))
+	require.Equal(t, []string{"workload.id", "task.id"}, opts.TraceBaggageKeys)
+}
+
 // TestEndpointTargetPorts
 func TestEndpointTargetPorts(t *testing.T) {
 	tests := []struct {
