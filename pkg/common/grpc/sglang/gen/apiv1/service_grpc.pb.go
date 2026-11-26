@@ -25,17 +25,79 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SglangService_Generate_FullMethodName             = "/sglang.api.v1.SglangService/Generate"
-	SglangService_HealthCheck_FullMethodName          = "/sglang.api.v1.SglangService/HealthCheck"
-	SglangService_GetModelInfo_FullMethodName         = "/sglang.api.v1.SglangService/GetModelInfo"
-	SglangService_GetServerInfo_FullMethodName        = "/sglang.api.v1.SglangService/GetServerInfo"
-	SglangService_GetHiCacheStorage_FullMethodName    = "/sglang.api.v1.SglangService/GetHiCacheStorage"
-	SglangService_AttachHiCacheStorage_FullMethodName = "/sglang.api.v1.SglangService/AttachHiCacheStorage"
-	SglangService_DetachHiCacheStorage_FullMethodName = "/sglang.api.v1.SglangService/DetachHiCacheStorage"
-	SglangService_ClearHiCacheStorage_FullMethodName  = "/sglang.api.v1.SglangService/ClearHiCacheStorage"
-	SglangService_ListModels_FullMethodName           = "/sglang.api.v1.SglangService/ListModels"
-	SglangService_Detokenize_FullMethodName           = "/sglang.api.v1.SglangService/Detokenize"
-	SglangService_Abort_FullMethodName                = "/sglang.api.v1.SglangService/Abort"
+	SglangService_Generate_FullMethodName                              = "/sglang.api.v1.SglangService/Generate"
+	SglangService_HealthCheck_FullMethodName                           = "/sglang.api.v1.SglangService/HealthCheck"
+	SglangService_GetModelInfo_FullMethodName                          = "/sglang.api.v1.SglangService/GetModelInfo"
+	SglangService_GetServerInfo_FullMethodName                         = "/sglang.api.v1.SglangService/GetServerInfo"
+	SglangService_GetHiCacheStorage_FullMethodName                     = "/sglang.api.v1.SglangService/GetHiCacheStorage"
+	SglangService_AttachHiCacheStorage_FullMethodName                  = "/sglang.api.v1.SglangService/AttachHiCacheStorage"
+	SglangService_DetachHiCacheStorage_FullMethodName                  = "/sglang.api.v1.SglangService/DetachHiCacheStorage"
+	SglangService_ClearHiCacheStorage_FullMethodName                   = "/sglang.api.v1.SglangService/ClearHiCacheStorage"
+	SglangService_ListModels_FullMethodName                            = "/sglang.api.v1.SglangService/ListModels"
+	SglangService_Detokenize_FullMethodName                            = "/sglang.api.v1.SglangService/Detokenize"
+	SglangService_Abort_FullMethodName                                 = "/sglang.api.v1.SglangService/Abort"
+	SglangService_SetInternalState_FullMethodName                      = "/sglang.api.v1.SglangService/SetInternalState"
+	SglangService_StartProfile_FullMethodName                          = "/sglang.api.v1.SglangService/StartProfile"
+	SglangService_StopProfile_FullMethodName                           = "/sglang.api.v1.SglangService/StopProfile"
+	SglangService_StartExpertDistributionRecord_FullMethodName         = "/sglang.api.v1.SglangService/StartExpertDistributionRecord"
+	SglangService_StopExpertDistributionRecord_FullMethodName          = "/sglang.api.v1.SglangService/StopExpertDistributionRecord"
+	SglangService_DumpExpertDistributionRecord_FullMethodName          = "/sglang.api.v1.SglangService/DumpExpertDistributionRecord"
+	SglangService_SlowDown_FullMethodName                              = "/sglang.api.v1.SglangService/SlowDown"
+	SglangService_ReleaseMemoryOccupation_FullMethodName               = "/sglang.api.v1.SglangService/ReleaseMemoryOccupation"
+	SglangService_ResumeMemoryOccupation_FullMethodName                = "/sglang.api.v1.SglangService/ResumeMemoryOccupation"
+	SglangService_GetWeightsByName_FullMethodName                      = "/sglang.api.v1.SglangService/GetWeightsByName"
+	SglangService_InitWeightsUpdateGroup_FullMethodName                = "/sglang.api.v1.SglangService/InitWeightsUpdateGroup"
+	SglangService_DestroyWeightsUpdateGroup_FullMethodName             = "/sglang.api.v1.SglangService/DestroyWeightsUpdateGroup"
+	SglangService_InitWeightsSendGroupForRemoteInstance_FullMethodName = "/sglang.api.v1.SglangService/InitWeightsSendGroupForRemoteInstance"
+	SglangService_SendWeightsToRemoteInstance_FullMethodName           = "/sglang.api.v1.SglangService/SendWeightsToRemoteInstance"
+	SglangService_UpdateWeightsFromDisk_FullMethodName                 = "/sglang.api.v1.SglangService/UpdateWeightsFromDisk"
+	SglangService_UpdateWeightsFromDistributed_FullMethodName          = "/sglang.api.v1.SglangService/UpdateWeightsFromDistributed"
+	SglangService_UpdateWeightsFromTensor_FullMethodName               = "/sglang.api.v1.SglangService/UpdateWeightsFromTensor"
+	SglangService_UpdateWeightsFromIpc_FullMethodName                  = "/sglang.api.v1.SglangService/UpdateWeightsFromIpc"
+	SglangService_BeginWeightUpdate_FullMethodName                     = "/sglang.api.v1.SglangService/BeginWeightUpdate"
+	SglangService_EndWeightUpdate_FullMethodName                       = "/sglang.api.v1.SglangService/EndWeightUpdate"
+	SglangService_PluginWeightUpdate_FullMethodName                    = "/sglang.api.v1.SglangService/PluginWeightUpdate"
+	SglangService_LoadLoraAdapter_FullMethodName                       = "/sglang.api.v1.SglangService/LoadLoraAdapter"
+	SglangService_LoadLoraAdapterFromTensors_FullMethodName            = "/sglang.api.v1.SglangService/LoadLoraAdapterFromTensors"
+	SglangService_UnloadLoraAdapter_FullMethodName                     = "/sglang.api.v1.SglangService/UnloadLoraAdapter"
+	SglangService_GetRemoteInstanceTransferEngineInfo_FullMethodName   = "/sglang.api.v1.SglangService/GetRemoteInstanceTransferEngineInfo"
+	SglangService_ParseFunctionCall_FullMethodName                     = "/sglang.api.v1.SglangService/ParseFunctionCall"
+	SglangService_SeparateReasoning_FullMethodName                     = "/sglang.api.v1.SglangService/SeparateReasoning"
+	SglangService_AddExternalCorpus_FullMethodName                     = "/sglang.api.v1.SglangService/AddExternalCorpus"
+	SglangService_RemoveExternalCorpus_FullMethodName                  = "/sglang.api.v1.SglangService/RemoveExternalCorpus"
+	SglangService_ListExternalCorpora_FullMethodName                   = "/sglang.api.v1.SglangService/ListExternalCorpora"
+	SglangService_FreezeGc_FullMethodName                              = "/sglang.api.v1.SglangService/FreezeGc"
+	SglangService_PauseGeneration_FullMethodName                       = "/sglang.api.v1.SglangService/PauseGeneration"
+	SglangService_ContinueGeneration_FullMethodName                    = "/sglang.api.v1.SglangService/ContinueGeneration"
+	SglangService_PdRoleSwitch_FullMethodName                          = "/sglang.api.v1.SglangService/PdRoleSwitch"
+	SglangService_UpdateWeightVersion_FullMethodName                   = "/sglang.api.v1.SglangService/UpdateWeightVersion"
+	SglangService_OpenSession_FullMethodName                           = "/sglang.api.v1.SglangService/OpenSession"
+	SglangService_CloseSession_FullMethodName                          = "/sglang.api.v1.SglangService/CloseSession"
+	SglangService_GetHiCacheL3CacheLayout_FullMethodName               = "/sglang.api.v1.SglangService/GetHiCacheL3CacheLayout"
+	SglangService_ConfigureLogging_FullMethodName                      = "/sglang.api.v1.SglangService/ConfigureLogging"
+	SglangService_DumperControl_FullMethodName                         = "/sglang.api.v1.SglangService/DumperControl"
+	SglangService_ScaleElasticEp_FullMethodName                        = "/sglang.api.v1.SglangService/ScaleElasticEp"
+	SglangService_GetElasticEpState_FullMethodName                     = "/sglang.api.v1.SglangService/GetElasticEpState"
+	SglangService_OllamaChat_FullMethodName                            = "/sglang.api.v1.SglangService/OllamaChat"
+	SglangService_OllamaGenerate_FullMethodName                        = "/sglang.api.v1.SglangService/OllamaGenerate"
+	SglangService_OllamaTags_FullMethodName                            = "/sglang.api.v1.SglangService/OllamaTags"
+	SglangService_OllamaShow_FullMethodName                            = "/sglang.api.v1.SglangService/OllamaShow"
+	SglangService_AnthropicMessages_FullMethodName                     = "/sglang.api.v1.SglangService/AnthropicMessages"
+	SglangService_AnthropicStreamMessages_FullMethodName               = "/sglang.api.v1.SglangService/AnthropicStreamMessages"
+	SglangService_AnthropicCountTokens_FullMethodName                  = "/sglang.api.v1.SglangService/AnthropicCountTokens"
+	SglangService_OpenAiCompletions_FullMethodName                     = "/sglang.api.v1.SglangService/OpenAiCompletions"
+	SglangService_OpenAiStreamCompletions_FullMethodName               = "/sglang.api.v1.SglangService/OpenAiStreamCompletions"
+	SglangService_OpenAiChatCompletions_FullMethodName                 = "/sglang.api.v1.SglangService/OpenAiChatCompletions"
+	SglangService_OpenAiStreamChatCompletions_FullMethodName           = "/sglang.api.v1.SglangService/OpenAiStreamChatCompletions"
+	SglangService_OpenAiEmbeddings_FullMethodName                      = "/sglang.api.v1.SglangService/OpenAiEmbeddings"
+	SglangService_OpenAiClassify_FullMethodName                        = "/sglang.api.v1.SglangService/OpenAiClassify"
+	SglangService_OpenAiScore_FullMethodName                           = "/sglang.api.v1.SglangService/OpenAiScore"
+	SglangService_OpenAiRerank_FullMethodName                          = "/sglang.api.v1.SglangService/OpenAiRerank"
+	SglangService_OpenAiTokenize_FullMethodName                        = "/sglang.api.v1.SglangService/OpenAiTokenize"
+	SglangService_OpenAiDetokenize_FullMethodName                      = "/sglang.api.v1.SglangService/OpenAiDetokenize"
+	SglangService_OpenAiResponses_FullMethodName                       = "/sglang.api.v1.SglangService/OpenAiResponses"
+	SglangService_OpenAiListModels_FullMethodName                      = "/sglang.api.v1.SglangService/OpenAiListModels"
+	SglangService_OpenAiRetrieveModel_FullMethodName                   = "/sglang.api.v1.SglangService/OpenAiRetrieveModel"
 )
 
 // SglangServiceClient is the client API for SglangService service.
@@ -70,6 +132,102 @@ type SglangServiceClient interface {
 	// Duplicate native IDs cancel all matching generations. A later reuse of the
 	// ID is unaffected. Internal control/detokenization requests are not targeted.
 	Abort(ctx context.Context, in *AbortRequest, opts ...grpc.CallOption) (*AbortResponse, error)
+	// `/set_internal_state`: override numeric scheduler knobs on every DP rank;
+	// one `updated` flag per rank.
+	SetInternalState(ctx context.Context, in *SetInternalStateRequest, opts ...grpc.CallOption) (*SetInternalStateResponse, error)
+	// `/start_profile` and `/stop_profile`: a profiler capture on every DP rank.
+	StartProfile(ctx context.Context, in *StartProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error)
+	StopProfile(ctx context.Context, in *StopProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error)
+	// `/{start,stop,dump}_expert_distribution_record`.
+	StartExpertDistributionRecord(ctx context.Context, in *ExpertDistributionRecordRequest, opts ...grpc.CallOption) (*ExpertDistributionRecordResponse, error)
+	StopExpertDistributionRecord(ctx context.Context, in *ExpertDistributionRecordRequest, opts ...grpc.CallOption) (*ExpertDistributionRecordResponse, error)
+	DumpExpertDistributionRecord(ctx context.Context, in *ExpertDistributionRecordRequest, opts ...grpc.CallOption) (*ExpertDistributionRecordResponse, error)
+	// `/slow_down`: a per-forward sleep on every DP rank, for testing.
+	SlowDown(ctx context.Context, in *SlowDownRequest, opts ...grpc.CallOption) (*SlowDownResponse, error)
+	// `/release_memory_occupation`, `/resume_memory_occupation`.
+	ReleaseMemoryOccupation(ctx context.Context, in *ReleaseMemoryOccupationRequest, opts ...grpc.CallOption) (*MemoryOccupationResponse, error)
+	ResumeMemoryOccupation(ctx context.Context, in *ResumeMemoryOccupationRequest, opts ...grpc.CallOption) (*MemoryOccupationResponse, error)
+	// `/get_weights_by_name`: one parameter per DP rank.
+	GetWeightsByName(ctx context.Context, in *GetWeightsByNameRequest, opts ...grpc.CallOption) (*GetWeightsByNameResponse, error)
+	// Weight-update process groups and remote-instance sends. Single-DP-rank
+	// deployments only, as in Python.
+	InitWeightsUpdateGroup(ctx context.Context, in *InitWeightsUpdateGroupRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error)
+	DestroyWeightsUpdateGroup(ctx context.Context, in *DestroyWeightsUpdateGroupRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error)
+	InitWeightsSendGroupForRemoteInstance(ctx context.Context, in *InitWeightsSendGroupForRemoteInstanceRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error)
+	SendWeightsToRemoteInstance(ctx context.Context, in *SendWeightsToRemoteInstanceRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error)
+	// The weight updates, each under the frontend's update lock on every
+	// listener. Distributed, tensor and plugin updates run inside a
+	// `BeginWeightUpdate` / `EndWeightUpdate` session and on single-DP-rank
+	// deployments only, as in Python.
+	UpdateWeightsFromDisk(ctx context.Context, in *UpdateWeightsFromDiskRequest, opts ...grpc.CallOption) (*UpdateWeightsFromDiskResponse, error)
+	UpdateWeightsFromDistributed(ctx context.Context, in *UpdateWeightsFromDistributedRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error)
+	UpdateWeightsFromTensor(ctx context.Context, in *UpdateWeightsFromTensorRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error)
+	UpdateWeightsFromIpc(ctx context.Context, in *UpdateWeightsFromIpcRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error)
+	BeginWeightUpdate(ctx context.Context, in *BeginWeightUpdateRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error)
+	EndWeightUpdate(ctx context.Context, in *EndWeightUpdateRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error)
+	PluginWeightUpdate(ctx context.Context, in *PluginWeightUpdateRequest, opts ...grpc.CallOption) (*PluginWeightUpdateResponse, error)
+	// LoRA adapters; refused as "LoRA is not enabled" (see weights.proto).
+	LoadLoraAdapter(ctx context.Context, in *LoadLoraAdapterRequest, opts ...grpc.CallOption) (*LoraUpdateResponse, error)
+	LoadLoraAdapterFromTensors(ctx context.Context, in *LoadLoraAdapterFromTensorsRequest, opts ...grpc.CallOption) (*LoraUpdateResponse, error)
+	UnloadLoraAdapter(ctx context.Context, in *UnloadLoraAdapterRequest, opts ...grpc.CallOption) (*LoraUpdateResponse, error)
+	// `/remote_instance_transfer_engine_info`: proxied from the engine-info
+	// bootstrap server.
+	GetRemoteInstanceTransferEngineInfo(ctx context.Context, in *RemoteInstanceTransferEngineInfoRequest, opts ...grpc.CallOption) (*RemoteInstanceTransferEngineInfoResponse, error)
+	// `/parse_function_call`, `/separate_reasoning`: frontend-only parsing.
+	ParseFunctionCall(ctx context.Context, in *ParseFunctionCallRequest, opts ...grpc.CallOption) (*ParseFunctionCallResponse, error)
+	SeparateReasoning(ctx context.Context, in *SeparateReasoningRequest, opts ...grpc.CallOption) (*SeparateReasoningResponse, error)
+	// `/add_external_corpus`, `/remove_external_corpus`, `/list_external_corpora`.
+	AddExternalCorpus(ctx context.Context, in *AddExternalCorpusRequest, opts ...grpc.CallOption) (*AddExternalCorpusResponse, error)
+	RemoveExternalCorpus(ctx context.Context, in *RemoveExternalCorpusRequest, opts ...grpc.CallOption) (*RemoveExternalCorpusResponse, error)
+	ListExternalCorpora(ctx context.Context, in *ListExternalCorporaRequest, opts ...grpc.CallOption) (*ListExternalCorporaResponse, error)
+	// `/freeze_gc`, `/pause_generation`, `/continue_generation`,
+	// `/pd_role_switch`, `/update_weight_version`.
+	FreezeGc(ctx context.Context, in *FreezeGcRequest, opts ...grpc.CallOption) (*FreezeGcResponse, error)
+	PauseGeneration(ctx context.Context, in *PauseGenerationRequest, opts ...grpc.CallOption) (*GenerationPauseResponse, error)
+	ContinueGeneration(ctx context.Context, in *ContinueGenerationRequest, opts ...grpc.CallOption) (*GenerationPauseResponse, error)
+	PdRoleSwitch(ctx context.Context, in *PdRoleSwitchRequest, opts ...grpc.CallOption) (*PdRoleSwitchResponse, error)
+	UpdateWeightVersion(ctx context.Context, in *UpdateWeightVersionRequest, opts ...grpc.CallOption) (*UpdateWeightVersionResponse, error)
+	// `/open_session`, `/close_session`: multi-turn sessions on the schedulers.
+	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionResponse, error)
+	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
+	// `/get_hicache_l3_cache_layout`: the merged HiCache L3 layout.
+	GetHiCacheL3CacheLayout(ctx context.Context, in *GetHiCacheL3CacheLayoutRequest, opts ...grpc.CallOption) (*GetHiCacheL3CacheLayoutResponse, error)
+	// `/configure_logging`: the scheduler ranks' log level.
+	ConfigureLogging(ctx context.Context, in *ConfigureLoggingRequest, opts ...grpc.CallOption) (*ConfigureLoggingResponse, error)
+	// `/dumper/{method}`: the debug dumper's control surface.
+	DumperControl(ctx context.Context, in *DumperControlRequest, opts ...grpc.CallOption) (*DumperControlResponse, error)
+	// `/scale_elastic_ep`, `/is_scaling_elastic_ep`.
+	ScaleElasticEp(ctx context.Context, in *ScaleElasticEpRequest, opts ...grpc.CallOption) (*ScaleElasticEpResponse, error)
+	GetElasticEpState(ctx context.Context, in *ElasticEpStateRequest, opts ...grpc.CallOption) (*ElasticEpStateResponse, error)
+	// Ollama data plane. Chat and generate are server-streaming like Generate:
+	// a unary request is a one-frame stream, and the final frame carries the
+	// counters. Chat renders the messages with the served chat template.
+	OllamaChat(ctx context.Context, in *OllamaChatRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OllamaChatResponse], error)
+	OllamaGenerate(ctx context.Context, in *OllamaGenerateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OllamaGenerateResponse], error)
+	OllamaTags(ctx context.Context, in *OllamaTagsRequest, opts ...grpc.CallOption) (*OllamaTagsResponse, error)
+	OllamaShow(ctx context.Context, in *OllamaShowRequest, opts ...grpc.CallOption) (*OllamaShowResponse, error)
+	// Anthropic Messages data plane. The unary and streamed replies have
+	// different wire shapes, so they are two RPCs; `stream` in the request is
+	// ignored here (the RPC decides).
+	AnthropicMessages(ctx context.Context, in *AnthropicMessagesRequest, opts ...grpc.CallOption) (*AnthropicMessagesResponse, error)
+	AnthropicStreamMessages(ctx context.Context, in *AnthropicMessagesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AnthropicStreamEvent], error)
+	AnthropicCountTokens(ctx context.Context, in *AnthropicCountTokensRequest, opts ...grpc.CallOption) (*AnthropicCountTokensResponse, error)
+	// OpenAI data plane. The schema is the interface the OpenAI adapter is
+	// being refactored onto; until then these answer UNIMPLEMENTED. Streamed
+	// routes are separate RPCs whose frame is the SSE frame.
+	OpenAiCompletions(ctx context.Context, in *OpenAiCompletionRequest, opts ...grpc.CallOption) (*OpenAiCompletionResponse, error)
+	OpenAiStreamCompletions(ctx context.Context, in *OpenAiCompletionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenAiCompletionStreamResponse], error)
+	OpenAiChatCompletions(ctx context.Context, in *OpenAiChatCompletionRequest, opts ...grpc.CallOption) (*OpenAiChatCompletionResponse, error)
+	OpenAiStreamChatCompletions(ctx context.Context, in *OpenAiChatCompletionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenAiChatCompletionStreamResponse], error)
+	OpenAiEmbeddings(ctx context.Context, in *OpenAiEmbeddingRequest, opts ...grpc.CallOption) (*OpenAiEmbeddingResponse, error)
+	OpenAiClassify(ctx context.Context, in *OpenAiClassifyRequest, opts ...grpc.CallOption) (*OpenAiClassifyResponse, error)
+	OpenAiScore(ctx context.Context, in *OpenAiScoreRequest, opts ...grpc.CallOption) (*OpenAiScoreResponse, error)
+	OpenAiRerank(ctx context.Context, in *OpenAiRerankRequest, opts ...grpc.CallOption) (*OpenAiRerankResponse, error)
+	OpenAiTokenize(ctx context.Context, in *OpenAiTokenizeRequest, opts ...grpc.CallOption) (*OpenAiTokenizeResponse, error)
+	OpenAiDetokenize(ctx context.Context, in *OpenAiDetokenizeRequest, opts ...grpc.CallOption) (*OpenAiDetokenizeResponse, error)
+	OpenAiResponses(ctx context.Context, in *OpenAiResponsesRequest, opts ...grpc.CallOption) (*OpenAiResponsesResponse, error)
+	OpenAiListModels(ctx context.Context, in *OpenAiListModelsRequest, opts ...grpc.CallOption) (*OpenAiModelList, error)
+	OpenAiRetrieveModel(ctx context.Context, in *OpenAiRetrieveModelRequest, opts ...grpc.CallOption) (*OpenAiModelCard, error)
 }
 
 type sglangServiceClient struct {
@@ -199,6 +357,671 @@ func (c *sglangServiceClient) Abort(ctx context.Context, in *AbortRequest, opts 
 	return out, nil
 }
 
+func (c *sglangServiceClient) SetInternalState(ctx context.Context, in *SetInternalStateRequest, opts ...grpc.CallOption) (*SetInternalStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetInternalStateResponse)
+	err := c.cc.Invoke(ctx, SglangService_SetInternalState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) StartProfile(ctx context.Context, in *StartProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProfileResponse)
+	err := c.cc.Invoke(ctx, SglangService_StartProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) StopProfile(ctx context.Context, in *StopProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProfileResponse)
+	err := c.cc.Invoke(ctx, SglangService_StopProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) StartExpertDistributionRecord(ctx context.Context, in *ExpertDistributionRecordRequest, opts ...grpc.CallOption) (*ExpertDistributionRecordResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpertDistributionRecordResponse)
+	err := c.cc.Invoke(ctx, SglangService_StartExpertDistributionRecord_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) StopExpertDistributionRecord(ctx context.Context, in *ExpertDistributionRecordRequest, opts ...grpc.CallOption) (*ExpertDistributionRecordResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpertDistributionRecordResponse)
+	err := c.cc.Invoke(ctx, SglangService_StopExpertDistributionRecord_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) DumpExpertDistributionRecord(ctx context.Context, in *ExpertDistributionRecordRequest, opts ...grpc.CallOption) (*ExpertDistributionRecordResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpertDistributionRecordResponse)
+	err := c.cc.Invoke(ctx, SglangService_DumpExpertDistributionRecord_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) SlowDown(ctx context.Context, in *SlowDownRequest, opts ...grpc.CallOption) (*SlowDownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SlowDownResponse)
+	err := c.cc.Invoke(ctx, SglangService_SlowDown_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ReleaseMemoryOccupation(ctx context.Context, in *ReleaseMemoryOccupationRequest, opts ...grpc.CallOption) (*MemoryOccupationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryOccupationResponse)
+	err := c.cc.Invoke(ctx, SglangService_ReleaseMemoryOccupation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ResumeMemoryOccupation(ctx context.Context, in *ResumeMemoryOccupationRequest, opts ...grpc.CallOption) (*MemoryOccupationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryOccupationResponse)
+	err := c.cc.Invoke(ctx, SglangService_ResumeMemoryOccupation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) GetWeightsByName(ctx context.Context, in *GetWeightsByNameRequest, opts ...grpc.CallOption) (*GetWeightsByNameResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWeightsByNameResponse)
+	err := c.cc.Invoke(ctx, SglangService_GetWeightsByName_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) InitWeightsUpdateGroup(ctx context.Context, in *InitWeightsUpdateGroupRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightGroupResponse)
+	err := c.cc.Invoke(ctx, SglangService_InitWeightsUpdateGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) DestroyWeightsUpdateGroup(ctx context.Context, in *DestroyWeightsUpdateGroupRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightGroupResponse)
+	err := c.cc.Invoke(ctx, SglangService_DestroyWeightsUpdateGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) InitWeightsSendGroupForRemoteInstance(ctx context.Context, in *InitWeightsSendGroupForRemoteInstanceRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightGroupResponse)
+	err := c.cc.Invoke(ctx, SglangService_InitWeightsSendGroupForRemoteInstance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) SendWeightsToRemoteInstance(ctx context.Context, in *SendWeightsToRemoteInstanceRequest, opts ...grpc.CallOption) (*WeightGroupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightGroupResponse)
+	err := c.cc.Invoke(ctx, SglangService_SendWeightsToRemoteInstance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) UpdateWeightsFromDisk(ctx context.Context, in *UpdateWeightsFromDiskRequest, opts ...grpc.CallOption) (*UpdateWeightsFromDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateWeightsFromDiskResponse)
+	err := c.cc.Invoke(ctx, SglangService_UpdateWeightsFromDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) UpdateWeightsFromDistributed(ctx context.Context, in *UpdateWeightsFromDistributedRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_UpdateWeightsFromDistributed_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) UpdateWeightsFromTensor(ctx context.Context, in *UpdateWeightsFromTensorRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_UpdateWeightsFromTensor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) UpdateWeightsFromIpc(ctx context.Context, in *UpdateWeightsFromIpcRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_UpdateWeightsFromIpc_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) BeginWeightUpdate(ctx context.Context, in *BeginWeightUpdateRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_BeginWeightUpdate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) EndWeightUpdate(ctx context.Context, in *EndWeightUpdateRequest, opts ...grpc.CallOption) (*WeightUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WeightUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_EndWeightUpdate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) PluginWeightUpdate(ctx context.Context, in *PluginWeightUpdateRequest, opts ...grpc.CallOption) (*PluginWeightUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PluginWeightUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_PluginWeightUpdate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) LoadLoraAdapter(ctx context.Context, in *LoadLoraAdapterRequest, opts ...grpc.CallOption) (*LoraUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LoraUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_LoadLoraAdapter_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) LoadLoraAdapterFromTensors(ctx context.Context, in *LoadLoraAdapterFromTensorsRequest, opts ...grpc.CallOption) (*LoraUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LoraUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_LoadLoraAdapterFromTensors_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) UnloadLoraAdapter(ctx context.Context, in *UnloadLoraAdapterRequest, opts ...grpc.CallOption) (*LoraUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LoraUpdateResponse)
+	err := c.cc.Invoke(ctx, SglangService_UnloadLoraAdapter_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) GetRemoteInstanceTransferEngineInfo(ctx context.Context, in *RemoteInstanceTransferEngineInfoRequest, opts ...grpc.CallOption) (*RemoteInstanceTransferEngineInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoteInstanceTransferEngineInfoResponse)
+	err := c.cc.Invoke(ctx, SglangService_GetRemoteInstanceTransferEngineInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ParseFunctionCall(ctx context.Context, in *ParseFunctionCallRequest, opts ...grpc.CallOption) (*ParseFunctionCallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ParseFunctionCallResponse)
+	err := c.cc.Invoke(ctx, SglangService_ParseFunctionCall_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) SeparateReasoning(ctx context.Context, in *SeparateReasoningRequest, opts ...grpc.CallOption) (*SeparateReasoningResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SeparateReasoningResponse)
+	err := c.cc.Invoke(ctx, SglangService_SeparateReasoning_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) AddExternalCorpus(ctx context.Context, in *AddExternalCorpusRequest, opts ...grpc.CallOption) (*AddExternalCorpusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddExternalCorpusResponse)
+	err := c.cc.Invoke(ctx, SglangService_AddExternalCorpus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) RemoveExternalCorpus(ctx context.Context, in *RemoveExternalCorpusRequest, opts ...grpc.CallOption) (*RemoveExternalCorpusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveExternalCorpusResponse)
+	err := c.cc.Invoke(ctx, SglangService_RemoveExternalCorpus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ListExternalCorpora(ctx context.Context, in *ListExternalCorporaRequest, opts ...grpc.CallOption) (*ListExternalCorporaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListExternalCorporaResponse)
+	err := c.cc.Invoke(ctx, SglangService_ListExternalCorpora_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) FreezeGc(ctx context.Context, in *FreezeGcRequest, opts ...grpc.CallOption) (*FreezeGcResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FreezeGcResponse)
+	err := c.cc.Invoke(ctx, SglangService_FreezeGc_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) PauseGeneration(ctx context.Context, in *PauseGenerationRequest, opts ...grpc.CallOption) (*GenerationPauseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationPauseResponse)
+	err := c.cc.Invoke(ctx, SglangService_PauseGeneration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ContinueGeneration(ctx context.Context, in *ContinueGenerationRequest, opts ...grpc.CallOption) (*GenerationPauseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerationPauseResponse)
+	err := c.cc.Invoke(ctx, SglangService_ContinueGeneration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) PdRoleSwitch(ctx context.Context, in *PdRoleSwitchRequest, opts ...grpc.CallOption) (*PdRoleSwitchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PdRoleSwitchResponse)
+	err := c.cc.Invoke(ctx, SglangService_PdRoleSwitch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) UpdateWeightVersion(ctx context.Context, in *UpdateWeightVersionRequest, opts ...grpc.CallOption) (*UpdateWeightVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateWeightVersionResponse)
+	err := c.cc.Invoke(ctx, SglangService_UpdateWeightVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenSessionResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseSessionResponse)
+	err := c.cc.Invoke(ctx, SglangService_CloseSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) GetHiCacheL3CacheLayout(ctx context.Context, in *GetHiCacheL3CacheLayoutRequest, opts ...grpc.CallOption) (*GetHiCacheL3CacheLayoutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetHiCacheL3CacheLayoutResponse)
+	err := c.cc.Invoke(ctx, SglangService_GetHiCacheL3CacheLayout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ConfigureLogging(ctx context.Context, in *ConfigureLoggingRequest, opts ...grpc.CallOption) (*ConfigureLoggingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfigureLoggingResponse)
+	err := c.cc.Invoke(ctx, SglangService_ConfigureLogging_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) DumperControl(ctx context.Context, in *DumperControlRequest, opts ...grpc.CallOption) (*DumperControlResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DumperControlResponse)
+	err := c.cc.Invoke(ctx, SglangService_DumperControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) ScaleElasticEp(ctx context.Context, in *ScaleElasticEpRequest, opts ...grpc.CallOption) (*ScaleElasticEpResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScaleElasticEpResponse)
+	err := c.cc.Invoke(ctx, SglangService_ScaleElasticEp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) GetElasticEpState(ctx context.Context, in *ElasticEpStateRequest, opts ...grpc.CallOption) (*ElasticEpStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ElasticEpStateResponse)
+	err := c.cc.Invoke(ctx, SglangService_GetElasticEpState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OllamaChat(ctx context.Context, in *OllamaChatRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OllamaChatResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangService_ServiceDesc.Streams[1], SglangService_OllamaChat_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[OllamaChatRequest, OllamaChatResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OllamaChatClient = grpc.ServerStreamingClient[OllamaChatResponse]
+
+func (c *sglangServiceClient) OllamaGenerate(ctx context.Context, in *OllamaGenerateRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OllamaGenerateResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangService_ServiceDesc.Streams[2], SglangService_OllamaGenerate_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[OllamaGenerateRequest, OllamaGenerateResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OllamaGenerateClient = grpc.ServerStreamingClient[OllamaGenerateResponse]
+
+func (c *sglangServiceClient) OllamaTags(ctx context.Context, in *OllamaTagsRequest, opts ...grpc.CallOption) (*OllamaTagsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OllamaTagsResponse)
+	err := c.cc.Invoke(ctx, SglangService_OllamaTags_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OllamaShow(ctx context.Context, in *OllamaShowRequest, opts ...grpc.CallOption) (*OllamaShowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OllamaShowResponse)
+	err := c.cc.Invoke(ctx, SglangService_OllamaShow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) AnthropicMessages(ctx context.Context, in *AnthropicMessagesRequest, opts ...grpc.CallOption) (*AnthropicMessagesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnthropicMessagesResponse)
+	err := c.cc.Invoke(ctx, SglangService_AnthropicMessages_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) AnthropicStreamMessages(ctx context.Context, in *AnthropicMessagesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AnthropicStreamEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangService_ServiceDesc.Streams[3], SglangService_AnthropicStreamMessages_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[AnthropicMessagesRequest, AnthropicStreamEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_AnthropicStreamMessagesClient = grpc.ServerStreamingClient[AnthropicStreamEvent]
+
+func (c *sglangServiceClient) AnthropicCountTokens(ctx context.Context, in *AnthropicCountTokensRequest, opts ...grpc.CallOption) (*AnthropicCountTokensResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnthropicCountTokensResponse)
+	err := c.cc.Invoke(ctx, SglangService_AnthropicCountTokens_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiCompletions(ctx context.Context, in *OpenAiCompletionRequest, opts ...grpc.CallOption) (*OpenAiCompletionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiCompletionResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiCompletions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiStreamCompletions(ctx context.Context, in *OpenAiCompletionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenAiCompletionStreamResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangService_ServiceDesc.Streams[4], SglangService_OpenAiStreamCompletions_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[OpenAiCompletionRequest, OpenAiCompletionStreamResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OpenAiStreamCompletionsClient = grpc.ServerStreamingClient[OpenAiCompletionStreamResponse]
+
+func (c *sglangServiceClient) OpenAiChatCompletions(ctx context.Context, in *OpenAiChatCompletionRequest, opts ...grpc.CallOption) (*OpenAiChatCompletionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiChatCompletionResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiChatCompletions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiStreamChatCompletions(ctx context.Context, in *OpenAiChatCompletionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenAiChatCompletionStreamResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangService_ServiceDesc.Streams[5], SglangService_OpenAiStreamChatCompletions_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[OpenAiChatCompletionRequest, OpenAiChatCompletionStreamResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OpenAiStreamChatCompletionsClient = grpc.ServerStreamingClient[OpenAiChatCompletionStreamResponse]
+
+func (c *sglangServiceClient) OpenAiEmbeddings(ctx context.Context, in *OpenAiEmbeddingRequest, opts ...grpc.CallOption) (*OpenAiEmbeddingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiEmbeddingResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiEmbeddings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiClassify(ctx context.Context, in *OpenAiClassifyRequest, opts ...grpc.CallOption) (*OpenAiClassifyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiClassifyResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiClassify_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiScore(ctx context.Context, in *OpenAiScoreRequest, opts ...grpc.CallOption) (*OpenAiScoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiScoreResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiScore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiRerank(ctx context.Context, in *OpenAiRerankRequest, opts ...grpc.CallOption) (*OpenAiRerankResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiRerankResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiRerank_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiTokenize(ctx context.Context, in *OpenAiTokenizeRequest, opts ...grpc.CallOption) (*OpenAiTokenizeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiTokenizeResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiTokenize_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiDetokenize(ctx context.Context, in *OpenAiDetokenizeRequest, opts ...grpc.CallOption) (*OpenAiDetokenizeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiDetokenizeResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiDetokenize_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiResponses(ctx context.Context, in *OpenAiResponsesRequest, opts ...grpc.CallOption) (*OpenAiResponsesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiResponsesResponse)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiResponses_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiListModels(ctx context.Context, in *OpenAiListModelsRequest, opts ...grpc.CallOption) (*OpenAiModelList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiModelList)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiListModels_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangServiceClient) OpenAiRetrieveModel(ctx context.Context, in *OpenAiRetrieveModelRequest, opts ...grpc.CallOption) (*OpenAiModelCard, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenAiModelCard)
+	err := c.cc.Invoke(ctx, SglangService_OpenAiRetrieveModel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SglangServiceServer is the server API for SglangService service.
 // All implementations must embed UnimplementedSglangServiceServer
 // for forward compatibility.
@@ -231,6 +1054,102 @@ type SglangServiceServer interface {
 	// Duplicate native IDs cancel all matching generations. A later reuse of the
 	// ID is unaffected. Internal control/detokenization requests are not targeted.
 	Abort(context.Context, *AbortRequest) (*AbortResponse, error)
+	// `/set_internal_state`: override numeric scheduler knobs on every DP rank;
+	// one `updated` flag per rank.
+	SetInternalState(context.Context, *SetInternalStateRequest) (*SetInternalStateResponse, error)
+	// `/start_profile` and `/stop_profile`: a profiler capture on every DP rank.
+	StartProfile(context.Context, *StartProfileRequest) (*ProfileResponse, error)
+	StopProfile(context.Context, *StopProfileRequest) (*ProfileResponse, error)
+	// `/{start,stop,dump}_expert_distribution_record`.
+	StartExpertDistributionRecord(context.Context, *ExpertDistributionRecordRequest) (*ExpertDistributionRecordResponse, error)
+	StopExpertDistributionRecord(context.Context, *ExpertDistributionRecordRequest) (*ExpertDistributionRecordResponse, error)
+	DumpExpertDistributionRecord(context.Context, *ExpertDistributionRecordRequest) (*ExpertDistributionRecordResponse, error)
+	// `/slow_down`: a per-forward sleep on every DP rank, for testing.
+	SlowDown(context.Context, *SlowDownRequest) (*SlowDownResponse, error)
+	// `/release_memory_occupation`, `/resume_memory_occupation`.
+	ReleaseMemoryOccupation(context.Context, *ReleaseMemoryOccupationRequest) (*MemoryOccupationResponse, error)
+	ResumeMemoryOccupation(context.Context, *ResumeMemoryOccupationRequest) (*MemoryOccupationResponse, error)
+	// `/get_weights_by_name`: one parameter per DP rank.
+	GetWeightsByName(context.Context, *GetWeightsByNameRequest) (*GetWeightsByNameResponse, error)
+	// Weight-update process groups and remote-instance sends. Single-DP-rank
+	// deployments only, as in Python.
+	InitWeightsUpdateGroup(context.Context, *InitWeightsUpdateGroupRequest) (*WeightGroupResponse, error)
+	DestroyWeightsUpdateGroup(context.Context, *DestroyWeightsUpdateGroupRequest) (*WeightGroupResponse, error)
+	InitWeightsSendGroupForRemoteInstance(context.Context, *InitWeightsSendGroupForRemoteInstanceRequest) (*WeightGroupResponse, error)
+	SendWeightsToRemoteInstance(context.Context, *SendWeightsToRemoteInstanceRequest) (*WeightGroupResponse, error)
+	// The weight updates, each under the frontend's update lock on every
+	// listener. Distributed, tensor and plugin updates run inside a
+	// `BeginWeightUpdate` / `EndWeightUpdate` session and on single-DP-rank
+	// deployments only, as in Python.
+	UpdateWeightsFromDisk(context.Context, *UpdateWeightsFromDiskRequest) (*UpdateWeightsFromDiskResponse, error)
+	UpdateWeightsFromDistributed(context.Context, *UpdateWeightsFromDistributedRequest) (*WeightUpdateResponse, error)
+	UpdateWeightsFromTensor(context.Context, *UpdateWeightsFromTensorRequest) (*WeightUpdateResponse, error)
+	UpdateWeightsFromIpc(context.Context, *UpdateWeightsFromIpcRequest) (*WeightUpdateResponse, error)
+	BeginWeightUpdate(context.Context, *BeginWeightUpdateRequest) (*WeightUpdateResponse, error)
+	EndWeightUpdate(context.Context, *EndWeightUpdateRequest) (*WeightUpdateResponse, error)
+	PluginWeightUpdate(context.Context, *PluginWeightUpdateRequest) (*PluginWeightUpdateResponse, error)
+	// LoRA adapters; refused as "LoRA is not enabled" (see weights.proto).
+	LoadLoraAdapter(context.Context, *LoadLoraAdapterRequest) (*LoraUpdateResponse, error)
+	LoadLoraAdapterFromTensors(context.Context, *LoadLoraAdapterFromTensorsRequest) (*LoraUpdateResponse, error)
+	UnloadLoraAdapter(context.Context, *UnloadLoraAdapterRequest) (*LoraUpdateResponse, error)
+	// `/remote_instance_transfer_engine_info`: proxied from the engine-info
+	// bootstrap server.
+	GetRemoteInstanceTransferEngineInfo(context.Context, *RemoteInstanceTransferEngineInfoRequest) (*RemoteInstanceTransferEngineInfoResponse, error)
+	// `/parse_function_call`, `/separate_reasoning`: frontend-only parsing.
+	ParseFunctionCall(context.Context, *ParseFunctionCallRequest) (*ParseFunctionCallResponse, error)
+	SeparateReasoning(context.Context, *SeparateReasoningRequest) (*SeparateReasoningResponse, error)
+	// `/add_external_corpus`, `/remove_external_corpus`, `/list_external_corpora`.
+	AddExternalCorpus(context.Context, *AddExternalCorpusRequest) (*AddExternalCorpusResponse, error)
+	RemoveExternalCorpus(context.Context, *RemoveExternalCorpusRequest) (*RemoveExternalCorpusResponse, error)
+	ListExternalCorpora(context.Context, *ListExternalCorporaRequest) (*ListExternalCorporaResponse, error)
+	// `/freeze_gc`, `/pause_generation`, `/continue_generation`,
+	// `/pd_role_switch`, `/update_weight_version`.
+	FreezeGc(context.Context, *FreezeGcRequest) (*FreezeGcResponse, error)
+	PauseGeneration(context.Context, *PauseGenerationRequest) (*GenerationPauseResponse, error)
+	ContinueGeneration(context.Context, *ContinueGenerationRequest) (*GenerationPauseResponse, error)
+	PdRoleSwitch(context.Context, *PdRoleSwitchRequest) (*PdRoleSwitchResponse, error)
+	UpdateWeightVersion(context.Context, *UpdateWeightVersionRequest) (*UpdateWeightVersionResponse, error)
+	// `/open_session`, `/close_session`: multi-turn sessions on the schedulers.
+	OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionResponse, error)
+	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
+	// `/get_hicache_l3_cache_layout`: the merged HiCache L3 layout.
+	GetHiCacheL3CacheLayout(context.Context, *GetHiCacheL3CacheLayoutRequest) (*GetHiCacheL3CacheLayoutResponse, error)
+	// `/configure_logging`: the scheduler ranks' log level.
+	ConfigureLogging(context.Context, *ConfigureLoggingRequest) (*ConfigureLoggingResponse, error)
+	// `/dumper/{method}`: the debug dumper's control surface.
+	DumperControl(context.Context, *DumperControlRequest) (*DumperControlResponse, error)
+	// `/scale_elastic_ep`, `/is_scaling_elastic_ep`.
+	ScaleElasticEp(context.Context, *ScaleElasticEpRequest) (*ScaleElasticEpResponse, error)
+	GetElasticEpState(context.Context, *ElasticEpStateRequest) (*ElasticEpStateResponse, error)
+	// Ollama data plane. Chat and generate are server-streaming like Generate:
+	// a unary request is a one-frame stream, and the final frame carries the
+	// counters. Chat renders the messages with the served chat template.
+	OllamaChat(*OllamaChatRequest, grpc.ServerStreamingServer[OllamaChatResponse]) error
+	OllamaGenerate(*OllamaGenerateRequest, grpc.ServerStreamingServer[OllamaGenerateResponse]) error
+	OllamaTags(context.Context, *OllamaTagsRequest) (*OllamaTagsResponse, error)
+	OllamaShow(context.Context, *OllamaShowRequest) (*OllamaShowResponse, error)
+	// Anthropic Messages data plane. The unary and streamed replies have
+	// different wire shapes, so they are two RPCs; `stream` in the request is
+	// ignored here (the RPC decides).
+	AnthropicMessages(context.Context, *AnthropicMessagesRequest) (*AnthropicMessagesResponse, error)
+	AnthropicStreamMessages(*AnthropicMessagesRequest, grpc.ServerStreamingServer[AnthropicStreamEvent]) error
+	AnthropicCountTokens(context.Context, *AnthropicCountTokensRequest) (*AnthropicCountTokensResponse, error)
+	// OpenAI data plane. The schema is the interface the OpenAI adapter is
+	// being refactored onto; until then these answer UNIMPLEMENTED. Streamed
+	// routes are separate RPCs whose frame is the SSE frame.
+	OpenAiCompletions(context.Context, *OpenAiCompletionRequest) (*OpenAiCompletionResponse, error)
+	OpenAiStreamCompletions(*OpenAiCompletionRequest, grpc.ServerStreamingServer[OpenAiCompletionStreamResponse]) error
+	OpenAiChatCompletions(context.Context, *OpenAiChatCompletionRequest) (*OpenAiChatCompletionResponse, error)
+	OpenAiStreamChatCompletions(*OpenAiChatCompletionRequest, grpc.ServerStreamingServer[OpenAiChatCompletionStreamResponse]) error
+	OpenAiEmbeddings(context.Context, *OpenAiEmbeddingRequest) (*OpenAiEmbeddingResponse, error)
+	OpenAiClassify(context.Context, *OpenAiClassifyRequest) (*OpenAiClassifyResponse, error)
+	OpenAiScore(context.Context, *OpenAiScoreRequest) (*OpenAiScoreResponse, error)
+	OpenAiRerank(context.Context, *OpenAiRerankRequest) (*OpenAiRerankResponse, error)
+	OpenAiTokenize(context.Context, *OpenAiTokenizeRequest) (*OpenAiTokenizeResponse, error)
+	OpenAiDetokenize(context.Context, *OpenAiDetokenizeRequest) (*OpenAiDetokenizeResponse, error)
+	OpenAiResponses(context.Context, *OpenAiResponsesRequest) (*OpenAiResponsesResponse, error)
+	OpenAiListModels(context.Context, *OpenAiListModelsRequest) (*OpenAiModelList, error)
+	OpenAiRetrieveModel(context.Context, *OpenAiRetrieveModelRequest) (*OpenAiModelCard, error)
 	mustEmbedUnimplementedSglangServiceServer()
 }
 
@@ -273,6 +1192,192 @@ func (UnimplementedSglangServiceServer) Detokenize(context.Context, *DetokenizeR
 }
 func (UnimplementedSglangServiceServer) Abort(context.Context, *AbortRequest) (*AbortResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Abort not implemented")
+}
+func (UnimplementedSglangServiceServer) SetInternalState(context.Context, *SetInternalStateRequest) (*SetInternalStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetInternalState not implemented")
+}
+func (UnimplementedSglangServiceServer) StartProfile(context.Context, *StartProfileRequest) (*ProfileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartProfile not implemented")
+}
+func (UnimplementedSglangServiceServer) StopProfile(context.Context, *StopProfileRequest) (*ProfileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StopProfile not implemented")
+}
+func (UnimplementedSglangServiceServer) StartExpertDistributionRecord(context.Context, *ExpertDistributionRecordRequest) (*ExpertDistributionRecordResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartExpertDistributionRecord not implemented")
+}
+func (UnimplementedSglangServiceServer) StopExpertDistributionRecord(context.Context, *ExpertDistributionRecordRequest) (*ExpertDistributionRecordResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StopExpertDistributionRecord not implemented")
+}
+func (UnimplementedSglangServiceServer) DumpExpertDistributionRecord(context.Context, *ExpertDistributionRecordRequest) (*ExpertDistributionRecordResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DumpExpertDistributionRecord not implemented")
+}
+func (UnimplementedSglangServiceServer) SlowDown(context.Context, *SlowDownRequest) (*SlowDownResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SlowDown not implemented")
+}
+func (UnimplementedSglangServiceServer) ReleaseMemoryOccupation(context.Context, *ReleaseMemoryOccupationRequest) (*MemoryOccupationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseMemoryOccupation not implemented")
+}
+func (UnimplementedSglangServiceServer) ResumeMemoryOccupation(context.Context, *ResumeMemoryOccupationRequest) (*MemoryOccupationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResumeMemoryOccupation not implemented")
+}
+func (UnimplementedSglangServiceServer) GetWeightsByName(context.Context, *GetWeightsByNameRequest) (*GetWeightsByNameResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetWeightsByName not implemented")
+}
+func (UnimplementedSglangServiceServer) InitWeightsUpdateGroup(context.Context, *InitWeightsUpdateGroupRequest) (*WeightGroupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InitWeightsUpdateGroup not implemented")
+}
+func (UnimplementedSglangServiceServer) DestroyWeightsUpdateGroup(context.Context, *DestroyWeightsUpdateGroupRequest) (*WeightGroupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DestroyWeightsUpdateGroup not implemented")
+}
+func (UnimplementedSglangServiceServer) InitWeightsSendGroupForRemoteInstance(context.Context, *InitWeightsSendGroupForRemoteInstanceRequest) (*WeightGroupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InitWeightsSendGroupForRemoteInstance not implemented")
+}
+func (UnimplementedSglangServiceServer) SendWeightsToRemoteInstance(context.Context, *SendWeightsToRemoteInstanceRequest) (*WeightGroupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SendWeightsToRemoteInstance not implemented")
+}
+func (UnimplementedSglangServiceServer) UpdateWeightsFromDisk(context.Context, *UpdateWeightsFromDiskRequest) (*UpdateWeightsFromDiskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateWeightsFromDisk not implemented")
+}
+func (UnimplementedSglangServiceServer) UpdateWeightsFromDistributed(context.Context, *UpdateWeightsFromDistributedRequest) (*WeightUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateWeightsFromDistributed not implemented")
+}
+func (UnimplementedSglangServiceServer) UpdateWeightsFromTensor(context.Context, *UpdateWeightsFromTensorRequest) (*WeightUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateWeightsFromTensor not implemented")
+}
+func (UnimplementedSglangServiceServer) UpdateWeightsFromIpc(context.Context, *UpdateWeightsFromIpcRequest) (*WeightUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateWeightsFromIpc not implemented")
+}
+func (UnimplementedSglangServiceServer) BeginWeightUpdate(context.Context, *BeginWeightUpdateRequest) (*WeightUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BeginWeightUpdate not implemented")
+}
+func (UnimplementedSglangServiceServer) EndWeightUpdate(context.Context, *EndWeightUpdateRequest) (*WeightUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EndWeightUpdate not implemented")
+}
+func (UnimplementedSglangServiceServer) PluginWeightUpdate(context.Context, *PluginWeightUpdateRequest) (*PluginWeightUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PluginWeightUpdate not implemented")
+}
+func (UnimplementedSglangServiceServer) LoadLoraAdapter(context.Context, *LoadLoraAdapterRequest) (*LoraUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LoadLoraAdapter not implemented")
+}
+func (UnimplementedSglangServiceServer) LoadLoraAdapterFromTensors(context.Context, *LoadLoraAdapterFromTensorsRequest) (*LoraUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LoadLoraAdapterFromTensors not implemented")
+}
+func (UnimplementedSglangServiceServer) UnloadLoraAdapter(context.Context, *UnloadLoraAdapterRequest) (*LoraUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UnloadLoraAdapter not implemented")
+}
+func (UnimplementedSglangServiceServer) GetRemoteInstanceTransferEngineInfo(context.Context, *RemoteInstanceTransferEngineInfoRequest) (*RemoteInstanceTransferEngineInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRemoteInstanceTransferEngineInfo not implemented")
+}
+func (UnimplementedSglangServiceServer) ParseFunctionCall(context.Context, *ParseFunctionCallRequest) (*ParseFunctionCallResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ParseFunctionCall not implemented")
+}
+func (UnimplementedSglangServiceServer) SeparateReasoning(context.Context, *SeparateReasoningRequest) (*SeparateReasoningResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SeparateReasoning not implemented")
+}
+func (UnimplementedSglangServiceServer) AddExternalCorpus(context.Context, *AddExternalCorpusRequest) (*AddExternalCorpusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddExternalCorpus not implemented")
+}
+func (UnimplementedSglangServiceServer) RemoveExternalCorpus(context.Context, *RemoveExternalCorpusRequest) (*RemoveExternalCorpusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveExternalCorpus not implemented")
+}
+func (UnimplementedSglangServiceServer) ListExternalCorpora(context.Context, *ListExternalCorporaRequest) (*ListExternalCorporaResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListExternalCorpora not implemented")
+}
+func (UnimplementedSglangServiceServer) FreezeGc(context.Context, *FreezeGcRequest) (*FreezeGcResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FreezeGc not implemented")
+}
+func (UnimplementedSglangServiceServer) PauseGeneration(context.Context, *PauseGenerationRequest) (*GenerationPauseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PauseGeneration not implemented")
+}
+func (UnimplementedSglangServiceServer) ContinueGeneration(context.Context, *ContinueGenerationRequest) (*GenerationPauseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ContinueGeneration not implemented")
+}
+func (UnimplementedSglangServiceServer) PdRoleSwitch(context.Context, *PdRoleSwitchRequest) (*PdRoleSwitchResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PdRoleSwitch not implemented")
+}
+func (UnimplementedSglangServiceServer) UpdateWeightVersion(context.Context, *UpdateWeightVersionRequest) (*UpdateWeightVersionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateWeightVersion not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenSession not implemented")
+}
+func (UnimplementedSglangServiceServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CloseSession not implemented")
+}
+func (UnimplementedSglangServiceServer) GetHiCacheL3CacheLayout(context.Context, *GetHiCacheL3CacheLayoutRequest) (*GetHiCacheL3CacheLayoutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetHiCacheL3CacheLayout not implemented")
+}
+func (UnimplementedSglangServiceServer) ConfigureLogging(context.Context, *ConfigureLoggingRequest) (*ConfigureLoggingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ConfigureLogging not implemented")
+}
+func (UnimplementedSglangServiceServer) DumperControl(context.Context, *DumperControlRequest) (*DumperControlResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DumperControl not implemented")
+}
+func (UnimplementedSglangServiceServer) ScaleElasticEp(context.Context, *ScaleElasticEpRequest) (*ScaleElasticEpResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ScaleElasticEp not implemented")
+}
+func (UnimplementedSglangServiceServer) GetElasticEpState(context.Context, *ElasticEpStateRequest) (*ElasticEpStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetElasticEpState not implemented")
+}
+func (UnimplementedSglangServiceServer) OllamaChat(*OllamaChatRequest, grpc.ServerStreamingServer[OllamaChatResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method OllamaChat not implemented")
+}
+func (UnimplementedSglangServiceServer) OllamaGenerate(*OllamaGenerateRequest, grpc.ServerStreamingServer[OllamaGenerateResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method OllamaGenerate not implemented")
+}
+func (UnimplementedSglangServiceServer) OllamaTags(context.Context, *OllamaTagsRequest) (*OllamaTagsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OllamaTags not implemented")
+}
+func (UnimplementedSglangServiceServer) OllamaShow(context.Context, *OllamaShowRequest) (*OllamaShowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OllamaShow not implemented")
+}
+func (UnimplementedSglangServiceServer) AnthropicMessages(context.Context, *AnthropicMessagesRequest) (*AnthropicMessagesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AnthropicMessages not implemented")
+}
+func (UnimplementedSglangServiceServer) AnthropicStreamMessages(*AnthropicMessagesRequest, grpc.ServerStreamingServer[AnthropicStreamEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method AnthropicStreamMessages not implemented")
+}
+func (UnimplementedSglangServiceServer) AnthropicCountTokens(context.Context, *AnthropicCountTokensRequest) (*AnthropicCountTokensResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AnthropicCountTokens not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiCompletions(context.Context, *OpenAiCompletionRequest) (*OpenAiCompletionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiCompletions not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiStreamCompletions(*OpenAiCompletionRequest, grpc.ServerStreamingServer[OpenAiCompletionStreamResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method OpenAiStreamCompletions not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiChatCompletions(context.Context, *OpenAiChatCompletionRequest) (*OpenAiChatCompletionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiChatCompletions not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiStreamChatCompletions(*OpenAiChatCompletionRequest, grpc.ServerStreamingServer[OpenAiChatCompletionStreamResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method OpenAiStreamChatCompletions not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiEmbeddings(context.Context, *OpenAiEmbeddingRequest) (*OpenAiEmbeddingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiEmbeddings not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiClassify(context.Context, *OpenAiClassifyRequest) (*OpenAiClassifyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiClassify not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiScore(context.Context, *OpenAiScoreRequest) (*OpenAiScoreResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiScore not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiRerank(context.Context, *OpenAiRerankRequest) (*OpenAiRerankResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiRerank not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiTokenize(context.Context, *OpenAiTokenizeRequest) (*OpenAiTokenizeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiTokenize not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiDetokenize(context.Context, *OpenAiDetokenizeRequest) (*OpenAiDetokenizeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiDetokenize not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiResponses(context.Context, *OpenAiResponsesRequest) (*OpenAiResponsesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiResponses not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiListModels(context.Context, *OpenAiListModelsRequest) (*OpenAiModelList, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiListModels not implemented")
+}
+func (UnimplementedSglangServiceServer) OpenAiRetrieveModel(context.Context, *OpenAiRetrieveModelRequest) (*OpenAiModelCard, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method OpenAiRetrieveModel not implemented")
 }
 func (UnimplementedSglangServiceServer) mustEmbedUnimplementedSglangServiceServer() {}
 func (UnimplementedSglangServiceServer) testEmbeddedByValue()                       {}
@@ -486,6 +1591,1087 @@ func _SglangService_Abort_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SglangService_SetInternalState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetInternalStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).SetInternalState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_SetInternalState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).SetInternalState(ctx, req.(*SetInternalStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_StartProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).StartProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_StartProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).StartProfile(ctx, req.(*StartProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_StopProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StopProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).StopProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_StopProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).StopProfile(ctx, req.(*StopProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_StartExpertDistributionRecord_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpertDistributionRecordRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).StartExpertDistributionRecord(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_StartExpertDistributionRecord_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).StartExpertDistributionRecord(ctx, req.(*ExpertDistributionRecordRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_StopExpertDistributionRecord_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpertDistributionRecordRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).StopExpertDistributionRecord(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_StopExpertDistributionRecord_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).StopExpertDistributionRecord(ctx, req.(*ExpertDistributionRecordRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_DumpExpertDistributionRecord_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpertDistributionRecordRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).DumpExpertDistributionRecord(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_DumpExpertDistributionRecord_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).DumpExpertDistributionRecord(ctx, req.(*ExpertDistributionRecordRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_SlowDown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SlowDownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).SlowDown(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_SlowDown_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).SlowDown(ctx, req.(*SlowDownRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ReleaseMemoryOccupation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseMemoryOccupationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ReleaseMemoryOccupation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ReleaseMemoryOccupation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ReleaseMemoryOccupation(ctx, req.(*ReleaseMemoryOccupationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ResumeMemoryOccupation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResumeMemoryOccupationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ResumeMemoryOccupation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ResumeMemoryOccupation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ResumeMemoryOccupation(ctx, req.(*ResumeMemoryOccupationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_GetWeightsByName_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWeightsByNameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).GetWeightsByName(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_GetWeightsByName_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).GetWeightsByName(ctx, req.(*GetWeightsByNameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_InitWeightsUpdateGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InitWeightsUpdateGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).InitWeightsUpdateGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_InitWeightsUpdateGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).InitWeightsUpdateGroup(ctx, req.(*InitWeightsUpdateGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_DestroyWeightsUpdateGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DestroyWeightsUpdateGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).DestroyWeightsUpdateGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_DestroyWeightsUpdateGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).DestroyWeightsUpdateGroup(ctx, req.(*DestroyWeightsUpdateGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_InitWeightsSendGroupForRemoteInstance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InitWeightsSendGroupForRemoteInstanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).InitWeightsSendGroupForRemoteInstance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_InitWeightsSendGroupForRemoteInstance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).InitWeightsSendGroupForRemoteInstance(ctx, req.(*InitWeightsSendGroupForRemoteInstanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_SendWeightsToRemoteInstance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendWeightsToRemoteInstanceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).SendWeightsToRemoteInstance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_SendWeightsToRemoteInstance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).SendWeightsToRemoteInstance(ctx, req.(*SendWeightsToRemoteInstanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_UpdateWeightsFromDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWeightsFromDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).UpdateWeightsFromDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_UpdateWeightsFromDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).UpdateWeightsFromDisk(ctx, req.(*UpdateWeightsFromDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_UpdateWeightsFromDistributed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWeightsFromDistributedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).UpdateWeightsFromDistributed(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_UpdateWeightsFromDistributed_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).UpdateWeightsFromDistributed(ctx, req.(*UpdateWeightsFromDistributedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_UpdateWeightsFromTensor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWeightsFromTensorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).UpdateWeightsFromTensor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_UpdateWeightsFromTensor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).UpdateWeightsFromTensor(ctx, req.(*UpdateWeightsFromTensorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_UpdateWeightsFromIpc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWeightsFromIpcRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).UpdateWeightsFromIpc(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_UpdateWeightsFromIpc_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).UpdateWeightsFromIpc(ctx, req.(*UpdateWeightsFromIpcRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_BeginWeightUpdate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginWeightUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).BeginWeightUpdate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_BeginWeightUpdate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).BeginWeightUpdate(ctx, req.(*BeginWeightUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_EndWeightUpdate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EndWeightUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).EndWeightUpdate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_EndWeightUpdate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).EndWeightUpdate(ctx, req.(*EndWeightUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_PluginWeightUpdate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PluginWeightUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).PluginWeightUpdate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_PluginWeightUpdate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).PluginWeightUpdate(ctx, req.(*PluginWeightUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_LoadLoraAdapter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LoadLoraAdapterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).LoadLoraAdapter(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_LoadLoraAdapter_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).LoadLoraAdapter(ctx, req.(*LoadLoraAdapterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_LoadLoraAdapterFromTensors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LoadLoraAdapterFromTensorsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).LoadLoraAdapterFromTensors(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_LoadLoraAdapterFromTensors_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).LoadLoraAdapterFromTensors(ctx, req.(*LoadLoraAdapterFromTensorsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_UnloadLoraAdapter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnloadLoraAdapterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).UnloadLoraAdapter(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_UnloadLoraAdapter_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).UnloadLoraAdapter(ctx, req.(*UnloadLoraAdapterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_GetRemoteInstanceTransferEngineInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoteInstanceTransferEngineInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).GetRemoteInstanceTransferEngineInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_GetRemoteInstanceTransferEngineInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).GetRemoteInstanceTransferEngineInfo(ctx, req.(*RemoteInstanceTransferEngineInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ParseFunctionCall_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ParseFunctionCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ParseFunctionCall(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ParseFunctionCall_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ParseFunctionCall(ctx, req.(*ParseFunctionCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_SeparateReasoning_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SeparateReasoningRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).SeparateReasoning(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_SeparateReasoning_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).SeparateReasoning(ctx, req.(*SeparateReasoningRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_AddExternalCorpus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddExternalCorpusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).AddExternalCorpus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_AddExternalCorpus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).AddExternalCorpus(ctx, req.(*AddExternalCorpusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_RemoveExternalCorpus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveExternalCorpusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).RemoveExternalCorpus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_RemoveExternalCorpus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).RemoveExternalCorpus(ctx, req.(*RemoveExternalCorpusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ListExternalCorpora_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListExternalCorporaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ListExternalCorpora(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ListExternalCorpora_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ListExternalCorpora(ctx, req.(*ListExternalCorporaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_FreezeGc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FreezeGcRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).FreezeGc(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_FreezeGc_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).FreezeGc(ctx, req.(*FreezeGcRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_PauseGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PauseGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).PauseGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_PauseGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).PauseGeneration(ctx, req.(*PauseGenerationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ContinueGeneration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContinueGenerationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ContinueGeneration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ContinueGeneration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ContinueGeneration(ctx, req.(*ContinueGenerationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_PdRoleSwitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PdRoleSwitchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).PdRoleSwitch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_PdRoleSwitch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).PdRoleSwitch(ctx, req.(*PdRoleSwitchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_UpdateWeightVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWeightVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).UpdateWeightVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_UpdateWeightVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).UpdateWeightVersion(ctx, req.(*UpdateWeightVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenSession(ctx, req.(*OpenSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_CloseSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).CloseSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_CloseSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).CloseSession(ctx, req.(*CloseSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_GetHiCacheL3CacheLayout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetHiCacheL3CacheLayoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).GetHiCacheL3CacheLayout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_GetHiCacheL3CacheLayout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).GetHiCacheL3CacheLayout(ctx, req.(*GetHiCacheL3CacheLayoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ConfigureLogging_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfigureLoggingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ConfigureLogging(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ConfigureLogging_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ConfigureLogging(ctx, req.(*ConfigureLoggingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_DumperControl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DumperControlRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).DumperControl(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_DumperControl_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).DumperControl(ctx, req.(*DumperControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_ScaleElasticEp_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScaleElasticEpRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).ScaleElasticEp(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_ScaleElasticEp_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).ScaleElasticEp(ctx, req.(*ScaleElasticEpRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_GetElasticEpState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ElasticEpStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).GetElasticEpState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_GetElasticEpState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).GetElasticEpState(ctx, req.(*ElasticEpStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OllamaChat_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(OllamaChatRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangServiceServer).OllamaChat(m, &grpc.GenericServerStream[OllamaChatRequest, OllamaChatResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OllamaChatServer = grpc.ServerStreamingServer[OllamaChatResponse]
+
+func _SglangService_OllamaGenerate_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(OllamaGenerateRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangServiceServer).OllamaGenerate(m, &grpc.GenericServerStream[OllamaGenerateRequest, OllamaGenerateResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OllamaGenerateServer = grpc.ServerStreamingServer[OllamaGenerateResponse]
+
+func _SglangService_OllamaTags_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OllamaTagsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OllamaTags(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OllamaTags_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OllamaTags(ctx, req.(*OllamaTagsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OllamaShow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OllamaShowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OllamaShow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OllamaShow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OllamaShow(ctx, req.(*OllamaShowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_AnthropicMessages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnthropicMessagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).AnthropicMessages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_AnthropicMessages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).AnthropicMessages(ctx, req.(*AnthropicMessagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_AnthropicStreamMessages_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(AnthropicMessagesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangServiceServer).AnthropicStreamMessages(m, &grpc.GenericServerStream[AnthropicMessagesRequest, AnthropicStreamEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_AnthropicStreamMessagesServer = grpc.ServerStreamingServer[AnthropicStreamEvent]
+
+func _SglangService_AnthropicCountTokens_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnthropicCountTokensRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).AnthropicCountTokens(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_AnthropicCountTokens_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).AnthropicCountTokens(ctx, req.(*AnthropicCountTokensRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiCompletions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiCompletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiCompletions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiCompletions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiCompletions(ctx, req.(*OpenAiCompletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiStreamCompletions_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(OpenAiCompletionRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangServiceServer).OpenAiStreamCompletions(m, &grpc.GenericServerStream[OpenAiCompletionRequest, OpenAiCompletionStreamResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OpenAiStreamCompletionsServer = grpc.ServerStreamingServer[OpenAiCompletionStreamResponse]
+
+func _SglangService_OpenAiChatCompletions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiChatCompletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiChatCompletions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiChatCompletions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiChatCompletions(ctx, req.(*OpenAiChatCompletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiStreamChatCompletions_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(OpenAiChatCompletionRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangServiceServer).OpenAiStreamChatCompletions(m, &grpc.GenericServerStream[OpenAiChatCompletionRequest, OpenAiChatCompletionStreamResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangService_OpenAiStreamChatCompletionsServer = grpc.ServerStreamingServer[OpenAiChatCompletionStreamResponse]
+
+func _SglangService_OpenAiEmbeddings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiEmbeddingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiEmbeddings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiEmbeddings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiEmbeddings(ctx, req.(*OpenAiEmbeddingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiClassify_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiClassifyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiClassify(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiClassify_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiClassify(ctx, req.(*OpenAiClassifyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiScore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiScoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiScore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiScore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiScore(ctx, req.(*OpenAiScoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiRerank_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiRerankRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiRerank(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiRerank_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiRerank(ctx, req.(*OpenAiRerankRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiTokenize_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiTokenizeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiTokenize(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiTokenize_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiTokenize(ctx, req.(*OpenAiTokenizeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiDetokenize_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiDetokenizeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiDetokenize(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiDetokenize_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiDetokenize(ctx, req.(*OpenAiDetokenizeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiResponses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiResponsesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiResponses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiResponses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiResponses(ctx, req.(*OpenAiResponsesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiListModels_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiListModelsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiListModels(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiListModels_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiListModels(ctx, req.(*OpenAiListModelsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangService_OpenAiRetrieveModel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenAiRetrieveModelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangServiceServer).OpenAiRetrieveModel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangService_OpenAiRetrieveModel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangServiceServer).OpenAiRetrieveModel(ctx, req.(*OpenAiRetrieveModelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SglangService_ServiceDesc is the grpc.ServiceDesc for SglangService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -533,11 +2719,264 @@ var SglangService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Abort",
 			Handler:    _SglangService_Abort_Handler,
 		},
+		{
+			MethodName: "SetInternalState",
+			Handler:    _SglangService_SetInternalState_Handler,
+		},
+		{
+			MethodName: "StartProfile",
+			Handler:    _SglangService_StartProfile_Handler,
+		},
+		{
+			MethodName: "StopProfile",
+			Handler:    _SglangService_StopProfile_Handler,
+		},
+		{
+			MethodName: "StartExpertDistributionRecord",
+			Handler:    _SglangService_StartExpertDistributionRecord_Handler,
+		},
+		{
+			MethodName: "StopExpertDistributionRecord",
+			Handler:    _SglangService_StopExpertDistributionRecord_Handler,
+		},
+		{
+			MethodName: "DumpExpertDistributionRecord",
+			Handler:    _SglangService_DumpExpertDistributionRecord_Handler,
+		},
+		{
+			MethodName: "SlowDown",
+			Handler:    _SglangService_SlowDown_Handler,
+		},
+		{
+			MethodName: "ReleaseMemoryOccupation",
+			Handler:    _SglangService_ReleaseMemoryOccupation_Handler,
+		},
+		{
+			MethodName: "ResumeMemoryOccupation",
+			Handler:    _SglangService_ResumeMemoryOccupation_Handler,
+		},
+		{
+			MethodName: "GetWeightsByName",
+			Handler:    _SglangService_GetWeightsByName_Handler,
+		},
+		{
+			MethodName: "InitWeightsUpdateGroup",
+			Handler:    _SglangService_InitWeightsUpdateGroup_Handler,
+		},
+		{
+			MethodName: "DestroyWeightsUpdateGroup",
+			Handler:    _SglangService_DestroyWeightsUpdateGroup_Handler,
+		},
+		{
+			MethodName: "InitWeightsSendGroupForRemoteInstance",
+			Handler:    _SglangService_InitWeightsSendGroupForRemoteInstance_Handler,
+		},
+		{
+			MethodName: "SendWeightsToRemoteInstance",
+			Handler:    _SglangService_SendWeightsToRemoteInstance_Handler,
+		},
+		{
+			MethodName: "UpdateWeightsFromDisk",
+			Handler:    _SglangService_UpdateWeightsFromDisk_Handler,
+		},
+		{
+			MethodName: "UpdateWeightsFromDistributed",
+			Handler:    _SglangService_UpdateWeightsFromDistributed_Handler,
+		},
+		{
+			MethodName: "UpdateWeightsFromTensor",
+			Handler:    _SglangService_UpdateWeightsFromTensor_Handler,
+		},
+		{
+			MethodName: "UpdateWeightsFromIpc",
+			Handler:    _SglangService_UpdateWeightsFromIpc_Handler,
+		},
+		{
+			MethodName: "BeginWeightUpdate",
+			Handler:    _SglangService_BeginWeightUpdate_Handler,
+		},
+		{
+			MethodName: "EndWeightUpdate",
+			Handler:    _SglangService_EndWeightUpdate_Handler,
+		},
+		{
+			MethodName: "PluginWeightUpdate",
+			Handler:    _SglangService_PluginWeightUpdate_Handler,
+		},
+		{
+			MethodName: "LoadLoraAdapter",
+			Handler:    _SglangService_LoadLoraAdapter_Handler,
+		},
+		{
+			MethodName: "LoadLoraAdapterFromTensors",
+			Handler:    _SglangService_LoadLoraAdapterFromTensors_Handler,
+		},
+		{
+			MethodName: "UnloadLoraAdapter",
+			Handler:    _SglangService_UnloadLoraAdapter_Handler,
+		},
+		{
+			MethodName: "GetRemoteInstanceTransferEngineInfo",
+			Handler:    _SglangService_GetRemoteInstanceTransferEngineInfo_Handler,
+		},
+		{
+			MethodName: "ParseFunctionCall",
+			Handler:    _SglangService_ParseFunctionCall_Handler,
+		},
+		{
+			MethodName: "SeparateReasoning",
+			Handler:    _SglangService_SeparateReasoning_Handler,
+		},
+		{
+			MethodName: "AddExternalCorpus",
+			Handler:    _SglangService_AddExternalCorpus_Handler,
+		},
+		{
+			MethodName: "RemoveExternalCorpus",
+			Handler:    _SglangService_RemoveExternalCorpus_Handler,
+		},
+		{
+			MethodName: "ListExternalCorpora",
+			Handler:    _SglangService_ListExternalCorpora_Handler,
+		},
+		{
+			MethodName: "FreezeGc",
+			Handler:    _SglangService_FreezeGc_Handler,
+		},
+		{
+			MethodName: "PauseGeneration",
+			Handler:    _SglangService_PauseGeneration_Handler,
+		},
+		{
+			MethodName: "ContinueGeneration",
+			Handler:    _SglangService_ContinueGeneration_Handler,
+		},
+		{
+			MethodName: "PdRoleSwitch",
+			Handler:    _SglangService_PdRoleSwitch_Handler,
+		},
+		{
+			MethodName: "UpdateWeightVersion",
+			Handler:    _SglangService_UpdateWeightVersion_Handler,
+		},
+		{
+			MethodName: "OpenSession",
+			Handler:    _SglangService_OpenSession_Handler,
+		},
+		{
+			MethodName: "CloseSession",
+			Handler:    _SglangService_CloseSession_Handler,
+		},
+		{
+			MethodName: "GetHiCacheL3CacheLayout",
+			Handler:    _SglangService_GetHiCacheL3CacheLayout_Handler,
+		},
+		{
+			MethodName: "ConfigureLogging",
+			Handler:    _SglangService_ConfigureLogging_Handler,
+		},
+		{
+			MethodName: "DumperControl",
+			Handler:    _SglangService_DumperControl_Handler,
+		},
+		{
+			MethodName: "ScaleElasticEp",
+			Handler:    _SglangService_ScaleElasticEp_Handler,
+		},
+		{
+			MethodName: "GetElasticEpState",
+			Handler:    _SglangService_GetElasticEpState_Handler,
+		},
+		{
+			MethodName: "OllamaTags",
+			Handler:    _SglangService_OllamaTags_Handler,
+		},
+		{
+			MethodName: "OllamaShow",
+			Handler:    _SglangService_OllamaShow_Handler,
+		},
+		{
+			MethodName: "AnthropicMessages",
+			Handler:    _SglangService_AnthropicMessages_Handler,
+		},
+		{
+			MethodName: "AnthropicCountTokens",
+			Handler:    _SglangService_AnthropicCountTokens_Handler,
+		},
+		{
+			MethodName: "OpenAiCompletions",
+			Handler:    _SglangService_OpenAiCompletions_Handler,
+		},
+		{
+			MethodName: "OpenAiChatCompletions",
+			Handler:    _SglangService_OpenAiChatCompletions_Handler,
+		},
+		{
+			MethodName: "OpenAiEmbeddings",
+			Handler:    _SglangService_OpenAiEmbeddings_Handler,
+		},
+		{
+			MethodName: "OpenAiClassify",
+			Handler:    _SglangService_OpenAiClassify_Handler,
+		},
+		{
+			MethodName: "OpenAiScore",
+			Handler:    _SglangService_OpenAiScore_Handler,
+		},
+		{
+			MethodName: "OpenAiRerank",
+			Handler:    _SglangService_OpenAiRerank_Handler,
+		},
+		{
+			MethodName: "OpenAiTokenize",
+			Handler:    _SglangService_OpenAiTokenize_Handler,
+		},
+		{
+			MethodName: "OpenAiDetokenize",
+			Handler:    _SglangService_OpenAiDetokenize_Handler,
+		},
+		{
+			MethodName: "OpenAiResponses",
+			Handler:    _SglangService_OpenAiResponses_Handler,
+		},
+		{
+			MethodName: "OpenAiListModels",
+			Handler:    _SglangService_OpenAiListModels_Handler,
+		},
+		{
+			MethodName: "OpenAiRetrieveModel",
+			Handler:    _SglangService_OpenAiRetrieveModel_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Generate",
 			Handler:       _SglangService_Generate_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "OllamaChat",
+			Handler:       _SglangService_OllamaChat_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "OllamaGenerate",
+			Handler:       _SglangService_OllamaGenerate_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "AnthropicStreamMessages",
+			Handler:       _SglangService_AnthropicStreamMessages_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "OpenAiStreamCompletions",
+			Handler:       _SglangService_OpenAiStreamCompletions_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "OpenAiStreamChatCompletions",
+			Handler:       _SglangService_OpenAiStreamChatCompletions_Handler,
 			ServerStreams: true,
 		},
 	},
