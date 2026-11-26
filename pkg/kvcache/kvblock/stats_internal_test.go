@@ -151,9 +151,11 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 	})
 }
 
-// TestInMemoryStatsNoDrift runs concurrent Adds, Evicts, and Clears over a
-// small index, then empties it: the entry and entry-slot counters must return
-// to zero, so no removal path subtracts what another already drained.
+// TestInMemoryStatsNoDrift runs concurrent Adds, Evicts, and Clears over an
+// index whose store holds half the key set, so capacity evictions race the
+// deliberate removal paths, then empties it: the entry and entry-slot
+// counters must return to zero, so no removal path subtracts what the
+// eviction callback already drained.
 func TestInMemoryStatsNoDrift(t *testing.T) {
 	ctx := t.Context()
 	const (
@@ -175,7 +177,8 @@ func TestInMemoryStatsNoDrift(t *testing.T) {
 		keys[i] = BlockHash(i + 1)
 	}
 
-	idx := newStatsTestIndex(t, numKeys, numPods)
+	idx := newStatsTestIndex(t, numKeys/2, numPods)
+	capacityBefore := evictions("capacity")
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -198,6 +201,9 @@ func TestInMemoryStatsNoDrift(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
+	// The store ran over capacity, so the eviction callback fired during the
+	// run; without that the drain path it exercises stays unreached.
+	require.Greater(t, evictions("capacity"), capacityBefore)
 
 	// Empty every key; whatever remains must account to zero.
 	for _, key := range keys {
