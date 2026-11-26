@@ -36,6 +36,17 @@ func frame(t *testing.T, payload string) map[string]any {
 	return m
 }
 
+// decodedReply encodes r's reply and decodes it, so assertions read the reply a
+// client receives.
+func decodedReply(t *testing.T, r *sseReassembler) map[string]any {
+	t.Helper()
+	payload, err := r.encodeReply()
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(payload, &m))
+	return m
+}
+
 func TestSSEReassemble_Chat(t *testing.T) {
 	r := newSSEReassembler(sseShapeChat, 0)
 	r.add(frame(t, `{"id":"cmpl-1","object":"chat.completion.chunk","created":100,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"He"},"finish_reason":null}]}`))
@@ -43,7 +54,7 @@ func TestSSEReassemble_Chat(t *testing.T) {
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`))
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
 
-	got := r.result()
+	got := decodedReply(t, r)
 	require.Equal(t, "cmpl-1", got["id"])
 	require.Equal(t, "chat.completion", got["object"])
 	require.Equal(t, "m", got["model"])
@@ -115,7 +126,7 @@ func TestSSEReassemble_IgnoresMalformedFrameParts(t *testing.T) {
 	r.add(frame(t, `{"choices":"nope"}`))
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`))
 
-	choices := r.result()["choices"].([]any)
+	choices := decodedReply(t, r)["choices"].([]any)
 	require.Len(t, choices, 1)
 	msg := choices[0].(map[string]any)["message"].(map[string]any)
 	require.Equal(t, "hi", msg["content"])
@@ -216,7 +227,7 @@ func TestSSEReassemble_KeepsMetrics(t *testing.T) {
 			r := newSSEReassembler(tc.shape, 1)
 			r.add(frame(t, tc.last))
 			require.False(t, r.lossyFrame, "metrics is folded, not dropped")
-			require.Equal(t, map[string]any{"ttft_s": 0.05, "speculative_decoding": map[string]any{"num_drafts": float64(2)}}, r.result()["metrics"])
+			require.Equal(t, map[string]any{"ttft_s": 0.05, "speculative_decoding": map[string]any{"num_drafts": float64(2)}}, decodedReply(t, r)["metrics"])
 		})
 	}
 }
@@ -240,7 +251,7 @@ func TestSSEReassemble_StopReason(t *testing.T) {
 			for _, f := range tc.frames {
 				r.add(frame(t, f))
 			}
-			choice := r.result()["choices"].([]any)[0].(map[string]any)
+			choice := decodedReply(t, r)["choices"].([]any)[0].(map[string]any)
 			require.Contains(t, choice, "stop_reason", "stop_reason is always present")
 			require.Equal(t, tc.want, choice["stop_reason"])
 		})
@@ -294,7 +305,7 @@ func TestSSEReassemble_MergesUsageAcrossFrames(t *testing.T) {
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":5}}`))
 	r.add(frame(t, `{"choices":[],"usage":{"completion_tokens":2,"total_tokens":7}}`))
 
-	usage := r.result()["usage"].(map[string]any)
+	usage := decodedReply(t, r)["usage"].(map[string]any)
 	require.EqualValues(t, 5, usage["prompt_tokens"])
 	require.EqualValues(t, 2, usage["completion_tokens"])
 	require.EqualValues(t, 7, usage["total_tokens"])
@@ -306,7 +317,7 @@ func TestSSEReassemble_Text(t *testing.T) {
 	r.add(frame(t, `{"choices":[{"index":0,"text":"llo","finish_reason":"length"}]}`))
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`))
 
-	got := r.result()
+	got := decodedReply(t, r)
 	require.Equal(t, "cmpl-2", got["id"])
 	require.Equal(t, "text_completion", got["object"])
 
@@ -326,7 +337,7 @@ func TestSSEReassemble_Text(t *testing.T) {
 func TestSSEReassemble_TextDefaultsObject(t *testing.T) {
 	r := newSSEReassembler(sseShapeText, 0)
 	r.add(frame(t, `{"id":"g-1","choices":[{"index":0,"text":"hi"}]}`))
-	require.Equal(t, "text_completion", r.result()["object"])
+	require.Equal(t, "text_completion", decodedReply(t, r)["object"])
 }
 
 func TestSSEReassemble_MultipleChoices(t *testing.T) {
@@ -334,13 +345,13 @@ func TestSSEReassemble_MultipleChoices(t *testing.T) {
 	r.add(frame(t, `{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"A"}},{"index":1,"delta":{"role":"assistant","content":"B"}}]}`))
 	r.add(frame(t, `{"choices":[{"index":1,"delta":{"content":"b"},"finish_reason":"stop"},{"index":0,"delta":{"content":"a"},"finish_reason":"stop"}]}`))
 
-	choices := r.result()["choices"].([]any)
+	choices := decodedReply(t, r)["choices"].([]any)
 	require.Len(t, choices, 2)
 
 	byIndex := map[int]map[string]any{}
 	for _, c := range choices {
 		cm := c.(map[string]any)
-		idx := cm["index"].(int)
+		idx := int(cm["index"].(float64))
 		byIndex[idx] = cm
 	}
 	require.Equal(t, "Aa", byIndex[0]["message"].(map[string]any)["content"])
@@ -354,7 +365,7 @@ func TestSSEReassemble_ChoiceOrder(t *testing.T) {
 	r.add(frame(t, `{"choices":[{"index":2,"text":"c"},{"index":0,"text":"a"}]}`))
 	r.add(frame(t, `{"choices":[{"index":1,"text":"b"}]}`))
 
-	choices := r.result()["choices"].([]any)
+	choices := decodedReply(t, r)["choices"].([]any)
 	require.Len(t, choices, 3)
 	for i, c := range choices {
 		require.EqualValues(t, i, c.(map[string]any)["index"])
@@ -416,7 +427,7 @@ func TestSSEReassemble_DropsNegativeChoiceIndex(t *testing.T) {
 	r.add(frame(t, `{"choices":[{"index":-1,"text":"drop"},{"index":0,"text":"keep"}]}`))
 
 	require.Len(t, r.choices, 1, "the negative-index choice must not create an entry")
-	choices := r.result()["choices"].([]any)
+	choices := decodedReply(t, r)["choices"].([]any)
 	require.Len(t, choices, 1)
 	require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
 	require.Equal(t, "keep", choices[0].(map[string]any)["text"])
@@ -444,7 +455,7 @@ func TestSSEReassemble_ChoiceIndex(t *testing.T) {
 			r := newSSEReassembler(sseShapeText, 2)
 			r.add(frame(t, `{"choices":[{`+tc.index+`"text":"hi"}]}`))
 
-			choices := r.result()["choices"].([]any)
+			choices := decodedReply(t, r)["choices"].([]any)
 			if !tc.want {
 				require.Empty(t, choices, "an invalid index must not create a choice")
 				require.Zero(t, r.bufferedBytes(), "a dropped choice is not charged to the ceiling")
@@ -464,7 +475,7 @@ func TestSSEReassemble_CapturesSystemFingerprint(t *testing.T) {
 	r.add(frame(t, `{"id":"c","model":"m","system_fingerprint":"fp_123","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`))
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`))
 
-	require.Equal(t, "fp_123", r.result()["system_fingerprint"])
+	require.Equal(t, "fp_123", decodedReply(t, r)["system_fingerprint"])
 }
 
 // The Responses stream is typed events; response.completed carries the terminal
@@ -485,7 +496,7 @@ func TestSSEReassemble_Responses(t *testing.T) {
 
 	var want map[string]any
 	require.NoError(t, json.Unmarshal([]byte(completed), &want))
-	require.Equal(t, want, r.result())
+	require.Equal(t, want, decodedReply(t, r))
 }
 
 // TestSSEReassemble_ResponsesDeltaAfterTerminal verifies a stray output_text.delta
@@ -504,7 +515,7 @@ func TestSSEReassemble_ResponsesDeltaAfterTerminal(t *testing.T) {
 
 	var want map[string]any
 	require.NoError(t, json.Unmarshal([]byte(completed), &want))
-	require.Equal(t, want, r.result(), "the completed object stands despite the late delta")
+	require.Equal(t, want, decodedReply(t, r), "the completed object stands despite the late delta")
 }
 
 // A terminal event other than response.completed (response.incomplete on a
@@ -537,7 +548,7 @@ func TestSSEReassemble_ResponsesTerminalStates(t *testing.T) {
 
 			var want map[string]any
 			require.NoError(t, json.Unmarshal([]byte(tc.resp), &want))
-			require.Equal(t, want, r.result())
+			require.Equal(t, want, decodedReply(t, r))
 		})
 	}
 }
@@ -570,7 +581,7 @@ func TestSSEReassemble_Messages(t *testing.T) {
 	// The text plus the two retained usage fields, input_tokens charged once.
 	require.EqualValues(t, len("Hello world")+len(`input_tokens`+`25`)+len(`output_tokens`+`2`), r.bufferedBytes())
 
-	got := r.result()
+	got := decodedReply(t, r)
 	require.Equal(t, "msg_1", got["id"])
 	require.Equal(t, "message", got["type"])
 	require.Equal(t, "assistant", got["role"])
@@ -598,7 +609,7 @@ func TestSSEReassemble_MessagesUsageMerge(t *testing.T) {
 	r.add(frame(t, `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`))
 	r.add(frame(t, `{"type":"message_delta","usage":{"input_tokens":10682,"cache_creation_input_tokens":64,"cache_read_input_tokens":128,"output_tokens":510,"server_tool_use":{"web_search_requests":1}}}`))
 
-	usage := r.result()["usage"].(map[string]any)
+	usage := decodedReply(t, r)["usage"].(map[string]any)
 	require.EqualValues(t, 10682, usage["input_tokens"], "message_delta input_tokens supersede message_start")
 	require.EqualValues(t, 510, usage["output_tokens"])
 	require.EqualValues(t, 64, usage["cache_creation_input_tokens"])
@@ -659,7 +670,7 @@ func TestSSEReassemble_Generate(t *testing.T) {
 	r.add(frame(t, `{"request_id":"generate-tokens-abc","choices":[{"index":0,"logprobs":null,"finish_reason":"length","token_ids":[374]}],"usage":null}`))
 	r.add(frame(t, `{"request_id":"generate-tokens-abc","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":16,"total_tokens":26}}`))
 
-	got := r.result()
+	got := decodedReply(t, r)
 	// The generate reply carries a request_id envelope with prompt_logprobs and
 	// kv_transfer_params null, not the OpenAI id/object/model fields.
 	require.Equal(t, "generate-tokens-abc", got["request_id"])
@@ -689,7 +700,7 @@ func TestSSEReassemble_Generate(t *testing.T) {
 func TestSSEReassemble_GenerateEmptyTokens(t *testing.T) {
 	r := newSSEReassembler(sseShapeGenerate, 0)
 	r.add(frame(t, `{"request_id":"g","choices":[{"index":0,"finish_reason":"stop"}]}`))
-	choice := r.result()["choices"].([]any)[0].(map[string]any)
+	choice := decodedReply(t, r)["choices"].([]any)[0].(map[string]any)
 	require.Equal(t, []any{}, choice["token_ids"])
 }
 
@@ -698,4 +709,108 @@ func TestSSEReassemble_GenerateBufferedBytesCountsTokens(t *testing.T) {
 	require.Zero(t, r.bufferedBytes())
 	r.add(frame(t, `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3]}]}`))
 	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+3*forceStreamBytesPerToken, r.bufferedBytes())
+}
+
+// TestEncodeReply pins the bytes of each shape's reply: encoding/json's sorted
+// key order and string escaping, with finish_reason and stop_reason after the
+// choice content.
+func TestEncodeReply(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		shape      sseShape
+		maxChoices int
+		frames     []string
+		want       string
+	}{
+		{
+			name:       "chat",
+			shape:      sseShapeChat,
+			maxChoices: 1,
+			frames: []string{
+				`{"id":"cmpl-1","object":"chat.completion.chunk","created":100,"model":"m","system_fingerprint":"fp","choices":[{"index":0,"delta":{"role":"assistant","content":"<b>\"Hi\""},"finish_reason":null}]}`,
+				`{"choices":[{"index":0,"delta":{"content":" & bye\n"},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+			},
+			want: `{"choices":[{"index":0,"logprobs":null,"message":{"content":"\u003cb\u003e\"Hi\" \u0026 bye\n","role":"assistant"},"finish_reason":"stop","stop_reason":null}],"created":100,"id":"cmpl-1","model":"m","object":"chat.completion","system_fingerprint":"fp","usage":{"completion_tokens":2,"prompt_tokens":5,"total_tokens":7}}`,
+		},
+		{
+			name:       "chat_multiple_choices",
+			shape:      sseShapeChat,
+			maxChoices: 2,
+			frames: []string{
+				`{"id":"c","model":"m","choices":[{"index":1,"delta":{"role":"assistant","content":"B"}},{"index":0,"delta":{"role":"assistant","content":"A"}}]}`,
+				`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"},{"index":1,"delta":{},"finish_reason":"length"}]}`,
+				`{"id":"c","model":"m","choices":[],"usage":{"prompt_tokens":1},"metrics":{"ttft_s":0.5}}`,
+			},
+			want: `{"choices":[{"index":0,"logprobs":null,"message":{"content":"A","role":"assistant"},"finish_reason":"stop","stop_reason":null},{"index":1,"logprobs":null,"message":{"content":"B","role":"assistant"},"finish_reason":"length","stop_reason":null}],"id":"c","metrics":{"ttft_s":0.5},"model":"m","object":"chat.completion","usage":{"prompt_tokens":1}}`,
+		},
+		{
+			name:       "chat_unfinished",
+			shape:      sseShapeChat,
+			maxChoices: 1,
+			frames:     []string{`{"choices":[{"index":0,"delta":{}}]}`},
+			want:       `{"choices":[{"index":0,"logprobs":null,"message":{"content":"","role":"assistant"},"finish_reason":null,"stop_reason":null}],"object":"chat.completion"}`,
+		},
+		{
+			name:       "text",
+			shape:      sseShapeText,
+			maxChoices: 1,
+			frames: []string{
+				`{"id":"cmpl-2","object":"text_completion","created":200,"model":"m","choices":[{"index":0,"text":"He","finish_reason":null}]}`,
+				`{"choices":[{"index":0,"text":"llo","finish_reason":"stop","stop_reason":"END"}]}`,
+			},
+			want: `{"choices":[{"index":0,"logprobs":null,"text":"Hello","finish_reason":"stop","stop_reason":"END"}],"created":200,"id":"cmpl-2","model":"m","object":"text_completion"}`,
+		},
+		{
+			name:       "generate",
+			shape:      sseShapeGenerate,
+			maxChoices: 1,
+			frames: []string{
+				`{"request_id":"gen-1","choices":[{"index":0,"token_ids":[576,9396]}]}`,
+				`{"request_id":"gen-1","choices":[{"index":0,"token_ids":[374],"finish_reason":"length"}]}`,
+				`{"request_id":"gen-1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`,
+			},
+			want: `{"choices":[{"index":0,"logprobs":null,"token_ids":[576,9396,374],"finish_reason":"length","stop_reason":null}],"kv_transfer_params":null,"prompt_logprobs":null,"request_id":"gen-1","usage":{"completion_tokens":3,"prompt_tokens":10,"total_tokens":13}}`,
+		},
+		{
+			name:       "generate_no_tokens",
+			shape:      sseShapeGenerate,
+			maxChoices: 1,
+			frames:     []string{`{"choices":[{"index":0,"finish_reason":"stop"}]}`},
+			want:       `{"choices":[{"index":0,"logprobs":null,"token_ids":[],"finish_reason":"stop","stop_reason":null}],"kv_transfer_params":null,"prompt_logprobs":null}`,
+		},
+		{
+			name:  "messages",
+			shape: sseShapeMessages,
+			frames: []string{
+				`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude","usage":{"input_tokens":25,"output_tokens":1}}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" <world>"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+				`{"type":"message_stop"}`,
+			},
+			want: `{"content":[{"text":"Hello \u003cworld\u003e","type":"text"}],"id":"msg_1","model":"claude","role":"assistant","stop_reason":"end_turn","type":"message","usage":{"input_tokens":25,"output_tokens":2}}`,
+		},
+		{
+			name:  "responses",
+			shape: sseShapeResponses,
+			frames: []string{
+				`{"type":"response.output_text.delta","delta":"Hi"}`,
+				`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":3,"output_tokens":1}}}`,
+			},
+			want: `{"id":"resp_1","object":"response","output":[{"content":[{"text":"Hi","type":"output_text"}],"type":"message"}],"status":"completed","usage":{"input_tokens":3,"output_tokens":1}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(tc.shape, tc.maxChoices)
+			for _, f := range tc.frames {
+				r.add(frame(t, f))
+			}
+			require.False(t, r.lossyFrame)
+			got, err := r.encodeReply()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(got))
+		})
+	}
 }

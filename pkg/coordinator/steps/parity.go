@@ -140,6 +140,23 @@ func parityResponseWriter(reqCtx *pipeline.RequestContext, check *parityCheck, i
 	return usage.NewResponseWriter(reqCtx.ResponseWriter, opts, reqCtx.Stream)
 }
 
+// applyForcedUsage does for a forced reply's usage block what
+// parityResponseWriter does for a pass-through reply's: it reports the block to
+// the parity check, then writes the prefill cache-hit count into it. A forced
+// reply is encoded from its fold, so its block is read and rewritten in place
+// before encoding. A nil block is left alone.
+func applyForcedUsage(reqCtx *pipeline.RequestContext, check *parityCheck, block map[string]any) {
+	if block == nil {
+		return
+	}
+	if check != nil {
+		check.onUsage(block)
+	}
+	if reqCtx.PrefillCachedTokens != nil {
+		usage.SetCachedTokens(block, *reqCtx.PrefillCachedTokens)
+	}
+}
+
 // onUsage is called for each usage block in the response. Only the first
 // block that carries a prompt count is judged: a streamed Messages response
 // reports input_tokens on message_start and again on the final usage, and both
