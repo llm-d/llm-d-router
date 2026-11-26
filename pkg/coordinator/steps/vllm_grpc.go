@@ -134,6 +134,7 @@ func (s *EncodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Reque
 	segs, err := vllmReq.Req.FrameSegments(vllmwire.LegOptions{
 		CapSingleToken: true,
 		Media:          vllmwire.MediaAll,
+		DropKVHints:    true,
 	})
 	if err != nil {
 		return fmt.Errorf("%s: build GenerateRequest: %w", EncodeStepName, err)
@@ -252,6 +253,7 @@ func (s *DecodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Reque
 		// remote_prefiller rather than do_remote_prefill and would otherwise
 		// also run EC lookup.
 		opts.Media = vllmwire.MediaNone
+		opts.DropKVHints = true
 		opts.KVTransferParams = s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	case vllmReq.EncodeRan:
 		opts.Media = vllmwire.MediaMetadataOnly

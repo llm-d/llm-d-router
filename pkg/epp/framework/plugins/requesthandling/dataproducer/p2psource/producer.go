@@ -18,7 +18,8 @@ limitations under the License.
 // prefix, publishes a request-wide reusable-prefix floor for scheduling, and
 // after scheduling writes the selected peer into the request body as
 // kv_transfer_params.remote_kv_source and the prefill endpoint's address and
-// OffloadingConnector P2P tier port on the routing headers.
+// OffloadingConnector P2P tier port on the routing headers, or with the kvcr
+// transport as a KVCR kv.fetch hint in a vllm.Inference request's kv_hints.
 package p2psource
 
 import (
@@ -66,6 +67,13 @@ const (
 	// defaultP2PConnectorPort is the port of the vLLM OffloadingConnector P2P
 	// tier on data parallel rank 0; rank r listens on defaultP2PConnectorPort+r.
 	defaultP2PConnectorPort = 7777
+
+	// TransportOffloading writes the source as kv_transfer_params for the vLLM
+	// OffloadingConnector P2P tier.
+	TransportOffloading = "offloading"
+	// TransportKVCR writes the source as a KVCR kv.fetch hint on
+	// vllm.Inference GenerateRequest.kv_hints.
+	TransportKVCR = "kvcr"
 )
 
 // Config configures the p2p-source-producer.
@@ -85,6 +93,13 @@ type Config struct {
 	// parallel rank 0 on every endpoint; rank r listens on P2PConnectorPort+r.
 	// Must be a valid TCP port; defaults to defaultP2PConnectorPort.
 	P2PConnectorPort int `json:"p2pConnectorPort,omitempty"`
+	// Transport selects how the source reaches the pod computing the prefix:
+	// TransportOffloading (the default) or TransportKVCR.
+	Transport string `json:"transport,omitempty"`
+	// KVCRControlPort is the KVCR control port of data parallel rank 0 on
+	// every endpoint; rank r listens on KVCRControlPort+r. Required with
+	// TransportKVCR and ignored otherwise.
+	KVCRControlPort int `json:"kvcrControlPort,omitempty"`
 	// CostModel, when set, decides the pull by comparing the prefill time the
 	// pull saves against the transfer and the waits a pull pays on busy pods,
 	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
@@ -263,6 +278,8 @@ type Producer struct {
 	minCachedTokenDelta         int
 	prefillProfile              string
 	p2pConnectorPort            int
+	transport                   string
+	kvcrControlPort             int
 	attrKeyValue                plugin.DataKey
 	costModel                   *CostModelConfig
 	// pluginState carries each request's decision to ResponseBody. Nil
@@ -284,6 +301,16 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	}
 	if !routing.IsTCPPort(cfg.P2PConnectorPort) {
 		return nil, fmt.Errorf("%s: p2pConnectorPort must be between 1 and 65535, got %d", PluginType, cfg.P2PConnectorPort)
+	}
+	switch cfg.Transport {
+	case "", TransportOffloading:
+	case TransportKVCR:
+		if !routing.IsTCPPort(cfg.KVCRControlPort) {
+			return nil, fmt.Errorf("%s: transport %q requires kvcrControlPort between 1 and 65535, got %d",
+				PluginType, TransportKVCR, cfg.KVCRControlPort)
+		}
+	default:
+		return nil, fmt.Errorf("%s: transport must be %q or %q, got %q", PluginType, TransportOffloading, TransportKVCR, cfg.Transport)
 	}
 	if cfg.CostModel != nil {
 		if err := cfg.CostModel.validate(); err != nil {
@@ -322,6 +349,10 @@ func New(name string, cfg Config) *Producer {
 	if !routing.IsTCPPort(p2pConnectorPort) {
 		p2pConnectorPort = defaultP2PConnectorPort
 	}
+	transport := cfg.Transport
+	if transport != TransportKVCR {
+		transport = TransportOffloading
+	}
 	costModel := cfg.CostModel
 	if costModel != nil && costModel.BusyQueueThreshold < 1 {
 		defaulted := *costModel
@@ -336,6 +367,8 @@ func New(name string, cfg Config) *Producer {
 		minCachedTokenDelta:         minCachedTokenDelta,
 		prefillProfile:              prefillProfile,
 		p2pConnectorPort:            p2pConnectorPort,
+		transport:                   transport,
+		kvcrControlPort:             cfg.KVCRControlPort,
 		attrKeyValue:                plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
 		costModel:                   costModel,
 	}
@@ -367,7 +400,8 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 // bestMatchPeer is the pull-source candidate chosen during Produce, stashed
 // as a request attribute so PreRequest can compare it against the scheduled
 // endpoint. hostPort is the serving endpoint, compared against the computing
-// endpoint; address and p2pPort are what a pull dials. cachedTokens is the
+// endpoint; address and p2pPort are what a pull dials: the P2P tier port, or
+// the KVCR control port with TransportKVCR. cachedTokens is the
 // chosen peer's own count, which may be one block below the pool maximum.
 type bestMatchPeer struct {
 	hostPort     string
@@ -429,11 +463,11 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		if cached == 0 {
 			continue
 		}
-		p2pPort, ok := p.p2pPort(md)
+		p2pPort, ok := p.sourcePort(md)
 		if !ok {
 			log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEBUG).Info(
-				"endpoint cannot serve as a P2P source: P2P tier port is outside 1-65535",
-				"requestID", request.RequestID, "endpoint", md.ID, "p2pConnectorPort", p.p2pConnectorPort, "rank", md.GetRankIndex())
+				"endpoint cannot serve as a P2P source: source port is outside 1-65535",
+				"requestID", request.RequestID, "endpoint", md.ID, "transport", p.transport, "rank", md.GetRankIndex())
 			continue
 		}
 		matches = append(matches, sourceMatch{ep: ep, p2pPort: p2pPort, cached: cached, blockSize: blockSize, hasTierData: hasTierData})
@@ -503,7 +537,9 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			return err
 		}
 		request.PutAttribute(p.attrKey(), &best)
-		if best.hasTierData {
+		// A request that gets no kv.fetch hint does not reuse the source's
+		// prefix, so no reusable floor is published for it.
+		if best.hasTierData && (p.transport != TransportKVCR || kvcrSkipOutcome(request) == "") {
 			reusableTokens := best.cachedTokens - p.minCachedTokenDelta + 1
 			if reusableTokens > 0 {
 				if err := ctx.Err(); err != nil {
@@ -607,6 +643,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	}
 	if prefillPicked {
 		computing = pr
+		// The prefill P2P tier header serves the sidecar's offloading connector.
 		if md := pr.TargetEndpoints[0].GetMetadata(); md != nil {
 			p2pPort, ok := p.p2pPort(md)
 			if !ok {
@@ -657,7 +694,12 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return nil
 	}
 	params := kvTransferParams(request.Body)
-	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok {
+	if p.transport == TransportKVCR {
+		if skip := kvcrSkipOutcome(request); skip != "" {
+			outcome = skip
+			return nil
+		}
+	} else if _, ok := params[reqcommon.FieldRemotePrefiller]; ok {
 		outcome = "decode-request"
 		return nil
 	}
@@ -672,6 +714,13 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 			recordUnpulledTokens(p.typedName.Name, role, outcome, delta)
 			return nil
 		}
+	}
+	if p.transport == TransportKVCR {
+		outcome = p.writeKVFetchHint(ctx, request, best)
+		if outcome == "pulled" {
+			recordPredictedPulledTokens(p.typedName.Name, role, delta)
+		}
+		return nil
 	}
 	if params == nil {
 		params = map[string]any{}
@@ -692,6 +741,21 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	return nil
 }
 
+// writeKVFetchHint writes best as a KVCR kv.fetch hint on a vllm.Inference
+// request that kvcrSkipOutcome accepted and returns the decision outcome.
+func (p *Producer) writeKVFetchHint(ctx context.Context, request *scheduling.InferenceRequest, best *bestMatchPeer) string {
+	endpoint := kvcrControlEndpoint(best.address, best.p2pPort)
+	ok, err := setKVFetchHint(request.Body, endpoint)
+	if err != nil {
+		log.FromContext(ctx).WithName(p.typedName.String()).Error(err, "writing kv.fetch hint",
+			"requestID", request.RequestID, "source", endpoint)
+	}
+	if !ok {
+		return "unparsed-body"
+	}
+	return "pulled"
+}
+
 // isSelected reports whether hostPort names one of the selected endpoints.
 func isSelected(hostPort string, endpoints []scheduling.Endpoint) bool {
 	for _, ep := range endpoints {
@@ -707,6 +771,15 @@ func isSelected(hostPort string, endpoints []scheduling.Endpoint) bool {
 // TCP port, which the bound on p2pConnectorPort alone does not rule out.
 func (p *Producer) p2pPort(md *fwkdl.EndpointMetadata) (int, bool) {
 	return routing.RankPort(p.p2pConnectorPort, md.GetRankIndex())
+}
+
+// sourcePort returns the port a destination dials on a source endpoint: its
+// KVCR control port with TransportKVCR, its P2P tier port otherwise.
+func (p *Producer) sourcePort(md *fwkdl.EndpointMetadata) (int, bool) {
+	if p.transport == TransportKVCR {
+		return routing.RankPort(p.kvcrControlPort, md.GetRankIndex())
+	}
+	return p.p2pPort(md)
 }
 
 // cpuDeviceTier is the CachedBlocksByTier key for the CPU tier (device tiers

@@ -513,6 +513,7 @@ func (l *vllmNIXLSerialLeg) prepareDecode(
 		RequestID:        uuidStr,
 		CapSingleToken:   false,
 		Media:            vllmwire.MediaNone,
+		DropKVHints:      true,
 		KVTransferParams: kvParams,
 	})
 	if !ok {
@@ -620,6 +621,7 @@ func (s *Server) handleNIXLV2VLLMGRPC(w http.ResponseWriter, r *http.Request, pr
 			RequestID:        uuidStr,
 			CapSingleToken:   false,
 			Media:            vllmwire.MediaNone,
+			DropKVHints:      true,
 			KVTransferParams: decodeKV,
 		})
 		if !dok {
@@ -669,6 +671,7 @@ func (s *Server) handleMooncakeVLLMGRPC(w http.ResponseWriter, r *http.Request, 
 	decodeBody, dok := s.buildLegFrameOrWriteError(w, r, scanned, vllmwire.LegOptions{
 		CapSingleToken:   false,
 		Media:            vllmwire.MediaNone,
+		DropKVHints:      true,
 		KVTransferParams: decodeKV,
 	})
 	if !dok {
@@ -780,6 +783,7 @@ func (s *Server) handleP2PVLLMGRPC(w http.ResponseWriter, r *http.Request, prefi
 		RequestID:        reqIDOverride,
 		CapSingleToken:   false,
 		Media:            vllmwire.MediaNone,
+		DropKVHints:      true,
 		KVTransferParams: decodeKV,
 	})
 	if !dok {
@@ -849,6 +853,7 @@ func (s *Server) handleSharedStorageVLLMGRPC(w http.ResponseWriter, r *http.Requ
 		RequestID:      reqIDOverride,
 		CapSingleToken: false,
 		Media:          vllmwire.MediaNone,
+		DropKVHints:    true,
 	})
 	if !dok {
 		return
@@ -953,6 +958,7 @@ func (s *Server) fanoutVLLMEncoder(
 			CapSingleToken:   true,
 			Media:            vllmwire.MediaAll,
 			ECTransferParams: ecParams,
+			DropKVHints:      true,
 		})
 		if err != nil {
 			return fmt.Errorf("build raw media encoder frame: %w", err)
