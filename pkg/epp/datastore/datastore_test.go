@@ -20,6 +20,7 @@ package datastore
 import (
 	"context"
 	"errors"
+	"math"
 	"net"
 	"reflect"
 	"strconv"
@@ -1083,6 +1084,19 @@ func TestDataParallelStartRankLabel(t *testing.T) {
 		{
 			name:   "a pod with a malformed label gets no endpoints",
 			labels: map[string]string{"app": "vllm", indexLabel: "-1"},
+			want:   map[string]rank{},
+		},
+		{
+			name:   "pod index at the max int rank boundary succeeds",
+			labels: map[string]string{"app": "vllm", indexLabel: strconv.Itoa((math.MaxInt - 1) / 2)},
+			want: map[string]rank{
+				"pod1-rank-0": {((math.MaxInt - 1) / 2) * 2, true},
+				"pod1-rank-1": {((math.MaxInt-1)/2)*2 + 1, true},
+			},
+		},
+		{
+			name:   "a pod with an overflowing label gets no endpoints",
+			labels: map[string]string{"app": "vllm", indexLabel: strconv.Itoa((math.MaxInt-1)/2 + 1)},
 			want:   map[string]rank{},
 		},
 	}

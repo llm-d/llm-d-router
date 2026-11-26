@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"slices"
 	"strconv"
@@ -194,6 +195,9 @@ func (ds *datastore) dataParallelStartRank(pod *corev1.Pod, ranksPerPort int) (i
 	index, err := strconv.Atoi(value)
 	if err != nil || index < 0 {
 		return 0, fmt.Errorf("pod label %q is %q, not a non-negative integer", ds.startRankLabel, value)
+	}
+	if ranksPerPort > 0 && index > (math.MaxInt-(ranksPerPort-1))/ranksPerPort {
+		return 0, fmt.Errorf("pod label %q is %q, which overflows int with %d ranks per port", ds.startRankLabel, value, ranksPerPort)
 	}
 	return index * ranksPerPort, nil
 }
