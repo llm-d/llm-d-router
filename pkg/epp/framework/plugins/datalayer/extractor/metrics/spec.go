@@ -117,8 +117,43 @@ func extractFamily(spec *Spec, families sourcemetrics.PrometheusMetricMap) (*dto
 	return family, nil
 }
 
+// rankFilter narrows a metric family's series to one data-parallel rank without
+// copying the scraped map or families. The zero value (empty label) matches
+// every series, and series without label are kept.
+type rankFilter struct {
+	label string
+	value string
+}
+
+func (f rankFilter) matches(metric *dto.Metric) bool {
+	if f.label == "" {
+		return true
+	}
+	v, ok := labelValue(metric, f.label)
+	return !ok || v == f.value
+}
+
+func (spec *Spec) noMatchError(rank rankFilter) error {
+	if rank.label != "" {
+		return fmt.Errorf(
+			"no matching metric found for %q with labels %v and excluded label values %v for %s=%q",
+			spec.Name,
+			spec.Labels,
+			spec.NotLabels,
+			rank.label,
+			rank.value,
+		)
+	}
+	return fmt.Errorf(
+		"no matching metric found for %q with labels %v and excluded label values %v",
+		spec.Name,
+		spec.Labels,
+		spec.NotLabels,
+	)
+}
+
 // getLatestMetric retrieves the latest metric based on Spec.
-func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*dto.Metric, error) {
+func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap, rank rankFilter) (*dto.Metric, error) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
 		return nil, err
@@ -128,7 +163,7 @@ func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*
 	var recent int64 = -1
 
 	for _, metric := range family.GetMetric() {
-		if spec.labelsMatch(metric.GetLabel()) {
+		if rank.matches(metric) && spec.labelsMatch(metric.GetLabel()) {
 			ts := metric.GetTimestampMs()
 			if ts > recent {
 				recent = ts
@@ -138,12 +173,7 @@ func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*
 	}
 
 	if latest == nil {
-		return nil, fmt.Errorf(
-			"no matching metric found for %q with labels %v and excluded label values %v",
-			spec.Name,
-			spec.Labels,
-			spec.NotLabels,
-		)
+		return nil, spec.noMatchError(rank)
 	}
 
 	if v := extractValue(latest); math.IsNaN(v) || math.IsInf(v, 0) {
@@ -165,7 +195,7 @@ const (
 // aggregateMetric folds every series matching Spec into one value, so a pod
 // exposing one series per engine reports all of its engines. A non-finite
 // value on any matching series fails the whole family.
-func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, agg aggregation) (float64, error) {
+func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, agg aggregation, rank rankFilter) (float64, error) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
 		return 0, err
@@ -175,7 +205,7 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 	matched := 0
 
 	for _, metric := range family.GetMetric() {
-		if !spec.labelsMatch(metric.GetLabel()) {
+		if !rank.matches(metric) || !spec.labelsMatch(metric.GetLabel()) {
 			continue
 		}
 		value := extractValue(metric)
@@ -194,12 +224,7 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 	}
 
 	if matched == 0 {
-		return 0, fmt.Errorf(
-			"no matching metric found for %q with labels %v and excluded label values %v",
-			spec.Name,
-			spec.Labels,
-			spec.NotLabels,
-		)
+		return 0, spec.noMatchError(rank)
 	}
 	return result, nil
 }
@@ -212,13 +237,13 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 // or not positive are skipped. ok is false when no series qualifies, and when
 // any matching series is NaN, infinite, or beyond the int range: the largest
 // of the remaining series can be lower than the true maximum.
-func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName string) (value int, ok bool) {
+func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName string, rank rankFilter) (value int, ok bool) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
 		return 0, false
 	}
 	for _, metric := range family.GetMetric() {
-		if !spec.labelsMatch(metric.GetLabel()) {
+		if !rank.matches(metric) || !spec.labelsMatch(metric.GetLabel()) {
 			continue
 		}
 		var v float64
@@ -252,13 +277,13 @@ func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName
 // hasPositiveValue reports whether a series matching Spec has a value above
 // zero. A family that is absent or has no matching series has none. ok is
 // false when a matching series is NaN or infinite.
-func (spec *Spec) hasPositiveValue(families sourcemetrics.PrometheusMetricMap) (detected, ok bool) {
+func (spec *Spec) hasPositiveValue(families sourcemetrics.PrometheusMetricMap, rank rankFilter) (detected, ok bool) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
 		return false, true
 	}
 	for _, metric := range family.GetMetric() {
-		if !spec.labelsMatch(metric.GetLabel()) {
+		if !rank.matches(metric) || !spec.labelsMatch(metric.GetLabel()) {
 			continue
 		}
 		v := extractValue(metric)

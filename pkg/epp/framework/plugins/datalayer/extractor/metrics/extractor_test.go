@@ -905,12 +905,8 @@ func TestExtractorRankEndpointMissingRankKeepsPreviousMetrics(t *testing.T) {
 	}
 }
 
-func TestRankSeriesLazyCopy(t *testing.T) {
-	unlabeled := &dto.MetricFamily{
-		Name:   proto.String("unlabeled"),
-		Type:   dto.MetricType_GAUGE.Enum(),
-		Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(1.0)}}},
-	}
+func TestRankFilterZeroAllocs(t *testing.T) {
+	unlabeled := &dto.Metric{Gauge: &dto.Gauge{Value: ptr.To(1.0)}}
 	rank0 := &dto.Metric{
 		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String("0")}},
 		Gauge: &dto.Gauge{Value: ptr.To(10.0)},
@@ -919,70 +915,107 @@ func TestRankSeriesLazyCopy(t *testing.T) {
 		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String("1")}},
 		Gauge: &dto.Gauge{Value: ptr.To(20.0)},
 	}
-	singleMatching := &dto.MetricFamily{
-		Name:   proto.String("single_matching"),
-		Type:   dto.MetricType_GAUGE.Enum(),
-		Metric: []*dto.Metric{rank0},
-	}
-
-	t.Run("no_allocations_when_nothing_dropped", func(t *testing.T) {
-		noDrops := sourcemetrics.PrometheusMetricMap{
-			"unlabeled":       unlabeled,
-			"single_matching": singleMatching,
-		}
-		var out sourcemetrics.PrometheusMetricMap
-		allocs := testing.AllocsPerRun(50, func() {
-			out = rankSeries(noDrops, "engine", "0")
-		})
-		if allocs != 0 {
-			t.Errorf("rankSeries allocs = %v, want 0", allocs)
-		}
-		if out["unlabeled"] != unlabeled || out["single_matching"] != singleMatching {
-			t.Error("rankSeries replaced unchanged MetricFamily pointers")
-		}
-	})
-
-	t.Run("preserves_unchanged_families_and_input_when_filtering", func(t *testing.T) {
-		twoRanks := &dto.MetricFamily{
+	families := sourcemetrics.PrometheusMetricMap{
+		"two_ranks": {
 			Name:   proto.String("two_ranks"),
 			Type:   dto.MetricType_GAUGE.Enum(),
 			Metric: []*dto.Metric{rank0, rank1},
-		}
-		input := sourcemetrics.PrometheusMetricMap{
-			"unlabeled": unlabeled,
-			"two_ranks": twoRanks,
-		}
+		},
+		"unlabeled": {
+			Name:   proto.String("unlabeled"),
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{unlabeled},
+		},
+	}
 
+	twoRanksSpec := &Spec{Name: "two_ranks"}
+	unlabeledSpec := &Spec{Name: "unlabeled"}
+	loraSpec := &LoRASpec{Spec: twoRanksSpec}
+
+	t.Run("zero_allocations_on_multi_rank_scrape", func(t *testing.T) {
+		filter := rankFilter{label: "engine", value: "1"}
+		var (
+			aggVal     float64
+			latest     *dto.Metric
+			maxVal     int
+			maxOK      bool
+			detected   bool
+			detectedOK bool
+			loraLatest *dto.Metric
+			unlabeledV float64
+			err        error
+		)
+		allocs := testing.AllocsPerRun(50, func() {
+			aggVal, err = twoRanksSpec.aggregateMetric(families, aggregateSum, filter)
+			latest, _ = twoRanksSpec.getLatestMetric(families, filter)
+			maxVal, maxOK = twoRanksSpec.maxValue(families, "", filter)
+			detected, detectedOK = twoRanksSpec.hasPositiveValue(families, filter)
+			loraLatest = loraSpec.getLatestMetric(families, filter)
+			unlabeledV, _ = unlabeledSpec.aggregateMetric(families, aggregateSum, filter)
+		})
+		if err != nil {
+			t.Fatalf("aggregateMetric: %v", err)
+		}
+		if allocs != 0 {
+			t.Errorf("multi-rank readers allocs = %v, want 0", allocs)
+		}
+		if aggVal != 20 || extractValue(latest) != 20 || !maxOK || maxVal != 20 || !detected || !detectedOK || loraLatest != rank1 || unlabeledV != 1 {
+			t.Errorf("unexpected filtered values: agg=%v latest=%v max=(%d,%v) pos=(%v,%v) lora=%v unlabeled=%v",
+				aggVal, extractValue(latest), maxVal, maxOK, detected, detectedOK, loraLatest, unlabeledV)
+		}
+		if len(families["two_ranks"].GetMetric()) != 2 {
+			t.Errorf("input MetricFamily mutated: got %d series, want 2", len(families["two_ranks"].GetMetric()))
+		}
+	})
+
+	t.Run("matches_per_rank_and_keeps_unlabeled", func(t *testing.T) {
 		for _, tc := range []struct {
-			name string
-			rank string
-			want []*dto.Metric
+			name     string
+			filter   rankFilter
+			wantVal  float64
+			wantLora *dto.Metric
 		}{
-			{name: "keep_first", rank: "0", want: []*dto.Metric{rank0}},
-			{name: "keep_second", rank: "1", want: []*dto.Metric{rank1}},
-			{name: "drop_all", rank: "2", want: []*dto.Metric{}},
+			{name: "keep_first", filter: rankFilter{label: "engine", value: "0"}, wantVal: 10, wantLora: rank0},
+			{name: "keep_second", filter: rankFilter{label: "engine", value: "1"}, wantVal: 20, wantLora: rank1},
+			{name: "disabled_filter", filter: rankFilter{}, wantVal: 30, wantLora: rank1},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				got := rankSeries(input, "engine", tc.rank)
-				if got["unlabeled"] != unlabeled {
-					t.Error("rankSeries replaced unchanged unlabeled MetricFamily")
+				got, err := twoRanksSpec.aggregateMetric(families, aggregateSum, tc.filter)
+				if err != nil {
+					t.Fatalf("aggregateMetric: %v", err)
 				}
-				if got["two_ranks"] == twoRanks {
-					t.Error("rankSeries mutated or aliased filtered MetricFamily")
+				if got != tc.wantVal {
+					t.Errorf("aggregateMetric = %v, want %v", got, tc.wantVal)
 				}
-				gotMetrics := got["two_ranks"].GetMetric()
-				if len(gotMetrics) != len(tc.want) {
-					t.Fatalf("filtered series count = %d, want %d", len(gotMetrics), len(tc.want))
+				if gotLora := loraSpec.getLatestMetric(families, tc.filter); gotLora != tc.wantLora {
+					t.Errorf("LoRASpec.getLatestMetric = %v, want %v", gotLora, tc.wantLora)
 				}
-				for i := range tc.want {
-					if gotMetrics[i] != tc.want[i] {
-						t.Errorf("filtered series[%d] pointer mismatch", i)
-					}
-				}
-				if len(input["two_ranks"].GetMetric()) != 2 {
-					t.Errorf("input MetricFamily mutated: got %d series, want 2", len(input["two_ranks"].GetMetric()))
+				if gotUnlabeled, uerr := unlabeledSpec.aggregateMetric(families, aggregateSum, tc.filter); uerr != nil || gotUnlabeled != 1 {
+					t.Errorf("unlabeled aggregateMetric = (%v, %v), want (1, nil)", gotUnlabeled, uerr)
 				}
 			})
+		}
+	})
+
+	t.Run("missing_rank_drops_labeled_and_keeps_unlabeled", func(t *testing.T) {
+		filter := rankFilter{label: "engine", value: "2"}
+		if _, err := twoRanksSpec.aggregateMetric(families, aggregateSum, filter); err == nil {
+			t.Fatal("aggregateMetric error = nil, want non-nil")
+		}
+		if _, err := twoRanksSpec.getLatestMetric(families, filter); err == nil {
+			t.Fatal("getLatestMetric error = nil, want non-nil")
+		}
+		if _, ok := twoRanksSpec.maxValue(families, "", filter); ok {
+			t.Fatal("maxValue ok = true, want false")
+		}
+		if det, ok := twoRanksSpec.hasPositiveValue(families, filter); det || !ok {
+			t.Fatalf("hasPositiveValue = (%v, %v), want (false, true)", det, ok)
+		}
+		if gotLora := loraSpec.getLatestMetric(families, filter); gotLora != nil {
+			t.Errorf("LoRASpec.getLatestMetric = %v, want nil", gotLora)
+		}
+		if gotUnlabeled, err := unlabeledSpec.aggregateMetric(families, aggregateSum, filter); err != nil || gotUnlabeled != 1 {
+			t.Errorf("unlabeled aggregateMetric = (%v, %v), want (1, nil)", gotUnlabeled, err)
 		}
 	})
 }

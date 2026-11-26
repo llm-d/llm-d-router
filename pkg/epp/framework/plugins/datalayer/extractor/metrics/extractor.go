@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -148,8 +147,9 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	if !ok {
 		return fmt.Errorf("no mapping found for engine type %q and no default mapping registered", engineType)
 	}
+	var rank rankFilter
 	if meta := ep.GetMetadata(); meta != nil && (meta.RankByHeader || ext.filterByRank) && mapping.RankLabel != "" {
-		families = rankSeries(families, mapping.RankLabel, strconv.Itoa(meta.RankIndex))
+		rank = rankFilter{label: mapping.RankLabel, value: strconv.Itoa(meta.RankIndex)}
 	}
 
 	var errs []error
@@ -161,14 +161,14 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	samples := fwkdl.NewScalarSampleUpdate(clone.ScalarSamples, mapping, scrapeTime, len(mapping.CustomMetrics))
 
 	if spec := mapping.TotalQueuedRequests; spec != nil { // extract queued requests
-		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateSum, rank); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.WaitingQueueSize = int(value)
 			putBuiltinScalarAttribute(ep, mapping, WaitingQueueSizeKey, value)
 			samples.Observe(fwkdl.ScalarFieldWaitingQueueSize, value)
 			if deferred := mapping.DeferredQueuedRequests; deferred != nil {
-				deferredValue, err := deferred.aggregateMetric(families, aggregateSum)
+				deferredValue, err := deferred.aggregateMetric(families, aggregateSum, rank)
 				if err != nil {
 					deferredValue = 0
 					if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
@@ -182,7 +182,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	}
 
 	if spec := mapping.TotalRunningRequests; spec != nil { // extract running requests
-		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateSum, rank); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.RunningRequestsSize = int(value)
@@ -193,7 +193,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	}
 
 	if spec := mapping.KVCacheUtilization; spec != nil { // extract KV cache usage
-		if value, err := spec.aggregateMetric(families, aggregateMax); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateMax, rank); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.KVCacheUsagePercent = value
@@ -204,14 +204,14 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	}
 
 	if spec := mapping.LoraRequestInfo; spec != nil { // extract LoRA-specific metrics
-		if metric := spec.getLatestMetric(families); metric != nil {
+		if metric := spec.getLatestMetric(families, rank); metric != nil {
 			populateLoRAMetrics(clone, metric, &errs)
 			updated = true
 		}
 	}
 
 	if spec := mapping.CacheInfo; spec != nil { // extract CacheInfo-specific metrics (labels)
-		metric, err := spec.getLatestMetric(families)
+		metric, err := spec.getLatestMetric(families, rank)
 		if err != nil {
 			errs = append(errs, err)
 		} else if metric != nil {
@@ -229,7 +229,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	}
 
 	if spec := mapping.CacheBlockSize; spec != nil { // extract block size as direct gauge value
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if metric, err := spec.getLatestMetric(families, rank); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.CacheBlockSize = int(extractValue(metric))
@@ -238,7 +238,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	}
 
 	if spec := mapping.CacheNumBlocks; spec != nil { // extract num GPU blocks as direct gauge value
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if metric, err := spec.getLatestMetric(families, rank); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.CacheNumBlocks = int(extractValue(metric))
@@ -250,7 +250,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	// reports them only when offloading is configured, and some only after the
 	// first request, so an absent family is neither an error nor a reset.
 	if spec := mapping.CacheTotalTokens; spec != nil {
-		if tokens, ok := spec.maxValue(families, mapping.CacheTotalTokensLabel); ok {
+		if tokens, ok := spec.maxValue(families, mapping.CacheTotalTokensLabel, rank); ok {
 			clone.KvCacheMaxTokenCapacity = tokens
 			updated = true
 		}
@@ -259,7 +259,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	if spec := mapping.CacheOffloadDetection; spec != nil {
 		// A positive value rather than the family's presence: vLLM registers its
 		// transfer counters at zero on startup, before the capacity label exists.
-		if detected, ok := spec.hasPositiveValue(families); ok && detected != clone.KvCacheOffloadDetected {
+		if detected, ok := spec.hasPositiveValue(families, rank); ok && detected != clone.KvCacheOffloadDetected {
 			clone.KvCacheOffloadDetected = detected
 			updated = true
 		}
@@ -270,10 +270,10 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		var value float64
 		var err error
 		if custom.Aggregation == metricAggregationSum {
-			value, err = custom.Spec.aggregateMetric(families, aggregateSum)
+			value, err = custom.Spec.aggregateMetric(families, aggregateSum, rank)
 		} else {
 			var metric *dto.Metric
-			metric, err = custom.Spec.getLatestMetric(families)
+			metric, err = custom.Spec.getLatestMetric(families, rank)
 			if err == nil {
 				value = extractValue(metric)
 			}
@@ -315,47 +315,6 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		return errors.Join(errs...)
 	}
 	return nil
-}
-
-// rankSeries returns families without the series whose rankLabel names a rank other
-// than rank. Series without rankLabel are kept. The input map is shared with the
-// data source and is not modified.
-func rankSeries(families sourcemetrics.PrometheusMetricMap, rankLabel, rank string) sourcemetrics.PrometheusMetricMap {
-	var filtered sourcemetrics.PrometheusMetricMap
-	for name, family := range families {
-		metrics := family.GetMetric()
-		firstDrop := -1
-		for i, metric := range metrics {
-			if value, ok := labelValue(metric, rankLabel); ok && value != rank {
-				firstDrop = i
-				break
-			}
-		}
-		if firstDrop < 0 {
-			continue
-		}
-		if filtered == nil {
-			filtered = maps.Clone(families)
-		}
-		kept := make([]*dto.Metric, firstDrop, len(metrics)-1)
-		copy(kept, metrics[:firstDrop])
-		for _, metric := range metrics[firstDrop+1:] {
-			if value, ok := labelValue(metric, rankLabel); !ok || value == rank {
-				kept = append(kept, metric)
-			}
-		}
-		filtered[name] = &dto.MetricFamily{
-			Name:   family.Name,
-			Help:   family.Help,
-			Type:   family.Type,
-			Unit:   family.Unit,
-			Metric: kept,
-		}
-	}
-	if filtered == nil {
-		return families
-	}
-	return filtered
 }
 
 // putBuiltinScalarAttribute writes a built-in scalar metric to the endpoint's
