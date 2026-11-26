@@ -18,7 +18,9 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -2326,6 +2328,94 @@ func TestFetchSnapshot_SlotWaitDoesNotCountAgainstTimeout(t *testing.T) {
 		assert.NoError(t, err, "subscriber %d", i)
 	}
 	assert.Equal(t, int32(slots), peak.Load(), "loads in flight must not exceed the configured slots")
+}
+
+// storeRemoveAdapter decodes a two-byte payload: the engine block hash, then 0
+// for a store or 1 for a removal. Each hash stores distinct tokens.
+type storeRemoveAdapter struct{}
+
+func (storeRemoveAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
+	hash := uint64(msg.Payload[0])
+	var event GenericEvent = &BlockRemovedEvent{BlockHashes: []uint64{hash}}
+	if msg.Payload[1] == 0 {
+		tokens := make([]uint32, 16)
+		for i := range tokens {
+			tokens[i] = uint32(hash) //#nosec G115 -- test data, hash is one byte
+		}
+		event = &BlockStoredEvent{BlockHashes: []uint64{hash}, Tokens: tokens}
+	}
+	return "10.0.0.1:8000", "test-model", EventBatch{Events: []GenericEvent{event}}, nil
+}
+
+func (storeRemoveAdapter) ShardingKey(*RawMessage) string { return "10.0.0.1:8000" }
+
+// processQueued applies every queued message in queue order.
+func processQueued(ctx context.Context, p *Pool) {
+	for _, q := range p.queues {
+		for q.Len() > 0 {
+			msg, _ := q.Get()
+			q.Done(msg)
+			p.processRawMessage(ctx, msg)
+		}
+	}
+}
+
+// A full replay that runs after the endpoint was indexed from live events
+// alone announces those blocks again. One BlockRemoved must still evict them.
+func TestFullReplayAfterLiveOnlyIndexingReplacesLiveState(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	pool, idx, _ := newTestPool(t, 16)
+	pool.adapter = storeRemoveAdapter{}
+	topic := []byte("kv@10.0.0.1:8000@test-model")
+
+	router := zmq4.NewRouter(ctx)
+	require.NoError(t, router.Listen("tcp://127.0.0.1:0"))
+	t.Cleanup(func() { _ = router.Close() })
+	go func() {
+		req, err := router.Recv()
+		if err != nil {
+			return
+		}
+		client := req.Frames[0]
+		for _, ev := range []struct {
+			seq  uint64
+			hash byte
+		}{{5, 100}, {6, 200}} {
+			frame := zmq4.NewMsgFrom(client, []byte{}, topic, binary.BigEndian.AppendUint64(nil, ev.seq), []byte{ev.hash, 0})
+			if router.Send(frame) != nil {
+				return
+			}
+		}
+		_ = router.Send(zmq4.NewMsgFrom(client, []byte{}, []byte{}, binary.BigEndian.AppendUint64(nil, math.MaxUint64), []byte{}))
+	}()
+
+	z := newZMQSubscriber(pool, "pod", "10.0.0.1:8000", "", "tcp://"+router.Addr().String(), "", "kv@", true)
+	// Block 100 is indexed from a live event while no replay base exists, as
+	// runSubscriber does after a failed replay.
+	z.setLiveOnly(true)
+	z.addTask(ctx, string(topic), 5, []byte{100, 0})
+	processQueued(ctx, pool)
+
+	resident := func(hash uint64) bool {
+		key, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", hash))
+		if err != nil {
+			return false
+		}
+		hits, err := idx.Lookup(ctx, []kvblock.BlockHash{key}, nil)
+		require.NoError(t, err)
+		return len(hits[key]) > 0
+	}
+
+	require.True(t, z.requestReplay(ctx, 0))
+	processQueued(ctx, pool)
+	require.True(t, resident(100), "the replay announces block 100")
+	require.True(t, resident(200), "the replay announces block 200")
+
+	z.addTask(ctx, string(topic), 7, []byte{100, 1})
+	processQueued(ctx, pool)
+
+	assert.False(t, resident(100), "one remove must evict a block the replay announced again")
+	assert.True(t, resident(200))
 }
 
 // TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
