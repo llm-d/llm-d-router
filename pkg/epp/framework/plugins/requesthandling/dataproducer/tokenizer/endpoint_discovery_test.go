@@ -74,7 +74,7 @@ func TestDiscoveredEndpointPicker_RoundRobinUsesInferencePortsByDefault(t *testi
 		"http://10.0.0.1:8000",
 		"http://10.0.0.2:8001",
 	} {
-		got, pickErr := picker.Pick()
+		got, pickErr := picker.Pick("")
 		require.NoError(t, pickErr)
 		assert.Equal(t, want, got)
 	}
@@ -103,12 +103,12 @@ func TestDiscoveredEndpointPicker_TracksUpdatesAndDeletes(t *testing.T) {
 	meta.Port = "8200"
 	require.NoError(t, picker.Upsert(meta))
 
-	got, err := picker.Pick()
+	got, err := picker.Pick("")
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.9:8200", got)
 
 	picker.Delete(meta)
-	_, err = picker.Pick()
+	_, err = picker.Pick("")
 	require.ErrorContains(t, err, "no vLLM render endpoints discovered")
 }
 
@@ -118,22 +118,22 @@ func TestDiscoveredEndpointPicker_ExclusionsPreserveCursor(t *testing.T) {
 	for _, name := range []string{"a", "b", "c"} {
 		require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
 	}
-	first, err := picker.Pick()
+	first, err := picker.Pick("")
 	require.NoError(t, err)
 	assert.Equal(t, "http://a:8000", first)
-	second, err := picker.PickExcluding(map[string]struct{}{"http://a:8000": {}, "http://b:8000": {}})
+	second, err := picker.PickExcluding("", map[string]struct{}{"http://a:8000": {}, "http://b:8000": {}})
 	require.NoError(t, err)
 	assert.Equal(t, "http://c:8000", second)
-	_, err = picker.PickExcluding(map[string]struct{}{"http://a:8000": {}, "http://b:8000": {}, "http://c:8000": {}})
+	_, err = picker.PickExcluding("", map[string]struct{}{"http://a:8000": {}, "http://b:8000": {}, "http://c:8000": {}})
 	require.ErrorIs(t, err, errNoRenderEndpoints)
-	third, err := picker.Pick()
+	third, err := picker.Pick("")
 	require.NoError(t, err)
 	assert.Equal(t, "http://a:8000", third)
 }
 
 type firstEndpointLoadBalancer struct{}
 
-func (firstEndpointLoadBalancer) Pick(endpoints []string, excluded map[string]struct{}) (string, error) {
+func (firstEndpointLoadBalancer) Pick(_ string, endpoints []string, excluded map[string]struct{}) (string, error) {
 	for _, endpoint := range endpoints {
 		if _, skip := excluded[endpoint]; !skip {
 			return endpoint, nil
@@ -144,7 +144,7 @@ func (firstEndpointLoadBalancer) Pick(endpoints []string, excluded map[string]st
 
 type endpointLoadBalancerFunc func(endpoints []string, excluded map[string]struct{}) (string, error)
 
-func (f endpointLoadBalancerFunc) Pick(endpoints []string, excluded map[string]struct{}) (string, error) {
+func (f endpointLoadBalancerFunc) Pick(_ string, endpoints []string, excluded map[string]struct{}) (string, error) {
 	return f(endpoints, excluded)
 }
 
@@ -161,7 +161,7 @@ func TestDiscoveredEndpointPicker_LoadBalancerIsPluggable(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()))
 
-	got, err := picker.Pick()
+	got, err := picker.Pick("")
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.1:8000", got)
 }
@@ -205,7 +205,65 @@ func TestDiscoveredEndpointPicker_PortRules(t *testing.T) {
 	require.NoError(t, picker.Upsert(discoveredEndpointWithRank("other-rank", "::1", "8001", 1, nil).GetMetadata()))
 
 	for _, want := range []string{"http://10.0.0.2:8203", "http://[::1]:9001", "http://10.0.0.1:8002"} {
-		got, pickErr := picker.Pick()
+		got, pickErr := picker.Pick("")
+		require.NoError(t, pickErr)
+		assert.Equal(t, want, got)
+	}
+}
+
+// Data-parallel ranks behind one port share that port's render listener, so
+// every rank resolves to basePort, not to basePort plus its rank.
+func TestDiscoveredEndpointPicker_PortRulesShareRenderPortAcrossRanks(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{
+		PortRules: []endpointPortRule{{BasePort: 8200}},
+	})
+	require.NoError(t, err)
+
+	for rank := range 2 {
+		require.NoError(t, picker.Upsert(&fwkdl.EndpointMetadata{
+			ID:           types.NamespacedName{Namespace: "default", Name: "decode-rank-" + strconv.Itoa(rank)},
+			Address:      "10.0.0.2",
+			Port:         "8000",
+			RankIndex:    rank,
+			RankByHeader: true,
+		}))
+	}
+
+	for range 2 {
+		got, pickErr := picker.Pick("")
+		require.NoError(t, pickErr)
+		assert.Equal(t, "http://10.0.0.2:8200", got)
+	}
+}
+
+// The ranks of a pod share one render URL. The picker lists it once, so the
+// round robin gives each pod one turn and not one turn for each rank.
+func TestDiscoveredEndpointPicker_RanksShareOneRoundRobinTurn(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+
+	for _, pod := range []struct{ name, address string }{{"decode-a", "10.0.0.2"}, {"decode-b", "10.0.0.3"}} {
+		for rank := range 2 {
+			require.NoError(t, picker.Upsert(&fwkdl.EndpointMetadata{
+				ID:           types.NamespacedName{Namespace: "default", Name: pod.name + "-rank-" + strconv.Itoa(rank)},
+				Address:      pod.address,
+				Port:         "8000",
+				RankIndex:    rank,
+				RankByHeader: true,
+			}))
+		}
+	}
+
+	for _, want := range []string{"http://10.0.0.2:8000", "http://10.0.0.3:8000", "http://10.0.0.2:8000", "http://10.0.0.3:8000"} {
+		got, pickErr := picker.Pick("")
+		require.NoError(t, pickErr)
+		assert.Equal(t, want, got)
+	}
+
+	// The URL stays while one rank of the pod is left.
+	picker.Delete(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "decode-a-rank-0"}})
+	for _, want := range []string{"http://10.0.0.2:8000", "http://10.0.0.3:8000"} {
+		got, pickErr := picker.Pick("")
 		require.NoError(t, pickErr)
 		assert.Equal(t, want, got)
 	}
@@ -282,7 +340,7 @@ func TestDiscoveredEndpointPicker_ReleasesLockBeforeLoadBalancing(t *testing.T) 
 		return endpoints[0], nil
 	})
 
-	_, err = picker.Pick()
+	_, err = picker.Pick("")
 	require.NoError(t, err)
 }
 
@@ -646,7 +704,7 @@ type errorEndpointPicker struct {
 	err error
 }
 
-func (p errorEndpointPicker) Pick() (string, error) {
+func (p errorEndpointPicker) Pick(_ string) (string, error) {
 	return "", p.err
 }
 
@@ -695,7 +753,7 @@ func TestPlugin_DiscoveryRegistersAndTracksEndpointNotifications(t *testing.T) {
 		Endpoint: ep,
 	}))
 
-	got, err := handler.picker.Pick()
+	got, err := handler.picker.Pick("")
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.1:8000", got)
 
@@ -703,7 +761,7 @@ func TestPlugin_DiscoveryRegistersAndTracksEndpointNotifications(t *testing.T) {
 		Type:     fwkdl.EventDelete,
 		Endpoint: ep,
 	}))
-	_, err = handler.picker.Pick()
+	_, err = handler.picker.Pick("")
 	require.Error(t, err)
 }
 
@@ -738,12 +796,12 @@ func TestEndpointDiscoveryHandler_IgnoresStaleDelete(t *testing.T) {
 	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: replacement}))
 	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: oldEndpoint}))
 
-	got, err := picker.Pick()
+	got, err := picker.Pick("")
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.2:8000", got)
 
 	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: replacement}))
-	_, err = picker.Pick()
+	_, err = picker.Pick("")
 	require.ErrorContains(t, err, "no vLLM render endpoints discovered")
 }
 
@@ -757,7 +815,7 @@ func TestEndpointDiscoveryHandler_RemovesInvalidUpdate(t *testing.T) {
 	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Endpoint: ep}))
 	ep.UpdateMetadata(discoveredEndpoint("a", "10.0.0.1", "8000").GetMetadata())
 	require.ErrorContains(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Endpoint: ep}), "does not match any port rule")
-	_, err = picker.Pick()
+	_, err = picker.Pick("")
 	require.ErrorIs(t, err, errNoRenderEndpoints)
 }
 
@@ -787,13 +845,13 @@ func TestPlugin_DiscoveryHandlersHavePerInstanceTypes(t *testing.T) {
 	require.NotNil(t, ep)
 	for _, registration := range registrations {
 		picker := registration.Extractor.(*endpointDiscoveryHandler).picker
-		url, err := picker.Pick()
+		url, err := picker.Pick("")
 		require.NoError(t, err)
 		assert.Equal(t, "http://10.0.0.1:8000", url)
 	}
 	runtime.ReleaseEndpoint(ep)
 	for _, registration := range registrations {
-		_, err := registration.Extractor.(*endpointDiscoveryHandler).picker.Pick()
+		_, err := registration.Extractor.(*endpointDiscoveryHandler).picker.Pick("")
 		require.ErrorIs(t, err, errNoRenderEndpoints)
 	}
 }
@@ -881,6 +939,24 @@ func TestPluginFactory_EndpointDiscoveryValidation(t *testing.T) {
 				"vllm": {"endpointDiscovery": {"loadBalancer": {"type": "random"}}}
 			}`,
 			wantErr: "unsupported load balancer",
+		},
+		{
+			name: "rejects an ambiguous session source",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {"loadBalancer": {
+					"type": "session-affinity", "sources": [{"header": "x-chat", "attribute": "SessionIDDataKey"}]
+				}}}
+			}`,
+			wantErr: "loadBalancer.sources[0]: exactly one of header or attribute must be set",
+		},
+		{
+			name: "rejects session sources with default round-robin",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {"loadBalancer": {"sources": [{"header": "x-chat"}]}}}
+			}`,
+			wantErr: "loadBalancer.sources requires",
 		},
 	}
 

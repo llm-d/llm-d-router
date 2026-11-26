@@ -23,8 +23,11 @@ Pipeline per request:
 - (`PreRequest`) Speculative-index the selected endpoint(s) with TTL eviction.
 - (`EndpointExtractor`) Per-pod ZMQ subscriber lifecycle on add/delete.
 
-Requires `TokenizedPrompt` on the request — set by a `token-producer`
-upstream. No-op otherwise.
+Requires `TokenizedPrompt` on the request from a `token-producer` that emits exact
+engine tokens (`exact_tokens: "true"`). Configure `backend: vllm` for text pools or
+`backend: passthrough` for pre-tokenized pools. EPP rejects `backend: estimate` at
+startup so byte-packed pseudo-tokens never enter the KV-block index. A request with
+no `TokenizedPrompt` is a no-op.
 
 ## Parameters
 
@@ -82,6 +85,10 @@ the snapshot as well. While the snapshot fails, is unavailable or comes from
 another publisher identity, the pod is indexed from live events alone, as it
 is with neither port set, and the load is retried after the replay cooldown.
 A snapshot that loads replaces that state.
+
+`kvEventsConfig.podDiscoveryConfig.maxConcurrentReplays` (default 8) bounds
+the snapshot loads and replays in flight across all pods. Pods beyond it wait
+for a slot, and a snapshot's timeout starts once it holds one.
 
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.

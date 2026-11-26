@@ -19,6 +19,9 @@ package request
 import (
 	"fmt"
 	"strings"
+
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 )
 
 // API paths shared by routing components.
@@ -152,10 +155,22 @@ func DetectAPIType(path string) APIType {
 	}
 }
 
-// MatchAPIType classifies generation paths without a routing fallback.
+// grpcMethodAPITypes maps gRPC generation methods to the API they serve. A
+// gRPC method path has no provider prefix, so it matches exactly.
+var grpcMethodAPITypes = map[string]APIType{
+	vllmpb.Inference_Generate_FullMethodName:          APITypeVLLMGenerate,
+	vllmpb.Inference_GenerateStream_FullMethodName:    APITypeVLLMGenerate,
+	sglangapiv1.SglangService_Generate_FullMethodName: APITypeSGLangGenerate,
+}
+
+// MatchAPIType classifies generation paths and gRPC generation methods without
+// a routing fallback.
 func MatchAPIType(path string) (APIType, bool) {
 	path, _, _ = strings.Cut(path, "?")
 	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	if apiType, ok := grpcMethodAPITypes[path]; ok {
+		return apiType, true
+	}
 	// vLLM Omni's /v1/audio/generate ends in SGLang's /generate but is not a
 	// generation API this classifier names.
 	if strings.HasSuffix(path, strings.TrimPrefix(PathAudioGenerate, "/v1")) {

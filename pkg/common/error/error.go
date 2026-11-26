@@ -38,6 +38,10 @@ import (
 // reason the EPP dropped a request.
 const RequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
 
+// RetryAfterHeaderKey is the HTTP response header carrying the advisory retry delay on capacity
+// rejections, in RFC 9110 delta-seconds.
+const RetryAfterHeaderKey = "retry-after"
+
 // RequestDroppedReason is the reason a request was rejected before dispatch or evicted after dispatch.
 type RequestDroppedReason string
 
@@ -126,11 +130,20 @@ var httpCodes = map[string]envoyTypePb.StatusCode{
 }
 
 // grpcCodes maps a canonical code to the gRPC status of the answer to a gRPC
-// request. For a code with no entry, Envoy derives the status from the HTTP status.
-// Envoy derives UNKNOWN from 412, and the coordinator reads a conditional-decode
-// cache miss from FAILED_PRECONDITION.
+// request. Without it Envoy derives the status from the HTTP status, which gives
+// INTERNAL for 400, UNIMPLEMENTED for 404, UNAVAILABLE for 429, and UNKNOWN for
+// 412, 413 and 500. The coordinator reads a conditional-decode cache miss from
+// FAILED_PRECONDITION and maps these codes back to HTTP in grpcStatusToHTTPStatus.
 var grpcCodes = map[string]codes.Code{
+	BadRequest:         codes.InvalidArgument,
+	Unauthorized:       codes.Unauthenticated,
+	Forbidden:          codes.PermissionDenied,
+	NotFound:           codes.NotFound,
 	PreconditionFailed: codes.FailedPrecondition,
+	PayloadTooLarge:    codes.ResourceExhausted,
+	ResourceExhausted:  codes.ResourceExhausted,
+	Internal:           codes.Internal,
+	ServiceUnavailable: codes.Unavailable,
 }
 
 // errorBody serializes the error in the envelope of the API the request was sent to.

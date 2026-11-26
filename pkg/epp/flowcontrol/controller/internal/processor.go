@@ -109,6 +109,10 @@ type Processor struct {
 	// Only accessed from the Run goroutine, so it needs no synchronization.
 	order []int
 
+	// drain estimates per-band and global contended drain intervals to project Retry-After hints on
+	// queue-capacity rejections. Only accessed from the Run goroutine.
+	drain *drainEstimator
+
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
@@ -161,6 +165,7 @@ func NewProcessor(
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
 		reclamation:          reclamation,
+		drain:                newDrainEstimator(),
 	}
 	// Seeded so readers never handle a nil sample. The pool reads as non-empty until the first dispatch cycle observes
 	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
@@ -357,17 +362,24 @@ func (p *Processor) enqueue(item *FlowItem) {
 			p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, types.ErrNoEndpoints))
 			return
 		}
+		var (
+			rejectErr error
+			hint      time.Duration
+		)
+		if flowLimit {
+			rejectErr = fmt.Errorf("%w: %w", types.ErrQueueAtCapacity, types.ErrFlowAtCapacity)
+		} else {
+			hint = p.drain.retryAfterHint(stats, key.Priority, req.ByteSize(), p.clock.Now())
+			rejectErr = &types.QueueCapacityError{RetryAfterHint: hint}
+		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
 			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(), "flowAtLimit", flowLimit,
+			"retryAfterHint", hint,
 			"maxRequestsPerFlow", stats.MaxRequestsPerFlow, "maxBytesPerFlow", stats.MaxBytesPerFlow,
 			"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
 			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
 			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
 			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
-		rejectErr := types.ErrQueueAtCapacity
-		if flowLimit {
-			rejectErr = fmt.Errorf("%w: %w", types.ErrQueueAtCapacity, types.ErrFlowAtCapacity)
-		}
 		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, rejectErr))
 		return
 	}
@@ -537,6 +549,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	p.recordCapacityUtilization()
 
 	priorities := p.registry.AllOrderedPriorityLevels()
+	defer func() {
+		p.drain.syncBusy(priorities, p.registry, p.regime.Load().empty, p.clock.Now())
+	}()
 	ceilings := p.ceilingsBuffer(len(priorities))
 	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
 
@@ -736,6 +751,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, e
 		p.recordDrop(outcome)
 		return false, nil
 	}
+	p.drain.recordDispatch(key.Priority, p.clock.Now())
 	return true, nil
 }
 

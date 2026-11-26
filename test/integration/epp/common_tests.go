@@ -24,6 +24,7 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -208,32 +209,47 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 // ExpectReject asserts that the EPP immediately rejected the request with the given code and message,
 // serialized in the OpenAI error envelope.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader())
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader()))
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
 func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
 		&envoyCorev3.HeaderValueOption{
 			Header: &envoyCorev3.HeaderValue{
 				Key:      errcommon.RequestDroppedReasonHeaderKey,
 				RawValue: []byte(reason),
 			},
-		})
+		}))
 }
 
 // ExpectRejectNoEndpoints asserts that the EPP rejected the request because no endpoint can serve it.
 // The error message is left empty; set ignoreErrorMessage on the test case.
 func ExpectRejectNoEndpoints() []*extProcPb.ProcessingResponse {
 	code := envoyTypePb.StatusCode_ServiceUnavailable
-	return fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, ""), jsonContentTypeHeader(),
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, ""), jsonContentTypeHeader(),
 		&envoyCorev3.HeaderValueOption{
 			Header: &envoyCorev3.HeaderValue{
 				Key:      errcommon.RequestDroppedReasonHeaderKey,
 				RawValue: []byte(errcommon.RequestDroppedReasonNoEndpoints),
 			},
-		})
+		}))
+}
+
+// rejectGRPCStatus is the gRPC status the EPP sets on a rejection, by HTTP status.
+var rejectGRPCStatus = map[envoyTypePb.StatusCode]codes.Code{
+	envoyTypePb.StatusCode_BadRequest:          codes.InvalidArgument,
+	envoyTypePb.StatusCode_TooManyRequests:     codes.ResourceExhausted,
+	envoyTypePb.StatusCode_InternalServerError: codes.Internal,
+	envoyTypePb.StatusCode_ServiceUnavailable:  codes.Unavailable,
+}
+
+func withGRPCStatus(code envoyTypePb.StatusCode, resps []*extProcPb.ProcessingResponse) []*extProcPb.ProcessingResponse {
+	if grpcCode, ok := rejectGRPCStatus[code]; ok {
+		resps[0].GetImmediateResponse().GrpcStatus = &extProcPb.GrpcStatus{Status: uint32(grpcCode)}
+	}
+	return resps
 }
 
 // errorBodyOption compares immediate response bodies without error.message, so the rest of the
@@ -280,7 +296,7 @@ type openAIErrorFields struct {
 // ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
 // given code and message, serialized in the Anthropic error envelope.
 func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader())
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader()))
 }
 
 func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {

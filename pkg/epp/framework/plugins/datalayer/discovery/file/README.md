@@ -46,9 +46,15 @@ endpoints:
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
     rankIndex: <int>            # optional -- defaults to 0, must be >= 0
+    rankByHeader: <bool>        # optional -- defaults to false
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
+
+Set `rankByHeader: true` on each entry of a model server that serves several
+data-parallel ranks behind one port. List one entry for each rank, with the
+rank in `rankIndex`. See
+[Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md).
 
 ## Configuration
 
