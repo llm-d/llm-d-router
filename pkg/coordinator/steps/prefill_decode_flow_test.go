@@ -415,7 +415,7 @@ func TestCachedTokens_FlowFromPrefillToDecode(t *testing.T) {
 // With nothing measured on the prefill side, the decode worker's own count is
 // the only one there is, and the client must see it rather than a fabricated
 // zero. A prefill response carrying no usage block at all is what the tokens-in
-// configuration produces: with use_openai_format false, prefill answers on
+// configuration produces: with worker_format tokens, prefill answers on
 // /inference/v1/generate while decode answers on the client's own route.
 func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T) {
 	const decodeCachedTokens = 500

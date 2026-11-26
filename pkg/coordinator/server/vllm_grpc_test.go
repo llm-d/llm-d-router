@@ -622,10 +622,10 @@ func TestVLLMGRPC_EncodePrefillDecodeMultimodalAndSkipsJSONSteps(t *testing.T) {
 			gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
 			cfg := &config.Config{
 				Pipeline: config.PipelineConfig{
-					WorkerProtocol:  config.WorkerProtocolGRPC,
-					KVConnector:     kv.NIXL,
-					ECConnector:     ecName,
-					UseOpenAIFormat: false,
+					WorkerProtocol: config.WorkerProtocolGRPC,
+					KVConnector:    kv.NIXL,
+					ECConnector:    ecName,
+					WorkerFormat:   config.WorkerFormatTokens,
 					Steps: []config.StepConfig{
 						{
 							Type: asyncbroker.StepName,
@@ -1225,10 +1225,10 @@ func TestVLLMHTTPGenerate_WorkerProtocolGRPCAndHTTPDefault(t *testing.T) {
 		gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
 		cfg := &config.Config{
 			Pipeline: config.PipelineConfig{
-				WorkerProtocol:  config.WorkerProtocolGRPC,
-				KVConnector:     kv.NIXL,
-				ECConnector:     ec.NIXL,
-				UseOpenAIFormat: false,
+				WorkerProtocol: config.WorkerProtocolGRPC,
+				KVConnector:    kv.NIXL,
+				ECConnector:    ec.NIXL,
+				WorkerFormat:   config.WorkerFormatTokens,
 				Steps: []config.StepConfig{
 					{Type: steps.RenderStepName, Params: map[string]any{"address": "http://127.0.0.1:1"}},
 					{Type: steps.ConditionalDecodeStepName},
@@ -1367,7 +1367,7 @@ func TestVLLMHTTPGenerate_WorkerProtocolGRPCAndHTTPDefault(t *testing.T) {
 		gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
 		cfg := &config.Config{
 			Pipeline: config.PipelineConfig{
-				UseOpenAIFormat: false,
+				WorkerFormat: config.WorkerFormatTokens,
 				Steps: []config.StepConfig{
 					{Type: steps.RenderStepName},
 					{Type: steps.DecodeStepName},

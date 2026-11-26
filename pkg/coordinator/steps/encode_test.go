@@ -103,9 +103,9 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		"max_parallel":      4,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		"max_parallel":           4,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -226,8 +226,8 @@ func TestEncodeStep_ParallelFanOutSharesRevisionDecisionIDAndAggregatesResponseH
 	defer server.Close()
 
 	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format": false,
-		"max_parallel":      imageCount,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		"max_parallel":           imageCount,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -290,8 +290,8 @@ func TestEncodeStep_SkipsInvalidECTransferParams(t *testing.T) {
 			defer server.Close()
 
 			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-				"use_openai_format": false,
-				ParamECConnector:    ec.NIXL,
+				config.ParamWorkerFormat: config.WorkerFormatTokens,
+				ParamECConnector:         ec.NIXL,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -342,7 +342,7 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, _ := NewEncodeStep(gwClient, map[string]any{"max_parallel": 1, "use_openai_format": false})
+	step, _ := NewEncodeStep(gwClient, map[string]any{"max_parallel": 1, config.ParamWorkerFormat: config.WorkerFormatTokens})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-2",
@@ -390,7 +390,7 @@ func TestEncodeStep_FailureLogRecord(t *testing.T) {
 				server.Close()
 			}
 
-			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{"use_openai_format": false})
+			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -428,7 +428,7 @@ func TestEncodeStep_DebugRequestRecord(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{"use_openai_format": false})
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -907,8 +907,8 @@ func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 	step, err := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -956,7 +956,7 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+	step, _ := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-tok",
@@ -1005,7 +1005,7 @@ func TestEncodeStep_BuildsTokenIDsFromSpan(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+	step, _ := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-span",
@@ -1053,7 +1053,7 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+	step, _ := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-gen-cap",
@@ -1375,7 +1375,7 @@ func TestEncodeStep_MissingMediaPartFails(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(gwClient, map[string]any{"use_openai_format": true})
+	step, err := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough})
 	if err != nil {
 		t.Fatalf("NewEncodeStep: %v", err)
 	}
@@ -1488,8 +1488,8 @@ func captureFanout(t *testing.T, reqCtx *pipeline.RequestContext) []fanoutPairin
 
 	gwClient := gateway.New(config.GatewayConfig{Address: encoderBackend.URL})
 	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": true,
-		"max_parallel":      1,
+		config.ParamWorkerFormat: config.WorkerFormatPassthrough,
+		"max_parallel":           1,
 	})
 	if err != nil {
 		t.Fatalf("NewEncodeStep: %v", err)
@@ -1927,7 +1927,7 @@ func TestEncodeStep_MessagesFormat(t *testing.T) {
 	}
 }
 
-// With use_openai_format false a Messages request collapses to the tokens-in
+// With worker_format tokens a Messages request collapses to the tokens-in
 // generate format, the same as chat completions: the sub-request carries
 // token_ids and no messages array, and goes to the generate path rather than
 // the client's own /v1/messages.
@@ -1946,7 +1946,7 @@ func TestEncodeStep_MessagesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *tes
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, "use_openai_format": false})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, config.ParamWorkerFormat: config.WorkerFormatTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1984,7 +1984,7 @@ func TestEncodeStep_MessagesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *tes
 	}
 }
 
-// With use_openai_format false a Responses request collapses to the tokens-in
+// With worker_format tokens a Responses request collapses to the tokens-in
 // generate format, the same as chat completions: the sub-request carries
 // token_ids and no input array, and goes to the generate path rather than the
 // client's own /v1/responses.
@@ -2003,7 +2003,7 @@ func TestEncodeStep_ResponsesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *te
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, "use_openai_format": false})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, config.ParamWorkerFormat: config.WorkerFormatTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2059,8 +2059,8 @@ func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
 	defer close(release)
 
 	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	require.NoError(t, err)
 	reqCtx := &pipeline.RequestContext{

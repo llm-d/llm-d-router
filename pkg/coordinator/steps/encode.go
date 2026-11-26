@@ -44,17 +44,17 @@ func init() {
 }
 
 type EncodeStep struct {
-	useOpenAIFormat bool
-	maxParallel     int
-	gwClient        *gateway.Client
-	ec              ec.Connector
+	workerFormat string
+	maxParallel  int
+	gwClient     *gateway.Client
+	ec           ec.Connector
 }
 
 func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("encode: gateway client is required")
 	}
-	useOpenAI, err := parseUseOpenAIFormat(params)
+	workerFormat, err := parseWorkerFormat(params)
 	if err != nil {
 		return nil, fmt.Errorf("encode: %w", err)
 	}
@@ -72,10 +72,10 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 		return nil, fmt.Errorf("encode: %w", err)
 	}
 	return &EncodeStep{
-		useOpenAIFormat: useOpenAI,
-		maxParallel:     maxParallel,
-		gwClient:        gwClient,
-		ec:              ecConn,
+		workerFormat: workerFormat,
+		maxParallel:  maxParallel,
+		gwClient:     gwClient,
+		ec:           ecConn,
 	}, nil
 }
 
@@ -103,7 +103,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	format := resolveFormat(s.workerFormat, reqCtx.OriginalPath)
 	var partsByMod map[reqcommon.Modality][]mediaPart
 	if format != reqcommon.APITypeVLLMGenerate || reqCtx.MMPayload != "" {
 		partsByMod = clientMediaParts(reqCtx)

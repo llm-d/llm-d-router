@@ -307,8 +307,8 @@ so client-provided values are not sent upstream.
 Every coordinator-to-worker call carries an `x-llm-d-epp-profile` header (`encode`, `prefill`, or
 `decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
 [pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). For encode and prefill, the request
-path is either the client's original OpenAI path or the internal `/inference/v1/generate` path, depending on
-`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)); decode and conditional-decode
+path is either the client's original API path or the internal `/inference/v1/generate` path, depending on
+`worker_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Decode and conditional-decode
 always forward on the client's original path regardless of that setting. Other
 paths can be added later as new protocols are supported.
 
@@ -736,12 +736,13 @@ edit: registration is the only wiring step.
 - Config values arrive as `map[string]any` decoded by viper. Integers decode as `int`,
   booleans as `bool`, durations as `string` (parse with `time.ParseDuration`), strings
   as `string`. Type-assert defensively and supply a default when the key is absent.
-- Connector names (`kv_connector`, `ec_connector`) and `use_openai_format` are injected
-  into every step's `params` by the entrypoint before the factory runs (see below), so a
-  step can read them without the operator repeating them per step. The constants are
-  `steps.ParamKVConnector` and `steps.ParamECConnector`.
+- Connector names (`kv_connector`, `ec_connector`) are injected into every step's
+  `params` by the builder before the factory runs, and `worker_format` is injected
+  into `encode` and `prefill` params when unset. The connector constants are
+  `steps.ParamKVConnector` and `steps.ParamECConnector`, and the format constant is
+  `config.ParamWorkerFormat`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
-  (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
+  (`parseWorkerFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
 
 ### Dependency injection
@@ -812,7 +813,7 @@ gateway:              # outbound client to the Inference Gateway
 pipeline:             # connector defaults, force-stream settings + ordered steps
   kv_connector: kv-shared-storage
   ec_connector: ec-shared-storage
-  use_openai_format: true
+  worker_format: passthrough
   worker_protocol: http
   force_stream: false                   # decode and conditional-decode; see coordinator.yaml
   force_stream_buffer_size: 1GiB
@@ -829,7 +830,7 @@ order in the file is the execution order; there is no implicit reordering.
 
 Any key can be overridden by an environment variable prefixed `COORDINATOR_`, with `.`
 replaced by `_` (viper `AutomaticEnv`). The env value wins over the YAML value. The
-documented example is `COORDINATOR_PIPELINE_USE_OPENAI_FORMAT`. The CLI flag `-v` overrides
+documented example is `COORDINATOR_PIPELINE_WORKER_FORMAT`. The CLI flag `-v` overrides
 `log_level`.
 
 ### Connector selection
@@ -849,29 +850,29 @@ single step may override the default in its own `params` (`kv_connector:` /
 
 ### Should the coordinator use the tokens-in format?
 
-`pipeline.use_openai_format` selects the wire format for the encode and prefill steps
-(the steps that choose their upstream endpoint by format). Decode and conditional-decode
-always forward on the client's original path and are unaffected by this setting:
+`pipeline.worker_format` selects the wire format for the `encode` and `prefill` steps.
+Decode and conditional-decode always forward on the client's original path and ignore
+this setting.
 
-- `true` (default): forward the client's original path (`/v1/chat/completions`,
+- `passthrough` (default): forward on the client's original path (`/v1/chat/completions`,
   `/v1/completions`, `/v1/responses`, `/v1/messages`).
-- `false`: the tokens-in format. Rewrite to the internal `/inference/v1/generate`
-  token-array endpoint, sending `token_ids` and `features` (including `kwargs_data`)
-  directly in the body.
+- `tokens`: rewrite to the internal `/inference/v1/generate` token-array endpoint and
+  send `token_ids` and `features` (including `kwargs_data`) in the body.
 
-`encode` and `prefill` can each override the global with `use_openai_format:` in
-their own `params`. The exact bodies per format are in [communication.md](communication.md).
+`encode` and `prefill` can override the pipeline value with `worker_format` in their own
+`params`. The legacy boolean key `use_openai_format` (`true` maps to `passthrough`,
+`false` maps to `tokens`) is deprecated and remains accepted as a compatibility alias.
+See [communication.md](communication.md) for the exact bodies per format.
 
-`false` requires a `render` step in the pipeline: render produces the token IDs the
-tokens-in format sends, so the coordinator fails to start when `false` is set without a
-`render` step configured.
+`tokens` requires a `render` step in the pipeline. The `render` step produces the token
+IDs that the tokens-in format sends, so the coordinator fails to start when `tokens` is
+configured without a `render` step.
 
-The tokens-in path (`false`) is **experimental**. It is the intended direction (a native
+The tokens-in path (`tokens`) is **experimental**. It is the intended direction (a native
 tokens-in endpoint, no re-tokenization), but the `/inference/v1/generate` endpoint is
 relatively new and, as shown in [Format tradeoff](#format-tradeoff), its request bodies
 carry the full preprocessor output and grow sharply with image resolution. The
-OpenAI-format path (`true`) remains the tested default until those limitations are
-addressed.
+`passthrough` path remains the tested default until those limitations are addressed.
 
 #### Format tradeoff
 
@@ -919,7 +920,7 @@ JSON requests to `/inference/v1/generate` on workers. When you set `worker_proto
 to `vllm.Inference` gRPC calls. It maps guided decoding, `logit_bias`, `bad_words`
 token sequences, `logprobs`, `top_logprobs`, `truncate_prompt_tokens`, and
 `allowed_token_ids`, and rejects unknown `sampling_params` keys with HTTP `400`. The
-coordinator still requires a `render` step when `use_openai_format` is `false`, because
+coordinator still requires a `render` step when `worker_format` is `tokens`, because
 OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
 upstream gRPC methods regardless of `worker_protocol`.
 
@@ -969,8 +970,8 @@ adds load, so use a small value.
 | `replace-media-urls` | Download `image_url`, `audio_url`, and `video_url` references (chat completions) or `input_image` references (Responses) and accept inline `input_audio`, inline each as a base64 `data:` URI, seed one `MultimodalEntries` item per part tagged with its modality. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries`, `max_download_size`, `max_image_download_size`, `max_audio_download_size`, `max_video_download_size`, `allowed_image_content_types`, `allowed_audio_content_types`, `allowed_video_content_types`, `allow_private_networks`, `allowed_domains` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens`, `mm_payload` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. With `pipeline.force_stream`, a non-streaming request's served probe is reassembled into one reply, as on `decode`. A served probe runs the same prompt-token parity check as `decode`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `prompt_token_parity`, `forward_prompt_token_ids` |
-| `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
-| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `use_openai_format`, `kv_connector`, `ec_connector`, `forward_prompt_token_ids` |
+| `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `worker_format`, `ec_connector` |
+| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `worker_format`, `kv_connector`, `ec_connector`, `forward_prompt_token_ids` |
 | `decode` | Stream the final completion to the client. With `pipeline.force_stream`, a non-streaming request is streamed upstream and reassembled into one reply. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). Optionally sends the rendered token IDs in `kv_transfer_params.prompt_token_ids` so the worker skips tokenization (`forward_prompt_token_ids`). | `kv_connector`, `prompt_token_parity`, `forward_prompt_token_ids` |
 
 Parameter semantics and defaults are documented inline in

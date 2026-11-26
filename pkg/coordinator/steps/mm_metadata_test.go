@@ -128,7 +128,7 @@ func encodePrefill(t *testing.T, srv *ecServer, reqCtx *pipeline.RequestContext)
 	server := httptest.NewServer(srv)
 	t.Cleanup(server.Close)
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	params := map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL}
+	params := map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, ParamECConnector: ec.NIXL}
 	encode, err := NewEncodeStep(gwClient, params)
 	require.NoError(t, err)
 	require.NoError(t, encode.Execute(context.Background(), reqCtx))

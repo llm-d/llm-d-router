@@ -198,8 +198,8 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 	// Run encode step
 	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 
 	err := encodeStep.Execute(context.Background(), reqCtx)
@@ -214,8 +214,8 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 	// Run prefill step
 	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 
 	err = prefillStep.Execute(context.Background(), reqCtx)
@@ -329,8 +329,8 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes(t *testing.T) {
 	}
 
 	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -340,8 +340,8 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes(t *testing.T) {
 	}
 
 	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -462,8 +462,8 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes_OpenAIFormat(t *testing.T) {
 	}
 
 	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": true,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatPassthrough,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -473,8 +473,8 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes_OpenAIFormat(t *testing.T) {
 	}
 
 	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": true,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatPassthrough,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -559,8 +559,8 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 	}
 
 	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("encode failed: %v", err)
@@ -573,8 +573,8 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 	}
 
 	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("prefill failed: %v", err)
@@ -637,8 +637,8 @@ func TestEncodeToPrefill_MixedModalityECFlow(t *testing.T) {
 	}
 
 	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -663,8 +663,8 @@ func TestEncodeToPrefill_MixedModalityECFlow(t *testing.T) {
 	}
 
 	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)

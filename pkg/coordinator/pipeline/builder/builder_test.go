@@ -45,6 +45,10 @@ func TestValidatePipeline(t *testing.T) {
 	forwardDecode := config.StepConfig{Type: steps.DecodeStepName, Params: forward}
 	forwardCondDecode := config.StepConfig{Type: steps.ConditionalDecodeStepName, Params: forward}
 	forwardPrefill := config.StepConfig{Type: steps.PrefillStepName, Params: forward}
+	tokensPrefill := config.StepConfig{Type: steps.PrefillStepName, Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens}}
+	legacyTokensEncode := config.StepConfig{Type: steps.EncodeStepName, Params: map[string]any{config.ParamUseOpenAIFormat: false}}
+	legacyFalse := false
+	legacyTrue := true
 
 	tests := []struct {
 		name    string
@@ -52,80 +56,120 @@ func TestValidatePipeline(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "openai format needs no render",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{decode}},
+			name:    "passthrough format needs no render",
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{decode}},
+			wantErr: false,
+		},
+		{
+			name:    "unset worker_format defaults to passthrough",
+			cfg:     config.PipelineConfig{Steps: []config.StepConfig{decode}},
 			wantErr: false,
 		},
 		{
 			name:    "tokens-in with render",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{render, decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatTokens, Steps: []config.StepConfig{render, decode}},
 			wantErr: false,
 		},
 		{
 			name:    "tokens-in without render is rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatTokens, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 		{
+			name:    "invalid worker_format is rejected",
+			cfg:     config.PipelineConfig{WorkerFormat: "openai", Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "deprecated use_openai_format false without render is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: &legacyFalse, Steps: []config.StepConfig{decode}}, //nolint:staticcheck // SA1019: exercising backward-compat path on purpose.
+			wantErr: true,
+		},
+		{
+			name:    "deprecated use_openai_format false with render is accepted",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: &legacyFalse, Steps: []config.StepConfig{render, decode}}, //nolint:staticcheck // SA1019: exercising backward-compat path on purpose.
+			wantErr: false,
+		},
+		{
+			name:    "both worker_format and deprecated use_openai_format is rejected",
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, UseOpenAIFormat: &legacyTrue, Steps: []config.StepConfig{decode}}, //nolint:staticcheck // SA1019: exercising backward-compat path on purpose.
+			wantErr: true,
+		},
+		{
+			name:    "step_level_tokens_without_render_is_rejected",
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{tokensPrefill, decode}},
+			wantErr: true,
+		},
+		{
+			name:    "step_level_legacy_false_without_render_is_rejected",
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{legacyTokensEncode, decode}},
+			wantErr: true,
+		},
+		{
+			name:    "step_level_tokens_with_render_is_accepted",
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{render, tokensPrefill, decode}},
+			wantErr: false,
+		},
+		{
 			name:    "forward_prompt_token_ids with render",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{render, forwardCondDecode, forwardPrefill, forwardDecode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{render, forwardCondDecode, forwardPrefill, forwardDecode}},
 			wantErr: false,
 		},
 		{
 			name:    "forward_prompt_token_ids on decode without render is rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardDecode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{forwardDecode}},
 			wantErr: true,
 		},
 		{
 			name:    "forward_prompt_token_ids on conditional-decode without render is rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardCondDecode, decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{forwardCondDecode, decode}},
 			wantErr: true,
 		},
 		{
 			name:    "forward_prompt_token_ids_on_prefill_without_render_is_rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardPrefill, decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{forwardPrefill, decode}},
 			wantErr: true,
 		},
 		{
 			name: "forward_prompt_token_ids false without render",
-			cfg: config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{
+			cfg: config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{
 				{Type: steps.DecodeStepName, Params: map[string]any{steps.ParamForwardPromptTokenIDs: false}},
 			}},
 			wantErr: false,
 		},
 		{
-			name:    "grpc worker protocol still requires render when use_openai_format is false",
-			cfg:     config.PipelineConfig{WorkerProtocol: config.WorkerProtocolGRPC, UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
+			name:    "grpc worker protocol still requires render when worker_format is tokens",
+			cfg:     config.PipelineConfig{WorkerProtocol: config.WorkerProtocolGRPC, WorkerFormat: config.WorkerFormatTokens, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 		{
-			name:    "grpc worker protocol with use_openai_format false and render is accepted",
-			cfg:     config.PipelineConfig{WorkerProtocol: config.WorkerProtocolGRPC, UseOpenAIFormat: false, Steps: []config.StepConfig{render, decode}},
+			name:    "grpc worker protocol with worker_format tokens and render is accepted",
+			cfg:     config.PipelineConfig{WorkerProtocol: config.WorkerProtocolGRPC, WorkerFormat: config.WorkerFormatTokens, Steps: []config.StepConfig{render, decode}},
 			wantErr: false,
 		},
 		{
 			name:    "invalid worker_protocol is rejected",
-			cfg:     config.PipelineConfig{WorkerProtocol: "ws", UseOpenAIFormat: true, Steps: []config.StepConfig{decode}},
+			cfg:     config.PipelineConfig{WorkerProtocol: "ws", WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 		{
 			name:    "max_step_reruns is accepted",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, MaxStepReruns: 2, Steps: []config.StepConfig{decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, MaxStepReruns: 2, Steps: []config.StepConfig{decode}},
 			wantErr: false,
 		},
 		{
 			name:    "negative max_step_reruns is rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, MaxStepReruns: -1, Steps: []config.StepConfig{decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, MaxStepReruns: -1, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 		{
 			name:    "async-broker first is accepted",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{broker, decode}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{broker, decode}},
 			wantErr: false,
 		},
 		{
 			name:    "async-broker after another step is rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{decode, broker}},
+			cfg:     config.PipelineConfig{WorkerFormat: config.WorkerFormatPassthrough, Steps: []config.StepConfig{decode, broker}},
 			wantErr: true,
 		},
 	}
@@ -149,9 +193,9 @@ func TestMergePipelineDefaultsDoesNotInjectResponseHeadersIntoSteps(t *testing.T
 	}
 }
 
-func TestBuildDoesNotInjectUseOpenAIFormatIntoDecodeOrConditionalDecode(t *testing.T) {
+func TestBuildDoesNotInjectWorkerFormatIntoDecodeOrConditionalDecode(t *testing.T) {
 	cfg := &config.Config{Pipeline: config.PipelineConfig{
-		UseOpenAIFormat: true,
+		WorkerFormat: config.WorkerFormatPassthrough,
 		Steps: []config.StepConfig{
 			{Type: steps.ConditionalDecodeStepName},
 			{Type: steps.DecodeStepName},
@@ -162,39 +206,69 @@ func TestBuildDoesNotInjectUseOpenAIFormatIntoDecodeOrConditionalDecode(t *testi
 	}
 }
 
-// TestBuildRejectsUseOpenAIFormatOverrideInCoordinatorYAML reproduces a
-// coordinator.yaml carrying the deprecated per-step override this PR removed:
-// decode or conditional-decode setting use_openai_format under their own
-// params. Build must fail config loading rather than build a pipeline that
-// silently ignores the setting.
-func TestBuildRejectsUseOpenAIFormatOverrideInCoordinatorYAML(t *testing.T) {
-	for _, stepType := range []string{steps.DecodeStepName, steps.ConditionalDecodeStepName} {
-		t.Run(stepType, func(t *testing.T) {
-			body := "pipeline:\n" +
-				"  use_openai_format: true\n" +
-				"  steps:\n" +
-				"    - type: " + stepType + "\n" +
-				"      params:\n" +
-				"        use_openai_format: false\n"
-			path := filepath.Join(t.TempDir(), "coordinator.yaml")
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-				t.Fatalf("writing fixture: %v", err)
-			}
+// TestBuildPreservesDeprecatedStepFormatOverride verifies that Build does not
+// inject worker_format into a step that overrides the format with the legacy
+// use_openai_format key, which would otherwise fail as a conflict.
+func TestBuildPreservesDeprecatedStepFormatOverride(t *testing.T) {
+	cfg := loadYAML(t, "pipeline:\n"+
+		"  worker_format: passthrough\n"+
+		"  steps:\n"+
+		"    - type: render\n"+
+		"      params:\n"+
+		"        address: http://127.0.0.1:8000\n"+
+		"    - type: encode\n"+
+		"      params:\n"+
+		"        use_openai_format: false\n"+
+		"    - type: prefill\n"+
+		"      params:\n"+
+		"        use_openai_format: false\n"+
+		"    - type: decode\n")
+	if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err != nil {
+		t.Fatalf("Build() unexpected error: %v", err)
+	}
+}
 
-			cfg, err := config.Load(path)
-			if err != nil {
-				t.Fatalf("Load() error = %v", err)
-			}
-			if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
-				t.Fatalf("Build() expected an error for %q overriding use_openai_format", stepType)
-			}
-		})
+// TestBuildRejectsWorkerFormatOverrideInCoordinatorYAML covers a
+// coordinator.yaml that sets worker_format or the deprecated use_openai_format
+// under decode or conditional-decode params. Build must fail config loading
+// rather than build a pipeline that ignores the setting.
+func TestBuildRejectsWorkerFormatOverrideInCoordinatorYAML(t *testing.T) {
+	cases := []struct {
+		name  string
+		param string
+	}{
+		{name: "worker_format", param: "worker_format: tokens"},
+		{name: "deprecated_use_openai_format", param: "use_openai_format: false"},
+	}
+	for _, stepType := range []string{steps.DecodeStepName, steps.ConditionalDecodeStepName} {
+		for _, tc := range cases {
+			t.Run(stepType+"_"+tc.name, func(t *testing.T) {
+				body := "pipeline:\n" +
+					"  worker_format: passthrough\n" +
+					"  steps:\n" +
+					"    - type: " + stepType + "\n" +
+					"      params:\n" +
+					"        " + tc.param + "\n"
+				path := filepath.Join(t.TempDir(), "coordinator.yaml")
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatalf("writing fixture: %v", err)
+				}
+
+				cfg, err := config.Load(path)
+				if err != nil {
+					t.Fatalf("Load() error = %v", err)
+				}
+				if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
+					t.Fatalf("Build() expected an error for %q overriding %s", stepType, tc.name)
+				}
+			})
+		}
 	}
 }
 
 func TestBuildRejectsInvalidForwardResponseHeaders(t *testing.T) {
 	cfg := &config.Config{Pipeline: config.PipelineConfig{
-		UseOpenAIFormat:        true,
+		WorkerFormat:           config.WorkerFormatPassthrough,
 		ForwardResponseHeaders: []string{"content-type"},
 	}}
 	if _, err := Build(cfg, nil); err == nil {
@@ -325,17 +399,17 @@ func TestBuildRejectsStepLevelForceStream(t *testing.T) {
 
 func TestBuildValidatesWorkerProtocolAndRenderRequirement(t *testing.T) {
 	noRender := &config.Config{Pipeline: config.PipelineConfig{
-		WorkerProtocol:  config.WorkerProtocolGRPC,
-		UseOpenAIFormat: false,
-		Steps:           []config.StepConfig{{Type: steps.DecodeStepName}},
+		WorkerProtocol: config.WorkerProtocolGRPC,
+		WorkerFormat:   config.WorkerFormatTokens,
+		Steps:          []config.StepConfig{{Type: steps.DecodeStepName}},
 	}}
 	if _, err := Build(noRender, gateway.New(config.GatewayConfig{})); err == nil {
-		t.Fatal("Build() expected an error when worker_protocol=grpc, use_openai_format=false, and render step is absent")
+		t.Fatal("Build() expected an error when worker_protocol=grpc, worker_format=tokens, and render step is absent")
 	}
 
 	withRender := &config.Config{Pipeline: config.PipelineConfig{
-		WorkerProtocol:  config.WorkerProtocolGRPC,
-		UseOpenAIFormat: false,
+		WorkerProtocol: config.WorkerProtocolGRPC,
+		WorkerFormat:   config.WorkerFormatTokens,
 		Steps: []config.StepConfig{
 			{Type: steps.RenderStepName, Params: map[string]any{"address": "http://127.0.0.1:8000"}},
 			{Type: steps.DecodeStepName},
@@ -376,9 +450,9 @@ func TestBuildAppliesMaxStepReruns(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config.Config{Pipeline: config.PipelineConfig{
-				UseOpenAIFormat: true,
-				MaxStepReruns:   tt.maxReruns,
-				Steps:           []config.StepConfig{{Type: stepType}},
+				WorkerFormat:  config.WorkerFormatPassthrough,
+				MaxStepReruns: tt.maxReruns,
+				Steps:         []config.StepConfig{{Type: stepType}},
 			}}
 			p, err := Build(cfg, nil)
 			if err != nil {

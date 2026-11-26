@@ -600,7 +600,7 @@ func TestEnableForceStream(t *testing.T) {
 	require.NoError(t, err)
 	decode, err := NewDecodeStep(gwClient, map[string]any{})
 	require.NoError(t, err)
-	prefill, err := NewPrefillStep(gwClient, map[string]any{"use_openai_format": true})
+	prefill, err := NewPrefillStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough})
 	require.NoError(t, err)
 
 	require.NoError(t, EnableForceStream([]pipeline.Step{prefill, cond, decode}, "", ""))

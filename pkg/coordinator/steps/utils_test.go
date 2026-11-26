@@ -103,26 +103,71 @@ func TestReadErrorBody_ReturnsSmallBodyVerbatim(t *testing.T) {
 	}
 }
 
+func TestParseWorkerFormat(t *testing.T) {
+	valid := []struct {
+		name   string
+		params map[string]any
+		want   string
+	}{
+		{name: "unset_defaults_to_passthrough", params: nil, want: config.WorkerFormatPassthrough},
+		{name: "empty_string_defaults_to_passthrough", params: map[string]any{config.ParamWorkerFormat: ""}, want: config.WorkerFormatPassthrough},
+		{name: "passthrough", params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough}, want: config.WorkerFormatPassthrough},
+		{name: "tokens", params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens}, want: config.WorkerFormatTokens},
+		{name: "deprecated_true", params: map[string]any{config.ParamUseOpenAIFormat: true}, want: config.WorkerFormatPassthrough},
+		{name: "deprecated_false", params: map[string]any{config.ParamUseOpenAIFormat: false}, want: config.WorkerFormatTokens},
+		{name: "deprecated_nil_defaults_to_passthrough", params: map[string]any{config.ParamUseOpenAIFormat: nil}, want: config.WorkerFormatPassthrough},
+	}
+	for _, tt := range valid {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseWorkerFormat(tt.params)
+			if err != nil {
+				t.Fatalf("parseWorkerFormat(%v) error = %v", tt.params, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseWorkerFormat(%v) = %q, want %q", tt.params, got, tt.want)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name   string
+		params map[string]any
+	}{
+		{name: "unknown_value", params: map[string]any{config.ParamWorkerFormat: "openai"}},
+		{name: "non_string_worker_format", params: map[string]any{config.ParamWorkerFormat: true}},
+		{name: "non_bool_deprecated_key", params: map[string]any{config.ParamUseOpenAIFormat: "false"}},
+		{name: "both_keys_set", params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough, config.ParamUseOpenAIFormat: true}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseWorkerFormat(tt.params); err == nil {
+				t.Fatalf("parseWorkerFormat(%v) error = nil, want failure", tt.params)
+			}
+		})
+	}
+}
+
 func TestResolveFormat(t *testing.T) {
 	tests := []struct {
-		name            string
-		useOpenAIFormat bool
-		path            string
-		want            reqcommon.APIType
+		name         string
+		workerFormat string
+		path         string
+		want         reqcommon.APIType
 	}{
-		{name: "chat completions with openai format", useOpenAIFormat: true, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
-		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeVLLMGenerate},
-		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
-		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
-		{name: "responses with openai format", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeResponses},
-		{name: "responses without openai format collapses to generate", path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
-		{name: "messages with openai format", useOpenAIFormat: true, path: reqcommon.PathMessages, want: reqcommon.APITypeMessages},
-		{name: "messages without openai format collapses to generate", path: reqcommon.PathMessages, want: reqcommon.APITypeVLLMGenerate},
+		{name: "chat_completions_passthrough", workerFormat: config.WorkerFormatPassthrough, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
+		{name: "chat_completions_empty_defaults_to_passthrough", workerFormat: "", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
+		{name: "chat_completions_tokens_collapses_to_generate", workerFormat: config.WorkerFormatTokens, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeVLLMGenerate},
+		{name: "completions_ignores_worker_format", workerFormat: config.WorkerFormatTokens, path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
+		{name: "generate", workerFormat: config.WorkerFormatPassthrough, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
+		{name: "responses_passthrough", workerFormat: config.WorkerFormatPassthrough, path: reqcommon.PathResponses, want: reqcommon.APITypeResponses},
+		{name: "responses_tokens_collapses_to_generate", workerFormat: config.WorkerFormatTokens, path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
+		{name: "messages_passthrough", workerFormat: config.WorkerFormatPassthrough, path: reqcommon.PathMessages, want: reqcommon.APITypeMessages},
+		{name: "messages_tokens_collapses_to_generate", workerFormat: config.WorkerFormatTokens, path: reqcommon.PathMessages, want: reqcommon.APITypeVLLMGenerate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveFormat(tt.useOpenAIFormat, tt.path); got != tt.want {
-				t.Errorf("resolveFormat(%t, %q) = %v, want %v", tt.useOpenAIFormat, tt.path, got, tt.want)
+			if got := resolveFormat(tt.workerFormat, tt.path); got != tt.want {
+				t.Errorf("resolveFormat(%q, %q) = %v, want %v", tt.workerFormat, tt.path, got, tt.want)
 			}
 		})
 	}

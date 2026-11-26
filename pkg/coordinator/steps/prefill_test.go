@@ -69,8 +69,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -198,8 +198,8 @@ func TestPrefillStep_GenerateUsesMMMetadataWhenECPresent(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 	step, err := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -266,8 +266,8 @@ func TestPrefillStep_GenerateFallsBackToKwargsWhenNoEC(t *testing.T) {
 	defer server.Close()
 
 	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -332,8 +332,8 @@ func TestPrefillStep_GeneratePartialECCoverage_SplitsPerEntry(t *testing.T) {
 	defer server.Close()
 
 	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -916,21 +916,21 @@ func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 	cases := []struct {
 		name         string
-		useOpenAI    bool
+		workerFormat string
 		originalPath string
 		body         map[string]any
 	}{
 		{
 			name:         "ChatCompletions",
-			useOpenAI:    true,
+			workerFormat: config.WorkerFormatPassthrough,
 			originalPath: reqcommon.PathChatCompletions,
 			body: map[string]any{
 				"model":    "m",
 				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 			},
 		},
-		{name: "Completions", useOpenAI: true, originalPath: reqcommon.PathCompletions},
-		{name: "Generate", useOpenAI: false, originalPath: reqcommon.PathChatCompletions},
+		{name: "Completions", workerFormat: config.WorkerFormatPassthrough, originalPath: reqcommon.PathCompletions},
+		{name: "Generate", workerFormat: config.WorkerFormatTokens, originalPath: reqcommon.PathChatCompletions},
 	}
 
 	for _, tc := range cases {
@@ -943,8 +943,8 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 			defer server.Close()
 
 			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-				"use_openai_format": tc.useOpenAI,
-				ParamECConnector:    ec.SharedStorage,
+				config.ParamWorkerFormat: tc.workerFormat,
+				ParamECConnector:         ec.SharedStorage,
 			})
 			if err != nil {
 				t.Fatalf("NewPrefillStep: %v", err)
@@ -988,8 +988,8 @@ func TestPrefillStep_ConflictingECParams_RejectsRequest(t *testing.T) {
 	defer server.Close()
 
 	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format": false,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1196,9 +1196,9 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 			defer server.Close()
 
 			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-				"use_openai_format": false,
-				ParamKVConnector:    tc.kvConn,
-				ParamECConnector:    ec.NIXL,
+				config.ParamWorkerFormat: config.WorkerFormatTokens,
+				ParamKVConnector:         tc.kvConn,
+				ParamECConnector:         ec.NIXL,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1238,9 +1238,9 @@ func TestPrefillStep_DebugRequestRecord(t *testing.T) {
 	defer server.Close()
 
 	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format": false,
-		ParamKVConnector:    kv.SharedStorage,
-		ParamECConnector:    ec.NIXL,
+		config.ParamWorkerFormat: config.WorkerFormatTokens,
+		ParamKVConnector:         kv.SharedStorage,
+		ParamECConnector:         ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1380,7 +1380,8 @@ func TestPrefillStep_ForwardPromptTokenIDs_RejectsInvalidParams(t *testing.T) {
 		params map[string]any
 	}{
 		{name: "non_bool", params: map[string]any{ParamForwardPromptTokenIDs: "yes"}},
-		{name: "tokens_in_format", params: map[string]any{ParamForwardPromptTokenIDs: true, "use_openai_format": false}},
+		{name: "tokens_in_format", params: map[string]any{ParamForwardPromptTokenIDs: true, config.ParamWorkerFormat: config.WorkerFormatTokens}},
+		{name: "deprecated_tokens_in_format", params: map[string]any{ParamForwardPromptTokenIDs: true, config.ParamUseOpenAIFormat: false}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

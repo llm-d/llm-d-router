@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -324,7 +325,8 @@ func parseAsyncBrokerConfig(params map[string]any) (*asyncBrokerConfig, error) {
 	// params; they are not async-broker settings.
 	delete(clean, steps.ParamKVConnector)
 	delete(clean, steps.ParamECConnector)
-	delete(clean, "use_openai_format")
+	delete(clean, config.ParamWorkerFormat)
+	delete(clean, config.ParamUseOpenAIFormat)
 
 	raw, err := json.Marshal(clean)
 	if err != nil {
