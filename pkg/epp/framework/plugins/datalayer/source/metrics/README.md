@@ -94,7 +94,13 @@ every rank:
       queuedRequestsSpec: "sglang_num_waiting_reqs"
       runningRequestsSpec: "sglang_num_running_reqs"
       kvUsageSpec: "sglang_token_usage"
+      rankLabelName: "dp_rank"
 ```
+
+An `engineConfigs` entry replaces the built-in config of the same name, so the entry sets
+`rankLabelName` itself. Without it, an endpoint that is one rank of the server reads the total of
+all ranks (see
+[Families with several series](../../extractor/metrics/README.md#families-with-several-series)).
 
 `/v1/loads` has no page size and no page count. With this config, the extractor does not set
 `CacheBlockSize` and `CacheNumBlocks`.
