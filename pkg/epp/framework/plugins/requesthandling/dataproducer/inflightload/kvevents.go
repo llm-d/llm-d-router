@@ -28,6 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
@@ -55,7 +56,7 @@ var _ kvevents.EventConsumer = (*InFlightLoadProducer)(nil)
 type pendingPrefill struct {
 	requestID string
 	result    *fwksched.SchedulingResult
-	// endpoints are the event endpoints (Address:Port) whose store events
+	// endpoints are the KV-events source endpoint identifiers whose store events
 	// complete the request: the decode engines' in disaggregated serving, the
 	// prefill engine's own when the request has no other target.
 	endpoints []string
@@ -241,14 +242,13 @@ func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok boo
 }
 
 // eventEndpoint is the endpoint identity under which the KV events source
-// delivers an engine's events: address and port joined with a colon and no
-// brackets, as the source names them.
+// delivers an engine's events.
 func eventEndpoint(endpoint fwksched.Endpoint) string {
 	meta := endpoint.GetMetadata()
-	if meta.Address == "" {
+	if meta == nil || meta.Address == "" {
 		return ""
 	}
-	return meta.Address + ":" + meta.Port
+	return srckvevents.PodIdentifier(meta)
 }
 
 // watchPrefill registers the dispatched request for completion from KV
