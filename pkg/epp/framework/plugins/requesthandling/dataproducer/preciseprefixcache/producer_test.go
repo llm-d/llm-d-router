@@ -1304,7 +1304,7 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		p, err := PluginFactory("precise", nil, handle)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			p.(*Producer).subscribersManager.Shutdown(utils.NewTestContext(t))
+			p.(*Producer).subscribersManager.Shutdown(context.WithoutCancel(handle.Context()))
 		})
 		handle.AddPlugin(p.TypedName().Name, p)
 	}
