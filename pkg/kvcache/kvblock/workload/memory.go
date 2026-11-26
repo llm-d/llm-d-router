@@ -46,6 +46,16 @@ func ReadHeap() HeapSnapshot {
 	}
 }
 
+// Delta returns after-before, zero when before exceeds after: a forced
+// collection or OS page reclamation can drop a later snapshot below an
+// earlier one, and callers report the difference as unsigned bytes.
+func Delta(after, before uint64) uint64 {
+	if after > before {
+		return after - before
+	}
+	return 0
+}
+
 // RSSBytes returns the process's resident set size, the figure the
 // container limit and OOM killer enforce. Zero when /proc is unavailable.
 func RSSBytes() uint64 {

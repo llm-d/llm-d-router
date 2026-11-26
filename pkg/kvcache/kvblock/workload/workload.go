@@ -81,8 +81,9 @@ type Profile struct {
 	WriteRatio float64
 	// SpecChance is the per-turn chance of a speculative tail Add.
 	SpecChance float64
-	// ClearChance is the per-conversation chance of a pod rollover
-	// (AllBlocksCleared, after which the pod keeps serving and re-Adds).
+	// ClearChance is the per-turn chance of a pod rollover (AllBlocksCleared)
+	// while the conversation's prefix stands and no rollover is pending; the
+	// pod keeps serving and the next Add re-covers the whole prefix.
 	ClearChance float64
 	// GroupChance is the per-entry chance of a group tag.
 	GroupChance float64
@@ -145,9 +146,10 @@ type addLogEntry struct {
 // Generator produces a Profile's operation stream deterministically. Each
 // turn emits, in order: the turn's Add, an optional speculative tail Add,
 // an optional wire Evict of an earlier block, and a Match over the whole
-// prefix. A conversation that opens with a rollover emits a Clear first,
-// after which the pod keeps serving and the turn's Add re-covers the whole
-// prefix.
+// prefix. A pod rollover strikes between turns, while the conversation's
+// prefix stands: the Clear is emitted mid-conversation, the pod keeps
+// serving, and the next Add re-covers the whole prefix rather than the
+// tail.
 type Generator struct {
 	p      Profile
 	rng    *rand.Rand
@@ -229,11 +231,15 @@ func (g *Generator) Next() (Op, bool) {
 			return Op{}, false
 		}
 		g.keys = make([]kvblock.BlockHash, 0, p.Depth+p.Turns*p.Grow)
-		g.turn, g.step, g.addLog, g.open = 0, 0, g.addLog[:0], true
-		if g.conv > 0 && g.rng.Float64() < p.ClearChance {
-			g.rolled = true
-			return Op{Kind: ClearOp, Pod: PodName(g.rng.Intn(p.Pods))}, true
-		}
+		g.turn, g.step, g.addLog, g.open, g.rolled = 0, 0, g.addLog[:0], true, false
+	}
+
+	// A rollover strikes at a turn boundary, once the conversation holds a
+	// prefix the Clear can remove and the next Add must re-cover from the
+	// start rather than extend at the tail.
+	if p.ClearChance > 0 && !g.rolled && g.step == 0 && len(g.keys) > 0 && g.rng.Float64() < p.ClearChance {
+		g.rolled = true
+		return Op{Kind: ClearOp, Pod: PodName(g.rng.Intn(p.Pods))}, true
 	}
 
 	for g.step < 4 {

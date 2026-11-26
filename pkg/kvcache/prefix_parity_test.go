@@ -168,6 +168,12 @@ func matchOp(keys ...kvblock.BlockHash) workload.Op {
 	return workload.Op{Kind: workload.MatchOp, Query: keys}
 }
 
+// filteredMatchOp carries a pod filter restricting the match; a nil filter
+// matches every pod.
+func filteredMatchOp(filter []string, keys ...kvblock.BlockHash) workload.Op {
+	return workload.Op{Kind: workload.MatchOp, Query: keys, Filter: filter}
+}
+
 func entry(pod, tier string) kvblock.PodEntry {
 	return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: tier}
 }
@@ -232,6 +238,22 @@ func TestPrefixParityScenarios(t *testing.T) {
 					matchOp(k...),
 					addOp(k, k, entry("pod-a", "gpu")),
 					matchOp(k...),
+				}
+			},
+		},
+		{
+			name: "pod filter subset",
+			cfg:  large,
+			ops: func() []workload.Op {
+				k := keys(4)
+				return []workload.Op{
+					addOp(k, k, entry("pod-a", "gpu"), entry("pod-b", "gpu"), entry("pod-c", "cpu")),
+					filteredMatchOp([]string{"pod-a", "pod-c"}, k...),
+					filteredMatchOp([]string{"pod-b"}, k...),
+					filteredMatchOp([]string{"pod-a", "pod-z"}, k...), // names a pod the index never held
+					filteredMatchOp(nil, k...),                        // empty filter matches every pod
+					evictRequestOp(k[1], entry("pod-b", "gpu")),
+					filteredMatchOp([]string{"pod-b"}, k...), // filtered to the evicted pod
 				}
 			},
 		},
@@ -348,7 +370,8 @@ func TestPrefixParityScenarios(t *testing.T) {
 
 // TestPrefixParityFuzz builds random op scripts from fixed seeds over a
 // small key and pod space, with a tight per-key cap so truncation fires,
-// and requires both read paths to agree at every match.
+// matches at times restricted to a random pod subset, and requires both
+// read paths to agree at every match.
 func TestPrefixParityFuzz(t *testing.T) {
 	const (
 		numKeys = 16
@@ -408,14 +431,20 @@ func TestPrefixParityFuzz(t *testing.T) {
 					}
 				case 6: // clear
 					ops = append(ops, clearOp(podNames[rng.Intn(numPods)]))
-				default: // match a random prefix
+				default: // match a random prefix, at times through a pod filter
 					from := rng.Intn(numKeys)
 					to := from + 1 + rng.Intn(numKeys-from)
 					q := make([]kvblock.BlockHash, 0, to-from)
 					for i := from; i < to; i++ {
 						q = append(q, key(i))
 					}
-					ops = append(ops, matchOp(q...))
+					var filter []string
+					if rng.Intn(3) == 0 {
+						for _, i := range rng.Perm(numPods)[:1+rng.Intn(numPods)] {
+							filter = append(filter, podNames[i])
+						}
+					}
+					ops = append(ops, filteredMatchOp(filter, q...))
 				}
 			}
 			newParityRunner(t, &kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 3}).replay(t, ops)

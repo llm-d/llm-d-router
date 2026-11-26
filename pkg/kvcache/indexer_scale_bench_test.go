@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
@@ -164,9 +165,15 @@ func BenchmarkIndexerContentionMatrix(b *testing.B) {
 			ctx := context.Background()
 
 			stop := make(chan struct{})
-			defer close(stop)
+			var wg sync.WaitGroup
+			defer func() {
+				close(stop)
+				wg.Wait()
+			}()
 			for w := 0; w < writers; w++ {
+				wg.Add(1)
 				go func(w int) {
+					defer wg.Done()
 					entries := []kvblock.PodEntry{{PodIdentifier: workload.PodName(100 + w), DeviceTier: "gpu"}}
 					engineKeys := make([]kvblock.BlockHash, 64)
 					requestKeys := make([]kvblock.BlockHash, 64)
@@ -237,10 +244,14 @@ func BenchmarkIndexerOperatingPoints(b *testing.B) {
 			b.StopTimer()
 
 			fk := float64(numKeys)
-			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc)/fk, "heap-B/key")
-			b.ReportMetric(float64(afterRSS-beforeRSS)/fk, "rss-B/key")
-			b.ReportMetric((after.PauseTotal - before.PauseTotal).Seconds(), "gc-pause-total-s")
-			b.ReportMetric(float64(after.NumGC-before.NumGC), "gc-cycles")
+			b.ReportMetric(float64(workload.Delta(after.HeapAlloc, before.HeapAlloc))/fk, "heap-B/key")
+			b.ReportMetric(float64(workload.Delta(afterRSS, beforeRSS))/fk, "rss-B/key")
+			pause := after.PauseTotal - before.PauseTotal
+			if pause < 0 {
+				pause = 0
+			}
+			b.ReportMetric(pause.Seconds(), "gc-pause-total-s")
+			b.ReportMetric(float64(workload.Delta(uint64(after.NumGC), uint64(before.NumGC))), "gc-cycles")
 		})
 	}
 }

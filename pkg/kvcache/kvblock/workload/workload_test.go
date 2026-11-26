@@ -110,23 +110,36 @@ func TestGeneratorSubCanonicalGeometry(t *testing.T) {
 }
 
 func TestGeneratorRolloverReAddsPrefix(t *testing.T) {
-	// ClearChance 1 forces every conversation after the first to open with
-	// a pod rollover, whose following Add must re-cover the whole prefix.
+	// ClearChance 1 forces a pod rollover at the first turn boundary of
+	// every conversation; the following Add must re-cover the standing
+	// prefix from its start, not just append the turn's growth.
 	p := Agentic(4, 1, 8)
 	p.ClearChance = 1
 	var cleared bool
+	var firstAdd []kvblock.BlockHash
 	for _, op := range collect(New(p)) {
 		switch op.Kind {
 		case ClearOp:
+			if len(firstAdd) == 0 {
+				t.Fatal("rollover emitted before the conversation established a prefix")
+			}
 			cleared = true
 		case AddOp:
-			if cleared {
-				if want := p.Depth + p.Grow; len(op.RequestKeys) != want {
-					t.Fatalf("post-rollover add covered %d keys, want the %d-block prefix plus growth",
-						len(op.RequestKeys), want)
+			if !cleared {
+				if firstAdd == nil {
+					firstAdd = op.RequestKeys
 				}
-				return
+				continue
 			}
+			if !slices.Equal(op.RequestKeys[:len(firstAdd)], firstAdd) {
+				t.Fatalf("post-rollover add covered %v, want the standing prefix %v at its start",
+					op.RequestKeys, firstAdd)
+			}
+			if want := len(firstAdd) + p.Grow; len(op.RequestKeys) != want {
+				t.Fatalf("post-rollover add covered %d keys, want the %d-key prefix plus growth",
+					len(op.RequestKeys), want)
+			}
+			return
 		}
 	}
 	t.Fatal("no rollover emitted")

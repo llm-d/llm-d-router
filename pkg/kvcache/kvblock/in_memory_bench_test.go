@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -134,9 +135,15 @@ func BenchmarkInMemoryIndexMixed(b *testing.B) {
 	ctx := context.Background()
 
 	stop := make(chan struct{})
-	defer close(stop)
+	var writers sync.WaitGroup
+	defer func() {
+		close(stop)
+		writers.Wait()
+	}()
 	for w := 0; w < 4; w++ {
+		writers.Add(1)
 		go func(w int) {
+			defer writers.Done()
 			entries := []kvblock.PodEntry{{PodIdentifier: fmt.Sprintf("10.1.0.%d:8000", w), DeviceTier: "gpu"}}
 			engineKeys := make([]kvblock.BlockHash, 64)
 			requestKeys := make([]kvblock.BlockHash, 64)
@@ -275,30 +282,32 @@ func BenchmarkInMemoryResidencyAttribution(b *testing.B) {
 		reportAs:   "mainstore-B/key",
 	}} {
 		b.Run(tc.name, func(b *testing.B) {
-			before := workload.ReadHeap()
-			idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: numKeys * 2, PodCacheSize: 8})
-			if err != nil {
-				b.Fatal(err)
-			}
-			ctx := context.Background()
-			var eng []kvblock.BlockHash
-			if tc.engineKeys {
-				eng = keys
-			}
-			for base := uint64(1); base <= uint64(numKeys); base += batchSize {
-				for j := range keys {
-					keys[j] = kvblock.BlockHash(base + uint64(j))
-				}
-				if err := idx.Add(ctx, eng, keys, entries); err != nil {
+			for i := 0; i < b.N; i++ {
+				before := workload.ReadHeap()
+				idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: numKeys * 2, PodCacheSize: 8})
+				if err != nil {
 					b.Fatal(err)
 				}
+				ctx := context.Background()
+				var eng []kvblock.BlockHash
+				if tc.engineKeys {
+					eng = keys
+				}
+				for base := uint64(1); base <= uint64(numKeys); base += batchSize {
+					for j := range keys {
+						keys[j] = kvblock.BlockHash(base + uint64(j))
+					}
+					if err := idx.Add(ctx, eng, keys, entries); err != nil {
+						b.Fatal(err)
+					}
+				}
+				after := workload.ReadHeap()
+				// Keep the index live across the snapshot's GC: without a later
+				// use it is unreachable there and the collector frees it before
+				// HeapAlloc is read.
+				runtime.KeepAlive(idx)
+				b.ReportMetric(float64(workload.Delta(after.HeapAlloc, before.HeapAlloc))/float64(numKeys), tc.reportAs)
 			}
-			after := workload.ReadHeap()
-			// Keep the index live across the snapshot's GC: without a later
-			// use it is unreachable there and the collector frees it before
-			// HeapAlloc is read.
-			runtime.KeepAlive(idx)
-			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc)/float64(numKeys), tc.reportAs)
 		})
 	}
 }
