@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-26
+
+* **Update**: Routed two packages that had no row in [review_a_pull_request.md](playbooks/review_a_pull_request.md): `pkg/epp/framework/common/duration/**` (`#4375`) to `None (AGENTS.md and repo search only)`, and `pkg/epp/framework/plugins/requesthandling/forwardtokens/**` (`#3706`) with the engine wire contracts and the compatibility policy, because it writes token IDs into the request body sent to vLLM and registers a configurable plugin type. A `review-playbook` job in the `CI - Lint` workflow runs `python3 hack/render_playbook.py --check`, so a pull request that adds an unrouted production Go file fails there.
+
 ## 2026-11-21
 
 * **Update**: Added `Testing` guidelines and test review checks to [AGENTS.md](../../AGENTS.md#testing), clarified that `make presubmit` runs no Go tests, and updated [prepare_a_pull_request.md](playbooks/prepare_a_pull_request.md) to run targeted `-race` tests (including `make -f Makefile.coord.mk test-unit` for coordinator code) alongside `make presubmit`.

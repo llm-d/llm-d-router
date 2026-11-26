@@ -176,6 +176,21 @@ jobs:
           path: ${{ steps.go-cache.outputs.build }}
           key: gobuild-lint-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
+  # The bundle under docs/review/ links to files and routes paths across the
+  # repository, so a change anywhere can break it and no path filter applies.
+  # The script needs only the Python standard library, so it runs on the
+  # runner instead of in the builder that make verify-review-playbook uses.
+  review-playbook:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Verify review playbook
+        run: python3 hack/render_playbook.py --check
+
   # The configs under test/testdata/plugins/stable/ are the written-down form of the
   # backwards-compatibility promise made when a plugin is promoted to Stable. Editing
   # one to make TestStablePluginConfigs pass would silently retract that promise, so
