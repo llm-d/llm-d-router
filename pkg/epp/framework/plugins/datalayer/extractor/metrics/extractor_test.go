@@ -860,6 +860,133 @@ func TestExtractorRankEndpointKeepsSeriesWithoutRankLabel(t *testing.T) {
 	}
 }
 
+func TestExtractorRankEndpointMissingRankKeepsPreviousMetrics(t *testing.T) {
+	ctx := t.Context()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	labeledGauge := func(entries map[string]float64) *dto.MetricFamily {
+		series := make([]*dto.Metric, 0, len(entries))
+		for engine, v := range entries {
+			series = append(series, &dto.Metric{
+				Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String(engine)}},
+				Gauge: &dto.Gauge{Value: ptr.To(v)},
+			})
+		}
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
+	}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{RankIndex: 2, RankByHeader: true}, nil)
+	initial := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    labeledGauge(map[string]float64{"0": 1, "2": 7}),
+		defaultTotalRunningRequestsMetric:   labeledGauge(map[string]float64{"0": 2, "2": 12}),
+		defaultKvCacheUsagePercentageMetric: labeledGauge(map[string]float64{"0": 0.1, "2": 0.42}),
+	}
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: initial, Endpoint: ep})
+
+	missingRank := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    labeledGauge(map[string]float64{"0": 6, "1": 10}),
+		defaultTotalRunningRequestsMetric:   labeledGauge(map[string]float64{"0": 40, "1": 38}),
+		defaultKvCacheUsagePercentageMetric: labeledGauge(map[string]float64{"0": 0.91, "1": 0.52}),
+	}
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: missingRank, Endpoint: ep}); err == nil {
+		t.Fatal("Extract error: want non-nil error when endpoint rank is absent from labeled families, got nil")
+	}
+	got := ep.GetMetrics()
+	if got.WaitingQueueSize != 7 {
+		t.Errorf("WaitingQueueSize: want 7, got %d", got.WaitingQueueSize)
+	}
+	if got.RunningRequestsSize != 12 {
+		t.Errorf("RunningRequestsSize: want 12, got %d", got.RunningRequestsSize)
+	}
+	if got.KVCacheUsagePercent != 0.42 {
+		t.Errorf("KVCacheUsagePercent: want 0.42, got %v", got.KVCacheUsagePercent)
+	}
+}
+
+func TestRankSeriesLazyCopy(t *testing.T) {
+	unlabeled := &dto.MetricFamily{
+		Name:   proto.String("unlabeled"),
+		Type:   dto.MetricType_GAUGE.Enum(),
+		Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(1.0)}}},
+	}
+	rank0 := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String("0")}},
+		Gauge: &dto.Gauge{Value: ptr.To(10.0)},
+	}
+	rank1 := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String("1")}},
+		Gauge: &dto.Gauge{Value: ptr.To(20.0)},
+	}
+	singleMatching := &dto.MetricFamily{
+		Name:   proto.String("single_matching"),
+		Type:   dto.MetricType_GAUGE.Enum(),
+		Metric: []*dto.Metric{rank0},
+	}
+
+	t.Run("no_allocations_when_nothing_dropped", func(t *testing.T) {
+		noDrops := sourcemetrics.PrometheusMetricMap{
+			"unlabeled":       unlabeled,
+			"single_matching": singleMatching,
+		}
+		var out sourcemetrics.PrometheusMetricMap
+		allocs := testing.AllocsPerRun(50, func() {
+			out = rankSeries(noDrops, "engine", "0")
+		})
+		if allocs != 0 {
+			t.Errorf("rankSeries allocs = %v, want 0", allocs)
+		}
+		if out["unlabeled"] != unlabeled || out["single_matching"] != singleMatching {
+			t.Error("rankSeries replaced unchanged MetricFamily pointers")
+		}
+	})
+
+	t.Run("preserves_unchanged_families_and_input_when_filtering", func(t *testing.T) {
+		twoRanks := &dto.MetricFamily{
+			Name:   proto.String("two_ranks"),
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{rank0, rank1},
+		}
+		input := sourcemetrics.PrometheusMetricMap{
+			"unlabeled": unlabeled,
+			"two_ranks": twoRanks,
+		}
+
+		for _, tc := range []struct {
+			name string
+			rank string
+			want []*dto.Metric
+		}{
+			{name: "keep_first", rank: "0", want: []*dto.Metric{rank0}},
+			{name: "keep_second", rank: "1", want: []*dto.Metric{rank1}},
+			{name: "drop_all", rank: "2", want: []*dto.Metric{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got := rankSeries(input, "engine", tc.rank)
+				if got["unlabeled"] != unlabeled {
+					t.Error("rankSeries replaced unchanged unlabeled MetricFamily")
+				}
+				if got["two_ranks"] == twoRanks {
+					t.Error("rankSeries mutated or aliased filtered MetricFamily")
+				}
+				gotMetrics := got["two_ranks"].GetMetric()
+				if len(gotMetrics) != len(tc.want) {
+					t.Fatalf("filtered series count = %d, want %d", len(gotMetrics), len(tc.want))
+				}
+				for i := range tc.want {
+					if gotMetrics[i] != tc.want[i] {
+						t.Errorf("filtered series[%d] pointer mismatch", i)
+					}
+				}
+				if len(input["two_ranks"].GetMetric()) != 2 {
+					t.Errorf("input MetricFamily mutated: got %d series, want 2", len(input["two_ranks"].GetMetric()))
+				}
+			})
+		}
+	})
+}
+
 func TestBackwardCompatibility(t *testing.T) {
 	ctx := context.Background()
 

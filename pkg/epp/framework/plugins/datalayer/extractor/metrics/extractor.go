@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -320,17 +321,28 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 // than rank. Series without rankLabel are kept. The input map is shared with the
 // data source and is not modified.
 func rankSeries(families sourcemetrics.PrometheusMetricMap, rankLabel, rank string) sourcemetrics.PrometheusMetricMap {
-	filtered := make(sourcemetrics.PrometheusMetricMap, len(families))
+	var filtered sourcemetrics.PrometheusMetricMap
 	for name, family := range families {
-		kept := make([]*dto.Metric, 0, len(family.GetMetric()))
-		for _, metric := range family.GetMetric() {
+		metrics := family.GetMetric()
+		firstDrop := -1
+		for i, metric := range metrics {
+			if value, ok := labelValue(metric, rankLabel); ok && value != rank {
+				firstDrop = i
+				break
+			}
+		}
+		if firstDrop < 0 {
+			continue
+		}
+		if filtered == nil {
+			filtered = maps.Clone(families)
+		}
+		kept := make([]*dto.Metric, firstDrop, len(metrics)-1)
+		copy(kept, metrics[:firstDrop])
+		for _, metric := range metrics[firstDrop+1:] {
 			if value, ok := labelValue(metric, rankLabel); !ok || value == rank {
 				kept = append(kept, metric)
 			}
-		}
-		if len(kept) == len(family.GetMetric()) {
-			filtered[name] = family
-			continue
 		}
 		filtered[name] = &dto.MetricFamily{
 			Name:   family.Name,
@@ -339,6 +351,9 @@ func rankSeries(families sourcemetrics.PrometheusMetricMap, rankLabel, rank stri
 			Unit:   family.Unit,
 			Metric: kept,
 		}
+	}
+	if filtered == nil {
+		return families
 	}
 	return filtered
 }
