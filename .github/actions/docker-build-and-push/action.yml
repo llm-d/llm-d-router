@@ -85,4 +85,7 @@ runs:
           COMMIT_SHA=${{ inputs.commit-sha || 'unknown' }}
           BUILD_REF=${{ inputs.build-ref || inputs.tag || 'unknown' }}
         cache-from: type=gha,scope=${{ inputs.image-name }}
-        cache-to: type=gha,mode=max,scope=${{ inputs.image-name }}
+        # Export layer caches only on main pushes and registry pushes so PR
+        # builds read main's cached layers without uploading blobs per push
+        # and evicting the 10 GB repository cache.
+        cache-to: ${{ (inputs.push == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && format('type=gha,mode=max,scope={0}', inputs.image-name) || '' }}

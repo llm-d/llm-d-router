@@ -134,15 +134,41 @@ jobs:
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
           echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Go modules and build cache
-        uses: actions/cache@v6
+      - name: Restore Go modules
+        id: go-mod-cache
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            ${{ steps.go-cache.outputs.mod }}
-            ${{ steps.go-cache.outputs.build }}
-          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          path: ${{ steps.go-cache.outputs.mod }}
+          key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-cache-${{ runner.os }}-
+            gomod-${{ runner.os }}-
+
+      # This job is the only writer of the module cache. A key is never
+      # overwritten, so a job that built a subset of the packages would
+      # otherwise leave a partial cache until go.sum next changes.
+      - name: Download Go modules (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.go-mod-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
+        run: make mod-download
+
+      - name: Save Go modules (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.go-mod-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go-cache.outputs.mod }}
+          key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+
+      - name: Restore Go build cache
+        id: go-build-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: gobuild-test-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-test-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-
 
       # Missing cache is not an error; compare-coverage.sh reports all
       # components as new and exits 0.
@@ -252,6 +278,13 @@ jobs:
         with:
           path: coverage/baseline
           key: coverage-main-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+
+      - name: Save Go build cache (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: gobuild-test-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
       - name: Upload coverage artifact (release branches)
         if: >-
@@ -421,6 +454,8 @@ jobs:
       - name: Set up e2e runner
         id: e2e-setup
         uses: ./.github/actions/e2e-runner-setup
+        with:
+          cache-job: e2e-router
 
       - name: Download builder image
         uses: actions/download-artifact@v8
@@ -462,3 +497,10 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           EXISTS_TIMEOUT: 90s
         run: make test-e2e-run
+
+      - name: Save Go build cache (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.e2e-setup.outputs.go-build-cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          key: gobuild-e2e-router-${{ runner.os }}-go${{ steps.e2e-setup.outputs.go-version }}-${{ github.sha }}
