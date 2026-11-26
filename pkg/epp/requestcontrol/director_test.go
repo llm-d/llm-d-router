@@ -2248,7 +2248,20 @@ func TestDirector_HandleRequest(t *testing.T) {
 					}
 					config = config.WithPreRequestPlugins(plugins...)
 				}
-				if test.requestHeaderPlugin != nil {
+				var headerTenantID string
+				mockRH, isMockRH := test.requestHeaderPlugin.(*mockRequestHeaderPlugin)
+				switch {
+				case isMockRH:
+					rh := *mockRH
+					origModify := rh.modifyFn
+					rh.modifyFn = func(r *fwksched.InferenceRequest) {
+						headerTenantID = r.TenantID
+						if origModify != nil {
+							origModify(r)
+						}
+					}
+					config = config.WithRequestHeaderPlugins(&rh)
+				case test.requestHeaderPlugin != nil:
 					config = config.WithRequestHeaderPlugins(test.requestHeaderPlugin)
 				}
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
@@ -2363,9 +2376,13 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 
 				assert.NoError(t, err, "HandleRequest() returned unexpected error")
+				if isMockRH {
+					assert.Equal(t, test.fairnessIDHeader, headerTenantID)
+				}
 				if returnedReqCtx.SchedulingRequest != nil {
 					assert.Equal(t, reqCtx.Request.ID, returnedReqCtx.SchedulingRequest.RequestID,
 						"SchedulingRequest.RequestID should be the EPP request ID, not the x-request-id header")
+					assert.Equal(t, test.fairnessIDHeader, returnedReqCtx.SchedulingRequest.TenantID)
 					assert.Equal(t, time.Unix(100, 0), returnedReqCtx.SchedulingRequest.ReceivedTimestamp)
 				}
 

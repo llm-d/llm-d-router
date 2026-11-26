@@ -265,6 +265,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		TargetModel:       reqCtx.TargetModelName,
 		Body:              inferenceRequestBody,
 		Headers:           reqCtx.Request.Headers,
+		TenantID:          fairnessID,
 		FairnessID:        fairnessID,
 		Objectives:        requestObjectives,
 		RequestSizeBytes:  reqCtx.RequestSize,
@@ -309,7 +310,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// alone, and a request carrying neither identity falls back to the
 	// default flow.
 	source := tracing.AttributionSourceHeader
-	tenantID := reqCtx.SchedulingRequest.FairnessID
+	tenantID := reqCtx.SchedulingRequest.TenantID
 	root, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentlineage.DerivedRootKey)
 	agentID, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey)
 	programID := root

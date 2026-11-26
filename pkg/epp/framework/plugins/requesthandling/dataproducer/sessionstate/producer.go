@@ -129,11 +129,11 @@ func (p *Producer) Consumes() fwkplugin.DataDependencies {
 // queue observes turns and responses recorded for the session in the meantime.
 // The session is not evicted while the request is pending.
 func (p *Producer) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
-	identity, ok := readAgentIdentity(request)
+	key, ok := sessionKey(request)
 	if !ok {
 		return nil
 	}
-	obs := p.registry.observe(identity, request.RequestID)
+	obs := p.registry.observe(key, request.RequestID)
 	request.PutAttribute(p.dk, &fwksched.DynamicRequestAttribute{Get: func() any { return obs.state() }})
 	return nil
 }
@@ -155,12 +155,12 @@ func (p *Producer) RequestAbandoned(_ context.Context, request *fwksched.Inferen
 // PreRequest records one dispatched turn. A request counts once even when
 // several profiles run.
 func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
-	identity, ok := readAgentIdentity(request)
+	key, ok := sessionKey(request)
 	if !ok {
 		return nil
 	}
 
-	p.registry.RecordDispatch(identity, request.RequestID)
+	p.registry.RecordDispatch(key, request.RequestID)
 	return nil
 }
 
@@ -175,7 +175,7 @@ func (p *Producer) ResponseBody(
 	if response == nil || !response.EndOfStream {
 		return
 	}
-	identity, ok := readAgentIdentity(request)
+	key, ok := sessionKey(request)
 	if !ok {
 		return
 	}
@@ -185,7 +185,7 @@ func (p *Producer) ResponseBody(
 		cachedTokens = int64(details.CachedTokens)
 	}
 	p.registry.RecordResponse(
-		identity,
+		key,
 		response.TerminationCause == fwkrh.TerminationCauseNatural,
 		TurnUsage{
 			InputTokens:  int64(response.Usage.PromptTokens),
@@ -195,12 +195,15 @@ func (p *Producer) ResponseBody(
 	)
 }
 
-func readAgentIdentity(request *fwksched.InferenceRequest) (string, bool) {
+func sessionKey(request *fwksched.InferenceRequest) (SessionKey, bool) {
 	if request == nil {
-		return "", false
+		return SessionKey{}, false
 	}
 	identity, ok := fwksched.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
-	return identity, ok && identity != ""
+	if !ok || identity == "" {
+		return SessionKey{}, false
+	}
+	return SessionKey{TenantID: request.TenantID, SessionID: identity}, true
 }
 
 func (p *Producer) runEviction(ctx context.Context) {
