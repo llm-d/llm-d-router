@@ -272,7 +272,7 @@ func TestConditionalDecodeForceStream_SendsPreparedBody(t *testing.T) {
 		reqCtx := condForcedRequest(httptest.NewRecorder())
 		reqCtx.OriginalPath = reqcommon.PathCompletions
 		reqCtx.Body = map[string]any{"model": "llama-3", "stream": false, "max_tokens": 16, "prompt": "hi"}
-		reqCtx.TokenIDs = []int{1, 2, 3}
+		reqCtx.TokenIDs = []uint32{1, 2, 3}
 
 		require.ErrorIs(t, step.Execute(context.Background(), reqCtx), pipeline.ErrPipelineDone)
 		require.Len(t, *calls, 1)
@@ -284,7 +284,7 @@ func TestConditionalDecodeForceStream_SendsPreparedBody(t *testing.T) {
 		server, calls := condUpstream(t, sseReply(condForcedFrames...))
 		step, reg := newForcedConditionalStep(t, server.URL, map[string]any{ParamForwardPromptTokenIDs: true})
 		reqCtx := condForcedRequest(httptest.NewRecorder())
-		reqCtx.TokenIDs = []int{1, 2, 3}
+		reqCtx.TokenIDs = []uint32{1, 2, 3}
 
 		require.ErrorIs(t, step.Execute(context.Background(), reqCtx), pipeline.ErrPipelineDone)
 		require.Len(t, *calls, 1)
@@ -450,7 +450,7 @@ func TestConditionalDecodeForceStream_PromptTokenParity(t *testing.T) {
 	server, _ := condUpstream(t, sseReply(frames...))
 	step, reg := newForcedConditionalStep(t, server.URL, map[string]any{ParamPromptTokenParity: "error"})
 	reqCtx := condForcedRequest(httptest.NewRecorder())
-	reqCtx.TokenIDs = []int{1, 2, 3}
+	reqCtx.TokenIDs = []uint32{1, 2, 3}
 
 	require.ErrorIs(t, step.Execute(context.Background(), reqCtx), pipeline.ErrPipelineDone)
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)

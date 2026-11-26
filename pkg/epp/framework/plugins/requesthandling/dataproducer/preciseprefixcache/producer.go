@@ -376,14 +376,17 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 
 // Consumes declares the TokenizedRequest dependency from token-producer so
 // the data-layer DAG orders tokenization before this producer runs, and uses
-// Level-2 attribute matching to require the engine-aligned vllm backend
-// (rejecting the estimate backend's byte-packed pseudo-tokens at startup).
+// Level-2 attribute matching to require exact engine token IDs (accepting
+// exact renderers and the passthrough backend, while rejecting the estimate
+// backend's byte-packed pseudo-tokens at startup).
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			tokenproducer.TokenizedPromptDataKey: plugin.ConsumedData{
-				Type:    fwkrequest.TokenizedRequest{},
-				Matches: plugin.MatchKeyValues(map[string]string{"backend": tokenproducer.BackendVLLM}),
+				Type: fwkrequest.TokenizedRequest{},
+				Matches: plugin.MatchKeyValues(map[string]string{
+					tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+				}),
 			},
 		},
 	}

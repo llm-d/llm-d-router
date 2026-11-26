@@ -318,7 +318,7 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "encode-prefill-duplicate-hash",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "same-hash", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 			{Modality: reqcommon.ModalityImage, Hash: "same-hash", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
@@ -441,7 +441,7 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes_OpenAIFormat(t *testing.T) {
 		RequestID:    "encode-prefill-duplicate-hash-openai",
 		Model:        "llama-3",
 		OriginalPath: reqcommon.PathChatCompletions,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 32000},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 32000},
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{"role": reqcommon.RoleUser, "content": []any{

@@ -37,6 +37,8 @@ func TestScreen(t *testing.T) {
 	p1Rank1 := endpoint("10.0.3.7", "8001")
 	p2 := endpoint("10.0.3.8", "8000")
 	v6 := endpoint("fd00::7", "8000")
+	dpRank0 := endpoint("10.0.3.9", "8000")
+	dpRank1 := endpoint("10.0.3.9", "8000")
 	noMetadata := fwksched.NewEndpoint(nil, nil, nil)
 	all := []fwksched.Endpoint{p1, p1Rank1, p2, v6, noMetadata}
 
@@ -56,6 +58,7 @@ func TestScreen(t *testing.T) {
 		{name: "endpoint without metadata is skipped", request: pinned("10.0.3.8:8000"), endpoints: []fwksched.Endpoint{noMetadata, p2}, want: []fwksched.Endpoint{p2}},
 		{name: "pin to a missing endpoint keeps nothing", request: pinned("10.0.9.9:8000"), endpoints: all, want: nil},
 		{name: "pin with no candidates keeps nothing", request: pinned("10.0.3.7:8000"), endpoints: nil, want: nil},
+		{name: "pin keeps every data-parallel rank behind the address", request: pinned("10.0.3.9:8000"), endpoints: []fwksched.Endpoint{p1, dpRank0, dpRank1}, want: []fwksched.Endpoint{dpRank0, dpRank1}},
 		{name: "address without port does not match", request: pinned("10.0.3.7"), endpoints: all, want: nil},
 	}
 	for _, tt := range tests {

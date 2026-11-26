@@ -146,11 +146,13 @@ Requests answered locally by a responder, such as `GET /v1/models`, are not coun
 
 The `api_surface` label identifies generation APIs with the values `messages`,
 `chat_completions`, `completions`, `responses`, `vllm_generate`, and `sglang_generate`.
+`vllm_generate` also covers the gRPC methods `vllm.Inference/Generate` and
+`vllm.Inference/GenerateStream`, and `sglang_generate` covers `sglang.api.v1.SglangService/Generate`.
 Responses item reads (`/v1/responses/{id}`), auxiliary token-count and render routes,
-vLLM gRPC `Generate`, Vertex AI paths, and missing or unrecognized paths use `unknown`. EPP captures
-the surface from the incoming path before routing can rewrite it. The corresponding
-request span carries `llm_d.epp.api_surface`, including requests without tools and
-requests rejected during parsing.
+`vllm.grpc.engine.VllmEngine` gRPC methods, Vertex AI paths, and missing or unrecognized paths
+use `unknown`. EPP captures the surface from the incoming path before routing can rewrite it.
+The corresponding request span carries `llm_d.epp.api_surface`, including requests without
+tools and requests rejected during parsing.
 
 Request volume and errors per second can be queried separately by surface:
 
@@ -411,14 +413,28 @@ Ready, the series keeps its last value.
 
 ### Scheduler
 
-These metrics are owned by EPP scheduler instrumentation.
+These metrics are owned by EPP scheduler instrumentation. Their declarations in
+[`zz_generated.scheduler_metrics.go`](../pkg/epp/metrics/zz_generated.scheduler_metrics.go)
+and the table below are generated from
+[`scheduler-metrics.yaml`](../pkg/common/observability/semconv/registry/scheduler-metrics.yaml).
+Edit the registry and run `make update-telemetry`; `make verify-telemetry` checks for drift.
+The registry supplies Prometheus names, histogram boundaries, and positional label order.
+Generation requires the `llm_d_epp_` name prefix and unique label positions covering `0..n-1`.
+Metric descriptions supply the Prometheus help text and the documentation. The registry's
+`unit` and `stability` fields are metadata and are not consumed by these templates. Collectors
+retain their `ALPHA` help prefix; unit suffixes come from `metric_name`.
+Other sections of this catalog are maintained manually.
+
+<!-- BEGIN GENERATED SCHEDULER METRICS -->
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
-| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
-| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Total number of scheduling attempts. |
+| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency distribution in seconds. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Total number of failed scheduling attempts, by reason. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Total number of candidate endpoints removed by scheduling filters, by scheduler profile, plugin type and plugin name. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
+
+<!-- END GENERATED SCHEDULER METRICS -->
 
 Each scheduler invocation records an attempt and latency, including failures.
 
@@ -549,6 +565,15 @@ and updated when the filter observes a change in an endpoint's health. The `reas
 | `llm_d_epp_endpoint_health_ejections_total` | Counter | `plugin_name`, `reason` | Endpoints marked unhealthy. |
 | `llm_d_epp_endpoint_health_readmissions_total` | Counter | `plugin_name`, `reason` | Unhealthy marks cleared. An endpoint is readmitted once no reason marks it. |
 | `llm_d_epp_endpoint_health_fail_open_total` | Counter | `plugin_name` | Scheduling cycles in which every candidate was unhealthy and all were kept. Alert on a non-zero rate. |
+
+### Models responder
+
+These metrics belong to `models-responder`. They are registered when the plugin is configured and
+updated once per inference request it screens.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_models_responder_screen_decisions_total` | Counter | `plugin_name`, `model_name`, `outcome` | Requests screened, by target model and by which endpoints were kept. The outcomes are described in the [plugin README](../pkg/epp/framework/plugins/requesthandling/responder/models/README.md#metrics). |
 
 ### Prefix cache indexer (approximate)
 
@@ -873,6 +898,27 @@ requests twice in the pool sum. All four rules aggregate by `namespace` and
 for a different window. An ID is missed when all of its requests went to a replica that was removed
 before Prometheus scraped it. To check the rules after editing them, run
 `promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
+
+#### Checking a gateway
+
+To check that a gateway sets the fairness ID and overwrites client values, send three requests
+through it and read `llm_d_epp_fairness_id_resolved_total` across the EPP replicas:
+
+1. A request from a known tenant, whose client sends neither header name. The series with that
+   tenant's ID and `source="header"` increases.
+2. A request from the same tenant, whose client sets both header names to a value no tenant uses.
+   The same series increases, and no series with the client's value as `fairness_id` appears.
+3. If the gateway admits callers it has no ID for, a request from such a caller with the same
+   client value. The request is counted under `default-flow` or under the ID the gateway assigns to
+   such callers, and no series with the client's value appears.
+
+Use one client value on every run, because a value that gets through takes a slot under the label
+cap.
+
+The steps describe a pool that does not derive agent identities and leaves
+`requestHandler.composeFairnessIDs` disabled. They need room under the label cap: if
+`llm_d_epp_fairness_id_overflow_total` increases during a step, the ID may have been counted as
+`other`, and the step is inconclusive.
 
 ### Program-aware fairness
 

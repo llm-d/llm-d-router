@@ -226,6 +226,30 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
+	// Regression test for #3982: a token-only pool can pair
+	// precise-prefix-cache-producer with a passthrough token-producer without
+	// configuring an unused HTTP render endpoint.
+	"preciseConfigWithPassthroughTokenProducer": `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    backend: passthrough
+- type: precise-prefix-cache-producer
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+`,
 	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 
 const {
+  listApprovedCandidatePullRequestNumbers,
   resolvePullRequestNumbers,
   evaluateAndEnqueue,
   runMergeQueueCheck,
@@ -181,6 +182,120 @@ describe('evaluateAndEnqueue', () => {
     assert.equal(fetchCount, 2);
     assert.equal(res.enqueued, true);
   });
+
+  it('does not retry BLOCKED state when retryBlocked is false', async () => {
+    let fetchCount = 0;
+    let sleeps = 0;
+    const github = {
+      graphql: async () => {
+        fetchCount++;
+        return {
+          repository: {
+            pullRequest: makePr({ mergeStateStatus: 'BLOCKED' }),
+          },
+        };
+      },
+    };
+
+    const res = await evaluateAndEnqueue({
+      github,
+      owner: 'llm-d',
+      repo: 'llm-d-router',
+      pull_number: 42,
+      retryBlocked: false,
+      sleep: async () => {
+        sleeps++;
+      },
+    });
+
+    assert.equal(fetchCount, 1);
+    assert.equal(sleeps, 0);
+    assert.equal(res.enqueued, false);
+    assert.equal(res.reason, 'checks_incomplete');
+  });
+
+  it('still retries UNKNOWN mergeable state when retryBlocked is false', async () => {
+    let fetchCount = 0;
+    const github = {
+      graphql: async (query) => {
+        if (query.includes('enqueuePullRequest')) {
+          return {
+            enqueuePullRequest: {
+              mergeQueueEntry: { id: 'MQE_4', position: 1, state: 'QUEUED' },
+            },
+          };
+        }
+        fetchCount++;
+        return {
+          repository: {
+            pullRequest: makePr({
+              mergeable: fetchCount < 2 ? 'UNKNOWN' : 'MERGEABLE',
+              mergeStateStatus: fetchCount < 2 ? 'UNKNOWN' : 'CLEAN',
+            }),
+          },
+        };
+      },
+    };
+
+    const res = await evaluateAndEnqueue({
+      github,
+      owner: 'llm-d',
+      repo: 'llm-d-router',
+      pull_number: 42,
+      retryBlocked: false,
+      sleep: async () => {},
+    });
+
+    assert.equal(fetchCount, 2);
+    assert.equal(res.enqueued, true);
+  });
+});
+
+describe('listApprovedCandidatePullRequestNumbers', () => {
+  it('paginates, deduplicates, and filters out drafts, queued, unapproved, and blocked PRs', async () => {
+    const cursors = [];
+    const github = {
+      graphql: async (_query, vars) => {
+        cursors.push(vars.after);
+        assert.match(vars.searchQuery, /repo:llm-d\/llm-d-router/);
+        assert.match(vars.searchQuery, /review:approved/);
+        if (vars.after === null) {
+          return {
+            search: {
+              pageInfo: { hasNextPage: true, endCursor: 'cursor-1' },
+              nodes: [
+                { number: 10, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+                { number: 11, isDraft: true, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+                { number: 12, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: { id: 'MQE' }, labels: { nodes: [] } },
+                { number: 13, isDraft: false, reviewDecision: 'REVIEW_REQUIRED', mergeQueueEntry: null, labels: { nodes: [] } },
+                { number: 14, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [{ name: 'hold' }] } },
+                { number: 15, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [{ name: 'needs-rebase' }] } },
+              ],
+            },
+          };
+        }
+        return {
+          search: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [
+              // Duplicate across pages and a valid second candidate.
+              { number: 10, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+              { number: 20, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [{ name: 'kind/bug' }] } },
+            ],
+          },
+        };
+      },
+    };
+
+    const nums = await listApprovedCandidatePullRequestNumbers({
+      github,
+      owner: 'llm-d',
+      repo: 'llm-d-router',
+    });
+
+    assert.deepEqual(cursors, [null, 'cursor-1']);
+    assert.deepEqual(nums, [10, 20]);
+  });
 });
 
 describe('resolvePullRequestNumbers', () => {
@@ -264,5 +379,110 @@ describe('resolvePullRequestNumbers', () => {
 
     await runMergeQueueCheck({ github, context, sleep: async () => {} });
     assert.equal(enqueuedId, 'PR_target_1');
+  });
+
+  it('resolves sweep candidates on schedule and empty workflow_dispatch', async () => {
+    const github = {
+      graphql: async () => ({
+        search: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            { number: 30, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+          ],
+        },
+      }),
+    };
+
+    const scheduled = await resolvePullRequestNumbers({
+      github,
+      context: {
+        eventName: 'schedule',
+        repo: { owner: 'llm-d', repo: 'llm-d-router' },
+        payload: {},
+      },
+    });
+    assert.deepEqual(scheduled, [30]);
+
+    const dispatchedSweep = await resolvePullRequestNumbers({
+      github,
+      context: {
+        eventName: 'workflow_dispatch',
+        repo: { owner: 'llm-d', repo: 'llm-d-router' },
+        payload: { inputs: { pr_number: '' } },
+      },
+    });
+    assert.deepEqual(dispatchedSweep, [30]);
+
+    const dispatchedSingle = await resolvePullRequestNumbers({
+      github,
+      context: {
+        eventName: 'workflow_dispatch',
+        repo: { owner: 'llm-d', repo: 'llm-d-router' },
+        payload: { inputs: { pr_number: '88' } },
+      },
+    });
+    assert.deepEqual(dispatchedSingle, [88]);
+  });
+
+  it('isolates per-PR errors during a schedule sweep so remaining PRs still enqueue', async () => {
+    const enqueued = [];
+    let sleeps = 0;
+    const github = {
+      graphql: async (query, vars) => {
+        if (query.includes('search(')) {
+          return {
+            search: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [
+                { number: 101, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+                { number: 102, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+                { number: 103, isDraft: false, reviewDecision: 'APPROVED', mergeQueueEntry: null, labels: { nodes: [] } },
+              ],
+            },
+          };
+        }
+        if (query.includes('enqueuePullRequest')) {
+          if (vars.pullRequestId === 'PR_101') {
+            throw new Error('transient graphql error');
+          }
+          enqueued.push(vars.pullRequestId);
+          return {
+            enqueuePullRequest: {
+              mergeQueueEntry: { id: 'MQE_SWEEP', position: 1, state: 'QUEUED' },
+            },
+          };
+        }
+        if (vars.number === 101) {
+          return { repository: { pullRequest: makePr({ id: 'PR_101', number: 101 }) } };
+        }
+        if (vars.number === 102) {
+          return {
+            repository: {
+              pullRequest: makePr({ id: 'PR_102', number: 102, mergeStateStatus: 'BLOCKED' }),
+            },
+          };
+        }
+        return { repository: { pullRequest: makePr({ id: 'PR_103', number: 103 }) } };
+      },
+    };
+
+    await assert.rejects(
+      () =>
+        runMergeQueueCheck({
+          github,
+          context: {
+            eventName: 'schedule',
+            repo: { owner: 'llm-d', repo: 'llm-d-router' },
+            payload: {},
+          },
+          sleep: async () => {
+            sleeps++;
+          },
+        }),
+      /Failed to process 1 pull request\(s\): #101/
+    );
+
+    assert.deepEqual(enqueued, ['PR_103']);
+    assert.equal(sleeps, 0);
   });
 });
