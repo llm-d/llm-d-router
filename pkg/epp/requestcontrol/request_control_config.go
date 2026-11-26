@@ -66,8 +66,8 @@ type Config struct {
 	requestStreamUsage bool
 
 	// rejectClientPromptIDs rejects external text-route requests that carry
-	// forbidden prompt-token, fingerprint, or KV-transfer fields with 400
-	// instead of stripping them.
+	// forbidden prompt-token, fingerprint, KV-transfer, or EC-transfer fields
+	// with 400 instead of stripping them.
 	rejectClientPromptIDs bool
 
 	// trustCallerFields disables client field sanitization on text routes and
@@ -116,7 +116,8 @@ func (c *Config) WithRejectClientPromptIDs(reject bool) *Config {
 }
 
 // TrustCallerFields reports whether the director preserves caller-supplied
-// prompt-token and KV-transfer fields on text routes and token routes.
+// prompt-token, KV-transfer, and EC-transfer fields on text routes and token
+// routes.
 func (c *Config) TrustCallerFields() bool {
 	return c.trustCallerFields
 }

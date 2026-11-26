@@ -52,7 +52,8 @@ type Config struct {
 	ForwardInputControlHeaders bool
 	// RejectClientPromptIDs mirrors requestHandler.rejectClientPromptIDs: when
 	// true the director rejects external text-route requests that carry
-	// forbidden prompt-token, fingerprint, or KV-transfer fields with 400.
+	// forbidden prompt-token, fingerprint, KV-transfer, or EC-transfer fields
+	// with 400.
 	RejectClientPromptIDs bool
 	// TrustCallerFields mirrors requestHandler.trustCallerFields: when true the
 	// director skips client field sanitization on text routes and token routes

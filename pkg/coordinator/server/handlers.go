@@ -152,11 +152,12 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			coordmetrics.IncPromptIDsSanitized(route, metricsutil.SanitizeActionStripped)
 		}
 	} else {
-		// A token route keeps the client token IDs. kv_transfer_params tells a
-		// model server which pod to pull KV from, so only the KV connector and
-		// the EPP may write it. A worker also reads it from vllm_xargs and
-		// from sampling_params.
-		droppedFields = reqcommon.StripKVTransferParams(parsed)
+		// A token route keeps the client token IDs. kv_transfer_params and
+		// ec_transfer_params tell a model server which pod to pull KV blocks
+		// or encoder outputs from, so only the connectors and the EPP may
+		// write them. A worker also reads them from vllm_xargs and from
+		// sampling_params.
+		droppedFields = reqcommon.StripTransferParams(parsed)
 	}
 	if len(droppedFields) > 0 {
 		// OriginalBody must not keep the dropped fields either.

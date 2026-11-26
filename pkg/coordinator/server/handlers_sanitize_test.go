@@ -63,6 +63,7 @@ func TestHandleInference_SanitizesExternalTextRoutes(t *testing.T) {
 				`,"prompt_render_fingerprint":"secret-fp-1"` +
 				`,"render_fingerprint":"secret-fp-2"` +
 				`,"kv_transfer_params":{"prompt_token_ids":[4,5],"do_remote_prefill":true}` +
+				`,"ec_transfer_params":{"image":[]}` +
 				`,"input_ids":[6,7]}`
 			rec := httptest.NewRecorder()
 			lines := handlerLogLines(t, func() {
@@ -223,10 +224,11 @@ func TestHandleInference_PreservesClientTokensOnDedicatedTokenRoutes(t *testing.
 	}
 }
 
-// A vLLM worker also reads kv_transfer_params from vllm_xargs and from
-// sampling_params, so the handler drops those copies with the top-level field.
-func TestHandleInference_DropsNestedKVTransferParams(t *testing.T) {
-	const clientKV = `"kv_transfer_params":{"do_remote_prefill":true}`
+// A vLLM worker also reads kv_transfer_params and ec_transfer_params from
+// vllm_xargs and from sampling_params, so the handler drops those copies with
+// the top-level fields.
+func TestHandleInference_DropsNestedTransferParams(t *testing.T) {
+	const clientKV = `"kv_transfer_params":{"do_remote_prefill":true},"ec_transfer_params":{"image":[]}`
 	tests := []struct {
 		name     string
 		path     string
@@ -256,6 +258,18 @@ func TestHandleInference_DropsNestedKVTransferParams(t *testing.T) {
 			path:     reqcommon.PathCompletions,
 			body:     `{"model":"m","prompt":[1,2,3],"vllm_xargs":{` + clientKV + `,"k":"v"}}`,
 			wantBody: `{"model":"m","prompt":[1,2,3],"vllm_xargs":{"k":"v"}}`,
+		},
+		{
+			name:     "vllm_generate_top_level_ec_transfer_params",
+			path:     reqcommon.PathVLLMGenerate,
+			body:     `{"model":"m","token_ids":[1,2,3],"ec_transfer_params":{"image":[]}}`,
+			wantBody: `{"model":"m","token_ids":[1,2,3]}`,
+		},
+		{
+			name:     "token_array_completions_top_level_ec_transfer_params",
+			path:     reqcommon.PathCompletions,
+			body:     `{"model":"m","prompt":[1,2,3],"ec_transfer_params":{"image":[]}}`,
+			wantBody: `{"model":"m","prompt":[1,2,3]}`,
 		},
 	}
 	for _, tc := range tests {
@@ -290,5 +304,20 @@ func TestHandleInference_RejectClientPromptIDsRejectsNestedKVTransferParams(t *t
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "vllm_xargs.kv_transfer_params")
+	require.Nil(t, step.captured)
+}
+
+func TestHandleInference_RejectClientPromptIDsRejectsECTransferParams(t *testing.T) {
+	metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	step := &capturingStep{}
+	srv, err := New(config.ServerConfig{RejectClientPromptIDs: true}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	require.NoError(t, err)
+
+	raw := `{"model":"m","messages":[{"role":"user","content":"hi"}],"ec_transfer_params":{"image":[]}}`
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), reqcommon.FieldECTransferParams)
 	require.Nil(t, step.captured)
 }

@@ -488,17 +488,18 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 // Coordinator opts out with requestHandler.trustCallerFields.
 //
 // On external text routes it strips the client-supplied prompt-token,
-// fingerprint, and KV-transfer fields, or rejects the request with 400 when
-// rejectClientPromptIDs is enabled. On dedicated HTTP token routes it keeps the
-// client token IDs and drops kv_transfer_params. It does not inspect native
-// gRPC requests (vllm.Inference, sglang.api.v1).
+// fingerprint, KV-transfer, and EC-transfer fields, or rejects the request
+// with 400 when rejectClientPromptIDs is enabled. On dedicated HTTP token
+// routes it keeps the client token IDs and drops kv_transfer_params and
+// ec_transfer_params. It does not inspect native gRPC requests
+// (vllm.Inference, sglang.api.v1).
 func (d *Director) sanitizeClientFields(ctx context.Context, body *fwkrequest.InferenceRequestBody) error {
 	if d.requestControlPlugins.TrustCallerFields() {
 		return nil
 	}
 	route, ok := externalTextRouteName(body)
 	if !ok {
-		dropTokenRouteKVTransferParams(ctx, body)
+		dropTokenRouteTransferParams(ctx, body)
 		return nil
 	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)
@@ -597,14 +598,15 @@ func isTokenRoute(body *fwkrequest.InferenceRequestBody) bool {
 	return body.Generate != nil || (body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0)
 }
 
-// dropTokenRouteKVTransferParams removes each client-supplied copy of
-// kv_transfer_params on a dedicated token route: the top-level field and the
-// copies in vllm_xargs and sampling_params, from which a vLLM worker also
-// reads it. The client token IDs stay, because sending them is the purpose of
-// the route. kv_transfer_params tells a model server which pod to pull KV
-// from, so only the Coordinator, the EPP plugins, and the sidecar may write
-// it. The field is dropped and never rejected, as in the Coordinator.
-func dropTokenRouteKVTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
+// dropTokenRouteTransferParams removes each client-supplied copy of
+// kv_transfer_params and ec_transfer_params on a dedicated token route: the
+// top-level fields and the copies in vllm_xargs and sampling_params, from which
+// a vLLM worker also reads them. The client token IDs stay, because sending
+// them is the purpose of the route. The transfer fields tell a model server
+// which pod to pull KV blocks or encoder outputs from, so only the Coordinator,
+// the EPP plugins, and the sidecar may write them. The fields are dropped and
+// never rejected, as in the Coordinator.
+func dropTokenRouteTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
 	if !isTokenRoute(body) {
 		return
 	}
@@ -612,14 +614,14 @@ func dropTokenRouteKVTransferParams(ctx context.Context, body *fwkrequest.Infere
 	if !ok {
 		return
 	}
-	found := reqcommon.FindKVTransferParams(payload)
+	found := reqcommon.FindTransferParams(payload)
 	if len(found) == 0 {
 		return
 	}
 	body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
-		reqcommon.StripKVTransferParams(m)
+		reqcommon.StripTransferParams(m)
 	})
-	// Field names only: the value carries a host, a port and a request id.
+	// Field names only: the values carry a host, a port and a request id.
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropped client-supplied fields", "fields", found)
 }
 

@@ -103,14 +103,16 @@ Before request control starts, the EPP drops client copies of router-owned body 
 
 - On the text routes (`/v1/chat/completions`, string `/v1/completions`, `/v1/messages`,
   `/v1/responses`) it drops `prompt_token_ids`, `prompt_render_fingerprint`,
-  `render_fingerprint`, `kv_transfer_params`, and `input_ids`. A worker uses client token
-  IDs in place of the chat template.
+  `render_fingerprint`, `kv_transfer_params`, `ec_transfer_params`, and `input_ids`. A
+  worker uses client token IDs in place of the chat template.
 - On the token routes (token-array `/v1/completions`, `/inference/v1/generate`,
-  `/generate`) it keeps the token IDs and drops `kv_transfer_params`.
+  `/generate`) it keeps the token IDs and drops `kv_transfer_params` and
+  `ec_transfer_params`.
 
-A vLLM worker also reads `kv_transfer_params` from `vllm_xargs`,
+`kv_transfer_params` and `ec_transfer_params` name the pod that a worker pulls KV blocks
+or encoder outputs from. A vLLM worker also reads both fields from `vllm_xargs`,
 `sampling_params.extra_args`, and `sampling_params.vllm_xargs`. On each route, the EPP
-handles those copies as it handles the top-level field.
+handles those copies as it handles the top-level fields.
 
 EPP plugins such as `p2p-source-producer` write `kv_transfer_params` after this step, so
 the drop does not affect them. Two `requestHandler` settings change the behavior, and

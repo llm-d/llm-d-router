@@ -22,8 +22,8 @@ import (
 )
 
 // Top-level request fields that only a trusted caller may set on an external
-// text route. FieldPromptTokenIDs and FieldKVTransferParams are declared in
-// constants.go.
+// text route. FieldPromptTokenIDs, FieldKVTransferParams, and
+// FieldECTransferParams are declared in constants.go.
 const (
 	FieldPromptRenderFingerprint = "prompt_render_fingerprint"
 	FieldRenderFingerprint       = "render_fingerprint"
@@ -37,28 +37,38 @@ const (
 // Removing kv_transfer_params at the top level also removes nested fields such
 // as kv_transfer_params.prompt_token_ids and do_remote_prefill/do_remote_decode.
 // FindExternalTextFields and StripExternalTextFields also cover the copies of
-// kv_transfer_params in nestedKVTransferParams.
+// the transfer fields in nestedTransferParams.
 var ExternalTextRouteSanitizedFields = []string{
 	FieldPromptTokenIDs,
 	FieldPromptRenderFingerprint,
 	FieldRenderFingerprint,
 	FieldKVTransferParams,
+	FieldECTransferParams,
 	FieldInputIDs,
 }
 
-// nestedKVTransferParams lists the objects, besides the top level, from which a
-// vLLM worker reads kv_transfer_params. The engine reads the field from
-// SamplingParams.extra_args. A client writes that map as
-// sampling_params.extra_args on /inference/v1/generate. vllm-rs also accepts
-// the name vllm_xargs there, and it accepts any JSON value in the top-level
-// vllm_xargs of the OpenAI routes.
-var nestedKVTransferParams = []struct {
+// transferParams lists the fields that name the peer from which a model
+// server pulls KV blocks (kv_transfer_params) or encoder outputs
+// (ec_transfer_params). Only the Coordinator, the EPP plugins, and the sidecar
+// may write them.
+var transferParams = []string{FieldKVTransferParams, FieldECTransferParams}
+
+// nestedTransferParams lists the copies of the transferParams besides the top
+// level. The vLLM engine reads both fields from SamplingParams.extra_args. A
+// client writes that map as sampling_params.extra_args on
+// /inference/v1/generate. vllm-rs also accepts the name vllm_xargs there, and
+// it accepts any JSON value in the top-level vllm_xargs of the OpenAI routes.
+var nestedTransferParams = []struct {
 	parents []string
+	key     string
 	name    string
 }{
-	{parents: []string{FieldVLLMXArgs}, name: "vllm_xargs.kv_transfer_params"},
-	{parents: []string{FieldSamplingParams, FieldExtraArgs}, name: "sampling_params.extra_args.kv_transfer_params"},
-	{parents: []string{FieldSamplingParams, FieldVLLMXArgs}, name: "sampling_params.vllm_xargs.kv_transfer_params"},
+	{parents: []string{FieldVLLMXArgs}, key: FieldKVTransferParams, name: "vllm_xargs.kv_transfer_params"},
+	{parents: []string{FieldVLLMXArgs}, key: FieldECTransferParams, name: "vllm_xargs.ec_transfer_params"},
+	{parents: []string{FieldSamplingParams, FieldExtraArgs}, key: FieldKVTransferParams, name: "sampling_params.extra_args.kv_transfer_params"},
+	{parents: []string{FieldSamplingParams, FieldExtraArgs}, key: FieldECTransferParams, name: "sampling_params.extra_args.ec_transfer_params"},
+	{parents: []string{FieldSamplingParams, FieldVLLMXArgs}, key: FieldKVTransferParams, name: "sampling_params.vllm_xargs.kv_transfer_params"},
+	{parents: []string{FieldSamplingParams, FieldVLLMXArgs}, key: FieldECTransferParams, name: "sampling_params.vllm_xargs.ec_transfer_params"},
 }
 
 // nestedKey reports whether the object at path parents inside value holds key.
@@ -115,39 +125,43 @@ func nestedKey(value any, parents []string, key string, strip bool) (any, bool) 
 	}
 }
 
-// nestedKVTransferParamsIn returns the names of the nestedKVTransferParams
-// copies in body, and deletes them when strip is true.
-func nestedKVTransferParamsIn(body map[string]any, strip bool) []string {
+// nestedTransferParamsIn returns the names of the nestedTransferParams copies
+// in body, and deletes them when strip is true.
+func nestedTransferParamsIn(body map[string]any, strip bool) []string {
 	var found []string
-	for _, field := range nestedKVTransferParams {
-		if _, ok := nestedKey(body, field.parents, FieldKVTransferParams, strip); ok {
+	for _, field := range nestedTransferParams {
+		if _, ok := nestedKey(body, field.parents, field.key, strip); ok {
 			found = append(found, field.name)
 		}
 	}
 	return found
 }
 
-// FindKVTransferParams returns the names of the client copies of
-// kv_transfer_params in body: the top-level field and the
-// nestedKVTransferParams copies. Returns nil when none are present.
-func FindKVTransferParams(body map[string]any) []string {
+// FindTransferParams returns the names of the client copies of the
+// transferParams in body: the top-level fields and the nestedTransferParams
+// copies. Returns nil when none are present.
+func FindTransferParams(body map[string]any) []string {
 	var found []string
-	if _, ok := body[FieldKVTransferParams]; ok {
-		found = append(found, FieldKVTransferParams)
+	for _, field := range transferParams {
+		if _, ok := body[field]; ok {
+			found = append(found, field)
+		}
 	}
-	return append(found, nestedKVTransferParamsIn(body, false)...)
+	return append(found, nestedTransferParamsIn(body, false)...)
 }
 
-// StripKVTransferParams deletes the fields that FindKVTransferParams reports
-// and returns their names. A dedicated token route keeps the client token IDs
-// and drops only these fields.
-func StripKVTransferParams(body map[string]any) []string {
+// StripTransferParams deletes the fields that FindTransferParams reports and
+// returns their names. A dedicated token route keeps the client token IDs and
+// drops only these fields.
+func StripTransferParams(body map[string]any) []string {
 	var stripped []string
-	if _, ok := body[FieldKVTransferParams]; ok {
-		delete(body, FieldKVTransferParams)
-		stripped = append(stripped, FieldKVTransferParams)
+	for _, field := range transferParams {
+		if _, ok := body[field]; ok {
+			delete(body, field)
+			stripped = append(stripped, field)
+		}
 	}
-	return append(stripped, nestedKVTransferParamsIn(body, true)...)
+	return append(stripped, nestedTransferParamsIn(body, true)...)
 }
 
 // isTokenArrayCompletionsPrompt reports whether a decoded /v1/completions
@@ -201,7 +215,7 @@ func IsExternalTextRoute(apiType APIType, completionsPrompt any) bool {
 
 // FindExternalTextFields returns the names of any forbidden external text-route
 // fields present in body: the ExternalTextRouteSanitizedFields in their order,
-// then the nestedKVTransferParams copies. Returns nil when none are present.
+// then the nestedTransferParams copies. Returns nil when none are present.
 func FindExternalTextFields(body map[string]any) []string {
 	var found []string
 	for _, field := range ExternalTextRouteSanitizedFields {
@@ -209,7 +223,7 @@ func FindExternalTextFields(body map[string]any) []string {
 			found = append(found, field)
 		}
 	}
-	return append(found, nestedKVTransferParamsIn(body, false)...)
+	return append(found, nestedTransferParamsIn(body, false)...)
 }
 
 // StripExternalTextFields deletes the fields that FindExternalTextFields
@@ -223,5 +237,5 @@ func StripExternalTextFields(body map[string]any) []string {
 			stripped = append(stripped, field)
 		}
 	}
-	return append(stripped, nestedKVTransferParamsIn(body, true)...)
+	return append(stripped, nestedTransferParamsIn(body, true)...)
 }

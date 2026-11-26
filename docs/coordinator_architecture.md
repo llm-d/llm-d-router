@@ -294,10 +294,11 @@ and answers `Prefer: if-available`, the `conditional-decode` step's signal, with
 any other leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.
 The inference routes parse the body and drop client copies of router-owned fields.
-The coordinator drops a client-provided `kv_transfer_params` on every inference route.
-The field names the pod a model server pulls KV from, and `p2p-source-producer` treats a
-request that carries `remote_prefiller` as a decode request.
-A vLLM worker also reads the field from `vllm_xargs`, `sampling_params.extra_args`, and
+The coordinator drops a client-provided `kv_transfer_params` or `ec_transfer_params` on
+every inference route. The fields name the pod a model server pulls KV blocks or encoder
+outputs from, and `p2p-source-producer` treats a request that carries `remote_prefiller`
+as a decode request.
+A vLLM worker also reads both fields from `vllm_xargs`, `sampling_params.extra_args`, and
 `sampling_params.vllm_xargs`, so the coordinator drops those copies too.
 On the text routes (`/v1/chat/completions`, string `/v1/completions`, `/v1/messages`,
 `/v1/responses`) the coordinator also drops `prompt_token_ids`,
@@ -332,7 +333,8 @@ phase call to the configured gateway, and the EPP picks the pod for that phase.
 ### Caller fields
 
 The coordinator writes `kv_transfer_params` into the prefill and decode requests that it
-sends through the gateway. With `forward_prompt_token_ids`, a request also carries
+sends through the gateway, and `ec_transfer_params` for a multimodal request. With
+`forward_prompt_token_ids`, a request also carries
 `kv_transfer_params.prompt_token_ids`. By default, an EPP treats each caller as
 an external client and drops these fields. Set `requestHandler.trustCallerFields` in the
 config of each EPP that receives coordinator requests:

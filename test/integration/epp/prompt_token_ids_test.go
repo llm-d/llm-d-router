@@ -454,7 +454,7 @@ dataLayer:
 
 // TestExternalTextRouteSanitization checks the untrusted external-text-route
 // boundary through the ext-proc stream. By default, EPP strips client-supplied
-// prompt token IDs, render fingerprints, and KV transfer fields before
+// prompt token IDs, render fingerprints, and KV and EC transfer fields before
 // token-producer runs, so the request renders normally and the forwarded body
 // omits those fields. With rejectClientPromptIDs enabled, EPP rejects the
 // request with HTTP 400.

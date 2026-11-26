@@ -142,6 +142,7 @@ func TestDirector_SanitizesExternalTextRoutes(t *testing.T) {
 			`,"prompt_render_fingerprint":"fp-1"` +
 			`,"render_fingerprint":"fp-2"` +
 			`,"kv_transfer_params":{"prompt_token_ids":[4,5],"do_remote_prefill":true}` +
+			`,"ec_transfer_params":{"image":[]}` +
 			`,"input_ids":[6,7]}`)
 
 		t.Run(tc.name+"/default strips before producers and preserves PreRequest KV injection", func(t *testing.T) {
@@ -184,6 +185,7 @@ func TestDirector_SanitizesExternalTextRoutes(t *testing.T) {
 				reqcommon.FieldPromptTokenIDs,
 				reqcommon.FieldPromptRenderFingerprint,
 				reqcommon.FieldRenderFingerprint,
+				reqcommon.FieldECTransferParams,
 				reqcommon.FieldInputIDs,
 			} {
 				require.NotContains(t, out, field, "repackaged body must omit client field %s", field)
@@ -192,7 +194,7 @@ func TestDirector_SanitizesExternalTextRoutes(t *testing.T) {
 				"PreRequest plugin KV transfer metadata must survive client stripping")
 
 			wantMetric := `
-# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, or KV transfer fields were stripped or rejected.
+# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, KV transfer, or EC transfer fields were stripped or rejected.
 # TYPE llm_d_epp_prompt_ids_sanitized_total counter
 llm_d_epp_prompt_ids_sanitized_total{action="stripped",component="epp",route="` + tc.wantRoute + `"} 1
 `
@@ -225,7 +227,7 @@ llm_d_epp_prompt_ids_sanitized_total{action="stripped",component="epp",route="` 
 			require.False(t, producer.called, "rejected request must not reach data producers")
 
 			wantMetric := `
-# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, or KV transfer fields were stripped or rejected.
+# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, KV transfer, or EC transfer fields were stripped or rejected.
 # TYPE llm_d_epp_prompt_ids_sanitized_total counter
 llm_d_epp_prompt_ids_sanitized_total{action="rejected",component="epp",route="` + tc.wantRoute + `"} 1
 `
@@ -505,7 +507,7 @@ func TestDirector_VertexAITextRequestWithForbiddenFieldIsRejected(t *testing.T) 
 					require.ErrorAs(t, err, &reqErr)
 					require.Equal(t, errcommon.BadRequest, reqErr.Code)
 					wantMetric := `
-# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, or KV transfer fields were stripped or rejected.
+# HELP llm_d_epp_prompt_ids_sanitized_total [ALPHA] Total number of external text-route requests where client-supplied prompt token, fingerprint, KV transfer, or EC transfer fields were stripped or rejected.
 # TYPE llm_d_epp_prompt_ids_sanitized_total counter
 llm_d_epp_prompt_ids_sanitized_total{action="rejected",component="epp",route="` + tc.wantRoute + `"} 1
 `
@@ -562,12 +564,13 @@ func TestDirector_CleanExternalTextRequestLeavesRawBodyUnmutated(t *testing.T) {
 	require.NoError(t, promtestutil.GatherAndCompare(ctrlmetrics.Registry, strings.NewReader(""), eppPromptIDsSanitizedMetric))
 }
 
-// A vLLM worker also reads kv_transfer_params from vllm_xargs and from
-// sampling_params, so the director drops those copies with the top-level field.
-func TestDirector_DropsNestedKVTransferParams(t *testing.T) {
+// A vLLM worker also reads kv_transfer_params and ec_transfer_params from
+// vllm_xargs and from sampling_params, so the director drops those copies with
+// the top-level fields.
+func TestDirector_DropsNestedTransferParams(t *testing.T) {
 	metrics.Register()
 
-	const clientKV = `"kv_transfer_params":{"do_remote_prefill":true}`
+	const clientKV = `"kv_transfer_params":{"do_remote_prefill":true},"ec_transfer_params":{"image":[]}`
 	tests := []struct {
 		name       string
 		path       string
@@ -648,4 +651,77 @@ func TestDirector_RejectClientPromptIDsRejectsNestedKVTransferParams(t *testing.
 	require.ErrorAs(t, err, &reqErr)
 	require.Equal(t, errcommon.BadRequest, reqErr.Code)
 	require.Contains(t, reqErr.Msg, "vllm_xargs.kv_transfer_params")
+}
+
+func TestDirector_TokenRoutesDropECTransferParams(t *testing.T) {
+	metrics.Register()
+
+	const clientEC = `,"ec_transfer_params":{"image":[]}`
+	tests := []struct {
+		name      string
+		path      string
+		parser    fwkrh.Parser
+		body      string // without the closing brace, so the test can append clientEC
+		keptField string
+	}{
+		{
+			name:      "vllm_generate",
+			path:      reqcommon.PathVLLMGenerate,
+			parser:    vllmhttp.NewVllmHTTPParser(),
+			body:      `{"model":"llama-3-8b","token_ids":[1,2,3]`,
+			keptField: "token_ids",
+		},
+		{
+			name:      "token_array_completions",
+			path:      reqcommon.PathCompletions,
+			parser:    openai.NewOpenAIParser(),
+			body:      `{"model":"llama-3-8b","prompt":[1,2,3]`,
+			keptField: reqcommon.FieldPrompt,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig(), tc.parser, tc.path, []byte(tc.body+clientEC+"}"))
+
+			require.NoError(t, err)
+			require.True(t, body.Mutated)
+			out := forwardedBody(t, reqCtx)
+			require.NotContains(t, out, reqcommon.FieldECTransferParams)
+			require.Contains(t, out, tc.keptField)
+			requireNoSanitizeMetric(t)
+		})
+
+		t.Run(tc.name+"/trust_caller_fields", func(t *testing.T) {
+			raw := []byte(tc.body + clientEC + "}")
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig().WithTrustCallerFields(true), tc.parser, tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+		})
+	}
+}
+
+func TestDirector_RejectClientPromptIDsRejectsECTransferParams(t *testing.T) {
+	metrics.Register()
+
+	tests := []struct {
+		name      string
+		field     string
+		wantField string
+	}{
+		{name: "top_level", field: `"ec_transfer_params":{"image":[]}`, wantField: `"ec_transfer_params"`},
+		{name: "vllm_xargs", field: `"vllm_xargs":{"ec_transfer_params":{"image":[]}}`, wantField: "vllm_xargs.ec_transfer_params"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],` + tc.field + `}`)
+			_, _, err := handleSanitizeRequest(t, NewConfig().WithRejectClientPromptIDs(true), openai.NewOpenAIParser(), reqcommon.PathChatCompletions, raw)
+
+			var reqErr errcommon.Error
+			require.ErrorAs(t, err, &reqErr)
+			require.Equal(t, errcommon.BadRequest, reqErr.Code)
+			require.Contains(t, reqErr.Msg, tc.wantField)
+		})
+	}
 }

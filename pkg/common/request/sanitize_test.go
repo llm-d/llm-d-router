@@ -75,6 +75,7 @@ func TestFindAndStripExternalTextFields(t *testing.T) {
 		"prompt_render_fingerprint": "fp1",
 		"render_fingerprint":        "fp2",
 		"kv_transfer_params":        map[string]any{"prompt_token_ids": []any{3}},
+		"ec_transfer_params":        map[string]any{"image": []any{}},
 		"input_ids":                 []any{4, 5},
 	}
 	wantFields := []string{
@@ -82,17 +83,18 @@ func TestFindAndStripExternalTextFields(t *testing.T) {
 		FieldPromptRenderFingerprint,
 		FieldRenderFingerprint,
 		FieldKVTransferParams,
+		FieldECTransferParams,
 		FieldInputIDs,
 	}
 	require.Equal(t, wantFields, FindExternalTextFields(dirty))
-	require.Len(t, dirty, 6, "FindExternalTextFields must not mutate the map")
+	require.Len(t, dirty, 7, "FindExternalTextFields must not mutate the map")
 
 	stripped := StripExternalTextFields(dirty)
 	require.Equal(t, wantFields, stripped)
 	require.Equal(t, map[string]any{"model": "m"}, dirty)
 }
 
-func TestNestedKVTransferParams(t *testing.T) {
+func TestTransferParams(t *testing.T) {
 	const kv = `{"do_remote_prefill":true}`
 	tests := []struct {
 		name string
@@ -149,22 +151,52 @@ func TestNestedKVTransferParams(t *testing.T) {
 			wantBody:  `{"sampling_params":{"max_tokens":4,"vllm_xargs":{}}}`,
 		},
 		{
+			name: "decoded_vllm_xargs_ec_transfer_params",
+			body: func() map[string]any {
+				return map[string]any{"model": "m", "vllm_xargs": map[string]any{"ec_transfer_params": map[string]any{"image": []any{}}, "k": "v"}}
+			},
+			wantNames: []string{"vllm_xargs.ec_transfer_params"},
+			wantBody:  `{"model":"m","vllm_xargs":{"k":"v"}}`,
+		},
+		{
+			name: "raw_sampling_params_extra_args_ec_transfer_params",
+			body: func() map[string]any {
+				return map[string]any{"token_ids": []any{1}, "sampling_params": json.RawMessage(
+					`{"max_tokens":4,"extra_args":{"ec_transfer_params":{"image":[]},"k":"v"}}`)}
+			},
+			wantNames: []string{"sampling_params.extra_args.ec_transfer_params"},
+			wantBody:  `{"token_ids":[1],"sampling_params":{"max_tokens":4,"extra_args":{"k":"v"}}}`,
+		},
+		{
+			name: "top_level_ec_transfer_params",
+			body: func() map[string]any {
+				return map[string]any{"token_ids": []any{1}, "ec_transfer_params": map[string]any{"image": []any{}}}
+			},
+			wantNames: []string{"ec_transfer_params"},
+			wantBody:  `{"token_ids":[1]}`,
+		},
+		{
 			name: "every_copy_and_the_top_level",
 			body: func() map[string]any {
 				return map[string]any{
 					"kv_transfer_params": map[string]any{"do_remote_prefill": true},
-					"vllm_xargs":         json.RawMessage(`{"kv_transfer_params":` + kv + `}`),
+					"ec_transfer_params": map[string]any{"image": []any{}},
+					"vllm_xargs":         json.RawMessage(`{"kv_transfer_params":` + kv + `,"ec_transfer_params":{}}`),
 					"sampling_params": map[string]any{
-						"extra_args": map[string]any{"kv_transfer_params": 1},
-						"vllm_xargs": map[string]any{"kv_transfer_params": 2},
+						"extra_args": map[string]any{"kv_transfer_params": 1, "ec_transfer_params": 1},
+						"vllm_xargs": map[string]any{"kv_transfer_params": 2, "ec_transfer_params": 2},
 					},
 				}
 			},
 			wantNames: []string{
 				"kv_transfer_params",
+				"ec_transfer_params",
 				"vllm_xargs.kv_transfer_params",
+				"vllm_xargs.ec_transfer_params",
 				"sampling_params.extra_args.kv_transfer_params",
+				"sampling_params.extra_args.ec_transfer_params",
 				"sampling_params.vllm_xargs.kv_transfer_params",
+				"sampling_params.vllm_xargs.ec_transfer_params",
 			},
 			wantBody: `{"vllm_xargs":{},"sampling_params":{"extra_args":{},"vllm_xargs":{}}}`,
 		},
@@ -210,30 +242,30 @@ func TestNestedKVTransferParams(t *testing.T) {
 			require.NoError(t, err)
 
 			found := tc.body()
-			require.Equal(t, tc.wantNames, FindKVTransferParams(found))
+			require.Equal(t, tc.wantNames, FindTransferParams(found))
 			afterFind, err := json.Marshal(found)
 			require.NoError(t, err)
-			require.JSONEq(t, string(unchanged), string(afterFind), "FindKVTransferParams must not change the body")
+			require.JSONEq(t, string(unchanged), string(afterFind), "FindTransferParams must not change the body")
 
 			stripped := tc.body()
-			require.Equal(t, tc.wantNames, StripKVTransferParams(stripped))
+			require.Equal(t, tc.wantNames, StripTransferParams(stripped))
 			afterStrip, err := json.Marshal(stripped)
 			require.NoError(t, err)
 			require.JSONEq(t, tc.wantBody, string(afterStrip))
-			require.Nil(t, FindKVTransferParams(stripped))
+			require.Nil(t, FindTransferParams(stripped))
 		})
 	}
 }
 
-func TestExternalTextFieldsIncludeNestedKVTransferParams(t *testing.T) {
+func TestExternalTextFieldsIncludeNestedTransferParams(t *testing.T) {
 	newBody := func() map[string]any {
 		return map[string]any{
 			"model":            "m",
 			"prompt_token_ids": []any{1, 2},
-			"vllm_xargs":       json.RawMessage(`{"kv_transfer_params":{"do_remote_prefill":true},"k":"v"}`),
+			"vllm_xargs":       json.RawMessage(`{"kv_transfer_params":{"do_remote_prefill":true},"ec_transfer_params":{},"k":"v"}`),
 		}
 	}
-	want := []string{FieldPromptTokenIDs, "vllm_xargs.kv_transfer_params"}
+	want := []string{FieldPromptTokenIDs, "vllm_xargs.kv_transfer_params", "vllm_xargs.ec_transfer_params"}
 
 	require.Equal(t, want, FindExternalTextFields(newBody()))
 
@@ -247,16 +279,16 @@ func TestExternalTextFieldsIncludeNestedKVTransferParams(t *testing.T) {
 // The EPP keeps nested objects raw, and most requests carry sampling_params or
 // vllm_xargs without kv_transfer_params. The check of such a request must not
 // decode those objects.
-func TestFindKVTransferParamsDoesNotDecodeCleanRawObjects(t *testing.T) {
+func TestFindTransferParamsDoesNotDecodeCleanRawObjects(t *testing.T) {
 	clean := map[string]any{
 		"token_ids":       json.RawMessage(`[1,2,3]`),
 		"vllm_xargs":      json.RawMessage(`{"k":"v"}`),
 		"sampling_params": json.RawMessage(`{"max_tokens":4,"extra_args":{"k":"v"},"vllm_xargs":{"k":"v"}}`),
 	}
 
-	require.Nil(t, FindKVTransferParams(clean))
+	require.Nil(t, FindTransferParams(clean))
 	require.Zero(t, testing.AllocsPerRun(100, func() {
-		_ = FindKVTransferParams(clean)
+		_ = FindTransferParams(clean)
 		_ = FindExternalTextFields(clean)
 	}))
 }

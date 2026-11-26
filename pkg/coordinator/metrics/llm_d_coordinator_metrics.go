@@ -97,7 +97,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "prompt_ids_sanitized_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of external text-route requests where client-supplied prompt token, fingerprint, or KV transfer fields were stripped or rejected.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of external text-route requests where client-supplied prompt token, fingerprint, KV transfer, or EC transfer fields were stripped or rejected.", compbasemetrics.ALPHA),
 		},
 		[]string{"component", "route", "action"},
 	)
