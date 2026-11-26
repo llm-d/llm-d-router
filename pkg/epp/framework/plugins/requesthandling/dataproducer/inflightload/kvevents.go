@@ -26,10 +26,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
 
 const (
@@ -38,9 +40,11 @@ const (
 	// blocks the request stores.
 	sessionIDHeader = "x-session-id"
 	// sessionIDField and extraArgsField are the body locations vLLM reads for
-	// the session id ahead of the header.
-	sessionIDField = "session_id"
-	extraArgsField = "vllm_xargs"
+	// the session id ahead of the header. SGLang reads sessionIDField only and
+	// rejects requests that set both sessionIDField and sessionParamsField.
+	sessionIDField     = "session_id"
+	sessionParamsField = "session_params"
+	extraArgsField     = "vllm_xargs"
 
 	signalKVEvent   = "kv_event"
 	signalFirstByte = "first_byte"
@@ -210,12 +214,21 @@ func (w *prefillWatch) reset(endpoint string) int {
 	return dropped
 }
 
-// sessionStamp returns the session id the engine will echo for the request,
-// following vLLM's precedence: body session_id, then the session header,
-// then vllm_xargs.session_id. With none present it sets the header to the
-// request id and reports own. ok is false when the request carries no headers
-// to stamp.
-func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok bool) {
+// sessionStamp returns the session id the engine will echo for the request.
+//
+// For SGLang, the engine reads only the top-level body session_id field and
+// rejects requests that also set session_params. When the body is a JSON
+// object carrying neither a non-null session_id nor a non-null session_params,
+// sessionStamp writes the request id into body session_id, marks the body
+// mutated, and reports own.
+//
+// For vLLM, sessionStamp follows vLLM's precedence: body session_id, then the
+// session header, then vllm_xargs.session_id. With none present it sets the
+// header to the request id and reports own.
+func sessionStamp(request *fwksched.InferenceRequest, engineType string) (stamp string, own, ok bool) {
+	if engineType == engineadapter.EngineTypeSGLang {
+		return sglangSessionStamp(request)
+	}
 	var payload fwkrequest.PayloadMap
 	if request.Body != nil {
 		payload, _ = request.Body.Payload.(fwkrequest.PayloadMap)
@@ -237,6 +250,35 @@ func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok boo
 		return "", false, false
 	}
 	request.Headers[sessionIDHeader] = request.RequestID
+	return request.RequestID, true, true
+}
+
+func sglangSessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok bool) {
+	if request.Body == nil {
+		return "", false, false
+	}
+	payload, isMap := request.Body.Payload.(fwkrequest.PayloadMap)
+	if !isMap || payload == nil {
+		return "", false, false
+	}
+	// SGLang raises ValueError when both session_id and session_params are
+	// non-null, and session_params requests do not echo a session_id on
+	// BlockStored, so leave the body untouched and fall back to first byte.
+	if _, set := reqcommon.FieldValue(payload, sessionParamsField); set {
+		return "", false, false
+	}
+	if v, set := reqcommon.FieldValue(payload, sessionIDField); set {
+		if s, isStr := v.(string); isStr && s != "" {
+			return s, false, true
+		}
+		return "", false, false
+	}
+	if request.RequestID == "" {
+		return "", false, false
+	}
+	request.Body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
+		m[sessionIDField] = request.RequestID
+	})
 	return request.RequestID, true, true
 }
 

@@ -58,6 +58,10 @@ func newKVEventsProducer(t testing.TB, name string) *InFlightLoadProducer {
 
 // newBoundProducer builds a producer bound to a kv-events-source named "events".
 func newBoundProducer(t testing.TB, name string) (*InFlightLoadProducer, *srckvevents.Source) {
+	return newBoundProducerForEngine(t, name, "")
+}
+
+func newBoundProducerForEngine(t testing.TB, name, engineType string) (*InFlightLoadProducer, *srckvevents.Source) {
 	raw, err := json.Marshal(Config{KVEventsSourceRef: "events"})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,6 +71,7 @@ func newBoundProducer(t testing.TB, name string) (*InFlightLoadProducer, *srckve
 	prefillCompletions.DeleteLabelValues(name, signalFirstByte)
 	prefillPending.DeleteLabelValues(name)
 	cfg := kvevents.DefaultConfig()
+	cfg.EngineType = engineType
 	cfg.PodDiscoveryConfig.PodLabelSelector = ""
 	source, err := srckvevents.New(ctx, "events", cfg)
 	require.NoError(t, err)
@@ -207,12 +212,12 @@ func TestKVEventPrefillCompletion_ReleasesWhenDecodeStoresLastBlock(t *testing.T
 	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
 }
 
-// An SGLang decode engine publishes the pulled prompt at its default page size
-// of 1, stamped with the request's session id.
+// An SGLang decode engine reads the top-level body session_id and publishes the
+// pulled prompt at its default page size of 1 stamped with that session id.
 func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
 	t.Parallel()
 	const name = "kv-release-sglang"
-	producer := newKVEventsProducer(t, name)
+	producer, _ := newBoundProducerForEngine(t, name, engineadapter.EngineTypeSGLang)
 	ctx := context.Background()
 	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
 	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
@@ -220,8 +225,23 @@ func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
 
 	prompt := seq(0, 200)
 	req := newStampedRequest("req-sglang", prompt)
+	envelope, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	require.NoError(t, err)
+	req.Body.Payload = fwkrequest.PayloadMap(envelope)
 	require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
 	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+	require.True(t, req.Body.Mutated, "stamping body session_id marks the body for repackaging")
+	require.Empty(t, req.Headers[sessionIDHeader], "SGLang stamping writes the body, leaving headers untouched")
+
+	stampedBody, ok := req.Body.Payload.(fwkrequest.PayloadMap)
+	require.True(t, ok)
+	require.Equal(t, "req-sglang", stampedBody[sessionIDField])
+	wireBytes, err := req.Body.WirePayload().(fwkrequest.Marshaler).Marshal()
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(wireBytes, &wire))
+	require.Equal(t, "req-sglang", wire[sessionIDField])
+	require.Equal(t, "m", wire["model"])
 
 	payload, err := msgpack.Marshal([]any{1.0, []any{map[string]any{
 		"type":         "BlockStored",
@@ -229,7 +249,7 @@ func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
 		"token_ids":    prompt,
 		"block_size":   1,
 		"medium":       "GPU",
-		"session_id":   req.Headers[sessionIDHeader],
+		"session_id":   stampedBody[sessionIDField],
 	}}, nil})
 	require.NoError(t, err)
 	_, _, batch, err := engineadapter.NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{
@@ -240,6 +260,35 @@ func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
 	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource}, batch))
 	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
 	require.Equal(t, float64(1), completions(name, signalKVEvent))
+}
+
+func TestKVEventPrefillCompletion_SGLangSessionParamsFallsBackToFirstByte(t *testing.T) {
+	t.Parallel()
+	const name = "kv-sglang-session-params"
+	producer, _ := newBoundProducerForEngine(t, name, engineadapter.EngineTypeSGLang)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+	prefillID := fullEndpointName("prefill-0")
+
+	prompt := seq(0, 200)
+	req := newStampedRequest("req-sp", prompt)
+	envelope, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","session_params":{"id":"sess-1"}}`))
+	require.NoError(t, err)
+	req.Body.Payload = fwkrequest.PayloadMap(envelope)
+	res := pdResult(prefill, decode)
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+
+	require.False(t, req.Body.Mutated, "session_params prevents body session_id injection")
+	_, hasSessionID := req.Body.Payload.(fwkrequest.PayloadMap)[sessionIDField]
+	require.False(t, hasSessionID)
+	require.Empty(t, req.Headers[sessionIDHeader])
+	require.Equal(t, float64(0), pendingWatch(name))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
 }
 
 func TestKVEventPrefillCompletion_IgnoresOtherBlocks(t *testing.T) {
@@ -291,29 +340,33 @@ func TestSessionStampPrecedence(t *testing.T) {
 	header := newStampedRequest("req-h", seq(0, 64))
 	header.Headers["X-Session-ID"] = "from-header"
 	header.Body.Payload = fwkrequest.PayloadMap{extraArgsField: map[string]any{sessionIDField: "from-xargs"}}
-	stamp, own, ok := sessionStamp(header)
+	stamp, own, ok := sessionStamp(header, engineadapter.EngineTypeVLLM)
 	require.True(t, ok)
 	require.False(t, own)
 	require.Equal(t, "from-header", stamp)
+	require.False(t, header.Body.Mutated)
 
 	xargs := newStampedRequest("req-x", seq(0, 64))
 	xargs.Body.Payload = fwkrequest.PayloadMap{extraArgsField: map[string]any{sessionIDField: "from-xargs"}}
-	stamp, own, ok = sessionStamp(xargs)
+	stamp, own, ok = sessionStamp(xargs, engineadapter.EngineTypeVLLM)
 	require.True(t, ok)
 	require.False(t, own)
 	require.Equal(t, "from-xargs", stamp)
 	require.Empty(t, xargs.Headers[sessionIDHeader])
+	require.False(t, xargs.Body.Mutated)
 
 	fresh := newStampedRequest("req-f", seq(0, 64))
-	stamp, own, ok = sessionStamp(fresh)
+	fresh.Body.Payload = fwkrequest.PayloadMap{"model": "m"}
+	stamp, own, ok = sessionStamp(fresh, engineadapter.EngineTypeVLLM)
 	require.True(t, ok)
 	require.True(t, own, "the producer's own stamp is the request id")
 	require.Equal(t, "req-f", stamp)
 	require.Equal(t, "req-f", fresh.Headers[sessionIDHeader])
+	require.False(t, fresh.Body.Mutated, "vLLM stamps the header without mutating the body")
 
 	none := newStampedRequest("req-n", seq(0, 64))
 	none.Headers = nil
-	_, _, ok = sessionStamp(none)
+	_, _, ok = sessionStamp(none, engineadapter.EngineTypeVLLM)
 	require.False(t, ok, "no header map to stamp")
 }
 
@@ -323,11 +376,171 @@ func TestSessionStampReadsEnvelopeXargs(t *testing.T) {
 	require.NoError(t, err)
 	req := newStampedRequest("req-e", seq(0, 64))
 	req.Body.Payload = fwkrequest.PayloadMap(payload)
-	stamp, own, ok := sessionStamp(req)
+	stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeVLLM)
 	require.True(t, ok)
 	require.False(t, own)
 	require.Equal(t, "from-xargs", stamp)
 	require.Empty(t, req.Headers[sessionIDHeader], "the client's vllm_xargs session id is left in place")
+}
+
+func TestSessionStampSGLang(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stamps OpenAI envelope body without touching headers", func(t *testing.T) {
+		payload, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		require.NoError(t, err)
+		req := newStampedRequest("req-sglang", seq(0, 64))
+		req.Body.Payload = fwkrequest.PayloadMap(payload)
+		stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+		require.True(t, ok)
+		require.True(t, own)
+		require.Equal(t, "req-sglang", stamp)
+		require.True(t, req.Body.Mutated)
+		require.Equal(t, "req-sglang", req.Body.Payload.(fwkrequest.PayloadMap)[sessionIDField])
+		require.Empty(t, req.Headers[sessionIDHeader])
+	})
+
+	t.Run("stamps native generate body preserving raw input_ids", func(t *testing.T) {
+		payload, err := parserutil.UnmarshalMapWithRawField([]byte(`{"input_ids":[1,2,3]}`), "input_ids")
+		require.NoError(t, err)
+		req := newStampedRequest("req-gen", seq(0, 64))
+		req.Body.Payload = fwkrequest.PayloadMap(payload)
+		stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+		require.True(t, ok)
+		require.True(t, own)
+		require.Equal(t, "req-gen", stamp)
+		require.True(t, req.Body.Mutated)
+		wire, err := req.Body.Payload.(fwkrequest.Marshaler).Marshal()
+		require.NoError(t, err)
+		require.JSONEq(t, `{"input_ids":[1,2,3],"session_id":"req-gen"}`, string(wire))
+	})
+
+	t.Run("keeps client body session_id without mutating", func(t *testing.T) {
+		for name, payload := range map[string]fwkrequest.PayloadMap{
+			"string":      {sessionIDField: "client-sess"},
+			"raw message": {sessionIDField: json.RawMessage(`"client-sess"`)},
+		} {
+			t.Run(name, func(t *testing.T) {
+				req := newStampedRequest("req-c", seq(0, 64))
+				req.Body.Payload = payload
+				stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+				require.True(t, ok)
+				require.False(t, own)
+				require.Equal(t, "client-sess", stamp)
+				require.False(t, req.Body.Mutated)
+				require.Empty(t, req.Headers[sessionIDHeader])
+			})
+		}
+	})
+
+	t.Run("skips empty or malformed client session_id without overwriting", func(t *testing.T) {
+		for name, val := range map[string]any{
+			"empty string": "",
+			"number":       42,
+			"invalid raw":  json.RawMessage(`{`),
+		} {
+			t.Run(name, func(t *testing.T) {
+				req := newStampedRequest("req-bad-sid", seq(0, 64))
+				req.Body.Payload = fwkrequest.PayloadMap{sessionIDField: val}
+				stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+				require.False(t, ok)
+				require.False(t, own)
+				require.Empty(t, stamp)
+				require.False(t, req.Body.Mutated)
+				require.Equal(t, val, req.Body.Payload.(fwkrequest.PayloadMap)[sessionIDField])
+			})
+		}
+	})
+
+	t.Run("skips stamping when session_params is present", func(t *testing.T) {
+		envelope, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","session_params":{"id":"sess-1"}}`))
+		require.NoError(t, err)
+		emptyEnvelope, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","session_params":{}}`))
+		require.NoError(t, err)
+		genMap, err := parserutil.UnmarshalMapWithRawField([]byte(`{"input_ids":[1,2],"session_params":{"id":"sess-1"}}`), "input_ids")
+		require.NoError(t, err)
+		for name, payload := range map[string]fwkrequest.PayloadMap{
+			"envelope object":       fwkrequest.PayloadMap(envelope),
+			"envelope empty object": fwkrequest.PayloadMap(emptyEnvelope),
+			"decoded map":           fwkrequest.PayloadMap(genMap),
+			"malformed raw":         {sessionParamsField: json.RawMessage(`{`)},
+			"with session_id too":   {sessionIDField: "client-sess", sessionParamsField: map[string]any{"id": "sess-1"}},
+		} {
+			t.Run(name, func(t *testing.T) {
+				req := newStampedRequest("req-sp", seq(0, 64))
+				req.Body.Payload = payload
+				_, hadSessionID := payload[sessionIDField]
+				stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+				require.False(t, ok)
+				require.False(t, own)
+				require.Empty(t, stamp)
+				require.False(t, req.Body.Mutated)
+				if !hadSessionID {
+					_, hasSessionID := payload[sessionIDField]
+					require.False(t, hasSessionID)
+				}
+			})
+		}
+	})
+
+	t.Run("treats explicit null session_id and session_params as unset", func(t *testing.T) {
+		envelope, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","session_id":null,"session_params":null}`))
+		require.NoError(t, err)
+		for name, payload := range map[string]fwkrequest.PayloadMap{
+			"envelope nulls": fwkrequest.PayloadMap(envelope),
+			"raw nulls":      {sessionIDField: json.RawMessage(`null`), sessionParamsField: json.RawMessage(`null`)},
+			"go nils":        {sessionIDField: nil, sessionParamsField: nil},
+		} {
+			t.Run(name, func(t *testing.T) {
+				req := newStampedRequest("req-null", seq(0, 64))
+				req.Body.Payload = payload
+				stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+				require.True(t, ok)
+				require.True(t, own)
+				require.Equal(t, "req-null", stamp)
+				require.True(t, req.Body.Mutated)
+				require.Equal(t, "req-null", payload[sessionIDField])
+			})
+		}
+	})
+
+	t.Run("ignores X-Session-ID header and vllm_xargs on SGLang", func(t *testing.T) {
+		req := newStampedRequest("req-hdr", seq(0, 64))
+		req.Headers["X-Session-ID"] = "client-header"
+		req.Body.Payload = fwkrequest.PayloadMap{
+			"model":        "m",
+			extraArgsField: map[string]any{sessionIDField: "xargs-id"},
+		}
+		stamp, own, ok := sessionStamp(req, engineadapter.EngineTypeSGLang)
+		require.True(t, ok)
+		require.True(t, own)
+		require.Equal(t, "req-hdr", stamp)
+		require.True(t, req.Body.Mutated)
+		require.Equal(t, "req-hdr", req.Body.Payload.(fwkrequest.PayloadMap)[sessionIDField])
+		require.Equal(t, "client-header", req.Headers["X-Session-ID"], "client header is left intact")
+	})
+
+	t.Run("skips non-map payloads and empty request id", func(t *testing.T) {
+		grpcReq := newStampedRequest("req-grpc", seq(0, 64))
+		grpcReq.Body.Payload = fwkrequest.PayloadBytes([]byte{1, 2, 3})
+		_, _, ok := sessionStamp(grpcReq, engineadapter.EngineTypeSGLang)
+		require.False(t, ok)
+		require.False(t, grpcReq.Body.Mutated)
+		require.Empty(t, grpcReq.Headers[sessionIDHeader])
+
+		nilPayload := newStampedRequest("req-nil", seq(0, 64))
+		_, _, ok = sessionStamp(nilPayload, engineadapter.EngineTypeSGLang)
+		require.False(t, ok)
+		require.False(t, nilPayload.Body.Mutated)
+
+		emptyID := newStampedRequest("", seq(0, 64))
+		emptyID.Body.Payload = fwkrequest.PayloadMap{"model": "m"}
+		_, _, ok = sessionStamp(emptyID, engineadapter.EngineTypeSGLang)
+		require.False(t, ok)
+		require.False(t, emptyID.Body.Mutated)
+		_, hasSessionID := emptyID.Body.Payload.(fwkrequest.PayloadMap)[sessionIDField]
+		require.False(t, hasSessionID)
+	})
 }
 
 func TestKVEventPrefillCompletion_NilBodyIsNotWatched(t *testing.T) {

@@ -119,10 +119,12 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 	cfg := parsed.(Config)
 
 	var source *srckvevents.Source
+	var kvEventsEngineType string
 	if cfg.KVEventsSourceRef != "" {
 		if source, err = fwkplugin.PluginByType[*srckvevents.Source](handle, cfg.KVEventsSourceRef); err != nil {
 			return nil, fmt.Errorf("inflight-load-producer kvEventsSourceRef: %w", err)
 		}
+		kvEventsEngineType = source.EngineType()
 	}
 
 	if cfg.MaxEstimatedOutputTokens != nil && *cfg.MaxEstimatedOutputTokens < 0 {
@@ -151,6 +153,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		syncCrossReplicaState:     syncCrossReplicaState,
 		PluginState:               fwkplugin.NewPluginState(ctx),
 		prefillFromKVEvents:       source != nil,
+		kvEventsEngineType:        kvEventsEngineType,
 		watch:                     newPrefillWatch(prefillPending.WithLabelValues(name)),
 	}
 	if source != nil {
@@ -193,6 +196,7 @@ type InFlightLoadProducer struct {
 	// plugin is not configured or is ordered after this producer).
 	outlenBucketMissingWarn sync.Once
 	prefillFromKVEvents     bool
+	kvEventsEngineType      string
 	watch                   *prefillWatch
 }
 
@@ -496,7 +500,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	var ownStamp bool
 	var targets map[string]fwksched.Endpoint
 	if p.prefillFromKVEvents && request.Body != nil && request.Body.TokenizedRequest != nil {
-		if stamp, ownStamp, _ = sessionStamp(request); stamp != "" {
+		if stamp, ownStamp, _ = sessionStamp(request, p.kvEventsEngineType); stamp != "" {
 			targets = make(map[string]fwksched.Endpoint, len(result.ProfileResults))
 		}
 	}
