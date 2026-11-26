@@ -162,16 +162,24 @@ func newMetricsParser(families []string) (func(io.Reader) (PrometheusMetricMap, 
 		filter   atomic.Pointer[familyFilter]
 		declared = slices.Clone(families)
 		opaque   bool
+		cache    = newFamilyCache()
+		whole    = newFamilyFilter(nil)
 	)
+	whole.all, whole.cache = true, cache
+	newFilter := func(families []string) *familyFilter {
+		f := newFamilyFilter(families)
+		f.cache = cache
+		return f
+	}
 	if len(declared) > 0 {
-		filter.Store(newFamilyFilter(declared))
+		filter.Store(newFilter(declared))
 	}
 	parser := func(data io.Reader) (PrometheusMetricMap, error) {
 		data = io.LimitReader(data, maxResponseBytes)
 		if f := filter.Load(); f != nil {
 			return f.parse(data)
 		}
-		return parseMetrics(data)
+		return whole.parse(data)
 	}
 	// AppendExtractor serializes the observer calls.
 	observer := func(ext fwkplugin.Plugin) {
@@ -185,7 +193,7 @@ func newMetricsParser(families []string) (func(io.Reader) (PrometheusMetricMap, 
 		}
 		declared = append(declared, reader.MetricFamilies()...)
 		if !opaque && len(declared) > 0 {
-			filter.Store(newFamilyFilter(declared))
+			filter.Store(newFilter(declared))
 		}
 	}
 	return parser, http.WithExtractorObserver(observer)
@@ -195,10 +203,18 @@ func newMetricsParser(families []string) (func(io.Reader) (PrometheusMetricMap, 
 // under the base family. Counters are declared under their _total name and need no suffix.
 var sampleSuffixes = [][]byte{[]byte("_bucket"), []byte("_sum"), []byte("_count")}
 
-// familyFilter parses only the lines of the listed metric families.
+// maxPooledBufferBytes is the largest kept-lines buffer returned to the pool, so a buffer grown by a
+// large response is not held between scrapes.
+const maxPooledBufferBytes = 1 << 20
+
+// familyFilter parses only the lines of the listed metric families, or every line when all is
+// set. With a cache, it reuses the parsed families of unchanged high-label lines.
 type familyFilter struct {
 	families map[string]struct{}
+	all      bool
+	cache    *familyCache
 	readers  sync.Pool
+	buffers  sync.Pool
 }
 
 func newFamilyFilter(families []string) *familyFilter {
@@ -207,6 +223,7 @@ func newFamilyFilter(families []string) *familyFilter {
 		f.families[name] = struct{}{}
 	}
 	f.readers.New = func() any { return bufio.NewReaderSize(nil, 64*1024) }
+	f.buffers.New = func() any { return new(bytes.Buffer) }
 	return f
 }
 
@@ -218,9 +235,16 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 		f.readers.Put(r)
 	}()
 
-	var kept bytes.Buffer
+	kept := f.buffers.Get().(*bytes.Buffer)
+	kept.Reset()
+	defer func() {
+		if kept.Cap() <= maxPooledBufferBytes {
+			f.buffers.Put(kept)
+		}
+	}()
 	var long []byte // a line longer than the reader's buffer, assembled across reads
 	var excluded map[string]struct{}
+	var runs familyRuns
 	for {
 		line, err := r.ReadSlice('\n')
 		if errors.Is(err, bufio.ErrBufferFull) {
@@ -231,9 +255,13 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 			line = append(long, line...)
 			long = nil
 		}
-		if f.keep(line, &excluded) {
+		if f.all || f.keep(line, &excluded) {
+			if f.cache != nil {
+				runs.observe(line, kept.Len())
+			}
 			kept.Write(line)
-			if len(line) > 0 && line[len(line)-1] != '\n' {
+			// The whole-response parse leaves an unterminated last line to the parser.
+			if !f.all && len(line) > 0 && line[len(line)-1] != '\n' {
 				kept.WriteByte('\n')
 			}
 		}
@@ -244,30 +272,20 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 			return nil, err
 		}
 	}
-	return parseMetrics(&kept)
+	if f.cache == nil {
+		return parseMetrics(kept)
+	}
+	return f.cache.parse(kept.Bytes(), runs.finish(kept.Len()))
 }
 
 // keep reports whether a text-format line belongs to a listed family. A declared, unlisted
 // family takes precedence over suffix matching for its samples.
 func (f *familyFilter) keep(line []byte, excluded *map[string]struct{}) bool {
-	line = bytes.TrimLeft(line, " \t")
-	metadata := bytes.HasPrefix(line, []byte("#"))
-	if metadata {
-		comment := bytes.TrimLeft(line[1:], " \t")
-		end := bytes.IndexAny(comment, " \t")
-		if end < 0 || (!bytes.Equal(comment[:end], []byte("HELP")) && !bytes.Equal(comment[:end], []byte("TYPE"))) {
-			return false
-		}
-		line = bytes.TrimLeft(comment[end:], " \t")
-	}
-	end := bytes.IndexAny(line, "{ \t\r\n")
-	if end < 0 {
-		end = len(line)
-	}
-	name := line[:end]
-	if len(name) == 0 {
+	kind, name, _ := lineHead(line)
+	if kind == lineOther {
 		return false
 	}
+	metadata := kind != lineSample
 	if _, ok := f.families[string(name)]; ok {
 		return true
 	}
