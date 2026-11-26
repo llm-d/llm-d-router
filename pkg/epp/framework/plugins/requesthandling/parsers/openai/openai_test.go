@@ -1434,6 +1434,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"size":                "1024x1024",
 				"response_format":     "b64_json",
 				"num_inference_steps": 30,
+				"layers":              4,
+				"resolution":          640,
 				"guidance_scale":      7.5,
 				"seed":                42,
 			},
@@ -1443,6 +1445,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					N:                 ptr.To[int64](2),
 					Size:              "1024x1024",
 					NumInferenceSteps: ptr.To[int64](30),
+					Layers:            ptr.To[int64](4),
+					Resolution:        ptr.To[int64](640),
 					NegativePrompt:    "blurry",
 				},
 				Payload: request.PayloadMap{
@@ -1453,6 +1457,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					"size":                "1024x1024",
 					"response_format":     "b64_json",
 					"num_inference_steps": json.Number("30"),
+					"layers":              json.Number("4"),
+					"resolution":          json.Number("640"),
 					"guidance_scale":      json.Number("7.5"),
 					"seed":                json.Number("42"),
 				},
@@ -1602,6 +1608,41 @@ func buildMultipartBody(t *testing.T, fields map[string]string) ([]byte, string)
 	return buf.Bytes(), w.FormDataContentType()
 }
 
+func TestOpenAIParser_ParseRequest_ImagesGenerationsNonIntegerResolution(t *testing.T) {
+	body := []byte(`{"model":"test-image-model","prompt":"a cat","resolution":"1024x1024","layers":"four"}`)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/generations"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	images := result.Body.Images
+	if images == nil || images.Prompt != "a cat" {
+		t.Fatalf("Images = %+v, want prompt a cat", images)
+	}
+	if images.Resolution != nil || images.Layers != nil {
+		t.Errorf("Resolution/Layers = %v/%v, want nil for non-integer values", images.Resolution, images.Layers)
+	}
+}
+
+func TestOpenAIParser_ParseRequest_ImagesGenerationsNumericStringResolution(t *testing.T) {
+	body := []byte(`{"model":"test-image-model","prompt":"a cat","resolution":"640","layers":"4"}`)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/generations"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	images := result.Body.Images
+	if images == nil || images.Prompt != "a cat" {
+		t.Fatalf("Images = %+v, want prompt a cat", images)
+	}
+	if images.Resolution == nil || *images.Resolution != 640 {
+		t.Errorf("Resolution = %v, want 640", images.Resolution)
+	}
+	if images.Layers == nil || *images.Layers != 4 {
+		t.Errorf("Layers = %v, want 4", images.Layers)
+	}
+}
+
 func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 	parser := NewOpenAIParser()
 
@@ -1633,6 +1674,8 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				"n":                   "2",
 				"size":                "1024x1024",
 				"num_inference_steps": "30",
+				"layers":              "4",
+				"resolution":          "640",
 				"negative_prompt":     "blurry",
 			},
 			wantModel: "test-image-model",
@@ -1641,6 +1684,8 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				N:                 ptr.To[int64](2),
 				Size:              "1024x1024",
 				NumInferenceSteps: ptr.To[int64](30),
+				Layers:            ptr.To[int64](4),
+				Resolution:        ptr.To[int64](640),
 				NegativePrompt:    "blurry",
 				InputImages:       []request.UploadedMedia{attachedImage},
 			},
@@ -1678,6 +1723,18 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 			path:    "/v1/images/edits",
 			fields:  map[string]string{"prompt": "a cat", "n": "two"},
 			wantErr: true,
+		},
+		{
+			name:       "images edits request with non-integer layers",
+			path:       "/v1/images/edits",
+			fields:     map[string]string{"prompt": "a cat", "layers": "four"},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "a cat", InputImages: []request.UploadedMedia{attachedImage}},
+		},
+		{
+			name:       "images edits request with non-integer resolution",
+			path:       "/v1/images/edits",
+			fields:     map[string]string{"prompt": "a cat", "resolution": "high"},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "a cat", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name:        "images edits request with non-multipart content-type",

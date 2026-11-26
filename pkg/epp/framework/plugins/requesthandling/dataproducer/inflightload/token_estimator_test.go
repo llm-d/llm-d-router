@@ -43,6 +43,19 @@ func ttsRequest(input, instructions, refText string, maxOut *int64) *fwksched.In
 	}
 }
 
+// imagesRequest builds a request whose body carries an image generation payload.
+func imagesRequest(size string, steps, n *int64) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			Images: &fwkrequest.ImagesGenerationsRequest{
+				Size:              size,
+				NumInferenceSteps: steps,
+				N:                 n,
+			},
+		},
+	}
+}
+
 // tokenizedRequest builds a request whose body carries a tokenized prompt of n tokens.
 func tokenizedRequest(n int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
@@ -163,6 +176,59 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 		req := &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}}
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
+}
+
+func TestEstimateOutputFromRequest_Images(t *testing.T) {
+	e := NewSimpleTokenEstimator(nil)
+
+	tests := []struct {
+		name       string
+		size       string
+		steps      *int64
+		n          *int64
+		layers     *int64
+		resolution *int64
+		want       int64
+	}{
+		{name: "default size and steps", size: "", want: 5243},
+		{name: "512 square twenty steps", size: "512x512", steps: ptr.To(int64(20)), want: 525},
+		{name: "1024 square fifty steps", size: "1024x1024", steps: ptr.To(int64(50)), want: 5243},
+		{name: "two images", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(2)), want: 10486},
+		{name: "malformed size falls back", size: "1024", steps: ptr.To(int64(50)), want: 5243},
+		{name: "steps are capped", size: "1024x1024", steps: ptr.To(int64(1000)), want: 20972},
+		{name: "images are capped", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(100)), want: 52429},
+		{name: "pixels are capped", size: "8192x8192", steps: ptr.To(int64(50)), want: 83887},
+		{name: "oversized dimension does not overflow", size: "2000000000x2", steps: ptr.To(int64(50)), want: 83887},
+		{name: "uppercase and whitespace size", size: " 1024X1024 ", steps: ptr.To(int64(50)), want: 5243},
+		{name: "zero steps and images use defaults", size: "1024x1024", steps: ptr.To(int64(0)), n: ptr.To(int64(0)), want: 5243},
+		{name: "four layers", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), want: 26215},
+		{name: "two layers", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(2)), want: 15729},
+		{name: "layers use default resolution", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), want: 10240},
+		{name: "resolution uses default layers", steps: ptr.To(int64(50)), resolution: ptr.To(int64(640)), want: 10240},
+		{name: "resolution and layers", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(640)), want: 10240},
+		{name: "size wins over resolution", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(640)), want: 26215},
+		{name: "layer count is capped", size: "1024x1024", steps: ptr.To(int64(50)), layers: ptr.To(int64(100)), want: 57672},
+		{name: "zero layers use default", steps: ptr.To(int64(50)), layers: ptr.To(int64(0)), want: 10240},
+		{name: "layered images multiply", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(2)), layers: ptr.To(int64(4)), want: 52429},
+		{name: "resolution is capped", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(8192)), want: 419431},
+		{name: "oversized resolution does not overflow", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(2000000000)), want: 419431},
+		{name: "zero resolution uses layered default", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(0)), want: 10240},
+		{name: "negative resolution uses layered default", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(-1)), want: 10240},
+		{name: "auto size uses layered resolution", size: "auto", steps: ptr.To(int64(50)), layers: ptr.To(int64(4)), resolution: ptr.To(int64(640)), want: 10240},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := imagesRequest(tt.size, tt.steps, tt.n)
+			req.Body.Images.Layers = tt.layers
+			req.Body.Images.Resolution = tt.resolution
+			require.Equal(t, tt.want, e.EstimateOutputFromRequest(req))
+		})
+	}
+}
+
+func TestEstimateOutputFromRequest_ImagesSkipOperatorCap(t *testing.T) {
+	e := NewSimpleTokenEstimator(ptr.To(int64(10)))
+	require.Equal(t, int64(5243), e.EstimateOutputFromRequest(imagesRequest("", nil, nil)))
 }
 
 func TestEstimateOutputFromRequest_OperatorCap(t *testing.T) {

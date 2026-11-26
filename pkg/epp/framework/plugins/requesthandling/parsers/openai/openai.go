@@ -751,6 +751,14 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 				return fmt.Errorf("invalid images edits num_inference_steps field: %w", err)
 			}
 			images.NumInferenceSteps = &steps
+		case "layers":
+			if layers, err := strconv.ParseInt(string(value), 10, 64); err == nil {
+				images.Layers = &layers
+			}
+		case "resolution":
+			if resolution, err := strconv.ParseInt(string(value), 10, 64); err == nil {
+				images.Resolution = &resolution
+			}
 		case "stream":
 			stream, err := parseFormBool(value)
 			if err != nil {
