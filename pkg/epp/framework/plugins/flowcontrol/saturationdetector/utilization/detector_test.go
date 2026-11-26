@@ -446,6 +446,34 @@ func TestDetector_Saturation_ScrapeLagCredit(t *testing.T) {
 		"only unobserved in-flight credited, running not double-counted")
 }
 
+func TestDetector_Saturation_DispatchReservation(t *testing.T) {
+	t.Parallel()
+
+	detector := NewDetector("test-detector", Config{
+		QueueDepthThreshold:       4,
+		KVCacheUtilThreshold:      1.0,
+		MetricsStalenessThreshold: time.Minute,
+	}, logr.Discard())
+	ctx := context.Background()
+	pod := func(name string) fwkdl.Endpoint {
+		metrics := fwkdl.NewMetrics()
+		metrics.UpdateTime = time.Now()
+		return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "ns1"}}, metrics)
+	}
+	pool := []fwkdl.Endpoint{pod("pod1"), pod("pod2")}
+	require.InDelta(t, 0.0, detector.Saturation(ctx, pool), 1e-4)
+
+	require.True(t, detector.ReserveDispatch("a"))
+	require.False(t, detector.ReserveDispatch("a"), "a duplicate reservation is counted once")
+	require.True(t, detector.ReserveDispatch("b"))
+	// Two released requests against two endpoints with a queue threshold of 4 each.
+	require.InDelta(t, 0.25, detector.Saturation(ctx, pool), 1e-4)
+
+	require.True(t, detector.ReleaseDispatch("a"))
+	require.False(t, detector.ReleaseDispatch("a"), "a duplicate release is a no-op")
+	require.InDelta(t, 0.125, detector.Saturation(ctx, pool), 1e-4)
+}
+
 func TestDetector_Filter(t *testing.T) {
 	t.Parallel()
 
