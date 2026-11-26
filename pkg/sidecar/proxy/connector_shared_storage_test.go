@@ -17,6 +17,8 @@ limitations under the License.
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -505,6 +507,113 @@ func TestResponseWriterWithBufferRecordsFinalStatus(t *testing.T) {
 				w.WriteHeader(code)
 			}
 			require.Equal(t, tt.want, w.getStatusCode())
+		})
+	}
+}
+
+// TestSharedStorage_ReportsPrefillCachedTokens covers the usage the client
+// sees after prefill: the prefill pod did the prompt work, so its
+// cached_tokens is reported instead of the decode pod's. A prefill response
+// with no usage, no count in its usage, or a body that fails to decode leaves
+// the decode count, and a
+// decode-first success keeps it because no prefill ran.
+func TestSharedStorage_ReportsPrefillCachedTokens(t *testing.T) {
+	const (
+		prefillUsage7 = `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`
+		decodeUsage49 = `{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		decodeSSE49   = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\ndata: [DONE]\n\n"
+		jsonRequest   = `{"model":"m","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}`
+	)
+	tests := []struct {
+		name        string
+		request     string
+		prefillBody string
+		decodeBody  string
+		decodeType  string
+		wantPrefill bool
+		wantCached  int
+	}{
+		{name: "JSON decode response", request: jsonRequest, prefillBody: prefillUsage7, decodeBody: decodeUsage49, wantPrefill: true, wantCached: 7},
+		{
+			name:        "streamed decode response",
+			request:     `{"model":"m","messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"stream":true,"stream_options":{"include_usage":true}}`,
+			prefillBody: prefillUsage7, decodeBody: decodeSSE49, decodeType: "text/event-stream", wantPrefill: true, wantCached: 7,
+		},
+		{
+			// vLLM without --enable-prompt-tokens-details sends null details
+			// however many tokens were cached, so no count was measured.
+			name:        "prefill usage with null details",
+			request:     jsonRequest,
+			prefillBody: `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":null}}`,
+			decodeBody:  decodeUsage49, wantPrefill: true, wantCached: 49,
+		},
+		{
+			name: "prefill response without usage", request: jsonRequest,
+			prefillBody: `{"id":"cmpl-prefill","object":"chat.completion","choices":[]}`,
+			decodeBody:  decodeUsage49, wantPrefill: true, wantCached: 49,
+		},
+		{
+			// 1e400 overflows float64 after usage is decoded.
+			name: "prefill response that fails to decode", request: jsonRequest,
+			prefillBody: `{"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"x":1e400}`,
+			decodeBody:  decodeUsage49, wantPrefill: true, wantCached: 49,
+		},
+		{
+			name:        "decode-first success runs no prefill",
+			request:     `{"model":"m","messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"cache_hit_threshold":0.5}`,
+			prefillBody: prefillUsage7, decodeBody: decodeUsage49, wantPrefill: false, wantCached: 49,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var prefillCalled atomic.Bool
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				prefillCalled.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.prefillBody))
+			}))
+			defer prefill.Close()
+
+			decodeURL, err := url.Parse("http://decoder:8000")
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+			srv.logger = log.Log
+			srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				contentType := tt.decodeType
+				if contentType == "" {
+					contentType = "application/json"
+				}
+				w.Header().Set("Content-Type", contentType)
+				_, _ = w.Write([]byte(tt.decodeBody))
+			})
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tt.request))
+			recorder := httptest.NewRecorder()
+			srv.handleSharedStorage(recorder, req, strings.TrimPrefix(prefill.URL, "http://"), reqcommon.APITypeChatCompletions)
+
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.Equal(t, tt.wantPrefill, prefillCalled.Load())
+			body := recorder.Body.String()
+			if tt.decodeType == "text/event-stream" {
+				require.Contains(t, body, `"content":"hello"`)
+				require.Contains(t, body, fmt.Sprintf(`"cached_tokens":%d`, tt.wantCached))
+				require.NotContains(t, body, `"cached_tokens":49`)
+				require.Contains(t, body, "data: [DONE]")
+				return
+			}
+			var response struct {
+				Usage struct {
+					PromptTokensDetails *struct {
+						CachedTokens *int `json:"cached_tokens"`
+					} `json:"prompt_tokens_details"`
+				} `json:"usage"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &response), body)
+			details := response.Usage.PromptTokensDetails
+			require.NotNil(t, details, body)
+			require.NotNil(t, details.CachedTokens, body)
+			require.Equal(t, tt.wantCached, *details.CachedTokens, body)
 		})
 	}
 }

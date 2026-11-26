@@ -1251,7 +1251,7 @@ func TestSharedStoragePrefillToolCalling(t *testing.T) {
 						target = "%invalid"
 					}
 					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(tt.body))
-					prefillErr := s.prefill(httptest.NewRecorder(), r, target, body, api, toolFields)
+					_, prefillErr := s.prefill(httptest.NewRecorder(), r, target, body, api, toolFields)
 					require.Equal(t, tt.invalidTarget, prefillErr != nil)
 					if tt.invalidTarget {
 						require.Zero(t, dispatched.Load())

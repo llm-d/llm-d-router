@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 )
 
 const finishReasonCacheThreshold = "cache_threshold"
@@ -80,7 +81,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 
 	// we clone the completion request to avoid modifying the original request
 	prefillRequest := maps.Clone(body)
-	if err := s.prefill(w, r, prefillPodHostPort, prefillRequest, apiType, toolFields); err != nil {
+	cachedTokens, err := s.prefill(w, r, prefillPodHostPort, prefillRequest, apiType, toolFields)
+	if err != nil {
 		logger.Error(err, "prefill failed")
 		return
 	}
@@ -101,7 +103,21 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	_, _ = toolFields.compareValidatedDispatched(decodeRequestBody)
-	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	if cachedTokens == nil {
+		s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	} else {
+		// Decode loads the prompt blocks prefill stored, so its own count reports
+		// the loaded prompt as cached. The prefill count is the one that measured
+		// the prompt cache, as on the P2P connector and the coordinator.
+		streaming, _ := body[reqcommon.FieldStream].(bool)
+		rewriter, finalize := usage.NewCachedTokensResponseWriter(decodeWriter, *cachedTokens, streaming)
+		s.decoderProxy.ServeHTTP(rewriter, decodeReq)
+		// A failed flush is a failed write to the client, which the status writer
+		// records, so the decode error is counted below.
+		if err := finalize(); err != nil {
+			logger.Error(err, "failed to flush cached token response writer")
+		}
+	}
 	decodeReturned = true
 	observeStageDuration(r.Context(), routing.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
@@ -297,8 +313,10 @@ func (s *Server) checkBufferedResponseForCacheThreshold(logger logr.Logger, data
 	return false
 }
 
-// prefill routes a request to a prefill node
-func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType, toolFields *toolCallingRequest) error {
+// prefill routes a request to a prefill node. On success it returns the
+// prefill pod's cached-token count (see prefillCachedTokens), nil when the
+// response carries none.
+func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType, toolFields *toolCallingRequest) (*int, error) {
 	logger := log.FromContext(r.Context())
 	// Prepare prefill request
 	reqcommon.CapSingleToken(body, apiType)
@@ -309,7 +327,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send Invalid JSON error response to client")
 		}
-		return err
+		return nil, err
 	}
 	preq := cloneRequestWithBody(r.Context(), r, pbody)
 
@@ -319,7 +337,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send Bad Gateway error response to client")
 		}
-		return err
+		return nil, err
 	}
 
 	// send prefill request
@@ -335,14 +353,14 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		// disconnects, which is not a prefill failure.
 		if preq.Context().Err() != nil {
 			logger.V(logging.DEFAULT).Info("client disconnected during prefill")
-			return prefillErr
+			return nil, prefillErr
 		}
 		observeStageError(r.Context(), routing.StagePrefill)
 		logger.Error(prefillErr, "prefill request failed", "status", pw.statusCode)
 		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send Bad Gateway error response to client")
 		}
-		return prefillErr
+		return nil, prefillErr
 	}
 
 	if isHTTPError(pw.statusCode) {
@@ -353,9 +371,9 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		if pw.buffer.Len() > 0 {
 			WriteAll(w, pw.buffer.Bytes())
 		}
-		return fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
+		return nil, fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
 	}
 
 	logger.V(logging.DEBUG).Info("prefill completed successfully")
-	return nil
+	return prefillCachedTokens(logger, pw.bodyBytes()), nil
 }
