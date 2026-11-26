@@ -398,7 +398,7 @@ func TestProducerScopeAndBranchIsolation(t *testing.T) {
 		observeBatch(t, p, nil, kvevents.EventSource{Endpoint: observation.endpoint},
 			kvevents.EventBatch{DataParallelRank: observation.rank, Events: []kvevents.GenericEvent{store}})
 	}
-	req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 48,
+	req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 49,
 		Prefixes: []attrsession.SessionCachePrefix{
 			{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20, 40}, BlockSizeTokens: 16, Exact: true},
 			{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 30, 50}, BlockSizeTokens: 16, Exact: true},
