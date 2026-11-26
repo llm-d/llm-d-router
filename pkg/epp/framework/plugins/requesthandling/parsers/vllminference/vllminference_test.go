@@ -31,6 +31,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/protoscan"
@@ -860,7 +861,22 @@ func TestVllmInferenceParser_RewriteModelName_BaseModelsConfig(t *testing.T) {
 		require.Equal(t, "sql-lora", decoded.GetLoraName())
 	})
 
-	t.Run("adapter target on an alias request with several base models is an error", func(t *testing.T) {
+	t.Run("adapter target on a lora_name-only request keeps model empty", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			LoraName: "ad0",
+			Prompt:   &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Empty(t, decoded.GetModel(), "vLLM accepts an empty model when lora_name is set")
+		require.Equal(t, "sql-lora", decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an alias request with several base models is a typed error", func(t *testing.T) {
 		parser := newConfigured(t)
 		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
 			Model:  "my-alias",
@@ -869,11 +885,20 @@ func TestVllmInferenceParser_RewriteModelName_BaseModelsConfig(t *testing.T) {
 		require.NoError(t, err)
 		_, err = parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
 		require.ErrorContains(t, err, "cannot resolve base model")
+		var errCommon errcommon.Error
+		require.ErrorAs(t, err, &errCommon)
+		require.Equal(t, errcommon.Internal, errCommon.Code,
+			"a plain error aborts the ext_proc stream and fails open instead of returning the error envelope")
 	})
 
 	t.Run("factory rejects invalid parameters", func(t *testing.T) {
 		_, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(`{"baseModels":`)), nil)
 		require.ErrorContains(t, err, "parameters")
+
+		for _, params := range []string{`{"baseModels":[""]}`, `{"baseModels":["Qwen/Qwen3-0.6B","  "]}`} {
+			_, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(params)), nil)
+			require.ErrorContains(t, err, "baseModels must not contain empty strings", params)
+		}
 	})
 }
 

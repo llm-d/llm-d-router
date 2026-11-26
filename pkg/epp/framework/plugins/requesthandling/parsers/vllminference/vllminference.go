@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
@@ -91,6 +92,9 @@ func VllmInferenceParserPluginFactory(name string, params *json.Decoder, _ fwkpl
 		}
 		parser.baseModels = make(map[string]bool, len(cfg.BaseModels))
 		for _, base := range cfg.BaseModels {
+			if strings.TrimSpace(base) == "" {
+				return nil, fmt.Errorf("%s: parameters: baseModels must not contain empty strings", VllmInferenceParserType)
+			}
 			parser.baseModels[base] = true
 		}
 	}
@@ -319,7 +323,8 @@ func modalityName(m vllmpb.Modality) (reqcommon.Modality, error) {
 // When BaseModels is configured, a target outside that list is an adapter. A
 // request whose model is not a base model names the pool through an alias, so
 // the rewrite writes the base model alongside the adapter; a single BaseModels
-// entry resolves it, and several without a match return an error.
+// entry resolves it, and several without a match return an error. A request
+// that sets only lora_name keeps its empty model, which vLLM accepts.
 // Without BaseModels, the parser cannot tell an adapter from another base
 // model, so only a request that already carries lora_name is rewritten to
 // another adapter (a target other than its base model); a request without
@@ -341,10 +346,15 @@ func (p *VllmInferenceParser) RewriteModelName(payload fwkrequest.MarshalablePay
 	baseModel := req.Model()
 	if len(p.baseModels) > 0 {
 		adapterTarget = !p.baseModels[model]
-		if adapterTarget && !p.baseModels[baseModel] {
+		// vLLM accepts an empty model when lora_name is set, so a
+		// lora_name-only request needs no base model.
+		if adapterTarget && baseModel != "" && !p.baseModels[baseModel] {
 			if len(p.baseModels) != 1 {
-				return nil, fmt.Errorf("rewriting model name: cannot resolve base model for adapter target %q: request model %q is not a configured base model and %d base models are configured",
-					model, baseModel, len(p.baseModels))
+				return nil, errcommon.Error{
+					Code: errcommon.Internal,
+					Msg: fmt.Sprintf("rewriting model name: cannot resolve base model for adapter target %q: request model %q is not a configured base model and %d base models are configured",
+						model, baseModel, len(p.baseModels)),
+				}
 			}
 			for b := range p.baseModels {
 				baseModel = b
