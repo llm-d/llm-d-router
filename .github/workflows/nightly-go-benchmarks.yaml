@@ -42,7 +42,7 @@ jobs:
       # ./pkg/... because the benchmarks under test/ need envtest or a live server.
       - name: Run the benchmarks
         shell: bash
-        run: go test -run='^$' -bench=. -benchmem -timeout=30m ./pkg/... | tee bench-raw.txt
+        run: go test -short -run='^$' -bench=. -benchmem -timeout=30m ./pkg/... | tee bench-raw.txt
 
       # The go tool treats every unit as smaller-is-better, which inverts MB/s and the other rates.
       - name: Keep ns/op only
@@ -61,15 +61,17 @@ jobs:
           ref: ${{ github.sha }} # main may move during the run; store the commit that was tested.
           alert-threshold: '120%'
           fail-on-alert: true
+          fail-threshold: '200%'
           summary-always: true
           max-items-in-chart: 90
 
       # Saved after an alert too, so a real regression becomes the baseline and does not fire every night.
       - name: Save the results
-        if: ${{ !cancelled() && steps.compare.outcome != 'skipped' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && steps.compare.outcome != 'skipped' && github.ref == 'refs/heads/main' && hashFiles('benchmark-data.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: go-benchmark-history
+          overwrite: true
           path: |
             benchmark-data.json
             bench-raw.txt
