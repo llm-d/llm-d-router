@@ -390,9 +390,10 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	}
 	require.NoError(t, p.PreRequest(ctx, request, &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":                   {TargetEndpoints: []scheduling.Endpoint{endpoints[1]}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{endpoints[2]}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{endpoints[1]}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoints[2]}},
 		},
 	}))
 	cached := p.speculativeCache.Get(request.RequestID)

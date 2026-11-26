@@ -248,9 +248,10 @@ func TestPreRequestPredictionFollowsPrefillEndpoint(t *testing.T) {
 	}
 	disaggregated := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"decode":                          {TargetEndpoints: []fwksched.Endpoint{decode}},
-			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{prefill}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decode}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefill}},
 		},
 	}
 

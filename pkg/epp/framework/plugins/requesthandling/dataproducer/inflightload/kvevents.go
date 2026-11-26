@@ -276,8 +276,9 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 	for _, prompt := range tokenized.Prompts {
 		pending.prompts = append(pending.prompts, prompt.TokenIDs)
 	}
+	prefillProfile := result.PrefillProfileName
 	for profileName, endpoint := range targets {
-		if profileName == profilePrefill {
+		if profileName == prefillProfile {
 			continue
 		}
 		if addr := eventEndpoint(endpoint); addr != "" {
@@ -285,7 +286,7 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 		}
 	}
 	if len(pending.endpoints) == 0 {
-		if endpoint, ok := targets[profilePrefill]; ok {
+		if endpoint, ok := targets[prefillProfile]; ok {
 			if addr := eventEndpoint(endpoint); addr != "" {
 				pending.endpoints = append(pending.endpoints, addr)
 			}
@@ -347,7 +348,7 @@ func (p *InFlightLoadProducer) onPrefillComplete(ctx context.Context, requestID 
 			continue
 		}
 		switch {
-		case profileName == profilePrefill:
+		case profileName == result.PrefillProfileName:
 			p.release(endpoint, requestID, profileName)
 		case !p.addEstimatedOutputTokens:
 			p.releaseTokensEarly(endpoint, requestID, profileName)

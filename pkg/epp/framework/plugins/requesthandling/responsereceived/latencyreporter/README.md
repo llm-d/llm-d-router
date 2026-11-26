@@ -41,14 +41,14 @@ plugins:
 - type: latency-reporter
   parameters:
     promptBuckets: [1024, 8192]      # labels: le1024, le8192, gt8192
-    prefillProfileName: prefill
+    prefillProfileName: prefill       # optional: defaults to the result's prefill profile
     priorities: [100]                # optional; empty records every priority
 ```
 
 | Field | Default | Description |
 |---|---|---|
 | `promptBuckets` | none | Strictly increasing upper bounds, in prompt tokens. With none, every request is in bucket `all`. |
-| `prefillProfileName` | `prefill` | Scheduling profile that marks a remote prefill. Match the `disagg-profile-handler` profile name. |
+| `prefillProfileName` | the result's prefill profile, then `prefill` | Scheduling profile that marks a remote prefill. Set it to pin a name the scheduling result does not carry. |
 | `priorities` | all | Served priorities to record. Limiting it bounds label cardinality. |
 
 ## Observability

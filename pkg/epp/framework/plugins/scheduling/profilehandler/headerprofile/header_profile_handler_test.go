@@ -104,12 +104,13 @@ func TestNewHeaderProfileHandlerEmptyFallsBackToDefault(t *testing.T) {
 
 func TestHeaderProfileHandlerFactory(t *testing.T) {
 	tests := []struct {
-		name               string
-		rawParameters      string
-		wantHeaderName     string
-		wantDefaultProfile string
-		wantPrefillProfile string
-		wantErr            bool
+		name                   string
+		rawParameters          string
+		wantHeaderName         string
+		wantDefaultProfile     string
+		wantPrefillProfile     string
+		wantPrefillProfileName string
+		wantErr                bool
 	}{
 		{
 			name:               "no parameters, uses default header and default profile",
@@ -123,6 +124,21 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 			wantHeaderName:     reqcommon.EPPProfileHeaderKey,
 			wantDefaultProfile: defaultProfileName,
 			wantPrefillProfile: "pf",
+		},
+		{
+			name:                   "prefill profile name is trimmed",
+			rawParameters:          `{"prefillProfileName": " ph200 "}`,
+			wantHeaderName:         reqcommon.EPPProfileHeaderKey,
+			wantDefaultProfile:     defaultProfileName,
+			wantPrefillProfileName: "ph200",
+		},
+		{
+			name:                   "prefill profile name and prefill profile stay separate",
+			rawParameters:          `{"prefillProfile": "pf", "prefillProfileName": "ph200"}`,
+			wantHeaderName:         reqcommon.EPPProfileHeaderKey,
+			wantDefaultProfile:     defaultProfileName,
+			wantPrefillProfile:     "pf",
+			wantPrefillProfileName: "ph200",
 		},
 		{
 			name:               "whitespace-only prefill profile disables the report",
@@ -204,6 +220,9 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 			}
 			if handler.prefillProfile != tt.wantPrefillProfile {
 				t.Errorf("Expected prefillProfile %q, got %q", tt.wantPrefillProfile, handler.prefillProfile)
+			}
+			if handler.prefillProfileName != tt.wantPrefillProfileName {
+				t.Errorf("Expected prefillProfileName %q, got %q", tt.wantPrefillProfileName, handler.prefillProfileName)
 			}
 		})
 	}
@@ -562,6 +581,38 @@ func TestHeaderProfileProcessResults(t *testing.T) {
 	}
 }
 
+// TestHeaderProfileProcessResultsPrefillProfileName covers how the handler names the
+// prefill stage: prefillProfileName wins, prefillProfile stands in for a coordinator
+// deployment that only configures the response header, and neither leaves the field for
+// the scheduler to default.
+func TestHeaderProfileProcessResultsPrefillProfileName(t *testing.T) {
+	tests := []struct {
+		name               string
+		prefillProfile     string
+		prefillProfileName string
+		want               string
+	}{
+		{name: "prefill profile name", prefillProfileName: "prefill-h200", want: "prefill-h200"},
+		{name: "prefill profile stands in", prefillProfile: "prefill-h200", want: "prefill-h200"},
+		{name: "prefill profile name wins", prefillProfile: "pf", prefillProfileName: "prefill-h200", want: "prefill-h200"},
+		{name: "neither leaves it to the scheduler"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHeaderProfileHandler("", "").
+				WithPrefillProfile(tt.prefillProfile).
+				WithPrefillProfileName(tt.prefillProfileName)
+			got, err := h.ProcessResults(context.Background(), nil, map[string]*fwksched.ProfileRunResult{"decode": {}})
+			if err != nil {
+				t.Fatalf("ProcessResults() unexpected error: %v", err)
+			}
+			if got.PrefillProfileName != tt.want {
+				t.Errorf("PrefillProfileName = %q, want %q", got.PrefillProfileName, tt.want)
+			}
+		})
+	}
+}
+
 func TestHeaderProfileResponseHeader(t *testing.T) {
 	endpoint := func(address, port string) *fwkdl.EndpointMetadata {
 		return &fwkdl.EndpointMetadata{Address: address, Port: port}
@@ -664,6 +715,16 @@ func TestHeaderProfileResponseHeader(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("prefill profile name alone reports no header", func(t *testing.T) {
+		h := NewHeaderProfileHandler("", "").WithPrefillProfileName("prefill-h200")
+		request := &fwksched.InferenceRequest{SchedulingResult: result("prefill-h200")}
+		response := &fwkrh.Response{Headers: map[string]string{}, ReqMetadata: served("10.0.0.7:8000")}
+		h.ResponseHeader(context.Background(), request, response, endpoint("10.0.0.7", "8000"))
+		if diff := cmp.Diff(map[string]string{}, response.Headers); diff != "" {
+			t.Errorf("response headers mismatch (-want +got):\n%s", diff)
+		}
+	})
 
 	t.Run("nil request, response, and headers map are no-ops", func(t *testing.T) {
 		h := NewHeaderProfileHandler("", "").WithPrefillProfile("prefill")

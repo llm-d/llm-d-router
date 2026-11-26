@@ -244,9 +244,10 @@ func TestPreRequest_PrefillProfile_SeedDecode_SeedsBoth(t *testing.T) {
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":                   {TargetEndpoints: []scheduling.Endpoint{testEndpoints[0]}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{testEndpoints[0]}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}},
 		},
 	}
 	_ = p.PreRequest(ctx, req, result)
@@ -284,9 +285,10 @@ func TestPreRequest_PrefillProfile_SeedsPrefillOnly(t *testing.T) {
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":                   {TargetEndpoints: []scheduling.Endpoint{testEndpoints[0]}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{testEndpoints[0]}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}},
 		},
+		PrefillProfileName: "prefill",
 	}
 	_ = p.PreRequest(ctx, req, result)
 
@@ -379,9 +381,10 @@ func TestPreRequest_PD_RecordsPrefillPrediction(t *testing.T) {
 	beforeDecode := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount()
 	_ = p.PreRequest(ctx, tokenizedRequest("req-pd", 8*testBlockSize), &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":                   {TargetEndpoints: []scheduling.Endpoint{decode}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{prefill}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{decode}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{prefill}},
 		},
 	})
 
@@ -464,12 +467,13 @@ func TestPreRequest_PD_BestPredictedFollowsPrefillProfile(t *testing.T) {
 	before := sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RolePrefill).GetSampleSum()
 	_ = p.PreRequest(ctx, tokenizedRequest("req-best-pd", 8*testBlockSize), &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
 			"decode": {
 				TargetEndpoints:  []scheduling.Endpoint{decode},
 				ScoredCandidates: []scheduling.ScoredEndpoint{{Endpoint: decode}},
 			},
-			experimentalPrefillProfile: {
+			"prefill": {
 				TargetEndpoints:  []scheduling.Endpoint{prefill},
 				ScoredCandidates: []scheduling.ScoredEndpoint{{Endpoint: prefill}},
 			},
@@ -777,7 +781,8 @@ func TestProduceThenPreRequest_ReadsOnlySelectedMatchInfo(t *testing.T) {
 			wantBest, wantAvailable := scoredBlocks, filteredBlocks
 			switch scenario {
 			case "prefill":
-				result.ProfileResults[experimentalPrefillProfile] = result.ProfileResults["decode"]
+				result.PrefillProfileName = "prefill"
+				result.ProfileResults["prefill"] = result.ProfileResults["decode"]
 				result.ProfileResults["decode"] = &scheduling.ProfileRunResult{
 					TargetEndpoints: []scheduling.Endpoint{endpoints[2]},
 				}
@@ -866,11 +871,12 @@ func TestProduceThenPreRequest_NoScoredCandidates_BothMaximaFallBack(t *testing.
 // through to the recorded metric.
 func newProducerForProduceAndPreRequest(ctx context.Context, name string, idx kvCacheIndexer) *Producer {
 	return &Producer{
-		typedName:       plugin.TypedName{Type: PluginType, Name: name},
-		kvCacheIndexer:  idx,
-		dk:              attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
-		pluginState:     plugin.NewPluginState(ctx),
-		blockSizeTokens: testBlockSize,
+		typedName:         plugin.TypedName{Type: PluginType, Name: name},
+		kvCacheIndexer:    idx,
+		dk:                attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		pluginState:       plugin.NewPluginState(ctx),
+		blockSizeTokens:   testBlockSize,
+		speculativeLeases: newSpeculativeLeases(idx.KVBlockIndex(), logr.Discard()),
 	}
 }
 
@@ -1143,9 +1149,10 @@ func TestPreRequest_PD_RecordsMMPrediction(t *testing.T) {
 	beforeDecode := sharedPrefixHistogram(t, mmPredictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount()
 	_ = p.PreRequest(ctx, mmRequest("req-mm-pd", 8*testBlockSize), &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":                   {TargetEndpoints: []scheduling.Endpoint{decode}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{prefill}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{decode}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{prefill}},
 		},
 	})
 
@@ -1567,11 +1574,12 @@ func TestPreRequest_PrefillProfile_EngineBlockPerTarget(t *testing.T) {
 	})
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
 			"decode": {TargetEndpoints: []scheduling.Endpoint{
 				endpointWithMetrics("pod-a", "10.0.0.1", &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize}),
 			}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{
 				endpointWithMetrics("pod-b", "10.0.0.2", nil),
 			}},
 		},

@@ -237,16 +237,16 @@ func RecordMMPrediction(pluginName, pluginType, role string, mmPredictedCached, 
 
 // PredictionTarget returns the profile result whose first target endpoint the
 // request's prefix-cache prediction is recorded for, and the endpoint_role to
-// record it under. A request with a target in prefillProfile is attributed to
-// that profile, because the sidecar's nixlv2 KV connector reports the
-// prefiller's cached-token count. The other KV connectors report the decoder's
-// count, which this does not match. It returns nil when the primary profile
-// selected no endpoint.
-func PredictionTarget(result *fwksched.SchedulingResult, prefillProfile string) (*fwksched.ProfileRunResult, string) {
+// record it under. A request with a target in the result's prefill profile is
+// attributed to that profile, because the sidecar's nixlv2 KV connector reports
+// the prefiller's cached-token count. The other KV connectors report the
+// decoder's count, which this does not match. It returns nil when the primary
+// profile selected no endpoint.
+func PredictionTarget(result *fwksched.SchedulingResult) (*fwksched.ProfileRunResult, string) {
 	if result == nil {
 		return nil, ""
 	}
-	if prefill := result.ProfileResults[prefillProfile]; prefill.FirstEndpoint() != nil {
+	if prefill := result.PrefillProfile(); prefill.FirstEndpoint() != nil {
 		return prefill, RolePrefill
 	}
 	if primary := result.ProfileResults[result.PrimaryProfileName]; primary.FirstEndpoint() != nil {

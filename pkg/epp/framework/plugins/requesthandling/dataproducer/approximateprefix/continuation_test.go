@@ -120,9 +120,10 @@ func (f *continuationFixture) schedule(t *testing.T, req *fwksched.InferenceRequ
 	require.NoError(t, f.p.Produce(ctx, req, []fwksched.Endpoint{f.decode, f.prefill}))
 	require.NoError(t, f.p.PreRequest(ctx, req, &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"decode":                          {TargetEndpoints: []fwksched.Endpoint{f.decode}},
-			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{f.prefill}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{f.decode}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{f.prefill}},
 		},
 	}))
 }
@@ -295,9 +296,10 @@ func TestContinuationIndexedAfterLatePromptInsert(t *testing.T) {
 		require.NoError(t, f.p.Produce(ctx, req, []fwksched.Endpoint{f.decode, f.prefill}))
 		require.NoError(t, f.p.PreRequest(ctx, req, &fwksched.SchedulingResult{
 			PrimaryProfileName: "decode",
+			PrefillProfileName: "prefill",
 			ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode":                          {TargetEndpoints: []fwksched.Endpoint{f.decode}},
-				experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{f.prefill}},
+				"decode":  {TargetEndpoints: []fwksched.Endpoint{f.decode}},
+				"prefill": {TargetEndpoints: []fwksched.Endpoint{f.prefill}},
 			},
 		}))
 		<-gate.waiting

@@ -325,6 +325,7 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	req := makeTokenRequest("multi-req", 4) // 4 input + UnknownOutputTokens output (UNKNOWN)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(podA)}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(podB)}},
@@ -869,6 +870,7 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream
 	req := makeTokenRequest("req-pd-no-output", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
@@ -978,6 +980,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	req := makeTokenRequest("req-multi-cache", 8)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{epA}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{epB}},
@@ -1016,6 +1019,7 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	req := makeTokenRequest("req-shared", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
@@ -1248,6 +1252,7 @@ func TestInFlightLoadProducer_JanitorReapsStalledStreamWithLiveContext(t *testin
 	req := makeTokenRequest("req-janitor-stalled-stream", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)}},
@@ -1658,6 +1663,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
 
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefillEP}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{decodeEP}},
