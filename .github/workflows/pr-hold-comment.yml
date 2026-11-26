@@ -25,8 +25,10 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: true
+    # The secrets context is not available in a step if; evaluate it here.
     env:
       GH_TOKEN: ${{ github.token }}
+      HAS_APP: ${{ secrets.RELEASE_NOTES_APP_ID != '' && secrets.RELEASE_NOTES_APP_PRIVATE_KEY != '' }}
       PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
       REPO: ${{ github.repository }}
     steps:
@@ -59,12 +61,29 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Reuses the llm-d-router-release-notes App, scoped to pull-requests: write.
+      # Label changes made with github.token do not trigger pull_request
+      # labeled/unlabeled workflows such as pr-hold-gate.yml.
+      - name: Generate GitHub App token
+        id: app-token
+        if: steps.cmd.outputs.cmd != '' && steps.check-access.outputs.skip != 'true' && env.HAS_APP == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_NOTES_APP_ID }}
+          private-key: ${{ secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
       - name: Add hold label
         if: steps.cmd.outputs.cmd == 'hold' && steps.check-access.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         run: gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label hold
 
       - name: Remove hold label
         if: steps.cmd.outputs.cmd == 'cancel' && steps.check-access.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         run: gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label hold || true
 
       - name: React to comment
