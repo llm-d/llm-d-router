@@ -17,8 +17,10 @@ limitations under the License.
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -187,25 +189,26 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	if reqCtx.IsGRPC() {
 		return nil
 	}
-	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
 	// One slice, tagged by modality, in request order: that order is what pairs
 	// entries with parts later (see collectMediaParts). Separate passes over URL
 	// and inline parts would reorder a request mixing audio_url and input_audio.
 	var refs []mediaRef
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
-	if items, ok := promptItems(reqCtx.Body, apiType); ok {
-		var err error
-		refs, err = collectMediaRefs(items, apiType)
-		if err != nil {
-			return err
-		}
-		// The refs alias parts inside items, which promptItems may have decoded
-		// out of a json.RawMessage; store the slice back so the rewrites below
-		// land in the body. Skipped when nothing will be rewritten, which leaves
-		// the field raw and its key order intact.
-		if len(refs) > 0 {
-			setPromptItems(reqCtx.Body, apiType, items)
+	if mayContainMedia(reqCtx.Body, apiType) {
+		if items, ok := promptItems(reqCtx.Body, apiType); ok {
+			var err error
+			refs, err = collectMediaRefs(items, apiType)
+			if err != nil {
+				return err
+			}
+			// The refs alias parts inside items, which promptItems may have decoded
+			// out of a json.RawMessage; store the slice back so the rewrites below
+			// land in the body. Skipped when nothing will be rewritten, which leaves
+			// the field raw and its key order intact.
+			if len(refs) > 0 {
+				setPromptItems(reqCtx.Body, apiType, items)
+			}
 		}
 	}
 
@@ -226,6 +229,8 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	if len(refs) == 0 {
 		return nil
 	}
+
+	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
 	if s.maxMultimodalEntries > 0 && len(refs) > s.maxMultimodalEntries {
 		return fmt.Errorf("too many multimodal entries: got %d, max %d: %w", len(refs), s.maxMultimodalEntries, pipeline.ErrBadRequest)
@@ -319,6 +324,100 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	}
 
 	return nil
+}
+
+type rawChatMediaToken struct {
+	prefix []byte
+	suffix []byte
+}
+
+func splitMediaToken(partType string) rawChatMediaToken {
+	prefix, suffix, _ := bytes.Cut([]byte(`"`+partType+`"`), []byte{'_'})
+	return rawChatMediaToken{prefix: prefix, suffix: suffix}
+}
+
+var (
+	// rawChatMediaTokens lists the JSON-quoted part types and untyped keys that
+	// collectMediaParts recognizes on chat completions and Responses requests,
+	// split on '_' for underscore-anchored scanning.
+	rawChatMediaTokens = []rawChatMediaToken{
+		splitMediaToken(reqcommon.PartTypeImageURL),
+		splitMediaToken(reqcommon.PartTypeInputImage),
+		splitMediaToken(reqcommon.PartTypeAudioURL),
+		splitMediaToken(reqcommon.PartTypeInputAudio),
+		splitMediaToken(reqcommon.PartTypeVideoURL),
+	}
+	rawMessagesMediaToken = []byte(`"` + reqcommon.BlockTypeImage + `"`)
+)
+
+// mayContainMedia reports whether body's prompt items field can contain a media
+// content part. When the field is still a json.RawMessage, scanning the raw
+// bytes skips a full json.Unmarshal on text-only requests. Unicode escapes that
+// can spell '_' or a lowercase ASCII letter fall back to decoding so escaped
+// keys or type values cannot bypass media handling.
+func mayContainMedia(body map[string]any, apiType reqcommon.APIType) bool {
+	field, ok := promptItemsField(apiType)
+	if !ok {
+		return false
+	}
+	raw, ok := body[field].(json.RawMessage)
+	if !ok {
+		return body[field] != nil
+	}
+	if len(raw) == 0 {
+		return false
+	}
+	if escapesMediaKeyChar(raw) {
+		return true
+	}
+	if apiType == reqcommon.APITypeMessages {
+		return bytes.Contains(raw, rawMessagesMediaToken)
+	}
+	return containsChatMediaToken(raw)
+}
+
+// escapesMediaKeyChar reports whether raw holds a \u escape of '_' or a
+// lowercase ASCII letter (U+005F or U+0061..U+007A), which spell every media
+// part type recognized by collectMediaParts.
+func escapesMediaKeyChar(raw []byte) bool {
+	for {
+		i := bytes.IndexByte(raw, '\\')
+		if i < 0 || i+4 >= len(raw) {
+			return false
+		}
+		if raw[i+1] == 'u' && raw[i+2] == '0' && raw[i+3] == '0' {
+			if c := raw[i+4]; c == '5' || c == '6' || c == '7' {
+				return true
+			}
+			raw = raw[i+4:]
+			continue
+		}
+		raw = raw[i+1:]
+	}
+}
+
+// containsChatMediaToken reports whether raw contains any JSON-quoted chat or
+// Responses media part token by anchoring on each '_' byte.
+func containsChatMediaToken(raw []byte) bool {
+	for off := 0; off < len(raw); {
+		rel := bytes.IndexByte(raw[off:], '_')
+		if rel < 0 {
+			return false
+		}
+		pos := off + rel
+		after := raw[pos+1:]
+		if len(after) > 0 {
+			c := after[0]
+			before := raw[:pos]
+			for _, tok := range rawChatMediaTokens {
+				if c == tok.suffix[0] && bytes.HasPrefix(after, tok.suffix) && bytes.HasSuffix(before, tok.prefix) {
+					return true
+				}
+			}
+		}
+		off = pos + 1
+	}
+	return false
 }
 
 // collectMediaRefs returns a ref per media content part, in walk order.
