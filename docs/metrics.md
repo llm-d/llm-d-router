@@ -896,7 +896,7 @@ keeps its InferenceObjective priority.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily` or `rejected_rate`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily`, `concurrency` or `rate`) and is empty within the contract. `served_class` is empty for rejections. |
+| `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, `rejected_rate`, `rejected_input_rate` or `rejected_uncached_rate`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily`, `concurrency`, `rate`, `input_rate` or `uncached_rate`) and is empty within the contract. `served_class` is empty for rejections. |
 | `llm_d_epp_qos_contract_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens charged after refunds. |
 | `llm_d_epp_qos_contract_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
