@@ -150,7 +150,7 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 > When EPP is scaled (`router.epp.replicas > 1`):
 > *   **Active-Passive Mode (Default)**: The chart automatically enables the `--ha-enable-leader-election` flag. Only one leader replica active-routes traffic, coordinates lease status, and maintains absolute routing state, while other replicas act as warm standbys.
 > *   **Active-Active Mode**: Set `router.epp.haMode: all-active` to disable leader election and let all replicas process traffic. Setting `router.epp.crossReplica.enabled: true` also selects this mode. The existing `router.epp.flags.ha-enable-leader-election: false` setting remains supported.
->     *   **Plugin compatibility**: Stateless plugins and plugins that read backend metrics can run independently. The optional Redis syncer shares in-flight load between replicas. Approximate prefix-cache state remains local, so this option does not make approximate prefix routing consistent across replicas.
+>     *   **Plugin compatibility**: Stateless plugins and plugins that read backend metrics can run independently. The optional Redis syncer shares in-flight load and a capped recent window of approximate prefix-cache hashes across replicas (when `syncCrossReplicaState` is left at its default `true` on both producers; set `syncCrossReplicaState: false` to keep either local).
 >
 > Setting `router.epp.flags.ha-enable-leader-election: true` also enables leader
 > election for a single replica. The chart grants the EPP ServiceAccount the

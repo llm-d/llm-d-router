@@ -114,6 +114,7 @@ EOF
     render_notes "${values[@]}" "${sync[@]}"
     grep -Fq 'WARNING: Redis configuration alone does not enable shared in-flight load.' "${TEMP_DIR}/notes.txt"
     grep -Fq 'default and optimized-baseline profiles do not consume in-flight load' "${TEMP_DIR}/notes.txt"
+    grep -Fq 'inflight-load-producer and approx-prefix-cache-producer to share in-flight load' "${TEMP_DIR}/notes.txt"
   done
   render_notes
   if grep -Fq 'WARNING: Redis configuration alone' "${TEMP_DIR}/notes.txt"; then
