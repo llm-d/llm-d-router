@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -49,9 +50,22 @@ type crossReplicaPublisher struct {
 	interval       time.Duration
 	publishTimeout time.Duration
 
-	// mu guards endpoints and orders syncer writes with endpoint removal.
+	// importers[i] imports peer state for contributors[i], or is nil when that
+	// contributor does not import or the syncer cannot read peer snapshots.
+	importers []*importWorker
+	// importersWithoutReader names importing contributors left on request-path
+	// merging because the syncer does not implement CrossReplicaPeerReader.
+	importersWithoutReader []string
+
+	// mu guards endpoints, gens and draining, and orders syncer writes with
+	// endpoint removal.
 	mu        sync.RWMutex
 	endpoints sets.Set[types.NamespacedName]
+	// gens holds the current generation of each registered endpoint when any
+	// contributor imports; draining holds generations whose delete has not
+	// reached the plugins yet.
+	gens     map[types.NamespacedName]*endpointGen
+	draining map[types.NamespacedName]*endpointGen
 
 	publishFailureLog rate.Sometimes
 }
@@ -64,10 +78,12 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 		return nil
 	}
 	var contributors []fwkdl.CrossReplicaContributor
+	var names []string
 	extractors.Range(func(_ string, exts []fwkplugin.Plugin) bool {
 		for _, ext := range exts {
 			if c, ok := ext.(fwkdl.CrossReplicaContributor); ok && !c.CrossReplicaState().SyncDisabled {
 				contributors = append(contributors, c)
+				names = append(names, ext.TypedName().String())
 			}
 		}
 		return true
@@ -84,30 +100,173 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	for _, c := range contributors {
 		metrics.InitCrossReplicaPublishMetrics(string(c.CrossReplicaState().StateKey))
 	}
-	return &crossReplicaPublisher{
+	p := &crossReplicaPublisher{
 		syncer:            syncer,
 		contributors:      contributors,
 		interval:          interval,
 		publishTimeout:    publishTimeout,
 		publishFailureLog: rate.Sometimes{Interval: publishFailureLogInterval},
+		importers:         make([]*importWorker, len(contributors)),
 	}
+	reader, hasReader := syncer.(fwkdl.CrossReplicaPeerReader)
+	for i, c := range contributors {
+		importer, ok := c.(fwkdl.CrossReplicaImporter)
+		switch {
+		case !ok:
+		case hasReader:
+			p.importers[i] = newImportWorker(c.CrossReplicaState(), importer, reader, interval)
+		default:
+			p.importersWithoutReader = append(p.importersWithoutReader, names[i])
+		}
+	}
+	return p
 }
 
 func (p *crossReplicaPublisher) start(ctx context.Context) {
+	logger := log.FromContext(ctx)
+	for _, name := range p.importersWithoutReader {
+		logger.Info("peer state is merged on the request path because the syncer does not implement CrossReplicaPeerReader", "contributor", name)
+	}
+	for _, w := range p.importers {
+		if w != nil {
+			go w.run(ctx, logger)
+		}
+	}
 	go p.run(ctx)
 }
 
+func (p *crossReplicaPublisher) importer(i int) *importWorker {
+	if i >= len(p.importers) {
+		return nil
+	}
+	return p.importers[i]
+}
+
+func (p *crossReplicaPublisher) importing() bool {
+	for _, w := range p.importers {
+		if w != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// registerEndpoint adds key to the published set. A generation of the same
+// key whose delete has not reached the plugins yet is waited for first, so
+// importers never see the new generation before the old one is cleaned up.
 func (p *crossReplicaPublisher) registerEndpoint(key types.NamespacedName) bool {
+	for {
+		p.mu.Lock()
+		if p.endpoints == nil {
+			p.endpoints = sets.New[types.NamespacedName]()
+		}
+		if old, ok := p.draining[key]; ok {
+			p.mu.Unlock()
+			<-old.drained
+			continue
+		}
+		if p.endpoints.Has(key) {
+			p.mu.Unlock()
+			return false
+		}
+		p.endpoints.Insert(key)
+		if p.importing() {
+			if p.gens == nil {
+				p.gens = make(map[types.NamespacedName]*endpointGen)
+			}
+			p.gens[key] = newEndpointGen()
+		}
+		p.mu.Unlock()
+		return true
+	}
+}
+
+// beginDelete stops imports of key's current generation: no new import starts,
+// the running one is canceled and waited for, and worker bookkeeping is
+// dropped. finishDelete must follow once the delete event reached the plugins.
+func (p *crossReplicaPublisher) beginDelete(logger logr.Logger, key types.NamespacedName) *endpointGen {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.endpoints == nil {
-		p.endpoints = sets.New[types.NamespacedName]()
+	gen, ok := p.gens[key]
+	if ok {
+		delete(p.gens, key)
+		if p.draining == nil {
+			p.draining = make(map[types.NamespacedName]*endpointGen)
+		}
+		p.draining[key] = gen
 	}
-	if p.endpoints.Has(key) {
-		return false
+	p.mu.Unlock()
+	if !ok {
+		return nil
 	}
-	p.endpoints.Insert(key)
-	return true
+	gen.mu.Lock()
+	gen.drain = true
+	gen.mu.Unlock()
+	gen.cancel()
+	done := make(chan struct{})
+	go func() {
+		gen.running.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(p.publishTimeout):
+		logger.Info("waiting for a canceled cross-replica import to return", "endpoint", key)
+		<-done
+	}
+	endpointID := key.String()
+	for _, w := range p.importers {
+		if w != nil {
+			w.forget(endpointID)
+		}
+	}
+	return gen
+}
+
+// finishDelete lets a registration of the same key proceed.
+func (p *crossReplicaPublisher) finishDelete(key types.NamespacedName, gen *endpointGen) {
+	if gen == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.draining[key] == gen {
+		delete(p.draining, key)
+	}
+	p.mu.Unlock()
+	close(gen.drained)
+}
+
+// enqueueImports queues peer snapshots for endpoints that a Set or SetBatch
+// of contributor i just published, skipping endpoints whose generation
+// changed meanwhile.
+func (p *crossReplicaPublisher) enqueueImports(i int, gens map[types.NamespacedName]*endpointGen, failures map[string]error) {
+	w := p.importer(i)
+	if w == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for key, gen := range gens {
+		endpointID := key.String()
+		if _, failed := failures[endpointID]; failed || p.gens[key] != gen {
+			continue
+		}
+		w.enqueue(endpointID, gen)
+	}
+}
+
+// generationsLocked returns the current generation of each key. Callers hold
+// p.mu.
+func (p *crossReplicaPublisher) generationsLocked(keys []types.NamespacedName) map[types.NamespacedName]*endpointGen {
+	if !p.importing() {
+		return nil
+	}
+	gens := make(map[types.NamespacedName]*endpointGen, len(keys))
+	for _, key := range keys {
+		if gen, ok := p.gens[key]; ok {
+			gens[key] = gen
+		}
+	}
+	return gens
 }
 
 func (p *crossReplicaPublisher) run(ctx context.Context) {
@@ -160,21 +319,25 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 	}
 	p.mu.RLock()
 	endpointIDs := make([]string, 0, len(snapshot))
+	live := make([]types.NamespacedName, 0, len(snapshot))
 	for _, key := range snapshot {
 		if p.endpoints.Has(key) {
 			endpointIDs = append(endpointIDs, key.String())
+			live = append(live, key)
 		}
 	}
+	gens := p.generationsLocked(live)
 	p.mu.RUnlock()
 	if len(endpointIDs) == 0 {
 		return
 	}
 	logger := log.FromContext(ctx)
 	var wg sync.WaitGroup
-	for _, spec := range specs {
+	for i, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
 			cycle.addBatch(spec.StateKey, len(endpointIDs), failures)
+			p.enqueueImports(i, gens, failures)
 			if len(failures) == 0 {
 				return
 			}
@@ -225,21 +388,25 @@ func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwk
 	}
 	cancel()
 	var revived []string
+	var revivedKeys []types.NamespacedName
 	p.mu.RLock()
 	for _, key := range removed {
 		if p.endpoints.Has(key) {
 			revived = append(revived, key.String())
+			revivedKeys = append(revivedKeys, key)
 		}
 	}
+	gens := p.generationsLocked(revivedKeys)
 	p.mu.RUnlock()
 	if len(revived) == 0 {
 		return
 	}
 	var wg sync.WaitGroup
-	for _, spec := range specs {
+	for i, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, revived, p.publishTimeout)
 			cycle.addBatch(spec.StateKey, len(revived), failures)
+			p.enqueueImports(i, gens, failures)
 			for endpointID, err := range failures {
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica batch republish failed", "key", spec.StateKey, "endpoint", endpointID)
@@ -283,17 +450,23 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 	})
 }
 
-// set publishes one endpoint's value for spec. published is false when the
-// endpoint was deleted after publishAll took its snapshot and the syncer was
-// not called.
-func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) (published bool, err error) {
+// set publishes one endpoint's value for contributor i. published is false
+// when the endpoint was deleted after publishAll took its snapshot and the
+// syncer was not called.
+func (p *crossReplicaPublisher) set(ctx context.Context, i int, key types.NamespacedName) (published bool, err error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if !p.endpoints.Has(key) {
 		return false, nil
 	}
-	if err := p.syncer.Set(ctx, spec, key.String()); err != nil {
+	if err := p.syncer.Set(ctx, p.contributors[i].CrossReplicaState(), key.String()); err != nil {
 		return false, err
+	}
+	// p.mu is held across Set, so the generation cannot change meanwhile.
+	if w := p.importer(i); w != nil {
+		if gen, ok := p.gens[key]; ok {
+			w.enqueue(key.String(), gen)
+		}
 	}
 	return true, nil
 }
@@ -329,10 +502,10 @@ func (p *crossReplicaPublisher) publish(ctx context.Context, key types.Namespace
 	endpointID := key.String()
 	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
 	var wg sync.WaitGroup
-	for _, c := range p.contributors {
+	for i, c := range p.contributors {
 		spec := c.CrossReplicaState()
 		wg.Go(func() {
-			published, err := p.set(ctx, spec, key)
+			published, err := p.set(ctx, i, key)
 			if err != nil {
 				cycle.addFailure(spec.StateKey, err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 				p.publishFailureLog.Do(func() {
