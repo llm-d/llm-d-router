@@ -270,7 +270,8 @@ pipeline:
     #     # deadline.
     #     # wait_cap_seconds: 55
     #     # fetch_grace_seconds is the mailbox TTL applied after a delivered
-    #     # fetch. Zero deletes the result on delivery.
+    #     # fetch or wait. Zero deletes the result on a delivered fetch; a
+    #     # wait delivery keeps it for 5s.
     #     # fetch_grace_seconds: 60
 
     # -------------------------------------------------------------------
