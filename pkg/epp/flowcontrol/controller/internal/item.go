@@ -29,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -86,6 +87,21 @@ type FlowItem struct {
 
 	// onceFinalize ensures the finalization logic runs exactly once per lifecycle.
 	onceFinalize sync.Once
+
+	// Preparation state is owned by the dispatch loop. The worker publishes its
+	// result through preparationDone and never writes these fields.
+	prepare         contracts.PrepareRequest
+	prepareCtx      context.Context
+	preparationDone chan preparationResult
+	prepared        *contracts.PreparedRequest
+	dispatchReady   *contracts.PreparedRequest
+	refreshAfter    time.Time
+}
+
+type preparationResult struct {
+	request     *contracts.PreparedRequest
+	completedAt time.Time
+	complete    bool
 }
 
 var _ flowcontrol.QueueItemAccessor = &FlowItem{}
@@ -122,6 +138,14 @@ func (fi *FlowItem) EffectiveTTL() time.Duration { return fi.effectiveTTL }
 
 // OriginalRequest returns the original FlowControlRequest object.
 func (fi *FlowItem) OriginalRequest() flowcontrol.FlowControlRequest { return fi.originalRequest }
+
+// SetPreparation must be called before submitting the item to the processor.
+func (fi *FlowItem) SetPreparation(ctx context.Context, prepare contracts.PrepareRequest) {
+	fi.prepareCtx, fi.prepare = ctx, prepare
+}
+
+// PreparedRequest may be read by the caller after successful finalization.
+func (fi *FlowItem) PreparedRequest() *contracts.PreparedRequest { return fi.dispatchReady }
 
 // Done returns a read-only channel that will receive the FinalState pointer exactly once.
 func (fi *FlowItem) Done() <-chan *FinalState { return fi.done }

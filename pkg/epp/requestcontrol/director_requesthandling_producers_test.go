@@ -28,7 +28,10 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	fctypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -122,6 +125,16 @@ func singlePodSchedulingResult() *fwksched.SchedulingResult {
 	}
 }
 
+type requestHandlingFlowController struct {
+	mockFlowController
+}
+
+func (fc *requestHandlingFlowController) EnqueueAndWaitPrepared(ctx context.Context, request flowcontrol.FlowControlRequest,
+	prepare contracts.PrepareRequest) (*contracts.PreparedRequest, fctypes.QueueOutcome, error) {
+	prepared := prepare(ctx, func(*contracts.PreparedRequest) bool { return true }, func(*contracts.PreparedRequest) {})
+	return prepared, fctypes.QueueOutcomeDispatched, nil
+}
+
 // TestDirector_RunsRequestHandlingProducersBeforeScreeners verifies that RequestHandling
 // producers run on the located endpoints before screeners, that screeners and
 // Scheduling producers see their data, and that Scheduling producers run on
@@ -141,6 +154,8 @@ func TestDirector_RunsRequestHandlingProducersBeforeScreeners(t *testing.T) {
 	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{pre, sched, screener})
 
 	dir, ctx := newSinglePodDirector(t, singlePodSchedulingResult())
+	fc := &requestHandlingFlowController{mockFlowController: mockFlowController{outcome: fctypes.QueueOutcomeDispatched}}
+	dir.admissionController = NewFlowControlAdmissionController(fc, "test-pool", dir.endpointCandidates)
 	dir.requestControlPlugins = *NewConfig().
 		WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
 		WithRequestHandlingDataProducers(pre).
@@ -153,6 +168,7 @@ func TestDirector_RunsRequestHandlingProducersBeforeScreeners(t *testing.T) {
 	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
 	require.NoError(t, err)
 
+	require.True(t, fc.called, "producers with request-handling hooks keep normal admission")
 	assert.Equal(t, []string{"pre", "screener", "sched"}, recorder.order)
 	assert.True(t, sawPreData, "screener must see RequestHandling producer data")
 	assert.Equal(t, 1, pre.endpoints)
