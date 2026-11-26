@@ -18,7 +18,7 @@ are met:
 | Condition | What it checks |
 |-----------|---------------|
 | **hasValid** | At least one endpoint has valid predictions meeting SLOs |
-| **hasIdle** | At least one endpoint has zero dispatched requests |
+| **hasIdle** | At least one endpoint has no dispatched requests and no running requests |
 | **hasCold** | At least one endpoint has <2% KV cache (predictions unreliable) |
 
 Endpoints whose metrics have never been scraped are skipped, including their predictions, which
@@ -40,6 +40,7 @@ because the predictor already neutralizes TPOT for non-streaming mode and prefil
 - Requires `predicted-latency-producer` to run first (in Produce) to populate
   `LatencyPredictionInfo` attributes on endpoints.
 - Reads `DispatchedRequestCount` from the same attributes for idle detection.
+- Reads `RunningRequestsSize` from endpoint metrics for idle detection.
 - Reads `KVCacheUsagePercent` from endpoint metrics for cold detection.
 
 **Configuration Example:**
