@@ -78,6 +78,17 @@ Tuning knobs, all under the `flowControl:` config section:
   when the selected band uses `0s`. The header cannot extend a finite configured TTL. These TTLs apply
   while the pool has endpoints. When the pool is empty, `noEndpointRequestTTL` controls how long
   requests wait.
+* Per-band `standingRequestTTL` shortens the wait while a flow, or the band as a whole, stays
+  backlogged and the pool has endpoints. Omit it or set it to `0s` to disable it. A positive value
+  must be shorter than the band's effective `defaultRequestTTL`. With budgets of 30s and 3s, a flow
+  shows backlog when it dispatches a request that waited 1.5s or longer, and a band when it holds at
+  least as many requests as it dispatched during the last 1.5s. After 30s of backlog the expiry sweep
+  applies the 3s budget from the later of enqueue or entry into that state. A dispatch that shows no
+  backlog, or a refill of an empty flow queue or band, starts a new 30s window once 3s have passed
+  without backlog. The band-wide check covers traffic spread over many flows that each queue one
+  request at a time, and while it holds, every flow in the band gets the 3s budget. Set the value to
+  several times the pool's interval between dispatches: with one or two dispatches per
+  `standingRequestTTL`, waits can reach about twice that budget.
 * `noEndpointRequestTTL` — the queue-wait budget that replaces `defaultRequestTTL` while the pool has
   no endpoints, where the queue acts as a scale-from-zero waiting room. Left unset it follows
   `defaultRequestTTL`, so splitting the regimes is opt-in. Size it above pod startup (image pull plus
@@ -89,7 +100,8 @@ Tuning knobs, all under the `flowControl:` config section:
 * The priority-holdback usage-limit policy — a gating knob, not a shedding one. It lowers the
   admission ceiling for low-priority traffic as utilization rises, so that traffic waits in queue
   rather than being rejected; it sheds only by way of the two limits above. Configure it via
-  `usageLimitPolicyPluginRef`.
+  `usageLimitPolicyPluginRef`. Time spent held back counts toward `standingRequestTTL`, so leave
+  that unset on bands meant to wait for spare capacity.
 
 For example, limit each flow to 100 queued requests and 1 MiB within a band that holds up to
 1000 requests and 16 MiB:

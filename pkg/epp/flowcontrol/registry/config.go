@@ -166,6 +166,10 @@ type PriorityBandConfig struct {
 	// DefaultRequestTTL bounds queue wait for requests in this band. A pointer to zero makes queue wait
 	// unbounded. Nil inherits the global default at request time.
 	DefaultRequestTTL *time.Duration
+
+	// StandingRequestTTL enables a short queue-wait budget after a flow or the band has stayed backlogged for
+	// DefaultRequestTTL.
+	StandingRequestTTL time.Duration
 }
 
 func (p *PriorityBandConfig) String() string {
@@ -321,6 +325,14 @@ func WithBandMaxRequestsPerFlow(maxRequests uint64) PriorityBandConfigOption {
 	}
 }
 
+// WithBandStandingRequestTTL sets the shorter budget for standing flow queues.
+func WithBandStandingRequestTTL(ttl time.Duration) PriorityBandConfigOption {
+	return func(p *PriorityBandConfig) error {
+		p.StandingRequestTTL = ttl
+		return nil
+	}
+}
+
 // WithBandDefaultRequestTTL sets the default request TTL for this priority band.
 func WithBandDefaultRequestTTL(defaultRequestTTL time.Duration) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
@@ -452,6 +464,12 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 func (p *PriorityBandConfig) validate() error {
 	if p.DefaultRequestTTL != nil && *p.DefaultRequestTTL < 0 {
 		return fmt.Errorf("DefaultRequestTTL cannot be negative for priority band %d", p.Priority)
+	}
+	if p.StandingRequestTTL < 0 {
+		return fmt.Errorf("standingRequestTTL cannot be negative for priority band %d", p.Priority)
+	}
+	if p.StandingRequestTTL > 0 && (p.DefaultRequestTTL == nil || p.StandingRequestTTL >= *p.DefaultRequestTTL) {
+		return fmt.Errorf("standingRequestTTL must be shorter than defaultRequestTTL for priority band %d", p.Priority)
 	}
 	if p.OrderingPolicy == nil {
 		return fmt.Errorf("OrderingPolicy instance is missing for priority band %d", p.Priority)

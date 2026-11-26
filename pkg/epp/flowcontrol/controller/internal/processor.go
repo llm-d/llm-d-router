@@ -751,7 +751,11 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, e
 		p.recordDrop(outcome)
 		return false, nil
 	}
-	p.drain.recordDispatch(key.Priority, p.clock.Now())
+	now := p.clock.Now()
+	if standing := managedQ.StandingQueue(); standing != nil {
+		standing.RecordDispatch(removedItem.EnqueueTime(), now)
+	}
+	p.drain.recordDispatch(key.Priority, now)
 	return true, nil
 }
 
@@ -790,6 +794,8 @@ func (p *Processor) sweepFinalizedItems() {
 	expiryErr := expiryError(regime.empty)
 
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
+		standing := managedQ.StandingQueue()
+		var standingCutoff time.Time
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
 			item, ok := itemAcc.(*FlowItem)
 			if !ok {
@@ -799,7 +805,13 @@ func (p *Processor) sweepFinalizedItems() {
 			if item.FinalState() != nil {
 				return true
 			}
-			if !isExpired(item, now, regime, p.noEndpointRequestTTL) {
+			if standing != nil && !regime.empty {
+				// Sample once inside Cleanup, while the queue lock prevents a drain and refill.
+				standingCutoff = standing.ExpiryCutoff(now, regime.since)
+				standing = nil
+			}
+			if !isExpired(item, now, regime, p.noEndpointRequestTTL) &&
+				(standingCutoff.IsZero() || item.EnqueueTime().After(standingCutoff)) {
 				return false
 			}
 			// Finalizing here rather than in a separate pass keeps expiry to a single scan. Finalization is

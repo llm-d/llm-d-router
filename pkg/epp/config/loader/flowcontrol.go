@@ -18,6 +18,7 @@ package loader
 
 import (
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -40,14 +41,14 @@ func buildFlowControlConfig(
 		return nil, fmt.Errorf("failed to resolve default flow-control policies: %w", err)
 	}
 
-	registryConfig, err := buildRegistryConfig(apiConfig, defaults, handle)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create registry config: %w", err)
-	}
-
 	ctrlCfg, err := controller.NewConfigFromAPI(apiConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create controller config: %w", err)
+	}
+
+	registryConfig, err := buildRegistryConfig(apiConfig, defaults, handle, ctrlCfg.DefaultRequestTTL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registry config: %w", err)
 	}
 
 	usageLimitRef := registry.DefaultUsageLimitPolicyRef
@@ -93,6 +94,7 @@ func buildRegistryConfig(
 	apiConfig *configapiv1.FlowControlConfig,
 	defaults registry.PriorityBandPolicyDefaults,
 	handle fwkplugin.Handle,
+	globalRequestTTL time.Duration,
 ) (*registry.Config, error) {
 	if apiConfig == nil {
 		return registry.NewConfig(defaults)
@@ -117,7 +119,7 @@ func buildRegistryConfig(
 	}
 
 	if apiConfig.DefaultPriorityBand != nil {
-		pb, err := buildPriorityBand(defaults, handle, apiConfig.DefaultPriorityBand, "default priority band")
+		pb, err := buildPriorityBand(defaults, handle, globalRequestTTL, apiConfig.DefaultPriorityBand, "default priority band")
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +127,7 @@ func buildRegistryConfig(
 	}
 
 	if apiConfig.DefaultNegativePriorityBand != nil {
-		pb, err := buildPriorityBand(defaults, handle, apiConfig.DefaultNegativePriorityBand, "default negative priority band")
+		pb, err := buildPriorityBand(defaults, handle, globalRequestTTL, apiConfig.DefaultNegativePriorityBand, "default negative priority band")
 		if err != nil {
 			return nil, err
 		}
@@ -135,7 +137,7 @@ func buildRegistryConfig(
 	for i := range apiConfig.PriorityBands {
 		band := &apiConfig.PriorityBands[i]
 		label := fmt.Sprintf("priority band %d", band.Priority)
-		pb, err := buildPriorityBand(defaults, handle, band, label)
+		pb, err := buildPriorityBand(defaults, handle, globalRequestTTL, band, label)
 		if err != nil {
 			return nil, err
 		}
@@ -151,6 +153,7 @@ func buildRegistryConfig(
 func buildPriorityBand(
 	defaults registry.PriorityBandPolicyDefaults,
 	handle fwkplugin.Handle,
+	globalRequestTTL time.Duration,
 	band *configapiv1.PriorityBandConfig,
 	label string,
 ) (*registry.PriorityBandConfig, error) {
@@ -158,6 +161,12 @@ func buildPriorityBand(
 
 	if band.DefaultRequestTTL != nil {
 		bandOpts = append(bandOpts, registry.WithBandDefaultRequestTTL(band.DefaultRequestTTL.Duration))
+	} else if band.StandingRequestTTL != nil && band.StandingRequestTTL.Duration > 0 {
+		// The flow queue needs the band's observation interval even before its first dispatch.
+		bandOpts = append(bandOpts, registry.WithBandDefaultRequestTTL(globalRequestTTL))
+	}
+	if band.StandingRequestTTL != nil {
+		bandOpts = append(bandOpts, registry.WithBandStandingRequestTTL(band.StandingRequestTTL.Duration))
 	}
 
 	maxBytes, err := resolveQuantity(band.MaxBytes, label+" MaxBytes")

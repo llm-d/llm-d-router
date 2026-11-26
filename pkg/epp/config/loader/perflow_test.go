@@ -19,6 +19,7 @@ package loader
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,7 @@ flowControl:
 				handle := newFlowControlTestHandle(t)
 				defaults, err := buildPriorityBandPolicyDefaults(handle)
 				require.NoError(t, err)
-				cfg, err := buildRegistryConfig(api.FlowControl, defaults, handle)
+				cfg, err := buildRegistryConfig(api.FlowControl, defaults, handle, time.Minute)
 				require.NoError(t, err)
 				for _, band := range []*registry.PriorityBandConfig{cfg.PriorityBands[10], cfg.PriorityBands[0], cfg.DefaultPriorityBand, cfg.DefaultNegativePriorityBand} {
 					require.Equal(t, limits.requests, band.MaxRequestsPerFlow)
@@ -94,7 +95,7 @@ func TestPerFlowLimitsInvalid(t *testing.T) {
 						handle := newFlowControlTestHandle(t)
 						defaults, err := buildPriorityBandPolicyDefaults(handle)
 						require.NoError(t, err)
-						_, err = buildRegistryConfig(api.FlowControl, defaults, handle)
+						_, err = buildRegistryConfig(api.FlowControl, defaults, handle, time.Minute)
 						require.ErrorContains(t, err, "must be non-negative")
 					})
 				}

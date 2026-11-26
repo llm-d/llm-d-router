@@ -2660,3 +2660,98 @@ func capacityStages(t *testing.T, detector string) []string {
 	}
 	return stages
 }
+
+func TestStandingQueueSweep(t *testing.T) {
+	h := newTestHarness(t, testCleanupTick)
+	const long, short = 10 * time.Second, 2 * time.Second
+	heavy := h.addQueue(testFlow)
+	heavy.Standing = contracts.NewStandingQueue(long, short, h.clock)
+	lightFlow := flowcontrol.FlowKey{ID: "light", Priority: testFlow.Priority}
+	light := h.addQueue(lightFlow)
+	light.Standing = contracts.NewStandingQueue(long, short, h.clock)
+
+	h.processor.enqueue(h.newTestItem("initial", testFlow, long))
+	h.clock.Step(9 * time.Second)
+	queued := h.newTestItem("queued", testFlow, long)
+	h.processor.enqueue(queued)
+	h.clock.Step(time.Second)
+	fast := h.newTestItem("fast", lightFlow, long)
+	h.processor.enqueue(fast)
+	dispatched, err := h.processor.dispatchItem(fast)
+	require.NoError(t, err)
+	require.True(t, dispatched)
+
+	h.clock.Step(short - time.Millisecond)
+	h.processor.sweepFinalizedItems()
+	require.Nil(t, queued.FinalState(), "a queued item gets the short budget starting at the standing transition")
+	late := h.newTestItem("late", testFlow, long)
+	h.processor.enqueue(late)
+	h.clock.Step(time.Millisecond)
+	h.processor.sweepFinalizedItems()
+	require.NotNil(t, queued.FinalState(), "a fast dispatch in another flow must not reset this queue")
+	assert.Equal(t, types.QueueOutcomeEvictedTTL, queued.FinalState().Outcome)
+	require.Nil(t, late.FinalState(), "a new arrival gets the short budget starting at enqueue")
+	h.clock.Step(short)
+	h.processor.sweepFinalizedItems()
+	require.NotNil(t, late.FinalState())
+
+	fresh := h.newTestItem("fresh", testFlow, long)
+	h.processor.enqueue(fresh)
+	h.clock.Step(short)
+	h.processor.sweepFinalizedItems()
+	require.Nil(t, fresh.FinalState(), "a drained queue starts a fresh observation window")
+}
+
+func TestStandingQueueDispatchWait(t *testing.T) {
+	const long, short = 10 * time.Second, 2 * time.Second
+	for _, tc := range []struct {
+		name        string
+		wait        time.Duration
+		wantExpired bool
+	}{
+		{"below_half_resets", time.Second - time.Nanosecond, false},
+		{"at_half_preserves_backlog", time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHarness(t, testCleanupTick)
+			q := h.addQueue(testFlow)
+			q.Standing = contracts.NewStandingQueue(long, short, h.clock)
+
+			h.processor.enqueue(h.newTestItem("initial", testFlow, long))
+			h.clock.Step(long)
+			next := h.newTestItem("next", testFlow, long)
+			h.processor.enqueue(next)
+			pending := h.newTestItem("pending", testFlow, long)
+			h.processor.enqueue(pending)
+			h.processor.sweepFinalizedItems()
+
+			h.clock.Step(tc.wait)
+			dispatched, err := h.processor.dispatchItem(next)
+			require.NoError(t, err)
+			require.True(t, dispatched)
+
+			h.clock.Step(short)
+			h.processor.sweepFinalizedItems()
+			assert.Equal(t, tc.wantExpired, pending.FinalState() != nil)
+		})
+	}
+}
+
+func TestStandingQueuePoolRecovery(t *testing.T) {
+	h := newTestHarness(t, testCleanupTick)
+	const long, short = 10 * time.Second, 2 * time.Second
+	q := h.addQueue(testFlow)
+	q.Standing = contracts.NewStandingQueue(long, short, h.clock)
+	h.processor.regime.Store(&regimeSample{empty: true, since: h.clock.Now()})
+
+	pending := h.newTestItem("pending", testFlow, long)
+	h.processor.enqueue(pending)
+	h.clock.Step(long + short)
+	h.processor.sweepFinalizedItems()
+	require.Nil(t, pending.FinalState(), "the no-endpoint budget still applies after a full standing observation window and short wait")
+
+	h.processor.regime.Store(&regimeSample{since: h.clock.Now()})
+	h.clock.Step(short)
+	h.processor.sweepFinalizedItems()
+	require.Nil(t, pending.FinalState(), "endpoint recovery starts a fresh observation window")
+}

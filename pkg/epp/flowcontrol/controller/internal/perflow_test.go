@@ -257,6 +257,7 @@ type shrinkingManagedQueue struct {
 	lens []int
 }
 
+func (q *shrinkingManagedQueue) StandingQueue() *contracts.StandingQueue          { return nil }
 func (q *shrinkingManagedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor { return q }
 
 func (q *shrinkingManagedQueue) Len() int {

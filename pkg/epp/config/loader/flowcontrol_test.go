@@ -18,9 +18,11 @@ package loader
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,6 +31,7 @@ import (
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
@@ -462,7 +465,7 @@ func TestBuildRegistryConfig(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := buildRegistryConfig(tc.apiConfig, defaults, handle)
+			cfg, err := buildRegistryConfig(tc.apiConfig, defaults, handle, time.Minute)
 
 			if tc.expectedErr != "" {
 				require.Error(t, err, "buildRegistryConfig should return an error")
@@ -663,4 +666,63 @@ func computeLimits(t *testing.T, p fwkfc.UsageLimitPolicy, saturation float64, p
 	}
 	p.ComputeLimit(context.Background(), saturation, priorities, ceilings)
 	return ceilings
+}
+
+func TestInvalidStandingRequestTTL(t *testing.T) {
+	for _, tc := range []struct{ name, config string }{
+		{"equal_to_band_budget", `{"priorityBands":[{"defaultRequestTTL":"3s","standingRequestTTL":"3s"}]}`},
+		{"exceeds_inherited_budget", `{"defaultRequestTTL":"2s","defaultPriorityBand":{"standingRequestTTL":"3s"}}`},
+		{"unbounded_band", `{"defaultNegativePriorityBand":{"defaultRequestTTL":"0s","standingRequestTTL":"3s"}}`},
+		{"negative_budget", `{"priorityBands":[{"standingRequestTTL":"-1s"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg configapiv1.FlowControlConfig
+			require.NoError(t, json.Unmarshal([]byte(tc.config), &cfg))
+			_, err := buildFlowControlConfig(&cfg, newFlowControlTestHandle(t))
+			require.ErrorContains(t, err, "standingRequestTTL")
+		})
+	}
+}
+
+func TestFlowQueueStandingBudget(t *testing.T) {
+	var api configapiv1.FlowControlConfig
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"defaultRequestTTL": "30s",
+		"defaultPriorityBand": {"standingRequestTTL": "3s"},
+		"defaultNegativePriorityBand": {"standingRequestTTL": "0s"},
+		"priorityBands": [{"priority": 1}, {"priority": 2, "defaultRequestTTL": "5s", "standingRequestTTL": "1s"}]
+	}`), &api))
+	cfg, err := buildFlowControlConfig(&api, newFlowControlTestHandle(t))
+	require.NoError(t, err)
+	reg := registry.NewFlowRegistry(cfg.Registry, logr.Discard())
+	reg.ApplyDesiredPriorities(map[int]struct{}{7: {}, -7: {}})
+	for _, tc := range []struct {
+		priority      int
+		interval, ttl time.Duration
+	}{
+		{0, 30 * time.Second, 3 * time.Second},
+		{1, 0, 0},
+		{2, 5 * time.Second, time.Second},
+		{7, 30 * time.Second, 3 * time.Second},
+		{-7, 0, 0},
+	} {
+		key := fwkfc.FlowKey{Priority: tc.priority, ID: "client"}
+		err := reg.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+			q, err := conn.GetDataPlane().ManagedQueue(key)
+			require.NoError(t, err)
+			if tc.ttl == 0 {
+				require.Nil(t, q.StandingQueue())
+				return nil
+			}
+			standing := q.StandingQueue()
+			require.NotNil(t, standing)
+			start := time.Unix(1, 0)
+			standing.RecordDispatch(start, start)
+			expires := start.Add(tc.interval + tc.ttl)
+			assert.True(t, standing.ExpiryCutoff(expires.Add(-time.Nanosecond), start).IsZero())
+			assert.True(t, standing.ExpiryCutoff(expires, start).Equal(start.Add(tc.interval)))
+			return nil
+		})
+		require.NoError(t, err)
+	}
 }
