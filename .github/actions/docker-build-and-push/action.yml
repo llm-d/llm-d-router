@@ -85,7 +85,8 @@ runs:
           COMMIT_SHA=${{ inputs.commit-sha || 'unknown' }}
           BUILD_REF=${{ inputs.build-ref || inputs.tag || 'unknown' }}
         cache-from: type=gha,scope=${{ inputs.image-name }}
-        # Export layer caches only on main pushes and registry pushes so PR
-        # builds read main's cached layers without uploading blobs per push
-        # and evicting the 10 GB repository cache.
-        cache-to: ${{ (inputs.push == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && format('type=gha,mode=max,scope={0}', inputs.image-name) || '' }}
+        # Pull request and merge queue builds read main's cached layers
+        # without exporting, which would upload blobs per push and evict the
+        # 10 GB repository cache. Every other build exports, so a push build
+        # reuses the layers of the scan build before it in the same job.
+        cache-to: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' && format('type=gha,mode=max,scope={0}', inputs.image-name) || '' }}

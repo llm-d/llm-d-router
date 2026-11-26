@@ -70,9 +70,11 @@ jobs:
         id: go-cache
         run: |
           mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
-          echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
-          echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
-          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
+          {
+            echo "mod=$HOME/.cache/llm-d-gomodcache"
+            echo "build=$HOME/.cache/llm-d-gobuildcache"
+            echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Restore Go modules
         uses: actions/cache/restore@v6
@@ -103,7 +105,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ steps.go-cache.outputs.build }}
-          key: gobuild-coord-unit-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
 
   e2e-images:
     needs: check-changes
@@ -262,7 +264,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ steps.e2e-setup.outputs.go-build-cache }}
-          key: gobuild-e2e-coordinator-${{ runner.os }}-go${{ steps.e2e-setup.outputs.go-version }}-${{ github.sha }}
+          key: ${{ steps.e2e-setup.outputs.go-build-cache-key }}
 
   e2e-tests-status:
     needs: e2e-tests
