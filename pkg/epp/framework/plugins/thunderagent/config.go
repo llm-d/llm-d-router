@@ -25,7 +25,7 @@ import (
 
 const defaultForceAdmitTimeout = 5 * time.Minute
 
-// sweepInterval is how often idle sessions and stale endpoints are swept.
+// sweepInterval is how often stale policy state and endpoints are swept.
 var sweepInterval = 10 * time.Second
 
 // Config holds the configuration for the ThunderAgent plugin.

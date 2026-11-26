@@ -20,28 +20,55 @@ import (
 	"context"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 )
 
 func (a *ThunderAgent) Category() fwksched.ScorerCategory {
 	return fwksched.Affinity
 }
 
-// Score pins a session to the pod recorded in the ledger: that pod scores
-// 1.0 and every other candidate 0.0, so a session's turns keep hitting the
-// KV blocks its history already occupies.
+// Score pins a session to its reserved or bound pod: that pod scores 1.0 and
+// every other candidate 0.0, so a session's turns keep hitting the KV blocks
+// its history already occupies.
 func (a *ThunderAgent) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	id := sessionID(request)
 	if id == "" {
 		return nil
 	}
 
-	m := a.mgr
-	m.mu.Lock()
-	target := ""
-	if s, ok := m.sessions[id]; ok && s.endpoint != nil {
-		target = s.endpoint.id
+	now := a.clock.Now()
+	state, hasState := sessionstate.ReadSessionState(request)
+
+	a.mu.Lock()
+	l := a.local[id]
+	res := resolvedSession{state: state, hasState: hasState}
+	if !hasState {
+		hint := ""
+		if l != nil {
+			hint = l.endpointHint
+		}
+		if s, ok := a.boundSessionLocked(id, hint); ok {
+			res = resolvedSession{state: s, hasState: true, isBound: true}
+		}
 	}
-	m.mu.Unlock()
+	resumed := false
+	if res.hasState && l != nil {
+		resumed = a.refreshOneLocked(id, l, res, false, now)
+		l = a.local[id]
+	}
+	target := ""
+	switch {
+	case res.hasState && l.reservationLive(res.state, now):
+		target = l.reservedEndpoint
+	case res.hasState:
+		target = res.state.Endpoint
+	case l != nil && l.reservedUnbound && !l.reservedUntil.IsZero() && now.Before(l.reservedUntil):
+		target = l.reservedEndpoint
+	}
+	a.mu.Unlock()
+	if resumed {
+		a.metrics.resumes.Inc()
+	}
 	if target == "" {
 		return nil
 	}
