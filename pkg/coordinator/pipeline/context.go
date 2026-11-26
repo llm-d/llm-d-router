@@ -54,6 +54,7 @@ var internalForwardingHeaders = map[string]bool{
 	routing.KVCachePrefillHeader:          true,
 	routing.PrefillEndpointHeader:         true,
 	routing.LegacyPrefillEndpointHeader:   true,
+	routing.PrefillDataParallelRankHeader: true,
 }
 
 func isForwardableHeader(name string) bool {

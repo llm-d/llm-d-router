@@ -1616,9 +1616,16 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 	It("ignores a prefill rank that is not a non-negative integer", func() {
 		proxyBaseAddr := startProxy()
-		sendWithRankHeaders(proxyBaseAddr, map[string]string{routing.PrefillDataParallelRankHeader: "one"})
+		for i, invalid := range []string{"one", "-1"} {
+			sendWithRankHeaders(proxyBaseAddr, map[string]string{
+				routing.DataParallelRankHeader:        "2",
+				routing.PrefillDataParallelRankHeader: invalid,
+			})
 
-		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
+			prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()[i]
+			Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("2"))
+			Expect(prefillHeaders.Get(routing.PrefillDataParallelRankHeader)).To(BeEmpty())
+		}
 	})
 })
 

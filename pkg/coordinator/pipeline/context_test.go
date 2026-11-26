@@ -101,6 +101,7 @@ func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 			"X-Llm-D-Pin-Host-Port":                  {"10.0.3.7:8000"},
 			"Prefer":                                 {"if-available"},
 			"X-Llm-D-Kv-Cache-Prefill-P2p-Host-Port": {"10.0.0.9:7777"},
+			"X-Llm-D-Prefiller-Data-Parallel-Rank":   {"2"},
 			"X-Request-Id":                           {"abc-123"},
 			"Authorization":                          {"Bearer token"},
 		},
@@ -108,7 +109,7 @@ func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 
 	out := rc.ForwardedHeaders()
 
-	for _, name := range []string{"x-llm-d-epp-profile", "x-llm-d-pin-host-port", "prefer", routing.KVCachePrefillHeader} {
+	for _, name := range []string{"x-llm-d-epp-profile", "x-llm-d-pin-host-port", "prefer", routing.KVCachePrefillHeader, routing.PrefillDataParallelRankHeader} {
 		if _, ok := out[name]; ok {
 			t.Fatalf("%s should not be forwarded: %v", name, out)
 		}
@@ -152,13 +153,14 @@ func TestForwardedHeaders_ExcludesClientSuppliedPeerTopology(t *testing.T) {
 func TestStripInternalHeaders(t *testing.T) {
 	headers := http.Header{
 		"X-Llm-D-Kv-Cache-Prefill-P2p-Host-Port": {"10.0.0.9:7777"},
+		"X-Llm-D-Prefiller-Data-Parallel-Rank":   {"2"},
 		"X-Llm-D-Peer-Topology":                  {"host=spoofed"},
 		"X-Request-Id":                           {"abc-123"},
 	}
 
 	StripInternalHeaders(headers)
 
-	for _, name := range []string{routing.KVCachePrefillHeader, reqcommon.PeerTopologyHeaderKey} {
+	for _, name := range []string{routing.KVCachePrefillHeader, routing.PrefillDataParallelRankHeader, reqcommon.PeerTopologyHeaderKey} {
 		if headers.Get(name) != "" {
 			t.Fatalf("%s should be stripped: %v", name, headers)
 		}
