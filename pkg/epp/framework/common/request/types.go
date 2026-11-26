@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -302,16 +301,9 @@ type arrayInputResult struct {
 }
 
 func parseTokenIDs(v []any, errorPrefix string) ([]uint32, error) {
-	ids := make([]uint32, len(v))
-	for i, val := range v {
-		flt, ok := val.(float64)
-		if !ok {
-			return nil, fmt.Errorf("%s: mixed types in array", errorPrefix)
-		}
-		if flt != float64(uint32(flt)) {
-			return nil, fmt.Errorf("%s: floating-point number %f is not a valid token ID", errorPrefix, flt)
-		}
-		ids[i] = uint32(flt)
+	ids, err := reqcommon.ParseTokenIDs(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
 	return ids, nil
 }
@@ -936,7 +928,7 @@ func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
 
 func (r *GenerateRequest) unmarshalJSONFallback(data []byte) error {
 	var raw struct {
-		TokenIDs  []float64     `json:"token_ids"`
+		TokenIDs  []any         `json:"token_ids"`
 		CacheSalt string        `json:"cache_salt,omitempty"`
 		Features  *wireFeatures `json:"features,omitempty"`
 	}
@@ -944,13 +936,11 @@ func (r *GenerateRequest) unmarshalJSONFallback(data []byte) error {
 		return err
 	}
 	r.CacheSalt = raw.CacheSalt
-	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
-	for i, v := range raw.TokenIDs {
-		if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
-			return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
-		}
-		r.TokenIDs[i] = uint32(v)
+	ids, err := parseTokenIDs(raw.TokenIDs, "token_ids")
+	if err != nil {
+		return err
 	}
+	r.TokenIDs = ids
 	r.setGenerateRequestFeatures(raw.Features)
 	return nil
 }

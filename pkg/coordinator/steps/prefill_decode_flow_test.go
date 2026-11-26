@@ -139,7 +139,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 		OriginalPath:       reqcommon.PathChatCompletions,
 		Model:              "llama-3",
 		Stream:             false,
-		TokenIDs:           []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:           []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -234,7 +234,7 @@ func TestOffloadingKVRequestID_FlowFromPrefillToDecode(t *testing.T) {
 		RequestID:    "test-offloading-flow",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "llama-3",
-		TokenIDs:     []int{1, 2345},
+		TokenIDs:     []uint32{1, 2345},
 		Body: map[string]any{
 			"model":    "llama-3",
 			"messages": []any{map[string]any{"role": "user", "content": "hello"}},

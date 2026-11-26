@@ -692,19 +692,19 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			name:        "negative token id rejected",
 			input:       `{"token_ids":[1,2,-1]}`,
 			wantErr:     true,
-			errContains: "token_ids[2]: invalid value",
+			errContains: "token_ids: token id at index 2",
 		},
 		{
 			name:        "non-integer token id rejected",
 			input:       `{"token_ids":[1,2.5,3]}`,
 			wantErr:     true,
-			errContains: "token_ids[1]: invalid value",
+			errContains: "token_ids: token id at index 1",
 		},
 		{
 			name:        "value above MaxUint32 rejected",
 			input:       `{"token_ids":[4294967296]}`,
 			wantErr:     true,
-			errContains: "token_ids[0]: invalid value",
+			errContains: "token_ids: token id at index 0",
 		},
 		{
 			name:        "NaN token id rejected",
@@ -759,8 +759,10 @@ func TestGenerateRequest_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
 	}
 
 	err := g.UnmarshalJSON([]byte(`{"token_ids":[1,2.5,3],"cache_salt":"updated"}`))
-	require.EqualError(t, err, "token_ids[1]: invalid value 2.5")
-	assert.Equal(t, []uint32{1, 0, 0}, g.TokenIDs)
+	require.EqualError(t, err, "token_ids: token id at index 1: expected non-negative integer, got 2.5")
+	// A failed decode leaves the receiver's token IDs untouched; only the
+	// fields decoded before the failure are set.
+	assert.Equal(t, []uint32{99}, g.TokenIDs)
 	assert.Equal(t, "updated", g.CacheSalt)
 	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
 

@@ -50,7 +50,7 @@ type promptTokenIDsCase struct {
 	name    string
 	params  map[string]any
 	path    string
-	tokens  []int
+	tokens  []uint32
 	entries []pipeline.MultimodalEntry
 	extra   map[string]any
 	want    bool
@@ -62,18 +62,18 @@ func promptTokenIDsCases() []promptTokenIDsCase {
 	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
 	forward := map[string]any{ParamForwardPromptTokenIDs: true}
 	return []promptTokenIDsCase{
-		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
-		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
-		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
-		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
-		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
-		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
-		{name: "return_prompt_text_on_responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
+		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []uint32{1, 2, 3}, want: true},
+		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []uint32{1, 2, 3}, want: true},
+		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []uint32{1, 2, 3}, want: true},
+		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []uint32{1, 2, 3}, entries: image},
+		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []uint32{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
+		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []uint32{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
+		{name: "return_prompt_text_on_responses", params: forward, path: reqcommon.PathResponses, tokens: []uint32{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
 		{name: "not_rendered", params: forward, path: reqcommon.PathChatCompletions},
-		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
-		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
-		{name: "off_by_default", params: map[string]any{}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
-		{name: "off", params: map[string]any{ParamForwardPromptTokenIDs: false}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
+		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []uint32{1, 2, 3}},
+		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []uint32{1, 2, 3}},
+		{name: "off_by_default", params: map[string]any{}, path: reqcommon.PathChatCompletions, tokens: []uint32{1, 2, 3}},
+		{name: "off", params: map[string]any{ParamForwardPromptTokenIDs: false}, path: reqcommon.PathChatCompletions, tokens: []uint32{1, 2, 3}},
 	}
 }
 
@@ -132,19 +132,20 @@ func TestExtractTokenIDs(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   any
-		want    []int
+		want    []uint32
 		wantErr bool
 	}{
-		{name: "valid", input: []any{float64(1), float64(2345), float64(6789)}, want: []int{1, 2345, 6789}},
+		{name: "valid", input: []any{float64(1), float64(2345), float64(6789)}, want: []uint32{1, 2345, 6789}},
 		{name: "nil", input: nil, wantErr: true},
 		{name: "not_array", input: "hello", wantErr: true},
 		{name: "empty_array", input: []any{}, wantErr: true},
 		{name: "negative_token", input: []any{float64(-1)}, wantErr: true},
 		{name: "non_integer_token", input: []any{float64(1.5)}, wantErr: true},
 		{name: "overflow_float_token", input: []any{float64(1e19)}, wantErr: true},
+		{name: "token_above_uint32", input: []any{float64(5000000000)}, wantErr: true},
 		{name: "string_element", input: []any{"abc"}, wantErr: true},
 		{name: "bool_element", input: []any{true}, wantErr: true},
-		{name: "json_number", input: []any{json.Number("1"), json.Number("2345")}, want: []int{1, 2345}},
+		{name: "json_number", input: []any{json.Number("1"), json.Number("2345")}, want: []uint32{1, 2345}},
 		{name: "json_number_non_integer", input: []any{json.Number("1.5")}, wantErr: true},
 		{name: "json_number_overflow", input: []any{json.Number("9223372036854775808")}, wantErr: true},
 		{name: "float_at_2_pow_63", input: []any{float64(1 << 63)}, wantErr: true},
@@ -155,6 +156,9 @@ func TestExtractTokenIDs(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
+				}
+				if !errors.Is(err, pipeline.ErrBadRequest) {
+					t.Fatalf("expected ErrBadRequest, got %v", err)
 				}
 				return
 			}

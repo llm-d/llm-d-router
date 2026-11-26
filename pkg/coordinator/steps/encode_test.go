@@ -114,7 +114,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
 		Model:     testModelName,
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -237,7 +237,7 @@ func TestEncodeStep_ParallelFanOutSharesRevisionDecisionIDAndAggregatesResponseH
 		RequestID:          "req-header-mode",
 		RevisionDecisionID: revisionDecisionID,
 		Model:              testModelName,
-		TokenIDs:           []int{1, 32000, 32000, 32000, 32000, 32000},
+		TokenIDs:           []uint32{1, 32000, 32000, 32000, 32000, 32000},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 			{Modality: reqcommon.ModalityImage, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
@@ -300,7 +300,7 @@ func TestEncodeStep_SkipsInvalidECTransferParams(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID: "req-1",
 				Model:     testModelName,
-				TokenIDs:  []int{1, 32000, 32000, 2345},
+				TokenIDs:  []uint32{1, 32000, 32000, 2345},
 				MultimodalEntries: []pipeline.MultimodalEntry{
 					{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 				},
@@ -347,7 +347,7 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-2",
 		Model:     "test",
-		TokenIDs:  []int{1, 32000, 32000, 32000},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
@@ -399,7 +399,7 @@ func TestEncodeStep_FailureLogRecord(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID: "req-1",
 				Model:     "test",
-				TokenIDs:  []int{1, 32000},
+				TokenIDs:  []uint32{1, 32000},
 				MultimodalEntries: []pipeline.MultimodalEntry{
 					{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 				},
@@ -437,7 +437,7 @@ func TestEncodeStep_DebugRequestRecord(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
 		Model:     "test",
-		TokenIDs:  []int{1, 32000},
+		TokenIDs:  []uint32{1, 32000},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 			{Modality: reqcommon.ModalityImage, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
@@ -489,7 +489,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		RequestID:    "req-chat",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":  testModelName,
 			"stream": false,
@@ -578,7 +578,7 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 		RequestID:    "req-responses",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":             testModelName,
 			"max_output_tokens": 800,
@@ -667,7 +667,7 @@ func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
 		RequestID:    "req-responses-detail",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model": testModelName,
 			"input": []any{
@@ -719,7 +719,7 @@ func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
 		RequestID:    "req-responses-bad-image",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model": testModelName,
 			"input": []any{
@@ -779,7 +779,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 		RequestID:    "req-chat-max-completion-tokens",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":                 testModelName,
 			"max_completion_tokens": 100,
@@ -829,7 +829,7 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID:         "req-text-only",
 		Model:             "test-model",
-		TokenIDs:          []int{1, 42, 43, 2},
+		TokenIDs:          []uint32{1, 42, 43, 2},
 		MultimodalEntries: nil,
 	}
 
@@ -871,7 +871,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 				RequestID:    "req-generate",
 				Model:        "test-model",
 				OriginalPath: path,
-				TokenIDs:     []int{1, 32000, 32000, 2},
+				TokenIDs:     []uint32{1, 32000, 32000, 2},
 				MultimodalEntries: []pipeline.MultimodalEntry{
 					{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 				},
@@ -917,7 +917,7 @@ func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-no-ec",
 		Model:     "test-model",
-		TokenIDs:  []int{1, 32000, 32000, 2},
+		TokenIDs:  []uint32{1, 32000, 32000, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
@@ -961,7 +961,7 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-tok",
 		Model:     "test",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 2345, 6789},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 2345, 6789},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -1010,7 +1010,7 @@ func TestEncodeStep_BuildsTokenIDsFromSpan(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-span",
 		Model:     "test",
-		TokenIDs:  []int{1, 32000, 32001, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32001, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -1019,12 +1019,12 @@ func TestEncodeStep_BuildsTokenIDsFromSpan(t *testing.T) {
 	require.Equal(t, []any{float64(1), float64(32000), float64(32001), float64(32000)}, receivedTokenIDs)
 
 	// A span past the end of token_ids fails the request.
-	reqCtx.TokenIDs = []int{1, 32000}
+	reqCtx.TokenIDs = []uint32{1, 32000}
 	require.Error(t, step.Execute(context.Background(), reqCtx))
 
 	// A negative length or an offset+length that overflows int fails the
 	// request instead of panicking.
-	reqCtx.TokenIDs = []int{1, 32000, 32001, 32000, 2345}
+	reqCtx.TokenIDs = []uint32{1, 32000, 32001, 32000, 2345}
 	for _, span := range []pipeline.PlaceholderRange{
 		{Offset: 4, Length: -2},
 		{Offset: 2, Length: math.MaxInt},
@@ -1058,7 +1058,7 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-gen-cap",
 		Model:     "test",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -1383,7 +1383,7 @@ func TestEncodeStep_MissingMediaPartFails(t *testing.T) {
 		RequestID:    "missing-part",
 		Model:        "llama-3",
 		OriginalPath: reqcommon.PathChatCompletions,
-		TokenIDs:     []int{1, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 2345},
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{"role": "user", "content": []any{
@@ -1523,7 +1523,7 @@ func TestEncodeStep_MixedModalityFanout(t *testing.T) {
 		RequestID:    "mixed-fanout",
 		Model:        "llama-3",
 		OriginalPath: reqcommon.PathChatCompletions,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":  "llama-3",
 			"stream": false,
@@ -1563,7 +1563,7 @@ func TestEncodeStep_WithinModalityFanoutPairing(t *testing.T) {
 		RequestID:    "within-modality-fanout",
 		Model:        "llama-3",
 		OriginalPath: reqcommon.PathChatCompletions,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":  "llama-3",
 			"stream": false,
@@ -1667,7 +1667,7 @@ func TestEncodeStep_ResponsesFormat_FansOutFunctionCallOutputImage(t *testing.T)
 		RequestID:    "req-responses-output",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model": testModelName,
 			"input": []any{
@@ -1769,7 +1769,7 @@ func TestEncodeStep_ForwardsPreprocessingKwargs(t *testing.T) {
 				RequestID:    "req-kwargs",
 				OriginalPath: tc.path,
 				Model:        testModelName,
-				TokenIDs:     []int{1, 32000, 2345},
+				TokenIDs:     []uint32{1, 32000, 2345},
 				Body: map[string]any{
 					"model":                          testModelName,
 					tc.promptKey:                     []any{tc.item},
@@ -1822,7 +1822,7 @@ func TestEncodeStep_ResponsesFormat_RejectsEntryIndexBeyondImageParts(t *testing
 		RequestID:    "req-responses-index-gap",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model": testModelName,
 			"input": []any{
@@ -1884,7 +1884,7 @@ func TestEncodeStep_MessagesFormat(t *testing.T) {
 		RequestID:    "req-messages",
 		OriginalPath: reqcommon.PathMessages,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":               testModelName,
 			"max_tokens":          800,
@@ -1955,7 +1955,7 @@ func TestEncodeStep_MessagesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *tes
 		RequestID:    "req-messages-tokens-in",
 		OriginalPath: reqcommon.PathMessages,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model": testModelName,
 			"messages": []any{
@@ -2012,7 +2012,7 @@ func TestEncodeStep_ResponsesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *te
 		RequestID:    "req-responses-tokens-in",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        testModelName,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model": testModelName,
 			"input": []any{
@@ -2066,7 +2066,7 @@ func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
 		Model:     testModelName,
-		TokenIDs:  []int{1, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
@@ -2097,7 +2097,7 @@ func TestEncodeStep_SkipsSGLangGRPCGenerate(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-grpc",
 		GRPC:      &pipeline.SGLangGRPCRequest{Payload: []byte{}},
-		TokenIDs:  []int{1, 32000, 2},
+		TokenIDs:  []uint32{1, 32000, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},

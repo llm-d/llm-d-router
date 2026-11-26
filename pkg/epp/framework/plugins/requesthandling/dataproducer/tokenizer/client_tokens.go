@@ -18,7 +18,6 @@ package tokenizer
 
 import (
 	"encoding/json"
-	"math"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -191,38 +190,13 @@ func parseTokenIDList(value any) []uint32 {
 		}
 		return parseTokenIDList(decoded)
 	case []any:
-		ids := make([]uint32, 0, len(v))
-		for _, item := range v {
-			id, ok := tokenID(item)
-			if !ok {
-				return nil
-			}
-			ids = append(ids, id)
+		ids, err := reqcommon.ParseTokenIDs(v)
+		if err != nil {
+			return nil
 		}
 		if len(ids) > 0 {
 			return ids
 		}
 	}
 	return nil
-}
-
-// tokenID converts one decoded JSON number to a token ID.
-func tokenID(v any) (uint32, bool) {
-	var f float64
-	switch n := v.(type) {
-	case json.Number:
-		parsed, err := n.Float64()
-		if err != nil {
-			return 0, false
-		}
-		f = parsed
-	case float64:
-		f = n
-	default:
-		return 0, false
-	}
-	if f < 0 || f != math.Trunc(f) || f > math.MaxUint32 {
-		return 0, false
-	}
-	return uint32(f), true
 }

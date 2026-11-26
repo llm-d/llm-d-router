@@ -30,9 +30,9 @@ func TestIdsForwardedIn(t *testing.T) {
 		want    bool
 	}{
 		{"generate route", map[string]any{"token_ids": []int{1}}, reqcommon.APITypeVLLMGenerate, true},
-		{"completions with ids as prompt", map[string]any{"prompt": []int{1, 2}}, reqcommon.APITypeCompletions, true},
+		{"completions with ids as prompt", map[string]any{"prompt": []uint32{1, 2}}, reqcommon.APITypeCompletions, true},
 		{"completions with text prompt", map[string]any{"prompt": "hi"}, reqcommon.APITypeCompletions, false},
-		{"chat with forwarded ids", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{"prompt_token_ids": []int{1, 2}}}, reqcommon.APITypeChatCompletions, true},
+		{"chat with forwarded ids", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{"prompt_token_ids": []uint32{1, 2}}}, reqcommon.APITypeChatCompletions, true},
 		{"chat with kv params but no ids", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{"do_remote_prefill": true}}, reqcommon.APITypeChatCompletions, false},
 		{"responses without kv params", map[string]any{"input": "hi"}, reqcommon.APITypeResponses, false},
 	}

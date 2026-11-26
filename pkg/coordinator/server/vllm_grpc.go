@@ -1276,15 +1276,11 @@ func parseUint32Array(raw any, fieldName string, allowEmpty bool) ([]uint32, err
 	if !allowEmpty && len(arr) == 0 {
 		return nil, fmt.Errorf("%s must not be empty", fieldName)
 	}
-	out := make([]uint32, 0, len(arr))
-	for _, elem := range arr {
-		n, err := reqcommon.NonNegativeInt(elem)
-		if err != nil || n > math.MaxUint32 {
-			return nil, fmt.Errorf("%s elements must be uint32 integers", fieldName)
-		}
-		out = append(out, uint32(n)) //#nosec G115 -- guarded by [0, MaxUint32] above
+	ids, err := reqcommon.ParseTokenIDs(arr)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", fieldName, err)
 	}
-	return out, nil
+	return ids, nil
 }
 
 func parseStopStrings(raw any) ([]string, error) {

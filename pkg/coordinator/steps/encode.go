@@ -232,8 +232,8 @@ func (s *EncodeStep) executeOne(
 // buildEncodeTokenIDs builds the encode sub-request prompt: BOS plus the
 // entry's placeholder span as it sits in the full prompt, so the encoder
 // preprocesses the same token sequence the prefiller expands.
-func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) ([]int, error) {
-	bos := 1
+func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []uint32, entry pipeline.MultimodalEntry) ([]uint32, error) {
+	bos := uint32(1)
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
 	}

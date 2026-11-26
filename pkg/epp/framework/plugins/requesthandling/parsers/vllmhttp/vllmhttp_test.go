@@ -387,7 +387,7 @@ func TestVllmHTTPParser_ParseRequest_GenerateErrorPaths(t *testing.T) {
 		{
 			name:        "negative token id surfaces unmarshal error",
 			body:        `{"token_ids":[1,2,-1]}`,
-			errContains: "token_ids[2]: invalid value",
+			errContains: "token_ids: token id at index 2",
 		},
 		{
 			name:        "empty token_ids surfaces empty-field error",

@@ -78,7 +78,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		RequestID:      "req-1",
 		OriginalPath:   testChatCompletionsPath,
 		Body:           map[string]any{"model": testModelName, "stream": false, "messages": []any{}},
-		TokenIDs:       []int{1, 2345, 6789},
+		TokenIDs:       []uint32{1, 2345, 6789},
 		ResponseWriter: recorder,
 	}
 
@@ -136,7 +136,7 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 		RequestID:      "req-1",
 		OriginalPath:   reqcommon.PathVLLMGenerate,
 		Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
-		TokenIDs:       []int{1, 2345},
+		TokenIDs:       []uint32{1, 2345},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -179,7 +179,7 @@ func TestConditionalDecodeStep_ResponsesFormat_PassesBodyThrough(t *testing.T) {
 		RequestID:      "req-responses",
 		OriginalPath:   reqcommon.PathResponses,
 		Body:           map[string]any{"model": testModelName, "input": "hello"},
-		TokenIDs:       []int{1, 2345, 6789},
+		TokenIDs:       []uint32{1, 2345, 6789},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -222,7 +222,7 @@ func TestConditionalDecodeStep_MessagesFormat_PassesBodyThrough(t *testing.T) {
 			"max_tokens": 10,
 			"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
 		},
-		TokenIDs:       []int{1, 2345, 6789},
+		TokenIDs:       []uint32{1, 2345, 6789},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -260,7 +260,7 @@ func TestConditionalDecodeStep_CompletionsFormat_RewritesPrompt(t *testing.T) {
 		RequestID:      "req-1",
 		OriginalPath:   reqcommon.PathCompletions,
 		Body:           map[string]any{"model": testModelName, "prompt": "Hello"},
-		TokenIDs:       []int{1, 2345},
+		TokenIDs:       []uint32{1, 2345},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
