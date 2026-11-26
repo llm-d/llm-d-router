@@ -66,7 +66,8 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 
 	// Without leader election, named liveness still excludes plugin readiness.
 	if !s.leaderElectionEnabled {
-		if !isLive || !protocolMatches || !pluginsReady || draining {
+		notServingOnDrain := draining && in.Service != LivenessCheckService
+		if !isLive || !protocolMatches || !pluginsReady || notServingOnDrain {
 			s.logger.Error(pluginReadinessErr, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches, "pluginsReady", pluginsReady, "draining", draining)
 			return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 		}
