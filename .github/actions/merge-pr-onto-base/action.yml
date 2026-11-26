@@ -1,0 +1,97 @@
+name: Merge PR onto live base branch
+description: >-
+  Re-merges a pull_request checkout onto the current tip of the base branch when
+  GitHub's synthetic refs/pull/<n>/merge commit is behind (for example on workflow
+  re-runs). No-op on non-pull_request events or when HEAD already merges the PR
+  head onto the target base commit.
+inputs:
+  base-sha:
+    description: >-
+      Optional target base commit SHA, or "<run_attempt>:<sha>" from an upstream
+      check-changes job. When the embedded attempt does not match github.run_attempt
+      (for example during "Re-run failed jobs"), the live tip of github.base_ref is
+      resolved instead.
+    required: false
+    default: ''
+outputs:
+  base_sha:
+    description: Base branch commit SHA that HEAD is merged onto (empty outside pull_request).
+    value: ${{ steps.merge.outputs.base_sha }}
+  merged:
+    description: "'true' when a new local merge commit was created, 'false' otherwise."
+    value: ${{ steps.merge.outputs.merged }}
+runs:
+  using: composite
+  steps:
+    - name: Merge PR head onto live base commit
+      id: merge
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        INPUT_BASE_SHA: ${{ inputs.base-sha }}
+        BASE_REF: ${{ github.base_ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          echo "base_sha=" >> "$GITHUB_OUTPUT"
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        target_base=""
+        if [[ "$INPUT_BASE_SHA" =~ ^([0-9]+):([0-9a-f]{40})$ ]]; then
+          if [ "${BASH_REMATCH[1]}" = "$RUN_ATTEMPT" ]; then
+            target_base="${BASH_REMATCH[2]}"
+          else
+            echo "Ignoring cached base SHA from attempt ${BASH_REMATCH[1]} during attempt ${RUN_ATTEMPT}."
+          fi
+        elif [[ "$INPUT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          target_base="$INPUT_BASE_SHA"
+        fi
+
+        if [ -z "$target_base" ]; then
+          target_base=$(git ls-remote origin "refs/heads/${BASE_REF}" | awk -v ref="refs/heads/${BASE_REF}" '$2 == ref {print $1; exit}')
+        fi
+        if [[ ! "$target_base" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::Failed to resolve live tip of refs/heads/${BASE_REF}."
+          exit 1
+        fi
+        echo "base_sha=${target_base}" >> "$GITHUB_OUTPUT"
+
+        # Read raw parent headers so fetch-depth: 1 shallow grafts do not hide HEAD's parents.
+        mapfile -t parents < <(git cat-file -p HEAD | awk '/^parent / {print $2} /^$/ {exit}')
+        cur_p1="${parents[0]:-}"
+        cur_p2="${parents[1]:-}"
+        if [ "$cur_p1" = "$target_base" ] && [ "$cur_p2" = "$PR_HEAD_SHA" ]; then
+          echo "HEAD already merges ${PR_HEAD_SHA} onto ${target_base} (${BASE_REF})."
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Re-merging PR #${PR_NUMBER} head ${PR_HEAD_SHA} onto ${BASE_REF} (${target_base}); previous base was ${cur_p1:-none}."
+        fetch_flags=(--no-tags)
+        if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          fetch_flags+=(--unshallow)
+        fi
+        git fetch "${fetch_flags[@]}" origin "refs/heads/${BASE_REF}" "refs/pull/${PR_NUMBER}/head"
+        if ! git cat-file -e "${target_base}^{commit}" 2>/dev/null; then
+          git fetch --no-tags origin "$target_base"
+        fi
+        if ! git cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null; then
+          git fetch --no-tags origin "$PR_HEAD_SHA"
+        fi
+
+        git checkout --detach --force "$target_base"
+        if ! git -c user.name="github-actions[bot]" \
+                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                 merge --no-edit --no-ff "$PR_HEAD_SHA"; then
+          conflicts=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+          git merge --abort || true
+          echo "::error::PR #${PR_NUMBER} (${PR_HEAD_SHA}) conflicts with ${BASE_REF} (${target_base}): ${conflicts}"
+          exit 1
+        fi
+        echo "merged=true" >> "$GITHUB_OUTPUT"

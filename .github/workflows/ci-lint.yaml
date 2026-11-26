@@ -37,9 +37,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       src: ${{ steps.filter.outputs.src }}
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+      - name: Resolve base commit
+        id: base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote origin "refs/heads/${BASE_REF}" | awk -v ref="refs/heads/${BASE_REF}" '$2 == ref {print $1; exit}')
+          test -n "$sha"
+          echo "sha=${RUN_ATTEMPT}:${sha}" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -59,6 +71,7 @@ jobs:
               - docs/telemetry.md
               - docs/metrics.md
               - test/**
+              - .github/actions/merge-pr-onto-base/action.yml
               - .github/workflows/ci-lint.yaml
 
   lint:
@@ -73,6 +86,12 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+
+      - name: Merge PR onto live base branch
+        id: merge-base
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -151,6 +170,14 @@ jobs:
       # code scanning for the branch.
       # Pinned to a commit SHA rather than a tag, unlike other actions in this
       # workflow, per GitHub's guidance for actions that write security data.
+      # codeql-action reads git rev-parse HEAD; point HEAD back to the
+      # GitHub-known commit OID while keeping gosec.sarif on disk.
+      - name: Restore workflow commit ref for SARIF upload
+        if: ${{ !cancelled() && steps.merge-base.outputs.merged == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: git reset --soft "$WORKFLOW_SHA"
+
       - name: Upload gosec SARIF
         if: ${{ !cancelled() && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
@@ -191,9 +218,13 @@ jobs:
           # The diff below needs the merge base with the target branch.
           fetch-depth: 0
 
+      - name: Merge PR onto live base branch
+        id: merge-base
+        uses: ./.github/actions/merge-pr-onto-base
+
       - name: Fail on modified or deleted frozen plugin configs
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.merge-base.outputs.base_sha }}
         run: |
           set -euo pipefail
 

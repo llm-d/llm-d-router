@@ -29,6 +29,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+
       - name: Check typos
         uses: crate-ci/typos@v1.52.2
 

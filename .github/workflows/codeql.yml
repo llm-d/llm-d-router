@@ -45,6 +45,10 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7
 
+      - name: Merge PR onto live base branch
+        id: merge-base
+        uses: ./.github/actions/merge-pr-onto-base
+
       - name: Set up Go
         if: matrix.language == 'go'
         uses: actions/setup-go@v7
@@ -62,6 +66,14 @@ jobs:
       - name: Build Go packages
         if: matrix.language == 'go'
         run: go build ./...
+
+      # codeql-action reads git rev-parse HEAD; point HEAD back to the
+      # GitHub-known commit OID while keeping the merged working tree on disk.
+      - name: Restore workflow commit ref for SARIF upload
+        if: steps.merge-base.outputs.merged == 'true'
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: git reset --soft "$WORKFLOW_SHA"
 
       - name: Perform CodeQL analysis
         id: analyze

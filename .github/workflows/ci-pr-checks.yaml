@@ -30,9 +30,21 @@ jobs:
       helm: ${{ steps.filter.outputs.helm }}
       sglang-proto: ${{ steps.filter.outputs.sglang-proto }}
       vllm-proto: ${{ steps.filter.outputs.vllm-proto }}
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+      - name: Resolve base commit
+        id: base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote origin "refs/heads/${BASE_REF}" | awk -v ref="refs/heads/${BASE_REF}" '$2 == ref {print $1; exit}')
+          test -n "$sha"
+          echo "sha=${RUN_ATTEMPT}:${sha}" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -48,6 +60,7 @@ jobs:
               - test/**
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
+              - .github/actions/merge-pr-onto-base/action.yml
               - .github/workflows/ci-pr-checks.yaml
               - '!Dockerfile.coordinator'
               - '!Makefile.coord.mk'
@@ -76,6 +89,11 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7
 
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -93,6 +111,11 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7
 
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -108,6 +131,11 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -125,6 +153,11 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
 
       - name: Create Go cache dirs
         id: go-cache
@@ -332,6 +365,12 @@ jobs:
         if: ${{ matrix.image.source == 'build' }}
         uses: actions/checkout@v7
 
+      - name: Merge PR onto live base branch
+        if: ${{ matrix.image.source == 'build' }}
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
+
       # $(BUILDER_IMAGE) in the Makefile resolves to the content hash tag. The
       # e2e artifact has to match or test-e2e-run pulls a tag with nothing built.
       - name: Compute builder tag
@@ -399,6 +438,12 @@ jobs:
         if: ${{ matrix.image.source == 'build' }}
         uses: actions/checkout@v7
 
+      - name: Merge PR onto live base branch
+        if: ${{ matrix.image.source == 'build' }}
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
+
       - name: Build ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'build' }}
         uses: ./.github/actions/docker-build-and-push
@@ -450,6 +495,11 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-changes.outputs.base_sha }}
 
       - name: Set up e2e runner
         id: e2e-setup
