@@ -25,8 +25,10 @@ import (
 	"errors"
 	"fmt"
 
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -150,9 +152,10 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 	if model, ok := bodyMap["model"].(string); ok {
 		body.Model = model
 	}
-	// max_tokens lives under sampling_params in the generate wire format.
-	if sp, ok := bodyMap["sampling_params"].(map[string]any); ok {
-		body.MaxOutputTokens = request.MaxOutputTokensFromPayload(sp, "max_tokens")
+	// max_tokens lives under sampling_params in the generate wire format, which
+	// OutputTokenLimit resolves for the generate API.
+	if n, ok := reqcommon.OutputTokenLimit(bodyMap, reqcommon.APITypeVLLMGenerate); ok {
+		body.MaxOutputTokens = ptr.To(int64(n))
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -115,7 +116,7 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 		if err := proto.Unmarshal(parsedPayload, &req); err != nil {
 			return nil, fmt.Errorf("unmarshaling GenerateRequest: %w", err)
 		}
-		extractedBody, err := convertToInferenceRequestBody(&req)
+		extractedBody, err := convertToInferenceRequestBody(&req, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -200,7 +201,7 @@ func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {
 	return proto.Unmarshal(parsedPayload, resp)
 }
 
-func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrequest.InferenceRequestBody, error) {
+func convertToInferenceRequestBody(pbReq *pb.GenerateRequest, logger logr.Logger) (*fwkrequest.InferenceRequestBody, error) {
 	var body *fwkrequest.InferenceRequestBody
 	switch pbReq.Input.(type) {
 	case *pb.GenerateRequest_Text:
@@ -226,7 +227,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrequest.Infer
 			TokenizedRequest: &fwkrequest.TokenizedRequest{
 				Prompts: []fwkrequest.PromptTokens{{
 					TokenIDs:           copiedTokenIDsInt,
-					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs(), logger),
 				}},
 			},
 		}
@@ -242,22 +243,44 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrequest.Infer
 	return body, nil
 }
 
-func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrequest.MultiModalFeature {
+// convertMultiModalFeatures pairs mm_placeholders with mm_hashes by index.
+// Features without a hash stay in the list: multimodal detection (for example
+// the E/P/D encode decider) counts them, and their spans still account for
+// media tokens. Every cache-key path (tokenizer.ConvertMMFeaturesFromUpstream
+// and prefixhash.mmBlockExtra) excludes empty hashes, so they cannot
+// contribute a content-blind identity to prefix block keys. A length mismatch
+// makes positional pairing ambiguous, so no hash is paired at all.
+func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs, logger logr.Logger) []fwkrequest.MultiModalFeature {
 	if mmInputs == nil {
 		return nil
 	}
 
 	placeholders := mmInputs.GetMmPlaceholders()
+	hashes := mmInputs.GetMmHashes()
+	debugLogger := logger.V(logutil.DEBUG)
 	if len(placeholders) == 0 {
+		if len(hashes) > 0 {
+			debugLogger.Info("mm_hashes without mm_placeholders; dropping multimodal hashes",
+				"hashes", len(hashes))
+		}
 		return nil
 	}
+	pairHashes := len(hashes) == len(placeholders)
+	if len(hashes) > 0 && !pairHashes {
+		debugLogger.Info("mm_hashes and mm_placeholders lengths differ; no hash is paired",
+			"hashes", len(hashes), "placeholders", len(placeholders))
+	}
 
-	hashes := mmInputs.GetMmHashes()
 	features := make([]fwkrequest.MultiModalFeature, 0, len(placeholders))
+	debugEnabled := debugLogger.Enabled()
+	var hashlessIndices []int
 	for i, placeholder := range placeholders {
 		hash := ""
-		if i < len(hashes) {
+		if pairHashes {
 			hash = hashes[i]
+		}
+		if debugEnabled && hash == "" {
+			hashlessIndices = append(hashlessIndices, i)
 		}
 
 		feature := fwkrequest.MultiModalFeature{
@@ -270,6 +293,10 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrequest.Multi
 		}
 
 		features = append(features, feature)
+	}
+	if len(hashlessIndices) > 0 {
+		debugLogger.Info("multimodal placeholders without hashes are excluded from cache keys",
+			"count", len(hashlessIndices), "indices", hashlessIndices, "totalFeatures", len(features))
 	}
 
 	return features

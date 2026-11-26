@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strconv"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -35,6 +37,10 @@ import (
 // RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
 // reason the EPP dropped a request.
 const RequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
+
+// RetryAfterHeaderKey is the HTTP response header carrying the advisory retry delay on capacity
+// rejections, in RFC 9110 delta-seconds.
+const RetryAfterHeaderKey = "retry-after"
 
 // RequestDroppedReason is the reason a request was rejected before dispatch or evicted after dispatch.
 type RequestDroppedReason string
@@ -76,6 +82,8 @@ const (
 	ServiceUnavailable = "ServiceUnavailable"
 	ModelServerError   = "ModelServerError"
 	ResourceExhausted  = "ResourceExhausted"
+	// ModelServerClientError is a 4xx response from a model server. ModelServerError is a 5xx.
+	ModelServerClientError = "ModelServerClientError"
 )
 
 // Error returns a string version of the error.
@@ -92,6 +100,21 @@ func CanonicalCode(err error) string {
 	return Unknown
 }
 
+// ModelServerStatusCode returns the error code for a model server response
+// status, or "" when the status is not an error. A status that is not a number
+// is a server error.
+func ModelServerStatusCode(status string) string {
+	code, err := strconv.Atoi(status)
+	switch {
+	case err != nil || code >= http.StatusInternalServerError:
+		return ModelServerError
+	case code >= http.StatusBadRequest:
+		return ModelServerClientError
+	default:
+		return ""
+	}
+}
+
 // httpCodes maps a canonical code to the HTTP status it is answered with. The
 // envelope derives its error type from the status (reqcommon.ErrorEnvelope).
 var httpCodes = map[string]envoyTypePb.StatusCode{
@@ -104,6 +127,23 @@ var httpCodes = map[string]envoyTypePb.StatusCode{
 	ResourceExhausted:  envoyTypePb.StatusCode_TooManyRequests,
 	Internal:           envoyTypePb.StatusCode_InternalServerError,
 	ServiceUnavailable: envoyTypePb.StatusCode_ServiceUnavailable,
+}
+
+// grpcCodes maps a canonical code to the gRPC status of the answer to a gRPC
+// request. Without it Envoy derives the status from the HTTP status, which gives
+// INTERNAL for 400, UNIMPLEMENTED for 404, UNAVAILABLE for 429, and UNKNOWN for
+// 412, 413 and 500. The coordinator reads a conditional-decode cache miss from
+// FAILED_PRECONDITION and maps these codes back to HTTP in grpcStatusToHTTPStatus.
+var grpcCodes = map[string]codes.Code{
+	BadRequest:         codes.InvalidArgument,
+	Unauthorized:       codes.Unauthenticated,
+	Forbidden:          codes.PermissionDenied,
+	NotFound:           codes.NotFound,
+	PreconditionFailed: codes.FailedPrecondition,
+	PayloadTooLarge:    codes.ResourceExhausted,
+	ResourceExhausted:  codes.ResourceExhausted,
+	Internal:           codes.Internal,
+	ServiceUnavailable: codes.Unavailable,
 }
 
 // errorBody serializes the error in the envelope of the API the request was sent to.
@@ -138,12 +178,19 @@ func BuildErrResponse(err error, apiType reqcommon.APIType) (*extProcPb.Processi
 	}
 	setHeaders := append([]*configPb.HeaderValueOption{contentType}, envoy.GenerateHeadersMutation(e.Headers)...)
 
+	// Envoy applies the gRPC status only to a gRPC request.
+	var grpcStatus *extProcPb.GrpcStatus
+	if grpcCode, ok := grpcCodes[e.Code]; ok {
+		grpcStatus = &extProcPb.GrpcStatus{Status: uint32(grpcCode)}
+	}
+
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status:  &envoyTypePb.HttpStatus{Code: httpCode},
-				Body:    body,
-				Headers: &extProcPb.HeaderMutation{SetHeaders: setHeaders},
+				Status:     &envoyTypePb.HttpStatus{Code: httpCode},
+				Body:       body,
+				Headers:    &extProcPb.HeaderMutation{SetHeaders: setHeaders},
+				GrpcStatus: grpcStatus,
 			},
 		},
 	}, nil

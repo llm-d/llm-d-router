@@ -397,8 +397,7 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	}))
 	cached := p.speculativeCache.Get(request.RequestID)
 	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 2)
-	require.Len(t, cached.Value().perPodKeys["10.0.0.2:8080"][0], 1)
+	require.Len(t, cached.Value().perPodKeys, 1)
 	require.Len(t, cached.Value().perPodKeys["10.0.0.3:8080"][0], 4)
 }
 
@@ -1281,6 +1280,22 @@ func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 // lookups. Level-2 attribute validation in datalayer.BuildRegistry and
 // Registry.ValidateConsumer rejects an estimate-backed or missing token-producer
 // at startup, independent of factory instantiation order.
+type stubTokenProducer struct {
+	typedName plugin.TypedName
+	attrs     map[string]string
+}
+
+func (s *stubTokenProducer) TypedName() plugin.TypedName { return s.typedName }
+
+func (s *stubTokenProducer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		tokenproducer.TokenizedPromptDataKey: plugin.ProducedData{
+			Type:       fwkrequest.TokenizedRequest{},
+			Attributes: s.attrs,
+		},
+	}
+}
+
 func TestTokenProducerDependencyValidation(t *testing.T) {
 	newHandle := func(t *testing.T) plugin.Handle {
 		return plugin.NewEppHandle(utils.NewTestContext(t), nil)
@@ -1326,6 +1341,40 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		require.NoError(t, validateHandle(handle))
 	})
 
+	t.Run("precise with passthrough token-producer: ok", func(t *testing.T) {
+		handle := newHandle(t)
+		addTokenProducer(t, handle, `{"backend":"passthrough"}`)
+		addPrecise(t, handle)
+		require.NoError(t, validateHandle(handle))
+	})
+
+	t.Run("precise with non-vllm exact_tokens producer (e.g. sglang renderer): ok", func(t *testing.T) {
+		handle := newHandle(t)
+		handle.AddPlugin("token-producer", &stubTokenProducer{
+			typedName: plugin.TypedName{Type: tokenproducer.PluginType, Name: "token-producer"},
+			attrs: map[string]string{
+				tokenproducer.AttrBackend:     "sglang",
+				tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+			},
+		})
+		addPrecise(t, handle)
+		require.NoError(t, validateHandle(handle))
+	})
+
+	t.Run("precise with producer missing exact_tokens attribute: rejected", func(t *testing.T) {
+		handle := newHandle(t)
+		handle.AddPlugin("token-producer", &stubTokenProducer{
+			typedName: plugin.TypedName{Type: tokenproducer.PluginType, Name: "token-producer"},
+			attrs: map[string]string{
+				tokenproducer.AttrBackend: "sglang",
+			},
+		})
+		addPrecise(t, handle)
+		err := validateHandle(handle)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `producer does not declare required attribute "exact_tokens"="true"`)
+	})
+
 	t.Run("precise with estimate-backed token-producer: rejected", func(t *testing.T) {
 		handle := newHandle(t)
 		// Empty config selects the zero-config estimate default.
@@ -1333,7 +1382,7 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		addPrecise(t, handle)
 		err := validateHandle(handle)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), `producer attribute "backend"="estimate" does not match required "vllm"`)
+		require.Contains(t, err.Error(), `producer attribute "exact_tokens"="false" does not match required "true"`)
 	})
 
 	t.Run("precise with no token-producer at all: rejected", func(t *testing.T) {
@@ -1353,7 +1402,7 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		addPrecise(t, handle)
 		err = validateHandle(handle)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), `producer attribute "backend"="estimate" does not match required "vllm"`)
+		require.Contains(t, err.Error(), `producer attribute "exact_tokens"="false" does not match required "true"`)
 	})
 }
 
@@ -1385,6 +1434,29 @@ func TestPluginFactory_RejectsNonPositiveKVEventsConcurrency(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "concurrency")
 	}
+}
+
+// Strict decoding rejects a non-loopback global ZMQ socket unless the config
+// sets kvEventsConfig.allowUntrustedPublishers.
+func TestPluginFactory_GlobalZMQEndpointGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+	handle := plugin.NewEppHandle(ctx, nil)
+
+	_, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:5557"}}`,
+	)), handle)
+	require.ErrorContains(t, err, "allowUntrustedPublishers")
+
+	result, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:0","allowUntrustedPublishers":true}}`,
+	)), handle)
+	require.NoError(t, err)
+	p := result.(*Producer)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	require.Equal(t, "tcp://0.0.0.0:0", p.kvEventsConfig.ZMQEndpoint)
+	require.True(t, p.kvEventsConfig.AllowUntrustedPublishers)
 }
 
 // Key built from string literals so an upstream rename trips the test.
@@ -1479,6 +1551,28 @@ func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
 		KVEventsConfig: kvEventsCfg,
 	})
 	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
+}
+
+func TestNewAcceptsRegisteredKVEventEngineType(t *testing.T) {
+	built := 0
+	engineadapter.Register("test-own-format", func() kvevents.EngineAdapter {
+		built++
+		return engineadapter.NewVLLMAdapter()
+	})
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "test-own-format"
+
+	_, err = New(ctx, "own-format-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, built, "New builds the pool's adapter from the registry")
 }
 
 type fakeSubscriberManager struct {

@@ -723,3 +723,52 @@ func TestAggregateMetric(t *testing.T) {
 		})
 	}
 }
+
+// TestHasPositiveValue determines when a detection metric reports a value above zero.
+func TestHasPositiveValue(t *testing.T) {
+	nonFinite := func(v float64) *dto.MetricFamily {
+		return makeMetricFamily("non_finite",
+			makeMetric(map[string]string{"engine": "0"}, 4096, 0),
+			makeMetric(map[string]string{"engine": "1"}, v, 0),
+		)
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"bytes": makeMetricFamily("bytes",
+			makeMetric(map[string]string{"transfer_type": "CPU_to_GPU"}, 0, 0),
+			makeMetric(map[string]string{"transfer_type": "GPU_to_CPU"}, 4096, 0),
+		),
+		"ratio":   makeMetricFamily("ratio", makeMetric(nil, 0.25, 0)),
+		"idle":    makeMetricFamily("idle", makeMetric(nil, 0, 0)),
+		"nan":     nonFinite(math.NaN()),
+		"pos_inf": nonFinite(math.Inf(1)),
+		"neg_inf": nonFinite(math.Inf(-1)),
+	}
+
+	tests := []struct {
+		name         string
+		spec         *Spec
+		wantDetected bool
+		wantOK       bool
+	}{
+		{name: "one series above zero", spec: &Spec{Name: "bytes"}, wantDetected: true, wantOK: true},
+		{name: "fraction below one", spec: &Spec{Name: "ratio"}, wantDetected: true, wantOK: true},
+		{name: "every series at zero", spec: &Spec{Name: "idle"}, wantOK: true},
+		{
+			name:   "only label-matching series",
+			spec:   &Spec{Name: "bytes", Labels: map[string]string{"transfer_type": "CPU_to_GPU"}},
+			wantOK: true,
+		},
+		{name: "family not found", spec: &Spec{Name: "absent"}, wantOK: true},
+		{name: "NaN series", spec: &Spec{Name: "nan"}},
+		{name: "+Inf series", spec: &Spec{Name: "pos_inf"}},
+		{name: "-Inf series", spec: &Spec{Name: "neg_inf"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detected, ok := tt.spec.hasPositiveValue(families)
+			assert.Equal(t, tt.wantDetected, detected, "detected")
+			assert.Equal(t, tt.wantOK, ok, "ok")
+		})
+	}
+}

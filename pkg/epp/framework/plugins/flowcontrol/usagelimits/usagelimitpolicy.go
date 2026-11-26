@@ -45,6 +45,9 @@ func StaticPolicyFactory(name string, rawConfig *json.Decoder, _ plugin.Handle) 
 			return nil, fmt.Errorf("failed to parse static usage limit policy config: %w", err)
 		}
 		if cfg.Threshold != nil {
+			if *cfg.Threshold <= 0.0 || *cfg.Threshold > 1.0 {
+				return nil, fmt.Errorf("threshold must be in (0.0, 1.0], got %f", *cfg.Threshold)
+			}
 			threshold = *cfg.Threshold
 		}
 	}
@@ -58,15 +61,24 @@ func DefaultPolicy() flowcontrol.UsageLimitPolicy {
 }
 
 // NewConstPolicy implements a UsageLimitPolicy that applies a fixed threshold to all priorities.
+// An empty name defaults to StaticUsageLimitPolicyType.
 func NewConstPolicy(usageLimitName string, threshold float64) flowcontrol.UsageLimitPolicy {
-	return NewPolicyFunc(usageLimitName, func(_ context.Context, _ float64, _ []int, ceilings []float64) {
-		for i := range ceilings {
-			ceilings[i] = threshold
-		}
-	})
+	if usageLimitName == "" {
+		usageLimitName = StaticUsageLimitPolicyType
+	}
+	return &usageLimitPolicyFunc{
+		typeName: StaticUsageLimitPolicyType,
+		name:     usageLimitName,
+		f: func(_ context.Context, _ float64, _ []int, ceilings []float64) {
+			for i := range ceilings {
+				ceilings[i] = threshold
+			}
+		},
+	}
 }
 
-// NewPolicyFunc implements a UsageLimitPolicy with a single func.
+// NewPolicyFunc implements a UsageLimitPolicy with a single func. The policy is not a registered
+// plugin type, so its type is derived from its name.
 func NewPolicyFunc(
 	usageLimitName string,
 	f func(ctx context.Context, saturation float64, priorities []int, ceilings []float64),

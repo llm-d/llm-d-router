@@ -19,6 +19,7 @@ package grpcframe
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -594,4 +595,136 @@ func TestReadFrameHeaderWithoutPayloadIsUnexpectedEOF(t *testing.T) {
 	require.Equal(t, frame, got)
 	_, err = fr2.Next()
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+type closeTrackingReader struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeTrackingReader) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestReadUnaryRequest(t *testing.T) {
+	frame, err := FramePayload([]byte("hello"))
+	require.NoError(t, err)
+	const limit = 64
+
+	for _, enc := range []string{"", "identity", "IDENTITY"} {
+		body := &closeTrackingReader{Reader: bytes.NewReader(frame)}
+		req := httptest.NewRequest(http.MethodPost, "/vllm.Inference/Generate", body)
+		if enc != "" {
+			req.Header.Set(HeaderEncoding, enc)
+		}
+		got, code, rErr := ReadUnaryRequest(req, limit)
+		require.NoError(t, rErr)
+		require.Equal(t, codes.OK, code)
+		require.Equal(t, frame, got)
+		require.True(t, body.closed)
+	}
+
+	tests := []struct {
+		name     string
+		encoding string
+		body     []byte
+		wantCode codes.Code
+		wantErr  error
+	}{
+		{
+			name:     "gzip encoding header",
+			encoding: "gzip",
+			body:     frame,
+			wantCode: codes.Unimplemented,
+			wantErr:  ErrCompressed,
+		},
+		{
+			name:     "compressed frame flag",
+			body:     []byte{1, 0, 0, 0, 0},
+			wantCode: codes.Unimplemented,
+			wantErr:  ErrCompressed,
+		},
+		{
+			name:     "oversized frame",
+			body:     []byte{0, 0, 0, 1, 0},
+			wantCode: codes.ResourceExhausted,
+			wantErr:  ErrTooLarge,
+		},
+		{
+			name:     "truncated frame",
+			body:     []byte{0, 0, 0},
+			wantCode: codes.InvalidArgument,
+			wantErr:  ErrMalformed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &closeTrackingReader{Reader: bytes.NewReader(tc.body)}
+			req := httptest.NewRequest(http.MethodPost, "/vllm.Inference/Generate", body)
+			if tc.encoding != "" {
+				req.Header.Set(HeaderEncoding, tc.encoding)
+			}
+			_, code, rErr := ReadUnaryRequest(req, limit)
+			require.ErrorIs(t, rErr, tc.wantErr)
+			require.Equal(t, tc.wantCode, code)
+			require.Equal(t, tc.wantErr.Error(), ReadErrorMessage(rErr))
+			require.True(t, body.closed)
+		})
+	}
+
+	require.Equal(t, "failed to read request body", ReadErrorMessage(errors.New("secret socket detail")))
+}
+
+func TestHTTPStatusToCodeMappings(t *testing.T) {
+	require.Equal(t, codes.InvalidArgument, UpstreamHTTPStatusToCode(http.StatusBadRequest))
+	require.Equal(t, codes.InvalidArgument, UpstreamHTTPStatusToCode(http.StatusUnprocessableEntity))
+	require.Equal(t, codes.Unauthenticated, UpstreamHTTPStatusToCode(http.StatusUnauthorized))
+	require.Equal(t, codes.PermissionDenied, UpstreamHTTPStatusToCode(http.StatusForbidden))
+	require.Equal(t, codes.Unimplemented, UpstreamHTTPStatusToCode(http.StatusNotFound))
+	require.Equal(t, codes.Unimplemented, UpstreamHTTPStatusToCode(http.StatusMethodNotAllowed))
+	require.Equal(t, codes.ResourceExhausted, UpstreamHTTPStatusToCode(http.StatusRequestEntityTooLarge))
+	require.Equal(t, codes.ResourceExhausted, UpstreamHTTPStatusToCode(http.StatusTooManyRequests))
+	require.Equal(t, codes.DeadlineExceeded, UpstreamHTTPStatusToCode(http.StatusGatewayTimeout))
+	require.Equal(t, codes.Unavailable, UpstreamHTTPStatusToCode(http.StatusInternalServerError))
+	require.Equal(t, codes.Unavailable, UpstreamHTTPStatusToCode(http.StatusBadGateway))
+
+	require.Equal(t, codes.InvalidArgument, LocalHTTPStatusToCode(http.StatusBadRequest))
+	require.Equal(t, codes.PermissionDenied, LocalHTTPStatusToCode(http.StatusForbidden))
+	require.Equal(t, codes.Unavailable, LocalHTTPStatusToCode(http.StatusBadGateway))
+	require.Equal(t, codes.Unavailable, LocalHTTPStatusToCode(http.StatusServiceUnavailable))
+	require.Equal(t, codes.DeadlineExceeded, LocalHTTPStatusToCode(http.StatusGatewayTimeout))
+	require.Equal(t, codes.Internal, LocalHTTPStatusToCode(http.StatusInternalServerError))
+}
+
+func TestNewH2CAwareTransport(t *testing.T) {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proto-Major", string(rune('0'+r.ProtoMajor)))
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Config.Protocols = protocols
+	srv.Start()
+	defer srv.Close()
+
+	client := &http.Client{Transport: NewH2CAwareTransport(&http.Transport{})}
+
+	httpReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/v1/completions", nil)
+	require.NoError(t, err)
+	httpReq.Header.Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+	httpResp, err := client.Do(httpReq)
+	require.NoError(t, err)
+	_ = httpResp.Body.Close()
+	require.Equal(t, "1", httpResp.Header.Get("X-Proto-Major"))
+
+	grpcReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/vllm.Inference/Generate", nil)
+	require.NoError(t, err)
+	grpcReq.Header.Set(reqcommon.HeaderContentType, MediaType)
+	grpcResp, err := client.Do(grpcReq)
+	require.NoError(t, err)
+	_ = grpcResp.Body.Close()
+	require.Equal(t, "2", grpcResp.Header.Get("X-Proto-Major"))
 }

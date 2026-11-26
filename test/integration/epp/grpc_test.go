@@ -609,7 +609,7 @@ func TestFullDuplexStreamed_SGLangGRPC(t *testing.T) {
 		}
 
 		h.ExpectMetrics(map[string]string{
-			"llm_d_epp_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal("", "", 4)),
+			"llm_d_epp_request_total": eppharness.CleanMetric(eppharness.MetricReqTotalForSurface(reqcommon.APITypeSGLangGenerate.Surface(), "", "", 4)),
 		})
 		for name, wantSum := range map[string]float64{
 			"llm_d_epp_request_input_tokens":  3,
@@ -868,7 +868,7 @@ func TestFullDuplexStreamed_VllmInference(t *testing.T) {
 		}
 
 		h.ExpectMetrics(map[string]string{
-			"llm_d_epp_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelMyModel, modelMyModel, 4)),
+			"llm_d_epp_request_total": eppharness.CleanMetric(eppharness.MetricReqTotalForSurface(reqcommon.APITypeVLLMGenerate.Surface(), modelMyModel, modelMyModel, 4)),
 		})
 		for name, wantSum := range map[string]float64{
 			"llm_d_epp_request_input_tokens":  3,
@@ -940,7 +940,7 @@ func TestFullDuplexStreamed_VllmInference(t *testing.T) {
 			t.Fatalf("Response mismatch (-want +got): %v", diff)
 		}
 		h.ExpectMetrics(map[string]string{
-			"llm_d_epp_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelSQLLora, modelSQLLoraTarget, 0)),
+			"llm_d_epp_request_total": eppharness.CleanMetric(eppharness.MetricReqTotalForSurface(reqcommon.APITypeVLLMGenerate.Surface(), modelSQLLora, modelSQLLoraTarget, 0)),
 		})
 	})
 

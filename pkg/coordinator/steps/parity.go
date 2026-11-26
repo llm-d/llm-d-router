@@ -155,24 +155,38 @@ func (p *parityCheck) onUsage(block map[string]any) {
 		return
 	}
 	p.reported = true
-	if got == p.expected {
+	recordPromptTokenMismatch(p.logger, p.mode, p.step, p.requestID, p.model, p.apiType, p.idsForwarded, p.expected, got)
+}
+
+// recordPromptTokenMismatch compares got against expected and records the
+// prompt_token_mismatch_total metric and log entry when they differ. On HTTP
+// paths expected is the render step's token count; on gRPC P/D paths expected
+// is the prefill worker's reported prompt token count.
+func recordPromptTokenMismatch(
+	logger logr.Logger,
+	mode, step, requestID, model string,
+	apiType reqcommon.APIType,
+	idsForwarded bool,
+	expected, got int,
+) {
+	if mode == promptTokenParityOff || got == expected {
 		return
 	}
-	coordmetrics.IncPromptTokenMismatch(p.model, p.apiType.String(), p.idsForwarded)
+	coordmetrics.IncPromptTokenMismatch(model, apiType.String(), idsForwarded)
 	keysAndValues := []any{
-		"request_id", p.requestID,
-		"step", p.step,
-		"rendered_tokens", p.expected,
+		"request_id", requestID,
+		"step", step,
+		"rendered_tokens", expected,
 		"worker_prompt_tokens", got,
-		"api_type", p.apiType,
-		"ids_forwarded", p.idsForwarded,
+		"api_type", apiType,
+		"ids_forwarded", idsForwarded,
 	}
-	if p.mode == promptTokenParityError {
-		coordmetrics.IncStepErrorTotal(p.step, coordmetrics.ErrorCodePromptTokenMismatch)
-		p.logger.Error(nil, "prompt token mismatch between render and worker", keysAndValues...)
+	if mode == promptTokenParityError {
+		coordmetrics.IncStepErrorTotal(step, coordmetrics.ErrorCodePromptTokenMismatch)
+		logger.Error(nil, "prompt token mismatch between render and worker", keysAndValues...)
 		return
 	}
-	p.logger.Info("prompt token mismatch between render and worker", keysAndValues...)
+	logger.Info("prompt token mismatch between render and worker", keysAndValues...)
 }
 
 // injectIncludeUsage asks a streamed chat or completions leg for the trailing

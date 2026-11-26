@@ -94,19 +94,20 @@ func (q *EvictionQueue) Untrack(requestID string) {
 	delete(q.allInFlight, requestID)
 }
 
-// PopN removes and returns up to n most-evictable items from the heap.
-func (q *EvictionQueue) PopN(n int) []*flowcontrol.EvictionItem {
+// PopIfBelow removes and returns the next item for eviction only if its priority is strictly below
+// priorityBound. If the heap is empty or the top item has Priority >= priorityBound, it returns nil
+// without modifying the queue. Only the top item is checked, so the ordering policy must place the
+// lowest priority first.
+func (q *EvictionQueue) PopIfBelow(priorityBound int) *flowcontrol.EvictionItem {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
-	result := make([]*flowcontrol.EvictionItem, 0, n)
-	for i := 0; i < n && q.h.Len() > 0; i++ {
-		e := heap.Pop(&q.h).(*heapEntry)
-		delete(q.handles, e.item.RequestID)
-		delete(q.allInFlight, e.item.RequestID)
-		result = append(result, e.item)
+	if q.h.Len() == 0 || q.h.entries[0].item.Priority >= priorityBound {
+		return nil
 	}
-	return result
+	e := heap.Pop(&q.h).(*heapEntry)
+	delete(q.handles, e.item.RequestID)
+	delete(q.allInFlight, e.item.RequestID)
+	return e.item
 }
 
 // Peek returns a shallow copy of the most-evictable item without removing it, or nil if the heap

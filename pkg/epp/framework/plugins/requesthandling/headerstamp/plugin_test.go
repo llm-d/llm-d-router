@@ -112,6 +112,44 @@ func TestPreRequest_SetOverwritesClientValue(t *testing.T) {
 		"endpoint attribute wins over any client-supplied value")
 }
 
+func TestPreRequest_SetDeletesClientValueWithoutAttribute(t *testing.T) {
+	roleKey := fwkplugin.NewDataKey("role", attribute.AttributeProducerType)
+	laneKey := fwkplugin.NewDataKey("lane", attribute.AttributeProducerType)
+	cases := []struct {
+		name  string
+		attrs map[fwkplugin.DataKey]attrstring.Value
+	}{
+		{name: "attribute missing", attrs: map[fwkplugin.DataKey]attrstring.Value{roleKey: "decode"}},
+		{name: "attribute empty", attrs: map[fwkplugin.DataKey]attrstring.Value{roleKey: "decode", laneKey: ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(
+				stampRule{headerName: "x-llm-d-role", mode: modeSet, dataKey: roleKey},
+				stampRule{headerName: "x-llm-d-lane", mode: modeSet, dataKey: laneKey},
+			)
+			request := &fwksched.InferenceRequest{Headers: map[string]string{
+				"x-llm-d-role": "client-chosen-role",
+				"x-llm-d-lane": "client-chosen-lane",
+			}}
+
+			require.NoError(t, h.PreRequest(context.Background(), request, schedulingResult(makeEndpoint(t, tc.attrs))))
+			assert.Equal(t, "decode", request.Headers["x-llm-d-role"])
+			assert.NotContains(t, request.Headers, "x-llm-d-lane",
+				"a set stamp without an endpoint value must not forward the client's value")
+		})
+	}
+}
+
+func TestPreRequest_SetKeepsPseudoHeaderWithoutAttribute(t *testing.T) {
+	ep := makeEndpoint(t, nil)
+	h := newTestHandler(stampRule{headerName: ":authority", mode: modeSet, dataKey: pathPrefixKey()})
+	request := &fwksched.InferenceRequest{Headers: map[string]string{":authority": "gw.example.com"}}
+
+	require.NoError(t, h.PreRequest(context.Background(), request, schedulingResult(ep)))
+	assert.Equal(t, "gw.example.com", request.Headers[":authority"], "a pseudo-header cannot be removed")
+}
+
 func TestPreRequest_MissingAttributeSkips(t *testing.T) {
 	ep := makeEndpoint(t, nil)
 	h := newTestHandler(stampRule{headerName: ":path", mode: modePrepend, dataKey: pathPrefixKey()})

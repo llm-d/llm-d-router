@@ -103,10 +103,29 @@ func (e *ResponseWrittenError) Error() string {
 
 func (e *ResponseWrittenError) Unwrap() error { return e.Cause }
 
+// StepRerunError asks the pipeline to run a step again. A step returns it when
+// an upstream call failed with a retryable error before any byte reached the
+// client, and only while RequestContext.CanRerunStep reports true. From names
+// the earliest step to run again: the step that produced the input that Step
+// could not use. The pipeline restarts at the nearest earlier step with that
+// name, or at Step itself when it has no such step.
+type StepRerunError struct {
+	Step  string
+	From  string
+	Cause error
+}
+
+func (e *StepRerunError) Error() string {
+	return fmt.Sprintf("%s: re-run requested: %v", e.Step, e.Cause)
+}
+
+func (e *StepRerunError) Unwrap() error { return e.Cause }
+
 // Pipeline orchestrates the sequential execution of steps.
 type Pipeline struct {
 	steps                  []Step
 	forwardResponseHeaders map[string]struct{}
+	maxStepReruns          int
 }
 
 // New creates a pipeline from an ordered list of steps.
@@ -118,6 +137,13 @@ func New(steps []Step) *Pipeline {
 // to discover steps that serve auxiliary HTTP routes.
 func (p *Pipeline) Steps() []Step {
 	return p.steps
+}
+
+// SetMaxStepReruns sets how many times one request may honor a
+// StepRerunError. Zero, the default, disables re-runs. Call it before the
+// pipeline serves requests.
+func (p *Pipeline) SetMaxStepReruns(n int) {
+	p.maxStepReruns = n
 }
 
 // stepTiming holds one step's per-request timing for the summary log line
@@ -147,7 +173,9 @@ func NewWithForwardResponseHeaders(steps []Step, headers []string) (*Pipeline, e
 	return &Pipeline{steps: steps, forwardResponseHeaders: forwardResponseHeaders}, nil
 }
 
-// Execute runs all steps in order. Any error aborts immediately.
+// Execute runs all steps in order. Any error aborts immediately, except a
+// StepRerunError while the request has a re-run left: the pipeline then runs
+// the named steps again.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
 
@@ -170,6 +198,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	}
 
 	reqCtx.forwardResponseHeaders = p.forwardResponseHeaders
+	reqCtx.stepRerunsLeft = p.maxStepReruns
 	if reqCtx.RevisionDecisionID == "" {
 		reqCtx.RevisionDecisionID = uuid.NewString()
 	}
@@ -204,13 +233,14 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		// valid empty prompt array in the completions branch), so gate on the
 		// step having run rather than on len > 0. gRPC Generate skips render
 		// and leaves TokenIDs unset.
-		if executed["render"] && !reqCtx.IsSGLangGRPC() {
+		if executed["render"] && !reqCtx.IsGRPC() {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
 		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)
 	}()
 
-	for idx, step := range p.steps {
+	for idx := 0; idx < len(p.steps); idx++ {
+		step := p.steps[idx]
 		if err := ctx.Err(); err != nil {
 			cancelled := fmt.Errorf("pipeline cancelled: %w", err)
 			span.SetStatus(codes.Error, cancelled.Error())
@@ -225,6 +255,22 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 				executed[name] = true
 				doneBy = name
 				return nil
+			}
+			var rerun *StepRerunError
+			// A client that left gets no re-run: the error takes the usual path.
+			if errors.As(err, &rerun) && reqCtx.stepRerunsLeft > 0 && ctx.Err() == nil {
+				reqCtx.stepRerunsLeft--
+				restart := p.rerunStart(idx, rerun.From)
+				failedStep := rerun.Step
+				if failedStep == "" {
+					failedStep = name
+				}
+				coordmetrics.IncStepRerunTotal(failedStep)
+				logger.V(logutil.DEFAULT).Info("re-running steps after a retryable upstream failure",
+					"step", failedStep, "from", p.steps[restart].Name(), "rerunsLeft", reqCtx.stepRerunsLeft)
+				// The loop increment moves idx to restart.
+				idx = restart - 1
+				continue
 			}
 			failed := fmt.Errorf("step %q failed: %w", name, err)
 			if IsClientCancellation(ctx, err) {
@@ -241,6 +287,18 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		logger.V(logutil.TRACE).Info("step complete", "step", name)
 	}
 	return nil
+}
+
+// rerunStart returns the index at which a re-run that the step at idx
+// requested starts: the nearest earlier step named from, or idx when the
+// pipeline has no such step.
+func (p *Pipeline) rerunStart(idx int, from string) int {
+	for i := idx - 1; i >= 0; i-- {
+		if p.steps[i].Name() == from {
+			return i
+		}
+	}
+	return idx
 }
 
 // runStep executes one step with per-iteration observability. The defer

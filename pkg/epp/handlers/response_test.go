@@ -1472,6 +1472,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 				metadata.DestinationEndpointKey: "10.2.0.5:8080",               // should be stripped
 				"content-length":                "500",                         // should be stripped
 				"x-llm-d-peer-topology":         "host=node12,zone=us-east1-a", // stamped by topology-stamp-handler, must reach the coordinator
+				errcommon.RetryAfterHeaderKey:   "5",                           // upstream model-server Retry-After must pass through unchanged
 			},
 		},
 	}
@@ -1490,6 +1491,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
 	assert.Equal(t, "host=node12,zone=us-east1-a", gotHeaders["x-llm-d-peer-topology"])
+	assert.Equal(t, "5", gotHeaders[errcommon.RetryAfterHeaderKey])
 }
 
 func TestGenerateResponseHeaders_FlowQueueDuration(t *testing.T) {
@@ -2155,4 +2157,36 @@ func TestGenerateResponseHeaderResponseStripsFailedStage(t *testing.T) {
 	value, present = setValue(mutation, "content-type")
 	require.True(t, present)
 	assert.Equal(t, "application/json", value)
+}
+
+func TestHandleResponseBodyCompletion(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	completionBody := []byte(`{"object":"text_completion","choices":[{"index":0,"text":"hello","finish_reason":"stop"}]}`)
+	tests := []struct {
+		name        string
+		statusCode  string
+		endOfStream bool
+		want        *fwkrh.Completion
+	}{
+		{name: "200 response", endOfStream: true, want: &fwkrh.Completion{Text: "hello", FinishReason: "stop"}},
+		{name: "error status", statusCode: errcommon.ModelServerError, endOfStream: true},
+		{name: "before end of stream"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response:           &Response{},
+				SchedulingRequest:  &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+				responseStatusCode: test.statusCode,
+			}
+			server.HandleResponseBody(ctx, reqCtx, completionBody, test.endOfStream)
+			if diff := cmp.Diff(test.want, reqCtx.Completion); diff != "" {
+				t.Errorf("Completion mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

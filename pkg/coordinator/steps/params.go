@@ -30,9 +30,13 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
-	// ParamForceStream opts the decode step into force-streaming: a
-	// non-streaming client request is sent upstream with stream enabled, and
-	// the streamed response is reassembled into one non-streaming reply.
+	// ParamForceStream opts the decode and conditional-decode steps into
+	// force-streaming: a non-streaming client request is sent upstream with
+	// stream enabled, and the streamed response is reassembled into one
+	// non-streaming reply. It, ParamForceStreamBufferSize and
+	// ParamForceStreamMaxRequestSize are pipeline settings (see
+	// EnableForceStream); setting them under decode or conditional-decode params
+	// fails config load.
 	ParamForceStream = "force_stream"
 	// ParamForceStreamBufferSize is the total byte budget, as a human-readable
 	// string ("1GiB"), shared across concurrent forced requests. A request that
@@ -52,12 +56,13 @@ const (
 	// logs it, "error" also records a step error. The response to the client
 	// is never changed.
 	ParamPromptTokenParity = "prompt_token_parity"
-	// ParamForwardPromptTokenIDs, when true, makes decode and conditional-decode
-	// send the rendered token IDs in kv_transfer_params.prompt_token_ids on
-	// text-only chat completions, Responses and Messages requests. The decode
-	// worker builds the engine input from them and skips chat templating and
-	// tokenization. Requires vLLM v0.27.0 or later, where earlier versions
-	// ignore the field, and a render step, which the pipeline builder checks.
+	// ParamForwardPromptTokenIDs, when true, makes prefill, decode and
+	// conditional-decode send the rendered token IDs in
+	// kv_transfer_params.prompt_token_ids on text-only chat completions,
+	// Responses and Messages requests. The worker builds the engine input from
+	// them and skips chat templating and tokenization. Requires vLLM v0.27.0 or
+	// later, where earlier versions ignore the field, and a render step, which
+	// the pipeline builder checks.
 	// Defaults to false.
 	ParamForwardPromptTokenIDs = "forward_prompt_token_ids"
 )

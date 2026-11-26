@@ -27,6 +27,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // RedisIndexConfig holds the configuration for the RedisIndex.
@@ -168,7 +170,7 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 		}
 
 		if len(filteredPods) == 0 {
-			logger.Info("no pods found for key, cutting search", "key", key)
+			logger.V(logging.TRACE).Info("no pods found for key, cutting search", "key", key)
 			return podsPerKey, nil // early stop since prefix-chain breaks here
 		}
 

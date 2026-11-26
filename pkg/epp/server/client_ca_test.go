@@ -24,8 +24,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -36,6 +39,7 @@ import (
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
@@ -83,6 +87,23 @@ func newTestClientCA(t *testing.T) testClientCA {
 	}
 }
 
+// writeServerCert writes a self-signed tls.crt and tls.key pair into a
+// temporary directory. Generating the certificate here, before the runner
+// starts, keeps its RSA key generation out of healthCheck's deadline.
+func writeServerCert(t *testing.T) string {
+	t.Helper()
+	cert, err := tlsutil.CreateSelfSignedTLSCertificate(logutil.NewTestLogger())
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.crt"),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
+	return dir
+}
+
 // startRunnerWithClientCA serves the ext_proc runner over TLS with a
 // self-signed server certificate and the given client CA, on a loopback port.
 func startRunnerWithClientCA(t *testing.T, pool *x509.CertPool) string {
@@ -91,6 +112,7 @@ func startRunnerWithClientCA(t *testing.T, pool *x509.CertPool) string {
 	require.NoError(t, err)
 	r := NewDefaultExtProcServerRunner()
 	r.SecureServing = true
+	r.CertPath = writeServerCert(t)
 	r.ClientCAs = pool
 	r.GrpcListener = lis
 	r.Datastore = datastore.NewDatastore(t.Context(), nil)

@@ -63,6 +63,34 @@ func TestHashLRUZeroCapacity(t *testing.T) {
 	}
 }
 
+func TestHashLRUAddReportsInsertion(t *testing.T) {
+	c := newHashLRU(2)
+	if !c.Add(1) {
+		t.Fatal("adding a new key reports insertion")
+	}
+	if c.Add(1) {
+		t.Fatal("refreshing a present key does not report insertion")
+	}
+	if !c.Add(2) {
+		t.Fatal("adding a second new key reports insertion")
+	}
+	// At capacity both keys are present, so re-adding refreshes without
+	// evicting.
+	if c.Add(1) {
+		t.Fatal("re-adding a present key at capacity does not report insertion")
+	}
+	// A third distinct key evicts the least recently added or refreshed key.
+	if !c.Add(3) {
+		t.Fatal("adding a key that evicts the oldest reports insertion")
+	}
+	if c.Contains(2) {
+		t.Fatal("the least recently added key should have been evicted")
+	}
+	if newHashLRU(0).Add(1) {
+		t.Fatal("a zero-capacity LRU inserts nothing")
+	}
+}
+
 // TestHashLRUMatchesSimpleLRU checks membership and eviction order against
 // simplelru for the same sequence of adds and lookups, including a block hash
 // of zero.
@@ -105,6 +133,80 @@ func TestHashLRUMatchesSimpleLRU(t *testing.T) {
 				}
 				if key > space && ref.Contains(key) != got.Contains(key) {
 					t.Fatalf("op %d membership of wide key %d", op, key)
+				}
+			}
+		})
+	}
+}
+
+func TestHashLRURemove(t *testing.T) {
+	c := newHashLRU(4)
+	c.Add(1)
+	c.Add(2)
+	c.Add(3)
+	c.Remove(2)
+	if c.Len() != 2 || len(c.nodes) != 2 {
+		t.Fatalf("len %d nodes %d, want 2 and 2", c.Len(), len(c.nodes))
+	}
+	if c.Contains(2) {
+		t.Fatal("removed key still present")
+	}
+	// Removal does not disturb the recency order of the remaining keys.
+	if got, ok := oldestKey(c); !ok || got != 1 {
+		t.Fatalf("oldest %d (%v), want 1", got, ok)
+	}
+	// Removing an absent key is a no-op.
+	c.Remove(99)
+	if c.Len() != 2 {
+		t.Fatalf("len %d after removing an absent key", c.Len())
+	}
+	// The freed node slot is reclaimed, so removals do not shrink capacity.
+	c.Add(4)
+	c.Add(5)
+	c.Add(6)
+	if c.Len() != 4 {
+		t.Fatalf("len %d, want 4 at capacity", c.Len())
+	}
+	if c.Contains(1) {
+		t.Fatal("the oldest key should be evicted at capacity")
+	}
+	for _, key := range []blockHash{3, 4, 5, 6} {
+		if !c.Contains(key) {
+			t.Fatalf("surviving key %d missing", key)
+		}
+	}
+}
+
+// TestHashLRURemoveMatchesSimpleLRU checks Remove, including the capacity the
+// freed slots keep, against simplelru for the same operation sequence.
+func TestHashLRURemoveMatchesSimpleLRU(t *testing.T) {
+	for _, capacity := range []int{1, 2, 3, 7, 32} {
+		t.Run(strconv.Itoa(capacity), func(t *testing.T) {
+			ref, err := simplelru.NewLRU[blockHash, struct{}](capacity, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := newHashLRU(capacity)
+			rng := rand.New(rand.NewPCG(7, uint64(capacity)))
+			const space = 64
+			for op := range 8000 {
+				key := blockHash(rng.Uint64N(space))
+				if rng.IntN(3) == 0 {
+					ref.Remove(key)
+					got.Remove(key)
+				} else {
+					ref.Add(key, struct{}{})
+					got.Add(key)
+				}
+				if ref.Len() != got.Len() {
+					t.Fatalf("op %d len ref %d got %d", op, ref.Len(), got.Len())
+				}
+				assertSameOldest(t, op, ref, got)
+				for i := range space {
+					k := blockHash(i)
+					if ref.Contains(k) != got.Contains(k) {
+						t.Fatalf("op %d membership of %d ref %v got %v", op, k, ref.Contains(k), got.Contains(k))
+					}
 				}
 			}
 		})
@@ -200,7 +302,7 @@ func BenchmarkHashLRUReplaceAfterFull(b *testing.B) {
 				for i := range benchmarkHashLRUCapacity {
 					lru.Add(benchmarkHashKey(i))
 				}
-				return lru.Add
+				return func(key blockHash) { lru.Add(key) }
 			},
 		},
 	} {

@@ -300,30 +300,7 @@ func TestConditionalDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
 // in kv_transfer_params.prompt_token_ids; multimodal, unrendered and
 // non-chat requests, and probes with the parameter unset, carry none.
 func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
-	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
-	forward := map[string]any{ParamForwardPromptTokenIDs: true}
-	tests := []struct {
-		name    string
-		params  map[string]any
-		path    string
-		tokens  []int
-		entries []pipeline.MultimodalEntry
-		extra   map[string]any
-		want    bool
-	}{
-		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
-		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
-		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
-		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
-		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
-		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
-		{name: "return_prompt_text on responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
-		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
-		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
-		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
-		{name: "off by default", params: nil, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
-	}
-	for _, tc := range tests {
+	for _, tc := range promptTokenIDsCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
 			require.NoError(t, err)
@@ -459,7 +436,7 @@ func TestConditionalDecodeStep_CacheMiss(t *testing.T) {
 			if len(respBody) != 0 {
 				t.Fatalf("expected empty response body on cache miss, got: %s", string(respBody))
 			}
-			require.Equal(t, 1, countRecords(records(), "cache miss"), "one log line for a miss: %v", records())
+			require.Equal(t, 1, countRecords(records(), "probe deferred"), "one log line for a miss: %v", records())
 			require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
 			for _, other := range []string{coordmetrics.ProbeResultServed, coordmetrics.ProbeResultError} {
 				require.InDelta(t, 0.0, probeCount(t, reg, other), 1e-9, "a miss must not count as %q", other)

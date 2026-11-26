@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -81,7 +82,13 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 func (s *EncodeStep) Name() string { return EncodeStepName }
 
 func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() || len(reqCtx.MultimodalEntries) == 0 {
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
+	case *pipeline.SGLangGRPCRequest:
+		return nil
+	}
+	if len(reqCtx.MultimodalEntries) == 0 {
 		return nil
 	}
 
@@ -95,11 +102,6 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
 		return nil
 	}
-
-	reqCtx.EncodeFanout = len(reqCtx.MultimodalEntries)
-
-	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
-	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var partsByMod map[reqcommon.Modality][]mediaPart
@@ -132,13 +134,30 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		bodies[i] = body
 	}
 
+	// A repeated non-empty hash needs one encoder response; empty hashes are independent.
+	requestIndices := make([]int, 0, len(reqCtx.MultimodalEntries))
+	seenHashes := make(map[string]struct{}, len(reqCtx.MultimodalEntries))
+	for i, entry := range reqCtx.MultimodalEntries {
+		if entry.Hash != "" {
+			if _, seen := seenHashes[entry.Hash]; seen {
+				continue
+			}
+			seenHashes[entry.Hash] = struct{}{}
+		}
+		requestIndices = append(requestIndices, i)
+	}
+
+	reqCtx.EncodeFanout = len(requestIndices)
+	results := make([]map[string]any, len(requestIndices))
+	responseHeaders := make([]http.Header, len(requestIndices))
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
-	for i := range reqCtx.MultimodalEntries {
+	for resultIndex, entryIndex := range requestIndices {
 		g.Go(func() error {
-			result, headers, err := s.executeOne(gCtx, logger, reqCtx, i, bodies[i], format)
-			results[i] = result
-			responseHeaders[i] = headers
+			result, headers, err := s.executeOne(gCtx, logger, reqCtx, entryIndex, bodies[entryIndex], format)
+			results[resultIndex] = result
+			responseHeaders[resultIndex] = headers
 			return err
 		})
 	}
@@ -218,16 +237,14 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
 	}
-	// The render response's spans reach here unvalidated, so check both
-	// signs and compare without adding, which could overflow.
+	// The render response's spans reach here unvalidated, so reject negative
+	// values before delegating bounds-safe slicing to vllmwire.SliceEncoderSpan.
 	span := entry.Placeholder
-	if span.Offset < 0 || span.Length < 0 || span.Offset > len(fullTokenIDs) || span.Length > len(fullTokenIDs)-span.Offset {
+	if span.Offset < 0 || span.Length < 0 {
 		return nil, fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
 			span.Offset, span.Length, len(fullTokenIDs))
 	}
-	tokenIDs := make([]int, 0, 1+span.Length)
-	tokenIDs = append(tokenIDs, bos)
-	return append(tokenIDs, fullTokenIDs[span.Offset:span.Offset+span.Length]...), nil
+	return vllmwire.SliceEncoderSpan(fullTokenIDs, bos, uint64(span.Offset), uint64(span.Length), true)
 }
 
 // buildEncodeBody builds one fanout sub-request. localIdx is the entry's

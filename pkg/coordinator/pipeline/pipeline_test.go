@@ -800,3 +800,226 @@ func TestExecute_AccumulatesStepDuration(t *testing.T) {
 		t.Fatalf("expected StepDuration > 0, got %s", reqCtx.StepDuration)
 	}
 }
+
+// stepRerunCount reads step_reruns_total for the given step via the passed
+// gatherer. Absent series is 0.
+func stepRerunCount(t *testing.T, reg *prometheus.Registry, step string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_step_reruns_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "step" && l.GetValue() == step {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func TestExecute_StepRerun(t *testing.T) {
+	cases := []struct {
+		name       string
+		steps      []string // step names, in pipeline order
+		maxReruns  int
+		failing    string // step that asks for a re-run
+		from       string // step that the re-run starts from
+		failures   int    // attempts of failing that ask for a re-run
+		wantOrder  []string
+		wantReruns float64
+		wantErr    bool
+	}{
+		{
+			name:       "restarts at the named earlier step",
+			steps:      []string{"encode", "prefill", "decode"},
+			maxReruns:  1,
+			failing:    "decode",
+			from:       "prefill",
+			failures:   1,
+			wantOrder:  []string{"encode", "prefill", "decode", "prefill", "decode"},
+			wantReruns: 1,
+		},
+		{
+			name:       "restarts at the failed step when the named step is absent",
+			steps:      []string{"encode", "decode"},
+			maxReruns:  1,
+			failing:    "decode",
+			from:       "prefill",
+			failures:   1,
+			wantOrder:  []string{"encode", "decode", "decode"},
+			wantReruns: 1,
+		},
+		{
+			name:       "honors each re-run up to the limit",
+			steps:      []string{"prefill", "decode"},
+			maxReruns:  2,
+			failing:    "decode",
+			from:       "prefill",
+			failures:   2,
+			wantOrder:  []string{"prefill", "decode", "prefill", "decode", "prefill", "decode"},
+			wantReruns: 2,
+		},
+		{
+			name:       "returns the step error after the last re-run",
+			steps:      []string{"prefill", "decode"},
+			maxReruns:  1,
+			failing:    "decode",
+			from:       "prefill",
+			failures:   2,
+			wantOrder:  []string{"prefill", "decode", "prefill", "decode"},
+			wantReruns: 1,
+			wantErr:    true,
+		},
+		{
+			name:      "does not re-run by default",
+			steps:     []string{"prefill", "decode"},
+			failing:   "decode",
+			from:      "prefill",
+			failures:  1,
+			wantOrder: []string{"prefill", "decode"},
+			wantErr:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			upstream := &UpstreamError{Step: tc.failing, StatusCode: http.StatusBadGateway}
+			var order []string
+			failures := 0
+			steps := make([]Step, 0, len(tc.steps))
+			for _, name := range tc.steps {
+				steps = append(steps, &mockStep{name: name, fn: func(context.Context, *RequestContext) error {
+					order = append(order, name)
+					if name != tc.failing || failures == tc.failures {
+						return nil
+					}
+					failures++
+					return &StepRerunError{Step: name, From: tc.from, Cause: upstream}
+				}})
+			}
+			p := New(steps)
+			p.SetMaxStepReruns(tc.maxReruns)
+
+			err := p.Execute(context.Background(), &RequestContext{})
+
+			require.Equal(t, tc.wantOrder, order)
+			require.InDelta(t, tc.wantReruns, stepRerunCount(t, reg, tc.failing), 1e-9)
+			wantErrors := 0.0
+			if tc.wantErr {
+				require.ErrorIs(t, err, upstream)
+				wantErrors = 1
+			} else {
+				require.NoError(t, err)
+			}
+			require.InDelta(t, wantErrors, stepErrorCount(t, reg, tc.failing, coordmetrics.ErrorCodeUpstream5xx), 1e-9,
+				"only the error that reaches the client counts as a step error")
+		})
+	}
+}
+
+// The re-runs of one request are shared by its steps, and every request starts
+// with the full count.
+func TestExecute_StepRerunLimitIsPerRequest(t *testing.T) {
+	newPipeline := func(failures map[string]int) *Pipeline {
+		steps := make([]Step, 0, 3)
+		for _, name := range []string{"encode", "prefill", "decode"} {
+			steps = append(steps, &mockStep{name: name, fn: func(context.Context, *RequestContext) error {
+				if failures[name] == 0 {
+					return nil
+				}
+				failures[name]--
+				return &StepRerunError{Step: name, From: "encode", Cause: &UpstreamError{Step: name, StatusCode: http.StatusBadGateway}}
+			}})
+		}
+		p := New(steps)
+		p.SetMaxStepReruns(1)
+		return p
+	}
+
+	failures := map[string]int{"prefill": 1, "decode": 1}
+	err := newPipeline(failures).Execute(context.Background(), &RequestContext{})
+	require.ErrorContains(t, err, `step "decode" failed`, "prefill used the only re-run of the request")
+
+	failures = map[string]int{"decode": 2}
+	p := newPipeline(failures)
+	require.Error(t, p.Execute(context.Background(), &RequestContext{}))
+	require.Equal(t, 0, failures["decode"])
+	failures["decode"] = 1
+	require.NoError(t, p.Execute(context.Background(), &RequestContext{}), "the next request has its own re-run")
+}
+
+func TestExecute_NoStepRerunAfterClientCancellation(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts := 0
+	p := New([]Step{&mockStep{name: "decode", fn: func(context.Context, *RequestContext) error {
+		attempts++
+		cancel()
+		return &StepRerunError{Step: "decode", From: "prefill", Cause: &UpstreamError{Step: "decode", StatusCode: http.StatusBadGateway}}
+	}}})
+	p.SetMaxStepReruns(1)
+
+	err := p.Execute(ctx, &RequestContext{})
+
+	require.ErrorContains(t, err, `step "decode" failed`)
+	require.Equal(t, 1, attempts)
+	require.Zero(t, stepRerunCount(t, reg, "decode"))
+	require.InDelta(t, 1.0, stepErrorCount(t, reg, "decode", coordmetrics.ErrorCodeUpstream5xx), 1e-9)
+}
+
+func TestCanRerunStep(t *testing.T) {
+	var nilCtx *RequestContext
+	require.False(t, nilCtx.CanRerunStep())
+	require.False(t, (&RequestContext{}).CanRerunStep(), "a request outside Execute has no re-run")
+
+	var seen []bool
+	p := New([]Step{&mockStep{name: "decode", fn: func(_ context.Context, rc *RequestContext) error {
+		seen = append(seen, rc.CanRerunStep())
+		if len(seen) == 1 {
+			return &StepRerunError{Step: "decode", From: "prefill", Cause: errors.New("unavailable")}
+		}
+		return nil
+	}}})
+	p.SetMaxStepReruns(1)
+	require.NoError(t, p.Execute(context.Background(), &RequestContext{}))
+	require.Equal(t, []bool{true, false}, seen, "the second attempt has no re-run left")
+}
+
+func TestStepRerunError(t *testing.T) {
+	cause := &UpstreamError{Step: "decode", StatusCode: http.StatusBadGateway}
+	err := &StepRerunError{Step: "decode", From: "prefill", Cause: cause}
+	require.ErrorIs(t, err, cause)
+	require.Equal(t, "decode: re-run requested: "+cause.Error(), err.Error())
+	require.Equal(t, coordmetrics.ErrorCodeUpstream5xx, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
+}
+
+func TestExecute_StepRerunRecordsPeerFailedStepLabel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	decodeAttempts := 0
+	p := New([]Step{
+		&mockStep{name: "prefill", fn: func(context.Context, *RequestContext) error { return nil }},
+		&mockStep{name: "decode", fn: func(context.Context, *RequestContext) error {
+			decodeAttempts++
+			if decodeAttempts == 1 {
+				return &StepRerunError{
+					Step:  "prefill",
+					From:  "prefill",
+					Cause: &UpstreamError{Step: "prefill", StatusCode: http.StatusBadGateway},
+				}
+			}
+			return nil
+		}},
+	})
+	p.SetMaxStepReruns(1)
+
+	require.NoError(t, p.Execute(context.Background(), &RequestContext{}))
+	require.Equal(t, 2, decodeAttempts)
+	require.InDelta(t, 1.0, stepRerunCount(t, reg, "prefill"), 1e-9)
+	require.Zero(t, stepRerunCount(t, reg, "decode"))
+}

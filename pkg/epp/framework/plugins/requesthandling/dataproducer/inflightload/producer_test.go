@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	datagraph "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -761,6 +762,49 @@ func TestInFlightLoadProducer_EndOfStreamObservesOutput(t *testing.T) {
 	require.Equal(t, int64(300), producer.tokenEstimator.EstimateOutputFromRequest(req))
 }
 
+func TestInFlightLoadProducer_TTSCompletionDoesNotTrainTextEstimate(t *testing.T) {
+	producer := newTestProducer(t)
+	req := &fwksched.InferenceRequest{
+		RequestID: "req-tts",
+		Body: &fwkrequest.InferenceRequestBody{
+			TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello"},
+		},
+		SchedulingResult: &fwksched.SchedulingResult{},
+	}
+
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Usage:            fwkrequest.Usage{CompletionTokens: 50},
+	}, nil)
+
+	textReq := makeTokenRequest("req-text", 4)
+	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(textReq))
+}
+
+func TestInFlightLoadProducer_TTSCompletionAfterBodyReleaseDoesNotTrainTextEstimate(t *testing.T) {
+	producer := newTestProducer(t)
+	body := &fwkrequest.InferenceRequestBody{
+		TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello"},
+	}
+	req := &fwksched.InferenceRequest{
+		RequestID: "req-tts",
+		Headers:   map[string]string{":path": reqcommon.PathAudioSpeech},
+		// The handler releases the body once the request is forwarded, before any response arrives.
+		Body:             body.ResponsePhaseView(),
+		SchedulingResult: &fwksched.SchedulingResult{},
+	}
+
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Usage:            fwkrequest.Usage{CompletionTokens: 5000},
+	}, nil)
+
+	textReq := makeTokenRequest("req-text", 4)
+	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(textReq))
+}
+
 // makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
 // which is what the estimator reads to derive the input token count. No outlen-bucket
 // attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
@@ -1189,6 +1233,72 @@ func TestInFlightLoadProducer_EndOfStreamAfterJanitorSkip(t *testing.T) {
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
 
+// TestInFlightLoadProducer_JanitorReapsStalledStreamWithLiveContext verifies
+// that once response streaming starts, liveness is governed by per-chunk Touch
+// calls so the janitor reclaims counters if the stream stalls before
+// EndOfStream even while the ext_proc stream ctx remains open (issue #3710).
+func TestInFlightLoadProducer_JanitorReapsStalledStreamWithLiveContext(t *testing.T) {
+	producer := newTestProducerWithFastJanitor(t)
+	prefillID := fullEndpointName("prefill-pod")
+	decodeID := fullEndpointName("decode-pod")
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	t.Cleanup(reqCancel)
+
+	req := makeTokenRequest("req-janitor-stalled-stream", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)}},
+		},
+	}
+	_ = producer.PreRequest(reqCtx, req, res)
+
+	// Before any response chunk arrives, the live ctx protects silent prefill
+	// wait across janitor sweeps (#2295).
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID),
+		"prefill counter must hold before the first response chunk while reqCtx is alive")
+	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID))
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID),
+		"decode counter must hold before the first response chunk while reqCtx is alive")
+	require.Equal(t, UnknownOutputTokens, producer.tokenTracker.get(decodeID))
+
+	// First streaming chunk arrives: prefill load is released, decode stays
+	// held, and liveness hands off from reqCtx to per-chunk Touch.
+	req.SchedulingResult = res
+	producer.ResponseBody(reqCtx, req, &fwkrh.Response{StartOfStream: true, EndOfStream: false}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID))
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID))
+	require.Equal(t, UnknownOutputTokens, producer.tokenTracker.get(decodeID))
+
+	// Intermediate chunks spaced within the 50ms staleness window keep decode alive.
+	for range 5 {
+		time.Sleep(20 * time.Millisecond)
+		producer.ResponseBody(reqCtx, req, &fwkrh.Response{StartOfStream: false, EndOfStream: false}, nil)
+	}
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID),
+		"active streaming chunks must keep decode counters alive past the initial staleness window")
+	require.Equal(t, UnknownOutputTokens, producer.tokenTracker.get(decodeID))
+
+	// Upstream stalls mid-stream without sending EndOfStream while reqCtx stays open.
+	require.NoError(t, reqCtx.Err())
+	require.Eventually(t, func() bool {
+		return producer.requestTracker.get(decodeID) == 0 && producer.tokenTracker.get(decodeID) == 0
+	}, 2*time.Second, 10*time.Millisecond, "janitor should reap stalled decode stream once Touch expires even with open reqCtx")
+
+	// Late EndOfStream or ctx teardown after reaping must not underflow counters.
+	producer.ResponseBody(reqCtx, req, &fwkrh.Response{EndOfStream: true}, nil)
+	reqCancel()
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID))
+	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID))
+}
+
 func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	producer := newTestProducer(t)
 	ctx := context.Background()
@@ -1206,7 +1316,7 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req, "default")
+		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req.RequestID, "default")
 	}()
 	go func() {
 		defer wg.Done()

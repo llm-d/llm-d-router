@@ -69,6 +69,11 @@ const waitPollInterval = 200 * time.Millisecond
 // recovered on the next backup tick rather than never.
 const waitBackupPollInterval = 2 * time.Second
 
+// waitGraceFloor is the shortest mailbox TTL a wait delivery sets. It
+// exceeds waitBackupPollInterval, so a waiter attached to the same id that
+// missed the wake-up still reads the result on its next poll.
+const waitGraceFloor = 5 * time.Second
+
 // Step bridges the coordinator to the llm-d-async broker. A
 // request that carries the mode header opts into async serving: passthrough
 // labels it (quota classification, objective and fairness headers) and lets
@@ -142,10 +147,10 @@ func New(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 func (s *Step) Name() string { return StepName }
 
 func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	// Async serving applies to JSON HTTP requests only. A gRPC Generate
-	// request has no model field and cannot get an OpenAI JSON error, so the
-	// step leaves it untouched even when it carries the mode header.
-	if reqCtx.IsSGLangGRPC() {
+	// Async serving applies to JSON HTTP requests only. A native gRPC Generate
+	// request cannot receive an OpenAI JSON error, so the step leaves it
+	// untouched even when it carries the mode header.
+	if reqCtx.IsNativeGRPC() {
 		return nil
 	}
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
@@ -411,6 +416,22 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
 }
 
+// expireDelivered bounds the mailbox after a wait delivery. A success keeps
+// the wait grace, restarted by every delivery as on fetch. An error keeps at
+// most waitGraceFloor from its first delivery, so a client retrying by id
+// faster than the floor is still enqueued again once it has passed. EXPIRE
+// with LT would cap the TTL in one command but needs Redis 7.0.
+func (s *Step) expireDelivered(ctx context.Context, key string, pipelineResult error) error {
+	if errors.Is(pipelineResult, pipeline.ErrPipelineDone) {
+		return s.rdb.Expire(ctx, key, s.cfg.waitGrace()).Err()
+	}
+	ttl, err := s.rdb.PTTL(ctx, key).Result()
+	if err == nil && ttl >= 0 && ttl <= waitGraceFloor {
+		return nil
+	}
+	return errors.Join(err, s.rdb.Expire(ctx, key, waitGraceFloor).Err())
+}
+
 func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string, timeout time.Duration) error {
 	logger := log.FromContext(ctx).WithName(StepName)
 	w := reqCtx.ResponseWriter
@@ -461,14 +482,15 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			if writeErr != nil {
 				logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
 			} else {
-				// Delivery confirmed on the held connection, the result's only
-				// consumer: reclaim the mailbox now instead of letting it sit
-				// out the full result TTL. On write failure the key stays, as
-				// the client may still fetch by id.
-				delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer delCancel()
-				if err := s.rdb.Del(delCtx, resultKey(tenant, id)).Err(); err != nil {
-					logger.Error(err, "failed to delete delivered result", "id", id)
+				// Delivery confirmed: bound the mailbox (see expireDelivered)
+				// instead of letting it sit out the full result TTL. Deleting
+				// outright would take the result from other waiters attached
+				// to the same id. On write failure the key stays, as the
+				// client may still fetch by id.
+				graceCtx, graceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer graceCancel()
+				if err := s.expireDelivered(graceCtx, resultKey(tenant, id), pipelineResult); err != nil {
+					logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 				}
 			}
 			return pipelineResult
@@ -493,8 +515,8 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 					pipelineResult, writeErr := writeResult(w, res)
 					if writeErr != nil {
 						logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
-					} else if err := s.rdb.Del(finalCtx, resultKey(tenant, id)).Err(); err != nil {
-						logger.Error(err, "failed to delete delivered result", "id", id)
+					} else if err := s.expireDelivered(finalCtx, resultKey(tenant, id), pipelineResult); err != nil {
+						logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 					}
 					return pipelineResult
 				}

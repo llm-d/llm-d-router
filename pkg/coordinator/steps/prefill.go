@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -44,6 +45,7 @@ func init() {
 
 type PrefillStep struct {
 	useOpenAIFormat bool
+	forwardTokenIDs bool
 	gwClient        *gateway.Client
 	kv              kv.Connector
 	ec              ec.Connector
@@ -65,8 +67,16 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
+	forwardTokenIDs, _, err := paramBool(params, ParamForwardPromptTokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("prefill: %w", err)
+	}
+	if forwardTokenIDs && !useOpenAI {
+		return nil, fmt.Errorf("prefill: %s requires use_openai_format=true (the tokens-in format sends the token IDs as token_ids)", ParamForwardPromptTokenIDs)
+	}
 	return &PrefillStep{
 		useOpenAIFormat: useOpenAI,
+		forwardTokenIDs: forwardTokenIDs,
 		gwClient:        gwClient,
 		kv:              kvConn,
 		ec:              ecConn,
@@ -76,8 +86,11 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
-		return s.executeSGLangGRPC(ctx, reqCtx)
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
+		return s.executeSGLangGRPC(ctx, reqCtx, g)
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
 	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
@@ -121,28 +134,37 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
-	// kv-nixl always requests a remote-decode handoff, so missing
-	// kv_transfer_params means decode will recompute the whole prompt. Older
-	// engines (< v0.29.0) silently drop top-level transfer params on this route,
-	// which is the most common cause. Empty params are not a failure for the
-	// other connectors: kv-shared-storage carries no wire fields at all.
-	decodeRecomputesPrompt := len(reqCtx.KVTransferParams) == 0 && s.kv.Name() == kv.NIXL
-	if decodeRecomputesPrompt {
-		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
-			"kvConnector", s.kv.Name(), "path", path)
+	var cachedTokens *int
+	if n, ok := usage.CachedTokens(prefillResp.Usage); ok {
+		cachedTokens = &n
 	}
-	// Only a prefill response that measured the prompt cache, for a request
-	// whose blocks decode will reuse, can correct the count decode reports; see
-	// RequestContext.PrefillCachedTokens for what the two states mean.
-	if prefillResp.Usage != nil && !decodeRecomputesPrompt {
-		cachedTokens, _ := usage.CachedTokens(prefillResp.Usage)
-		reqCtx.PrefillCachedTokens = &cachedTokens
-	}
+	recordPrefillOutcome(logger, reqCtx, s.kv.Name(), path, cachedTokens)
 
 	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
+}
+
+// recordPrefillOutcome logs a missing kv-nixl handoff and stores prefill's
+// prompt-cache hit count on reqCtx when decode will reuse prefill's KV blocks.
+func recordPrefillOutcome(logger logr.Logger, reqCtx *pipeline.RequestContext, kvName, path string, cachedTokens *int) {
+	// kv-nixl always requests a remote-decode handoff, so missing
+	// kv_transfer_params means decode will recompute the whole prompt. Older
+	// engines (< v0.29.0) silently drop top-level transfer params on this route,
+	// which is the most common cause. Empty params are not a failure for the
+	// other connectors: kv-shared-storage carries no wire fields at all.
+	decodeRecomputesPrompt := len(reqCtx.KVTransferParams) == 0 && kvName == kv.NIXL
+	if decodeRecomputesPrompt {
+		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
+			"kvConnector", kvName, "path", path)
+	}
+	// Only a prefill response that measured the prompt cache, for a request
+	// whose blocks decode will reuse, can correct the count decode reports; see
+	// RequestContext.PrefillCachedTokens for what the two states mean.
+	if cachedTokens != nil && !decodeRecomputesPrompt {
+		reqCtx.PrefillCachedTokens = cachedTokens
+	}
 }
 
 func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
@@ -156,6 +178,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
+		if sendsPromptTokenIDs(s.forwardTokenIDs, reqCtx, format) {
+			kvParams[reqcommon.FieldPromptTokenIDs] = reqCtx.TokenIDs
+		}
 		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams

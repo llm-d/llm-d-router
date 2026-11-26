@@ -211,12 +211,12 @@ func TestAsyncBrokerSGLangGRPCGenerateIsNoOp(t *testing.T) {
 			step, rdb := newAsyncTestStep(t, nil)
 			rec := httptest.NewRecorder()
 			reqCtx := &pipeline.RequestContext{
-				RequestID:           "req-grpc-1",
-				OriginalPath:        sglangapiv1.SglangService_Generate_FullMethodName,
-				OriginalHeaders:     http.Header{http.CanonicalHeaderKey(defaultModeHeader): {mode}},
-				GRPCGeneratePayload: []byte{},
-				Stream:              true,
-				ResponseWriter:      rec,
+				RequestID:       "req-grpc-1",
+				OriginalPath:    sglangapiv1.SglangService_Generate_FullMethodName,
+				OriginalHeaders: http.Header{http.CanonicalHeaderKey(defaultModeHeader): {mode}},
+				GRPC:            &pipeline.SGLangGRPCRequest{Payload: []byte{}},
+				Stream:          true,
+				ResponseWriter:  rec,
 			}
 
 			require.NoError(t, step.Execute(t.Context(), reqCtx))
@@ -513,16 +513,18 @@ func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	require.NoError(t, err)
 	key := resultKey("team-a", "req-test-1")
 	require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+	require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
 
 	err = step.Execute(t.Context(), reqCtx)
 	require.True(t, errors.Is(err, pipeline.ErrPipelineDone))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "chat.completion")
 
-	// Delivered on the held connection: the mailbox is reclaimed.
-	exists, err := rdb.Exists(t.Context(), key).Result()
+	// Delivery shrinks the mailbox to the grace window, which other attached
+	// waiters and retries read within.
+	ttl, err := rdb.TTL(t.Context(), key).Result()
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists)
+	assert.Equal(t, resultFetchGraceTTL, ttl)
 }
 
 func TestAsyncBrokerWaitDeliversStoredError(t *testing.T) {
@@ -605,6 +607,11 @@ func TestAsyncBrokerWaitDeliversStoredError(t *testing.T) {
 			assert.Equal(t, tc.wantCode, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 			assert.Equal(t, tc.wantStatus, rec.Code)
 			assert.Contains(t, rec.Body.String(), tc.wantBody)
+
+			// The first delivery of an error leaves it the wait floor.
+			ttl, err := rdb.TTL(t.Context(), resultKey("team-a", "req-test-1")).Result()
+			require.NoError(t, err)
+			assert.Equal(t, 5*time.Second, ttl)
 		})
 	}
 }
@@ -921,9 +928,8 @@ func TestWriteResultReportsWriteFailure(t *testing.T) {
 	}
 }
 
-// TestAsyncBrokerUndeliveredErrorResultIsRetained covers the cleanup paths
-// that reclaim the mailbox only after confirmed delivery: a stored error
-// result whose body write fails must stay fetchable by id.
+// TestAsyncBrokerUndeliveredErrorResultIsRetained covers a stored error
+// result whose body write fails: it must stay fetchable by id.
 func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
 	seed := func(t *testing.T, rdb *redis.Client, id string) string {
 		t.Helper()
@@ -953,6 +959,10 @@ func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
 		assert.Equal(t, coordmetrics.ErrorCodeUpstream4xx, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 		assert.Equal(t, http.StatusTooManyRequests, w.status)
 		assertRetained(t, rdb, key)
+		// An undelivered result keeps its full TTL.
+		ttl, err := rdb.TTL(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, time.Hour, ttl)
 	})
 
 	t.Run("fetch with zero grace", func(t *testing.T) {

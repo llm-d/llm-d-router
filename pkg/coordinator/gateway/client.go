@@ -77,11 +77,7 @@ func NewWithTransport(transport *http.Transport, baseURL string) *Client {
 	if transport != nil {
 		baseRT := http.RoundTripper(transport)
 		if !strings.HasPrefix(baseURL, "https://") && transport.Protocols == nil {
-			h2c := transport.Clone()
-			h2cProtocols := new(http.Protocols)
-			h2cProtocols.SetUnencryptedHTTP2(true)
-			h2c.Protocols = h2cProtocols
-			baseRT = &h2cAwareTransport{http1: transport, h2c: h2c}
+			baseRT = grpcframe.NewH2CAwareTransport(transport)
 		}
 		// otelhttp injects W3C trace context on every outbound request, so the
 		// gateway, EPP, and sidecar spans join the trace that started here.
@@ -94,20 +90,6 @@ func NewWithTransport(transport *http.Transport, baseURL string) *Client {
 		httpClient: &http.Client{Transport: rt},
 		baseURL:    baseURL,
 	}
-}
-
-// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
-// while keeping HTTP/1.1 for standard HTTP requests.
-type h2cAwareTransport struct {
-	http1 http.RoundTripper
-	h2c   http.RoundTripper
-}
-
-func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
-		return rt.h2c.RoundTrip(req)
-	}
-	return rt.http1.RoundTrip(req)
 }
 
 // Request sends an HTTP request to the gateway at the given path. The returned

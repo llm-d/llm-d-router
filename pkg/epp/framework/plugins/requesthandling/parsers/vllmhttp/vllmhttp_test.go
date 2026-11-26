@@ -453,6 +453,14 @@ func TestVllmHTTPParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			want: ptr.To(int64(128)),
 		},
 		{
+			name: "sampling_params max_tokens written as a decimal float",
+			body: map[string]any{
+				"token_ids":       []any{1, 2, 3},
+				"sampling_params": map[string]any{"max_tokens": json.Number("1000.0")},
+			},
+			want: ptr.To(int64(1000)),
+		},
+		{
 			name: "no sampling_params",
 			body: map[string]any{"token_ids": []any{1, 2, 3}},
 			want: nil,

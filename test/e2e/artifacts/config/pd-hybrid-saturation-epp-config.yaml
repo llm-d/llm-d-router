@@ -27,9 +27,10 @@ plugins:
     concurrencyMode: requests
     maxConcurrency: 32
     headroom: 0.1
-# kvCacheUtilThreshold: 1.0 keeps the pd-queue filter from dropping endpoints
-# with a full KV cache. KV cache utilization still contributes to the
-# saturation score, so a full KV cache can still stop dispatch.
+# kvCacheUtilThreshold: 1.0 sets the pd-queue filter's KV limit to its maximum:
+# the filter drops only endpoints that report a full KV cache. KV cache
+# utilization also contributes to the saturation score, so a full KV cache can
+# still stop dispatch.
 # With the default stalenessPolicy (saturated), a stalled metrics scrape
 # scores every endpoint as saturated and halts dispatch; set
 # stalenessPolicy: ignore to fail open instead.

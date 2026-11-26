@@ -846,6 +846,254 @@ func TestEndpointMetadata(t *testing.T) {
 	}
 }
 
+func TestDataParallelSizeLocal(t *testing.T) {
+	readyPod := func(annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "pod1",
+				Namespace:   "default",
+				Labels:      map[string]string{"app": "vllm"},
+				Annotations: annotations,
+			},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				PodIP:      "10.0.0.1",
+				HostIP:     "192.168.1.10",
+			},
+		}
+	}
+	rankEndpoint := func(name string, port string, rank int) *fwkdl.EndpointMetadata {
+		return &fwkdl.EndpointMetadata{
+			ID:           types.NamespacedName{Name: name, Namespace: "default"},
+			Name:         "pod1",
+			Address:      "10.0.0.1",
+			NodeAddress:  "192.168.1.10",
+			Port:         port,
+			MetricsHost:  net.JoinHostPort("10.0.0.1", port),
+			Labels:       map[string]string{"app": "vllm"},
+			RankIndex:    rank,
+			RankByHeader: true,
+		}
+	}
+	sortByName := cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.ID.Name < b.ID.Name })
+
+	tests := []struct {
+		name        string
+		targetPorts []v1.Port
+		pod         *corev1.Pod
+		want        []*fwkdl.EndpointMetadata
+	}{
+		{
+			name:        "one port expands into one endpoint per rank on that port",
+			targetPorts: []v1.Port{{Number: 8000}},
+			pod:         readyPod(map[string]string{dataParallelSizeLocalAnnotation: "2"}),
+			want: []*fwkdl.EndpointMetadata{
+				rankEndpoint("pod1-rank-0", "8000", 0),
+				rankEndpoint("pod1-rank-1", "8000", 1),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			fakeClient := fake.NewClientBuilder().WithObjects(test.pod).Build()
+			ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+			pool := fwkgaie.MakeInferencePool("test-pool").Namespace("default").
+				Selector(map[string]string{"app": "vllm"}).ObjRef()
+			pool.Spec.TargetPorts = test.targetPorts
+
+			// PoolSet resyncs the pod; the resync must keep every rank endpoint.
+			require.NoError(t, ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)))
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, test.pod))
+
+			endpoints := ds.PodList(AllPodsPredicate)
+			got := make([]*fwkdl.EndpointMetadata, 0, len(endpoints))
+			for _, ep := range endpoints {
+				got = append(got, ep.GetMetadata())
+			}
+			if diff := cmp.Diff(test.want, got, sortByName); diff != "" {
+				t.Errorf("endpoints mismatch (-want +got):\n%s", diff)
+			}
+
+			ds.PodDelete(test.pod.Name)
+			assert.Empty(t, ds.PodList(AllPodsPredicate), "deleting the pod removes every rank endpoint")
+		})
+	}
+}
+
+// The llm-d.ai/data-parallel-size-local pod annotation sets a pod's rank count,
+// so prefill and decode pods in one pool can run different DP sizes.
+func TestDataParallelSizeLocalAnnotation(t *testing.T) {
+	// rank is the RankIndex of an endpoint and its RankByHeader marker.
+	type rank struct {
+		rankIndex int
+		byHeader  bool
+	}
+	pod := func(name string, annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations},
+			Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+		}
+	}
+	endpoints := func(ds Datastore) map[string]rank {
+		got := map[string]rank{}
+		for _, ep := range ds.PodList(AllPodsPredicate) {
+			md := ep.GetMetadata()
+			got[md.ID.Name] = rank{md.RankIndex, md.RankByHeader}
+		}
+		return got
+	}
+	newDatastore := func(t *testing.T, ports ...int32) Datastore {
+		ctx := context.Background()
+		ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+		pool := fwkgaie.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+		pool.Spec.TargetPorts = nil
+		for _, p := range ports {
+			pool.Spec.TargetPorts = append(pool.Spec.TargetPorts, v1.Port{Number: v1.PortNumber(p)})
+		}
+		require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+		return ds
+	}
+	ctx := context.Background()
+
+	t.Run("pods with different rank counts in one pool", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("prefill", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("decode", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
+		assert.Equal(t, map[string]rank{
+			"prefill-rank-0": {0, true}, "prefill-rank-1": {1, true},
+			"decode-rank-0": {0, true}, "decode-rank-1": {1, true}, "decode-rank-2": {2, true}, "decode-rank-3": {3, true},
+		}, endpoints(ds))
+	})
+
+	t.Run("a pod with one rank or no annotation is one endpoint without a rank", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("one", map[string]string{dataParallelSizeLocalAnnotation: "1"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("plain", nil)))
+		assert.Equal(t, map[string]rank{"one-rank-0": {0, false}, "plain-rank-0": {0, false}}, endpoints(ds))
+	})
+
+	aboveMax := strconv.Itoa(maxDataParallelSizeLocal + 1)
+	for _, value := range []string{"0", "-1", "two", aboveMax, "4000000000000000000"} {
+		t.Run("malformed annotation "+value+" gets no endpoints", func(t *testing.T) {
+			ds := newDatastore(t, 8000)
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("bad", map[string]string{dataParallelSizeLocalAnnotation: value})))
+			assert.Empty(t, endpoints(ds))
+		})
+	}
+
+	t.Run("several ranks need exactly one target port", func(t *testing.T) {
+		ds := newDatastore(t, 8000, 8001)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("multi", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		assert.Empty(t, endpoints(ds))
+	})
+
+	t.Run("the largest rank count is accepted", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("max", map[string]string{dataParallelSizeLocalAnnotation: strconv.Itoa(maxDataParallelSizeLocal)})))
+		assert.Len(t, endpoints(ds), maxDataParallelSizeLocal)
+	})
+
+	t.Run("raising the rank count adds rank endpoints", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "3"})))
+		assert.Equal(t, map[string]rank{"p-rank-0": {0, true}, "p-rank-1": {1, true}, "p-rank-2": {2, true}}, endpoints(ds))
+	})
+
+	t.Run("lowering the largest rank count removes every extra rank endpoint", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		largest := strconv.Itoa(maxDataParallelSizeLocal)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: largest})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("other", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", nil)))
+		assert.Equal(t, map[string]rank{
+			"p-rank-0":     {0, false},
+			"other-rank-0": {0, true}, "other-rank-1": {1, true},
+		}, endpoints(ds), "the cleanup of one pod leaves the endpoints of the other pods")
+	})
+
+	t.Run("lowering the rank count removes the extra rank endpoints", func(t *testing.T) {
+		ds := newDatastore(t, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
+		require.Len(t, endpoints(ds), 4)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		assert.Equal(t, map[string]rank{"p-rank-0": {0, true}, "p-rank-1": {1, true}}, endpoints(ds))
+	})
+}
+
+// A resync runs at startup and after each pool change. It must drop a pod whose
+// rank count cannot be read, and keep the rank endpoints of the other pods.
+func TestDataParallelSizeLocal_ResyncDropsPodWithMalformedAnnotation(t *testing.T) {
+	ctx := context.Background()
+	readyPod := func(name, ip, ranks string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Namespace:   "default",
+				Labels:      map[string]string{"app": "vllm"},
+				Annotations: map[string]string{dataParallelSizeLocalAnnotation: ranks},
+			},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				PodIP:      ip,
+			},
+		}
+	}
+	names := func(ds Datastore) []string {
+		endpoints := ds.PodList(AllPodsPredicate)
+		got := make([]string, 0, len(endpoints))
+		for _, ep := range endpoints {
+			got = append(got, ep.GetMetadata().ID.Name)
+		}
+		return got
+	}
+	newPool := func(port int32) *datalayer.EndpointPool {
+		pool := fwkgaie.MakeInferencePool("test-pool").Namespace("default").
+			Selector(map[string]string{"app": "vllm"}).ObjRef()
+		pool.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(port)}}
+		return poolutil.InferencePoolToEndpointPool(pool)
+	}
+
+	good := readyPod("good", "10.0.0.1", "2")
+	bad := readyPod("bad", "10.0.0.2", "2")
+	fakeClient := fake.NewClientBuilder().WithObjects(good, bad).Build()
+	ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	require.NoError(t, ds.PoolSet(ctx, fakeClient, newPool(8000)))
+	require.ElementsMatch(t, []string{"good-rank-0", "good-rank-1", "bad-rank-0", "bad-rank-1"}, names(ds))
+
+	bad.Annotations[dataParallelSizeLocalAnnotation] = "two"
+	require.NoError(t, fakeClient.Update(ctx, bad))
+	// A changed target port makes PoolSet resync every pod.
+	require.NoError(t, ds.PoolSet(ctx, fakeClient, newPool(8001)))
+
+	assert.ElementsMatch(t, []string{"good-rank-0", "good-rank-1"}, names(ds))
+}
+
+func TestDataParallelSizeLocal_PortDeactivationRemovesRanks(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	pool := fwkgaie.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+	pool.Spec.TargetPorts = []v1.Port{{Number: 8000}}
+	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pod1", Namespace: "default",
+			Annotations: map[string]string{dataParallelSizeLocalAnnotation: "2"},
+		},
+		Status: corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod))
+	require.Len(t, ds.PodList(AllPodsPredicate), 2)
+
+	pod.Annotations[activePortsAnnotation] = "9000"
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod))
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+}
+
 func TestActivePortFiltering(t *testing.T) {
 	// Create pods that are ready
 	readyPod1 := &corev1.Pod{

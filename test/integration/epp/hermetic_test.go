@@ -517,9 +517,17 @@ func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
 	)
 }
 
+// removeW3CTraceContextHeaders rewrites traced responses into the untraced shape
+// the shared expectations use, where EPP removes the trace headers instead of
+// setting them.
 func removeW3CTraceContextHeaders(responses []*extProcPb.ProcessingResponse) {
 	for _, resp := range responses {
 		if mutation := resp.GetRequestHeaders().GetResponse().GetHeaderMutation(); mutation != nil {
+			for _, h := range mutation.GetSetHeaders() {
+				if isW3CTraceContextHeader(h.GetHeader().GetKey()) {
+					mutation.RemoveHeaders = append(mutation.RemoveHeaders, h.GetHeader().GetKey())
+				}
+			}
 			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
 		}
 		if mutation := resp.GetResponseHeaders().GetResponse().GetHeaderMutation(); mutation != nil {
