@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
@@ -69,10 +70,11 @@ type EvictChannelLookup interface {
 
 func NewStreamingServer(datastore Datastore, director Director, parserRegistry *ParserRegistry, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
-		director:          director,
-		datastore:         datastore,
-		parserRegistry:    parserRegistry,
-		maxPoolBufferSize: maxPoolBufferSize,
+		director:                director,
+		datastore:               datastore,
+		parserRegistry:          parserRegistry,
+		maxPoolBufferSize:       maxPoolBufferSize,
+		requestIDResponseHeader: true,
 		bufferPool: sync.Pool{
 			New: func() any {
 				return new(bytes.Buffer)
@@ -95,6 +97,18 @@ func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
 // SetToolCallingTelemetryEnabled controls tool-specific request and response observations.
 func (s *StreamingServer) SetToolCallingTelemetryEnabled(enabled bool) {
 	s.toolCallingTelemetryEnabled = enabled
+}
+
+// SetRequestIDResponseHeader controls whether the response carries the resolved
+// request ID in reqcommon.RequestIDHeaderKey.
+func (s *StreamingServer) SetRequestIDResponseHeader(enabled bool) {
+	s.requestIDResponseHeader = enabled
+}
+
+// SetTraceparentResponseHeader controls whether the response carries the request
+// span's W3C trace context.
+func (s *StreamingServer) SetTraceparentResponseHeader(enabled bool) {
+	s.traceparentResponseHeader = enabled
 }
 
 // SetMaxRequestBodySize caps the request body in bytes. A larger body is answered with 413.
@@ -135,6 +149,12 @@ type StreamingServer struct {
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores          bool
 	toolCallingTelemetryEnabled bool
+	// requestIDResponseHeader returns the resolved request ID to the client, so a
+	// user can quote an ID that the EPP logs and spans also carry. On by default.
+	requestIDResponseHeader bool
+	// traceparentResponseHeader returns the request span's W3C trace context to the
+	// client. Off by default: it exposes trace IDs outside the cluster.
+	traceparentResponseHeader bool
 	// maxRequestBodySize caps the buffered request body in bytes; 0 disables the cap.
 	maxRequestBodySize int
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
@@ -223,6 +243,19 @@ type RequestContext struct {
 	// during which the response is entirely in EPP's hands.
 	responseProcessingDuration time.Duration
 	responseHeadersReceivedAt  time.Time
+
+	// resolvedRequestID is the client's x-request-id, or the one EPP generated in
+	// its place. Captured where it is resolved rather than read back from
+	// Request.Headers, which routing paths that answer before the client headers
+	// are copied (a bodyless GET) leave unset.
+	resolvedRequestID string
+
+	// correlationHeaders carry resolvedRequestID and the request span's trace
+	// context back to the client. Resolved once the root span starts, so every
+	// reply quotes the same values, including the ImmediateResponse paths that
+	// never reach generateResponseHeaders. Empty until then, and whenever neither
+	// header is enabled.
+	correlationHeaders []*configPb.HeaderValueOption
 
 	// Envoy ext_proc protocol state.
 	requestState         streamRequestState
@@ -673,6 +706,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				loggerTrace.Info("RequestID header is not found in the request, generated a request id")
 				reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey] = requestID
 			}
+			reqCtx.resolvedRequestID = requestID
 			logger = logger.WithValues(reqcommon.RequestIDHeaderKey, requestID, logKeyEPPRequestID, reqCtx.Request.ID)
 			ctx = log.IntoContext(ctx, logger)
 
@@ -681,10 +715,18 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// headers, then start it. The headers are only available here, so the span
 			// cannot be started at the top of Process without orphaning the trace.
 			ctx = extractTraceContext(ctx, v)
+			// The request ID is on the root span, not only the scheduling children, so
+			// searching it in a trace backend reaches the trace.
 			ctx, span = tracer.Start(ctx, "request",
 				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String())),
+				trace.WithAttributes(
+					semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String()),
+					semconv.GenAIRequestID(requestID),
+				),
 			)
+
+			// Both inputs are settled now, and every reply from here on quotes them.
+			reqCtx.correlationHeaders = s.correlationResponseHeaders(ctx, reqCtx)
 
 			// Tag every log line of this request with the trace it belongs to.
 			ctx = tracing.LoggerWithSpanContext(ctx, span)
@@ -934,6 +976,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if err != nil {
 				return err
 			}
+			appendCorrelationHeaders(reqCtx, resp.GetImmediateResponse())
 			if err := srv.Send(resp); err != nil {
 				if ctx.Err() == context.Canceled {
 					logger.V(logutil.DEBUG).Info("Request stream cancelled while sending response")
@@ -1092,6 +1135,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		if err != nil {
 			return err
 		}
+		appendCorrelationHeaders(r, resp.GetImmediateResponse())
 		return srv.Send(resp)
 	}
 

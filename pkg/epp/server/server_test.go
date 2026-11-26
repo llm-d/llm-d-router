@@ -222,7 +222,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 		"x-test":                        "body",
 		"x-request-id":                  "test-request-id",
 	}
-	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body"}
+	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 	expectedSchedulerHeaders := map[string]string{":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 
 	model := fwkapix.MakeV1InferenceObjective("v1").
@@ -324,7 +324,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	if streamingResponse {
 		// If response is streaming, the header should have text/event-stream.
 		headers = testutils.BuildEnvoyGRPCHeaders(map[string]string{"x-test": "body", ":method": "POST", "content-type": "text/event-stream"}, true)
-		expectedResponseHeaders = map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body", "content-type": "text/event-stream"}
+		expectedResponseHeaders = map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body", "content-type": "text/event-stream", "x-request-id": "test-request-id"}
 	} else {
 		headers = testutils.BuildEnvoyGRPCHeaders(map[string]string{"x-test": "body", ":method": "POST"}, false)
 	}

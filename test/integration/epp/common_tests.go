@@ -19,6 +19,7 @@ package epp
 
 import (
 	"encoding/json"
+	"strings"
 
 	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -50,6 +51,10 @@ func buildEnvoyHeaders(headers map[string]string) []*envoyCorev3.HeaderValue {
 	}
 	return hList
 }
+
+// testRequestID is the x-request-id the shared request generators set, so a
+// sequence that supplies its own headers can assert the same value coming back.
+const testRequestID = "test-request-id"
 
 // ReqSubset creates a request sequence with Envoy Endpoint Metadata.
 // This simulates the "Subset Load Balancing" flow where EPP picks a specific pod IP.
@@ -207,34 +212,33 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 }
 
 // ExpectReject asserts that the EPP immediately rejected the request with the given code and message,
-// serialized in the OpenAI error envelope.
-func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader()))
+// serialized in the OpenAI error envelope. requestID is the x-request-id the rejection must carry back,
+// which is what a user quotes when reporting the failure.
+func ExpectReject(code envoyTypePb.StatusCode, msg, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{jsonContentTypeHeader()}, requestIDResponseHeader(requestID)...)
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), headers...))
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
-func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
-		&envoyCorev3.HeaderValueOption{
+func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		jsonContentTypeHeader(),
+		{
 			Header: &envoyCorev3.HeaderValue{
 				Key:      errcommon.RequestDroppedReasonHeaderKey,
 				RawValue: []byte(reason),
 			},
-		}))
+		},
+	}, requestIDResponseHeader(requestID)...)
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), headers...))
 }
 
 // ExpectRejectNoEndpoints asserts that the EPP rejected the request because no endpoint can serve it.
 // The error message is left empty; set ignoreErrorMessage on the test case.
-func ExpectRejectNoEndpoints() []*extProcPb.ProcessingResponse {
+func ExpectRejectNoEndpoints(requestID string) []*extProcPb.ProcessingResponse {
 	code := envoyTypePb.StatusCode_ServiceUnavailable
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, ""), jsonContentTypeHeader(),
-		&envoyCorev3.HeaderValueOption{
-			Header: &envoyCorev3.HeaderValue{
-				Key:      errcommon.RequestDroppedReasonHeaderKey,
-				RawValue: []byte(errcommon.RequestDroppedReasonNoEndpoints),
-			},
-		}))
+	return ExpectRejectWithDropReason(code, "", errcommon.RequestDroppedReasonNoEndpoints, requestID)
 }
 
 // rejectGRPCStatus is the gRPC status the EPP sets on a rejection, by HTTP status.
@@ -295,8 +299,9 @@ type openAIErrorFields struct {
 
 // ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
 // given code and message, serialized in the Anthropic error envelope.
-func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader()))
+func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{jsonContentTypeHeader()}, requestIDResponseHeader(requestID)...)
+	return withGRPCStatus(code, fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), headers...))
 }
 
 func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {
@@ -325,40 +330,79 @@ func jsonContentTypeHeader() *envoyCorev3.HeaderValueOption {
 	}
 }
 
+// requestIDResponseHeader returns the x-request-id header EPP sets on the
+// response, or nil when requestID is empty. EPP returns the request ID it
+// resolved in the request-headers phase, so a sequence that starts at the
+// response phase (ReqResponseOnly) gets none back, and a request without an
+// x-request-id gets a generated UUID that a test cannot predict.
+func requestIDResponseHeader(requestID string) []*envoyCorev3.HeaderValueOption {
+	if requestID == "" {
+		return nil
+	}
+	return []*envoyCorev3.HeaderValueOption{{Header: &envoyCorev3.HeaderValue{
+		Key:      reqcommon.RequestIDHeaderKey,
+		RawValue: []byte(requestID),
+	}}}
+}
+
+// requestIDOf returns the x-request-id a built request sequence carries, for
+// sequences that number each request rather than reusing testRequestID.
+func requestIDOf(requests []*extProcPb.ProcessingRequest) string {
+	for _, req := range requests {
+		for _, header := range req.GetRequestHeaders().GetHeaders().GetHeaders() {
+			if !strings.EqualFold(header.GetKey(), reqcommon.RequestIDHeaderKey) {
+				continue
+			}
+			if raw := header.GetRawValue(); len(raw) > 0 {
+				return string(raw)
+			}
+			return header.GetValue()
+		}
+	}
+	return ""
+}
+
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
 // This uses the shared primitive but adds EPP-specific headers we expect.
-func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingResponse {
-	return fwkepp.NewResponseBufferedResponse(
-		body,
-		contentType != "application/grpc", // For gRPC, the EoS will not be set to true but it will return a trailer.
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+// requestID is the x-request-id the response must carry; pass "" when the
+// sequence skips the request-headers phase.
+func ExpectBufferResp(body, contentType, requestID string) []*extProcPb.ProcessingResponse {
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte(contentType),
 		}},
+	}, requestIDResponseHeader(requestID)...)
+	return fwkepp.NewResponseBufferedResponse(
+		body,
+		contentType != "application/grpc", // For gRPC, the EoS will not be set to true but it will return a trailer.
+		headers...,
 	)
 }
 
 // ExpectStreamResp asserts that the EPP streams the response chunks (pass-through).
 // It constructs a sequence of:
-// 1. ResponseHeaders (with "x-went-into-resp-headers" and "text/event-stream")
+// 1. ResponseHeaders (with "x-went-into-resp-headers" and "text/event-stream",
+// plus x-request-id when requestID is not empty)
 // 2. ResponseBody chunks (with EndOfStream=true on the final chunk)
-func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
+func ExpectStreamResp(requestID string, chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, fwkepp.NewResponseHeaders(
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte("text/event-stream"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "status", RawValue: []byte("200")}},
-	))
+		{Header: &envoyCorev3.HeaderValue{Key: "status", RawValue: []byte("200")}},
+	}, requestIDResponseHeader(requestID)...)
+	res = append(res, fwkepp.NewResponseHeaders(headers...))
 
 	// 2. The Body Chunk Frames
 	for i, chunk := range chunks {
@@ -368,18 +412,20 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 }
 
 // ExpectGRPCStreamResp asserts that the EPP streams the gRPC response chunks.
-func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
+// requestID is the x-request-id the response must carry, or "" for none.
+func ExpectGRPCStreamResp(requestID string, chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, fwkepp.NewResponseHeaders(
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+	headers := append([]*envoyCorev3.HeaderValueOption{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
 		}},
-		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+		{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte("application/grpc"),
 		}},
-	))
+	}, requestIDResponseHeader(requestID)...)
+	res = append(res, fwkepp.NewResponseHeaders(headers...))
 
 	for _, chunk := range chunks {
 		res = append(res, fwkepp.NewResponseStreamChunk(chunk, false))
@@ -440,20 +486,23 @@ func commonTestCases(prio func(int) int) []testCase {
 			},
 		},
 		{
-			name:               "no backend pods available",
-			requests:           fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			name: "no backend pods available",
+			requests: fwkepp.ReqHeaderOnly(map[string]string{
+				"content-type":               "application/json",
+				reqcommon.RequestIDHeaderKey: testRequestID,
+			}),
 			pods:               nil,
-			wantResponses:      ExpectRejectNoEndpoints(),
+			wantResponses:      ExpectRejectNoEndpoints(testRequestID),
 			ignoreErrorMessage: true,
 		},
 		{
 			name: "request missing model field",
 			requests: fwkepp.ReqRaw(
-				map[string]string{"content-type": "application/json"},
+				map[string]string{"content-type": "application/json", reqcommon.RequestIDHeaderKey: testRequestID},
 				`{"prompt":"hello world"}`,
 			),
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-				"model not found in request body"),
+				"model not found in request body", testRequestID),
 		},
 	}
 }

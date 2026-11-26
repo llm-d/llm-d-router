@@ -18,6 +18,10 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// TraceparentHeaderKey names the W3C Trace Context header that carries the
+	// trace a request belongs to, inbound and on the forwarded request, and back
+	// to the client when the EPP is configured to return it.
+	TraceparentHeaderKey = "traceparent"
 	// EPPProfileHeaderKey names the scheduling profile the EPP must run for a
 	// request. The coordinator sets it on every phase call, Envoy routes on it,
 	// and the header-profile-handler reads it.

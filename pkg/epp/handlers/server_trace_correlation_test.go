@@ -216,6 +216,62 @@ func TestProcessAttributesAPISurface(t *testing.T) {
 	}
 }
 
+// Searching a request ID in the trace backend must find the request's trace, so
+// the root request span carries it whether the client supplied one or EPP
+// generated it.
+func TestProcessAttributesRequestIDOnRequestSpan(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		headers   map[string]string
+		wantExact string
+	}{
+		{
+			name:      "client supplied",
+			headers:   map[string]string{":path": reqcommon.PathChatCompletions, reqcommon.RequestIDHeaderKey: "req-from-client"},
+			wantExact: "req-from-client",
+		},
+		{
+			name:    "generated when absent",
+			headers: map[string]string{":path": reqcommon.PathChatCompletions},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+			srv := &scriptedProcessServer{
+				ctx: context.Background(),
+				reqs: []*extProcPb.ProcessingRequest{
+					newRequestHeaders(tt.headers),
+					{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{
+						Body:        []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`),
+						EndOfStream: true,
+					}}},
+				},
+			}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			_ = NewStreamingServer(nil, &agentIdentityDirector{}, registry, 0).Process(srv)
+
+			var requestSpans []sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				if span.Name() == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+
+			attrs := attribute.NewSet(requestSpans[0].Attributes()...)
+			got, ok := attrs.Value(semconv.GenAIRequestIDKey)
+			require.True(t, ok, "root request span must carry gen_ai.request.id")
+			if tt.wantExact != "" {
+				require.Equal(t, tt.wantExact, got.AsString())
+				return
+			}
+			require.NotEmpty(t, got.AsString(), "EPP must attribute the request ID it generated")
+		})
+	}
+}
+
 // agentIdentityDirector resolves the fairness identity inside HandleRequest, as
 // the real Director does after the request span opened.
 type agentIdentityDirector struct {

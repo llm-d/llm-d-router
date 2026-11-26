@@ -85,6 +85,12 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			semconv.LLMDPDProxyRequestPath(requestPath),
 			openAIAPIAttr(apiType),
 		)
+		// The same attribute the EPP sets on its request span, so one request ID
+		// finds the trace across both components. The EPP resolves the ID, so the
+		// sidecar attributes only what it was sent.
+		if requestID := r.Header.Get(reqcommon.RequestIDHeaderKey); requestID != "" {
+			span.SetAttributes(semconv.GenAIRequestID(requestID))
+		}
 
 		prefillHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.PrefillEndpointHeader)
 

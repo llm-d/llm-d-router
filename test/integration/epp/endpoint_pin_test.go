@@ -115,11 +115,15 @@ func TestEndpointPin_NoEndpoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			responses := streamRequests(t, h, newRoutedRequest(map[string]string{
+			// newRoutedRequest numbers each request ID, so the expectation reads the
+			// one this call produced rather than naming a fixed value.
+			requests := newRoutedRequest(map[string]string{
 				reqcommon.EPPProfileHeaderKey: prefillProfile,
 				routing.EndpointPinHeader:     tt.pin,
-			}), 1)
-			want := ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable, tt.wantMsg, errcommon.RequestDroppedReasonNoEndpoints)
+			})
+			responses := streamRequests(t, h, requests, 1)
+			want := ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable, tt.wantMsg,
+				errcommon.RequestDroppedReasonNoEndpoints, requestIDOf(requests))
 			if diff := cmp.Diff(want, responses, protocmp.Transform()); diff != "" {
 				t.Fatalf("the EPP must answer the request and not route it (-want +got):\n%s", diff)
 			}

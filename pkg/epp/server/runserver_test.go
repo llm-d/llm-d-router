@@ -97,6 +97,7 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	opts.GRPCPort, opts.CertPath = 19002, "/tmp/certs"
 	opts.SecureServing, opts.HealthChecking, opts.EnableCertReload = true, true, true
 	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores, opts.EnableToolCallingTelemetry = true, true, true
+	opts.EnableRequestIDResponseHeader, opts.EnableTraceparentResponseHeader = true, true
 	opts.TLSMinVersion, opts.TLSCipherSuites = "VersionTLS13", []string{"TLS_AES_128_GCM_SHA256"}
 	opts.ClientCAFile = writeCAFile(t)
 	opts.RefreshPrometheusMetricsInterval, opts.MetricsStalenessThreshold = 7*time.Second, 11*time.Second
@@ -163,6 +164,12 @@ var boolOptions = []struct {
 	{"EnableToolCallingTelemetry",
 		func(o *server.Options, v bool) { o.EnableToolCallingTelemetry = v },
 		func(r *server.ExtProcServerRunner) bool { return r.EnableToolCallingTelemetry }},
+	{"EnableRequestIDResponseHeader",
+		func(o *server.Options, v bool) { o.EnableRequestIDResponseHeader = v },
+		func(r *server.ExtProcServerRunner) bool { return r.EnableRequestIDResponseHeader }},
+	{"EnableTraceparentResponseHeader",
+		func(o *server.Options, v bool) { o.EnableTraceparentResponseHeader = v },
+		func(r *server.ExtProcServerRunner) bool { return r.EnableTraceparentResponseHeader }},
 }
 
 // TestNewExtProcServerRunnerMapsEachBoolOption sets one boolean option at a time and

@@ -9,7 +9,9 @@ The registry's development stability describes llm-d conventions, not upstream O
 
 The EPP spans also attach `gen_ai.request.model` and `gen_ai.request.id` when
 available, except `run_scheduler_profile`, which only attaches the profile name.
-Those shared helpers are defined in
+The EPP `request` span and the routing sidecar `forward_request` span carry
+`gen_ai.request.id` under that same key, so one request ID finds the trace in
+either component. Those shared helpers are defined in
 [`genai.go`](../pkg/common/observability/semconv/genai.go).
 Span attributes are described for recorded spans. Interrupted operations may end
 before their completion attributes are set.
@@ -25,6 +27,32 @@ version bump in the registry's `schema_url`.
 Generation uses Weaver, pinned with release checksums and installed in the
 builder image by [`Dockerfile.builder`](../Dockerfile.builder).
 Prometheus metrics are documented separately in [metrics.md](metrics.md).
+
+## Request correlation
+
+The EPP resolves `x-request-id` for every request and generates one when the
+client does not send it. The resolved value reaches the request span, the
+scheduling spans and every log line of the request.
+
+Two flags return the correlation IDs to the client:
+
+| Flag | Default | Response header |
+| --- | --- | --- |
+| `--enable-request-id-response-header` | `true` | `x-request-id`, the resolved request ID |
+| `--enable-traceparent-response-header` | `false` | `traceparent`, the W3C trace context of the EPP request span |
+
+A client that quotes `x-request-id` gives an operator a key into the EPP logs and
+the trace backend. `traceparent` carries the trace ID itself and defaults to off
+because it exposes trace IDs outside the cluster. Where a gateway or a client
+starts the trace, the returned `traceparent` carries that trace's ID, since the
+EPP request span joins the upstream trace. `tracestate` and `baggage` are never
+returned.
+
+A request ID the model server sets in its own response is dropped in favour of
+the resolved value, so the client receives a single `x-request-id`.
+
+Every reply carries the headers, including the ones the EPP produces itself for a
+request it rejects, sheds under load, or answers locally.
 
 ## Attributes
 
