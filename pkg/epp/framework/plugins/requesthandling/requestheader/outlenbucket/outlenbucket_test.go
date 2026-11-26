@@ -298,6 +298,22 @@ func TestEstimateOutlen_ExtendedSignals(t *testing.T) {
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": map[string]any{"type": "disabled"}}}),
 			want: Unknown,
 		},
+		// --- LONG pushers: boolean thinking (DeepSeek V3.1, Granite 3.2 templates) ---
+		{
+			name: "thinking=true -> LONG",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": true}}),
+			want: Long,
+		},
+		{
+			name: "thinking=true + tools -> LONG (thinking overrides has_tools)",
+			body: bodyWith(bodyOpts{tools: oneTool, kwArgs: map[string]any{"thinking": true}}),
+			want: Long,
+		},
+		{
+			name: "thinking=false + thinking_budget>4000 -> UNKNOWN (explicit false wins)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": false, "thinking_budget": float64(8000)}}),
+			want: Unknown,
+		},
 		// --- LONG pushers: Nemotron reasoning_budget alias ---
 		{
 			name: "reasoning_budget=5000 -> LONG (Nemotron alias for thinking_budget)",
