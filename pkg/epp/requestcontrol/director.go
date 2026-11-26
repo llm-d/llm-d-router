@@ -40,6 +40,7 @@ import (
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -818,6 +819,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	response := &fwkrh.Response{
 		RequestID:      reqCtx.Request.ID,
 		Headers:        reqCtx.Response.Headers,
+		ReqMetadata:    reqCtx.Request.Metadata,
 		StartOfStream:  startOfStream,
 		EndOfStream:    endOfStream,
 		Usage:          reqCtx.Usage,
@@ -840,6 +842,18 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 			requests = q.requests
 		} else {
 			requests = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
+		}
+		// A gRPC response's final status arrives in trailers, after the headers
+		// were already reported to the plugins. Write it onto the response
+		// headers here, once the async queue has drained, so the plugins that
+		// classify a response by its status see the final one. The header
+		// response to Envoy is already built, so the write cannot reach the
+		// client.
+		if reqCtx.ResponseGRPCStatus != "" {
+			if response.Headers == nil {
+				response.Headers = map[string]string{}
+			}
+			response.Headers[grpcframe.HeaderStatus] = reqCtx.ResponseGRPCStatus
 		}
 		// Run the final chunk synchronously so DynamicMetadata is available for the response.
 		d.runResponseBodyPlugins(ctx, requests, response, reqCtx.TargetPod)

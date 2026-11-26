@@ -3030,6 +3030,79 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}
 }
 
+// grpcStatusSnapshot records the grpc-status value each ResponseBody call saw
+// at call time, so a later write to the shared headers map cannot rewrite
+// what an earlier chunk observed.
+type grpcStatusSnapshot struct {
+	mu       sync.Mutex
+	statuses []string
+	// served records the endpoint each call saw on the response metadata, which
+	// response plugins read to tell a fallback-served response from one the
+	// target served.
+	served []string
+}
+
+func (p *grpcStatusSnapshot) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "grpc-status-snapshot", Name: "snapshot"}
+}
+
+func (p *grpcStatusSnapshot) ResponseBody(_ context.Context, _ *fwksched.InferenceRequest,
+	response *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.statuses = append(p.statuses, response.Headers[grpcframe.HeaderStatus])
+	served, _ := metadata.ServedEndpoint(response.ReqMetadata)
+	p.served = append(p.served, served)
+}
+
+// A gRPC stream's final status arrives in trailers, after the response
+// headers were already reported, so the director publishes it on the
+// end-of-stream response headers: intermediate chunks do not see it, and the
+// final chunk does.
+func TestDirector_HandleResponseBody_PublishesGRPCStatus(t *testing.T) {
+	snapshot := &grpcStatusSnapshot{}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	ds := datastore.NewDatastore(t.Context(), nil)
+	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, NewDatastoreEndpointCandidates(ds),
+		NewConfig().WithResponseStreamingPlugins(snapshot), "")
+
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{
+			ID:      "grpc-status-req",
+			Headers: map[string]string{},
+			// Envoy reports the endpoint that actually served the request in
+			// the response metadata, which a fallback-served response needs so
+			// response plugins do not charge the target endpoint for it.
+			Metadata: map[string]any{
+				metadata.DestinationEndpointNamespace: map[string]any{
+					metadata.DestinationEndpointServedKey: "10.0.0.2:50051",
+				},
+			},
+		},
+		Response: &handlers.Response{Headers: map[string]string{"content-type": grpcframe.MediaType}},
+		TargetPod: &fwkdl.EndpointMetadata{
+			ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"},
+		},
+		ResponseGRPCStatus: "14",
+	}
+
+	director.HandleResponseBody(ctx, reqCtx, false)
+	require.Eventually(t, func() bool {
+		snapshot.mu.Lock()
+		defer snapshot.mu.Unlock()
+		return len(snapshot.statuses) >= 1
+	}, time.Second, 10*time.Millisecond, "the intermediate chunk should have been processed")
+
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	require.Equal(t, []string{"", "14"}, snapshot.statuses)
+	require.Equal(t, []string{"10.0.0.2:50051", "10.0.0.2:50051"}, snapshot.served,
+		"every body-phase response carries the endpoint Envoy reports it served")
+}
+
 func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	// orderTrackingPlugin records the RequestId of each chunk it processes.
 	// Since we set a unique RequestId per chunk, the recorded order lets us

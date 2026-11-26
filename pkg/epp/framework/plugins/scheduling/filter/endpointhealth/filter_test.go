@@ -29,6 +29,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -660,6 +661,161 @@ func TestResponseEjectionCountsOnlyConsecutiveFailures(t *testing.T) {
 		respond(f, "b", status)
 	}
 	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// grpcRespond delivers the end of a gRPC response stream whose grpc-status
+// the director wrote onto the response headers, mapped to no HTTP status:
+// the filter classifies it by the HTTP status the code corresponds to.
+func grpcRespond(f *EndpointHealthFilter, name, grpcStatus string) {
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{
+			Headers: map[string]string{
+				reqcommon.HeaderContentType: grpcframe.MediaType,
+				grpcframe.HeaderStatus:      grpcStatus,
+			},
+			EndOfStream: true,
+		},
+		&fwkdl.EndpointMetadata{ID: id(name)})
+}
+
+// grpcHeaders delivers a gRPC response's headers. The stream's status is not
+// final yet, so the headers alone must charge nothing.
+func grpcHeaders(f *EndpointHealthFilter, name, grpcStatus string) {
+	headers := map[string]string{
+		reqcommon.PseudoHeaderStatus: "200",
+		reqcommon.HeaderContentType:  grpcframe.MediaType,
+	}
+	if grpcStatus != "" {
+		headers[grpcframe.HeaderStatus] = grpcStatus
+	}
+	f.ResponseHeader(context.Background(), nil,
+		&fwkrh.Response{Headers: headers},
+		&fwkdl.EndpointMetadata{ID: id(name)})
+}
+
+// A gRPC failure ejected at the end of the stream: UNAVAILABLE maps to 503,
+// which the default responseFailureCodes count.
+func TestGRPCFailureEjectsAtEndOfStream(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+	filter := func() []string { return names(f.Filter(context.Background(), nil, candidates)) }
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	require.Equal(t, []string{"a", "b"}, filter(), "four failures are below the threshold")
+
+	grpcRespond(f, "b", "14")
+	require.Equal(t, []string{"a"}, filter(), "the fifth consecutive failure ejects")
+
+	clock.advance(30 * time.Second)
+	require.Equal(t, []string{"a", "b"}, filter(), "the ejection ends after ejectionDuration")
+}
+
+// A gRPC response's headers carry :status 200 whatever the stream's outcome,
+// and the grpc-status of a trailers-only response is final only once the
+// stream ends, so header delivery charges neither a failure nor a reset.
+func TestGRPCResponseHeadersChargeNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	for range 10 {
+		grpcHeaders(f, "a", "")
+		grpcHeaders(f, "b", "")
+		grpcHeaders(f, "b", "14")
+	}
+	grpcRespond(f, "b", "14")
+	assert.Equal(t, []string{"a"}, names(f.Filter(context.Background(), nil, candidates)),
+		"header deliveries neither eject nor reset the failure run")
+}
+
+// A gRPC stream that ends OK resets the failure run, like an HTTP 200.
+func TestGRPCSuccessResetsFailureRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	grpcRespond(f, "a", grpcframe.StatusOK)
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// A gRPC status outside responseFailureCodes behaves like the HTTP status it
+// maps to: INVALID_ARGUMENT maps to 400, which resets the failure run.
+func TestGRPCStatusOutsideFailureCodesResetsRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	grpcRespond(f, "a", "3")
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// A gRPC stream that ends without a status the EPP could see, such as a
+// disconnect before the trailers arrived, and a stream still in progress
+// both count nothing.
+// A gRPC response Envoy served from a fallback endpoint says nothing about the
+// endpoint the EPP picked, so its status neither charges nor resets the target.
+func TestGRPCResponsesServedByAnotherEndpointAreIgnored(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpointAt("a", "10.0.0.1"), endpointAt("b", "10.0.0.2")}
+	respondFrom := func(served, grpcStatus string) {
+		f.ResponseBody(context.Background(), nil,
+			&fwkrh.Response{
+				Headers: map[string]string{
+					reqcommon.HeaderContentType: grpcframe.MediaType,
+					grpcframe.HeaderStatus:      grpcStatus,
+				},
+				EndOfStream: true,
+				ReqMetadata: map[string]any{metadata.DestinationEndpointNamespace: map[string]any{
+					metadata.DestinationEndpointServedKey: served,
+				}},
+			},
+			&fwkdl.EndpointMetadata{ID: id("a"), Address: "10.0.0.1", Port: "8000"})
+	}
+
+	for range 5 {
+		respondFrom("10.0.0.2:8000", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)),
+		"failures served by a fallback endpoint do not count toward the target")
+
+	for range 5 {
+		respondFrom("10.0.0.1:8000", "14")
+	}
+	assert.Equal(t, []string{"b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+func TestGRPCStreamWithoutStatusCountsNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	// An intermediate chunk of a gRPC stream.
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+		&fwkdl.EndpointMetadata{ID: id("b")})
+	// The stream ends with no grpc-status the EPP saw.
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}, EndOfStream: true},
+		&fwkdl.EndpointMetadata{ID: id("b")})
+	grpcRespond(f, "b", "14")
+	assert.Equal(t, []string{"a"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the status-less end neither ejects nor resets the failure run")
 }
 
 func TestResponseEjectionBackoff(t *testing.T) {
