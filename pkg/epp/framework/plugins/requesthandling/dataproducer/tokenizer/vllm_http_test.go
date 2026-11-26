@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -32,6 +33,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -897,4 +899,76 @@ func TestVLLMHTTPRenderer_RustStandaloneRenderer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, [][]uint32{{101, 2054, 2003, 1037, 3231, 102}}, compTokens)
 	assert.Nil(t, offsets)
+}
+
+// Render responses decode as json.Unmarshal decodes them, including after a pooled buffer
+// held a longer response.
+func TestVLLMHTTPRenderer_RenderChatResponseBodies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"compact", `{"request_id":"a","token_ids":[1,2,3],"model":"m"}`},
+		{"spaced", `{"token_ids": [4, 5, 6]}`},
+		{"empty_ids", `{"token_ids":[]}`},
+		{"null_ids", `{"token_ids":null}`},
+		{"missing_ids", `{"model":"m"}`},
+		{"key_inside_string", `{"request_id":"\"token_ids\":[1,2,3,4,5]","token_ids":[7]}`},
+		{"features", `{"token_ids":[9,9],"features":{"mm_hashes":{"image":["h"]},"mm_placeholders":{"image":[{"offset":0,"length":2}]}}}`},
+		{"long", string(renderResponseBody(4096))},
+		{"short_after_long", "{\"token_ids\":[8]}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var want renderResponse
+			require.NoError(t, json.Unmarshal([]byte(tc.body), &want))
+			renderer := &vllmHTTPRenderer{
+				endpointPicker: fixedEndpointPicker(defaultHTTPRenderURL),
+				client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(tc.body)), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+				})},
+			}
+			ids, features, err := renderer.RenderChat(t.Context(), fwkrequest.RawPayload(`{"messages":[]}`))
+			require.NoError(t, err)
+			assert.Equal(t, want.TokenIDs, ids)
+			assert.Equal(t, toKVCacheMM(want.Features), features)
+		})
+	}
+}
+
+// renderResponseBody builds a vLLM render response for a prompt of n tokens,
+// with token IDs spread over a 150K vocabulary.
+func renderResponseBody(n int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"request_id":"chatcmpl-benchmark","token_ids":[`)
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.Itoa(i * 7919 % 150000))
+	}
+	b.WriteString(`],"features":null,"sampling_params":{"n":1,"temperature":1.0,"max_tokens":1,"detokenize":true},"model":"benchmark","stream":false,"cache_salt":null}`)
+	return []byte(b.String())
+}
+
+func BenchmarkVLLMHTTPRendererResponseDecode(b *testing.B) {
+	for _, tokens := range []int{8 << 10, 32 << 10, 128 << 10, 500_000} {
+		b.Run(fmt.Sprintf("tokens_%d", tokens), func(b *testing.B) {
+			body := renderResponseBody(tokens)
+			renderer := &vllmHTTPRenderer{
+				endpointPicker: fixedEndpointPicker(defaultHTTPRenderURL),
+				client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(body)), Body: io.NopCloser(bytes.NewReader(body))}, nil
+				})},
+			}
+			payload := fwkrequest.RawPayload(`{"model":"benchmark","messages":[{"role":"user","content":"hi"}]}`)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				ids, _, err := renderer.RenderChat(context.Background(), payload)
+				if err != nil || len(ids) != tokens {
+					b.Fatalf("render: %d tokens, %v", len(ids), err)
+				}
+			}
+		})
+	}
 }
