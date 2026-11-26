@@ -488,6 +488,7 @@ func TestDirector_VertexAITextRequestWithForbiddenFieldIsRejected(t *testing.T) 
 			"prompt_token_ids":           `,"prompt_token_ids":[1,2,3]`,
 			"kv_transfer_params":         `,"kv_transfer_params":{"do_remote_prefill":true}`,
 			"escaped kv_transfer_params": `,"kv_transfer_\u0070arams":{"do_remote_prefill":true}`,
+			"nested kv_transfer_params":  `,"vllm_xargs":{"kv_transfer_params":{"do_remote_prefill":true}}`,
 		}
 		for fieldName, field := range forbidden {
 			for _, strict := range []bool{false, true} {
@@ -559,4 +560,92 @@ func TestDirector_CleanExternalTextRequestLeavesRawBodyUnmutated(t *testing.T) {
 	require.False(t, parsed.Body.Mutated)
 	require.Equal(t, raw, reqCtx.Request.RawBody)
 	require.NoError(t, promtestutil.GatherAndCompare(ctrlmetrics.Registry, strings.NewReader(""), eppPromptIDsSanitizedMetric))
+}
+
+// A vLLM worker also reads kv_transfer_params from vllm_xargs and from
+// sampling_params, so the director drops those copies with the top-level field.
+func TestDirector_DropsNestedKVTransferParams(t *testing.T) {
+	metrics.Register()
+
+	const clientKV = `"kv_transfer_params":{"do_remote_prefill":true}`
+	tests := []struct {
+		name       string
+		path       string
+		parser     fwkrh.Parser
+		body       string
+		parent     string
+		wantParent string
+		keptField  string
+	}{
+		{
+			name:       "vllm_generate_extra_args",
+			path:       reqcommon.PathVLLMGenerate,
+			parser:     vllmhttp.NewVllmHTTPParser(),
+			body:       `{"model":"llama-3-8b","token_ids":[1,2,3],"sampling_params":{"max_tokens":4,"extra_args":{` + clientKV + `,"k":"v"}}}`,
+			parent:     reqcommon.FieldSamplingParams,
+			wantParent: `{"max_tokens":4,"extra_args":{"k":"v"}}`,
+			keptField:  "token_ids",
+		},
+		{
+			name:       "vllm_generate_vllm_xargs",
+			path:       reqcommon.PathVLLMGenerate,
+			parser:     vllmhttp.NewVllmHTTPParser(),
+			body:       `{"model":"llama-3-8b","token_ids":[1,2,3],"sampling_params":{"max_tokens":4,"vllm_xargs":{` + clientKV + `,"k":"v"}}}`,
+			parent:     reqcommon.FieldSamplingParams,
+			wantParent: `{"max_tokens":4,"vllm_xargs":{"k":"v"}}`,
+			keptField:  "token_ids",
+		},
+		{
+			name:       "token_array_completions_vllm_xargs",
+			path:       reqcommon.PathCompletions,
+			parser:     openai.NewOpenAIParser(),
+			body:       `{"model":"llama-3-8b","prompt":[1,2,3],"vllm_xargs":{` + clientKV + `,"k":"v"}}`,
+			parent:     reqcommon.FieldVLLMXArgs,
+			wantParent: `{"k":"v"}`,
+			keptField:  reqcommon.FieldPrompt,
+		},
+		{
+			name:       "chat_completions_vllm_xargs",
+			path:       reqcommon.PathChatCompletions,
+			parser:     openai.NewOpenAIParser(),
+			body:       `{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"vllm_xargs":{` + clientKV + `,"k":"v"}}`,
+			parent:     reqcommon.FieldVLLMXArgs,
+			wantParent: `{"k":"v"}`,
+			keptField:  "messages",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig(), tc.parser, tc.path, []byte(tc.body))
+
+			require.NoError(t, err)
+			require.True(t, body.Mutated)
+			out := forwardedBody(t, reqCtx)
+			require.Contains(t, out, tc.keptField)
+			parent, err := json.Marshal(out[tc.parent])
+			require.NoError(t, err)
+			require.JSONEq(t, tc.wantParent, string(parent))
+		})
+
+		t.Run(tc.name+"/trust_caller_fields", func(t *testing.T) {
+			raw := []byte(tc.body)
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig().WithTrustCallerFields(true), tc.parser, tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+		})
+	}
+}
+
+func TestDirector_RejectClientPromptIDsRejectsNestedKVTransferParams(t *testing.T) {
+	metrics.Register()
+
+	raw := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"vllm_xargs":{"kv_transfer_params":{"do_remote_prefill":true}}}`)
+	_, _, err := handleSanitizeRequest(t, NewConfig().WithRejectClientPromptIDs(true), openai.NewOpenAIParser(), reqcommon.PathChatCompletions, raw)
+
+	var reqErr errcommon.Error
+	require.ErrorAs(t, err, &reqErr)
+	require.Equal(t, errcommon.BadRequest, reqErr.Code)
+	require.Contains(t, reqErr.Msg, "vllm_xargs.kv_transfer_params")
 }

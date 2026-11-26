@@ -297,6 +297,8 @@ The inference routes parse the body and drop client copies of router-owned field
 The coordinator drops a client-provided `kv_transfer_params` on every inference route.
 The field names the pod a model server pulls KV from, and `p2p-source-producer` treats a
 request that carries `remote_prefiller` as a decode request.
+A vLLM worker also reads the field from `vllm_xargs`, `sampling_params.extra_args`, and
+`sampling_params.vllm_xargs`, so the coordinator drops those copies too.
 On the text routes (`/v1/chat/completions`, string `/v1/completions`, `/v1/messages`,
 `/v1/responses`) the coordinator also drops `prompt_token_ids`,
 `prompt_render_fingerprint`, `render_fingerprint`, and `input_ids`, because a worker uses

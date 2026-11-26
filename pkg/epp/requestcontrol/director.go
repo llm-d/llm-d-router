@@ -597,12 +597,13 @@ func isTokenRoute(body *fwkrequest.InferenceRequestBody) bool {
 	return body.Generate != nil || (body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0)
 }
 
-// dropTokenRouteKVTransferParams removes a client-supplied kv_transfer_params
-// on a dedicated token route. The client token IDs stay, because sending them
-// is the purpose of the route. kv_transfer_params tells a model server which
-// pod to pull KV from, so only the Coordinator, the EPP plugins, and the
-// sidecar may write it. The field is dropped and never rejected, as in the
-// Coordinator.
+// dropTokenRouteKVTransferParams removes each client-supplied copy of
+// kv_transfer_params on a dedicated token route: the top-level field and the
+// copies in vllm_xargs and sampling_params, from which a vLLM worker also
+// reads it. The client token IDs stay, because sending them is the purpose of
+// the route. kv_transfer_params tells a model server which pod to pull KV
+// from, so only the Coordinator, the EPP plugins, and the sidecar may write
+// it. The field is dropped and never rejected, as in the Coordinator.
 func dropTokenRouteKVTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
 	if !isTokenRoute(body) {
 		return
@@ -611,14 +612,15 @@ func dropTokenRouteKVTransferParams(ctx context.Context, body *fwkrequest.Infere
 	if !ok {
 		return
 	}
-	if _, present := payload[reqcommon.FieldKVTransferParams]; !present {
+	found := reqcommon.FindKVTransferParams(payload)
+	if len(found) == 0 {
 		return
 	}
 	body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
-		delete(m, reqcommon.FieldKVTransferParams)
+		reqcommon.StripKVTransferParams(m)
 	})
-	// Field name only: the value carries a host, a port and a request id.
-	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropped client-supplied fields", "fields", []string{reqcommon.FieldKVTransferParams})
+	// Field names only: the value carries a host, a port and a request id.
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropped client-supplied fields", "fields", found)
 }
 
 // escapeFairnessTenant percent-encodes the characters that would otherwise make

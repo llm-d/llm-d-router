@@ -151,12 +151,12 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			droppedFields = reqcommon.StripExternalTextFields(parsed)
 			coordmetrics.IncPromptIDsSanitized(route, metricsutil.SanitizeActionStripped)
 		}
-	} else if _, ok := parsed[reqcommon.FieldKVTransferParams]; ok {
+	} else {
 		// A token route keeps the client token IDs. kv_transfer_params tells a
 		// model server which pod to pull KV from, so only the KV connector and
-		// the EPP may write it.
-		delete(parsed, reqcommon.FieldKVTransferParams)
-		droppedFields = []string{reqcommon.FieldKVTransferParams}
+		// the EPP may write it. A worker also reads it from vllm_xargs and
+		// from sampling_params.
+		droppedFields = reqcommon.StripKVTransferParams(parsed)
 	}
 	if len(droppedFields) > 0 {
 		// OriginalBody must not keep the dropped fields either.

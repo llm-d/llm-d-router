@@ -108,6 +108,10 @@ Before request control starts, the EPP drops client copies of router-owned body 
 - On the token routes (token-array `/v1/completions`, `/inference/v1/generate`,
   `/generate`) it keeps the token IDs and drops `kv_transfer_params`.
 
+A vLLM worker also reads `kv_transfer_params` from `vllm_xargs`,
+`sampling_params.extra_args`, and `sampling_params.vllm_xargs`. On each route, the EPP
+handles those copies as it handles the top-level field.
+
 EPP plugins such as `p2p-source-producer` write `kv_transfer_params` after this step, so
 the drop does not affect them. Two `requestHandler` settings change the behavior, and
 they cannot both be `true`:

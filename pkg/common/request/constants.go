@@ -86,6 +86,7 @@ const (
 	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
 	FieldExtraArgs            = "extra_args" // sampling_params field: vLLM reads kv_transfer_params from it
+	FieldVLLMXArgs            = "vllm_xargs" // vllm-rs name of extra_args, also a top-level field of the OpenAI routes
 	FieldN                    = "n"
 	FieldCacheSalt            = "cache_salt"
 	FieldPriority             = "priority"

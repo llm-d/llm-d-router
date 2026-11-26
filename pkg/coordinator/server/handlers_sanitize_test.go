@@ -222,3 +222,73 @@ func TestHandleInference_PreservesClientTokensOnDedicatedTokenRoutes(t *testing.
 		}
 	}
 }
+
+// A vLLM worker also reads kv_transfer_params from vllm_xargs and from
+// sampling_params, so the handler drops those copies with the top-level field.
+func TestHandleInference_DropsNestedKVTransferParams(t *testing.T) {
+	const clientKV = `"kv_transfer_params":{"do_remote_prefill":true}`
+	tests := []struct {
+		name     string
+		path     string
+		body     string
+		wantBody string
+	}{
+		{
+			name:     "chat_completions_vllm_xargs",
+			path:     reqcommon.PathChatCompletions,
+			body:     `{"model":"m","messages":[{"role":"user","content":"hi"}],"vllm_xargs":{` + clientKV + `,"k":"v"}}`,
+			wantBody: `{"model":"m","messages":[{"role":"user","content":"hi"}],"vllm_xargs":{"k":"v"}}`,
+		},
+		{
+			name:     "vllm_generate_extra_args",
+			path:     reqcommon.PathVLLMGenerate,
+			body:     `{"model":"m","token_ids":[1,2,3],"sampling_params":{"max_tokens":4,"extra_args":{` + clientKV + `,"k":"v"}}}`,
+			wantBody: `{"model":"m","token_ids":[1,2,3],"sampling_params":{"max_tokens":4,"extra_args":{"k":"v"}}}`,
+		},
+		{
+			name:     "vllm_generate_vllm_xargs",
+			path:     reqcommon.PathVLLMGenerate,
+			body:     `{"model":"m","token_ids":[1,2,3],"sampling_params":{"max_tokens":4,"vllm_xargs":{` + clientKV + `,"k":"v"}}}`,
+			wantBody: `{"model":"m","token_ids":[1,2,3],"sampling_params":{"max_tokens":4,"vllm_xargs":{"k":"v"}}}`,
+		},
+		{
+			name:     "token_array_completions_vllm_xargs",
+			path:     reqcommon.PathCompletions,
+			body:     `{"model":"m","prompt":[1,2,3],"vllm_xargs":{` + clientKV + `,"k":"v"}}`,
+			wantBody: `{"model":"m","prompt":[1,2,3],"vllm_xargs":{"k":"v"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+			step := &capturingStep{}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			require.NoError(t, err)
+
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.NotNil(t, step.captured)
+			require.JSONEq(t, tc.wantBody, string(step.captured.OriginalBody))
+			body, err := json.Marshal(step.captured.Body)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.wantBody, string(body))
+		})
+	}
+}
+
+func TestHandleInference_RejectClientPromptIDsRejectsNestedKVTransferParams(t *testing.T) {
+	metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	step := &capturingStep{}
+	srv, err := New(config.ServerConfig{RejectClientPromptIDs: true}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	require.NoError(t, err)
+
+	raw := `{"model":"m","messages":[{"role":"user","content":"hi"}],"vllm_xargs":{"kv_transfer_params":{"do_remote_prefill":true}}}`
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "vllm_xargs.kv_transfer_params")
+	require.Nil(t, step.captured)
+}

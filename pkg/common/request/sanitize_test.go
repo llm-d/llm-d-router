@@ -91,3 +91,172 @@ func TestFindAndStripExternalTextFields(t *testing.T) {
 	require.Equal(t, wantFields, stripped)
 	require.Equal(t, map[string]any{"model": "m"}, dirty)
 }
+
+func TestNestedKVTransferParams(t *testing.T) {
+	const kv = `{"do_remote_prefill":true}`
+	tests := []struct {
+		name string
+		// body builds a new request body: Strip edits decoded objects in place.
+		body      func() map[string]any
+		wantNames []string
+		wantBody  string
+	}{
+		{
+			name: "decoded_vllm_xargs",
+			body: func() map[string]any {
+				return map[string]any{"model": "m", "vllm_xargs": map[string]any{"kv_transfer_params": map[string]any{"do_remote_prefill": true}, "k": "v"}}
+			},
+			wantNames: []string{"vllm_xargs.kv_transfer_params"},
+			wantBody:  `{"model":"m","vllm_xargs":{"k":"v"}}`,
+		},
+		{
+			name: "raw_vllm_xargs",
+			body: func() map[string]any {
+				return map[string]any{"model": "m", "vllm_xargs": json.RawMessage(`{"kv_transfer_params":` + kv + `,"k":"v"}`)}
+			},
+			wantNames: []string{"vllm_xargs.kv_transfer_params"},
+			wantBody:  `{"model":"m","vllm_xargs":{"k":"v"}}`,
+		},
+		{
+			name: "decoded_sampling_params_extra_args",
+			body: func() map[string]any {
+				return map[string]any{"token_ids": []any{1}, "sampling_params": map[string]any{
+					"max_tokens": 4,
+					"extra_args": map[string]any{"kv_transfer_params": map[string]any{"do_remote_decode": true}, "k": "v"},
+				}}
+			},
+			wantNames: []string{"sampling_params.extra_args.kv_transfer_params"},
+			wantBody:  `{"token_ids":[1],"sampling_params":{"max_tokens":4,"extra_args":{"k":"v"}}}`,
+		},
+		{
+			name: "raw_sampling_params_extra_args",
+			body: func() map[string]any {
+				return map[string]any{"token_ids": []any{1}, "sampling_params": json.RawMessage(
+					`{"max_tokens":4,"extra_args":{"kv_transfer_params":` + kv + `,"k":"v"}}`)}
+			},
+			wantNames: []string{"sampling_params.extra_args.kv_transfer_params"},
+			wantBody:  `{"token_ids":[1],"sampling_params":{"max_tokens":4,"extra_args":{"k":"v"}}}`,
+		},
+		{
+			name: "decoded_sampling_params_with_raw_vllm_xargs",
+			body: func() map[string]any {
+				return map[string]any{"sampling_params": map[string]any{
+					"max_tokens": 4,
+					"vllm_xargs": json.RawMessage(`{"kv_transfer_params":` + kv + `}`),
+				}}
+			},
+			wantNames: []string{"sampling_params.vllm_xargs.kv_transfer_params"},
+			wantBody:  `{"sampling_params":{"max_tokens":4,"vllm_xargs":{}}}`,
+		},
+		{
+			name: "every_copy_and_the_top_level",
+			body: func() map[string]any {
+				return map[string]any{
+					"kv_transfer_params": map[string]any{"do_remote_prefill": true},
+					"vllm_xargs":         json.RawMessage(`{"kv_transfer_params":` + kv + `}`),
+					"sampling_params": map[string]any{
+						"extra_args": map[string]any{"kv_transfer_params": 1},
+						"vllm_xargs": map[string]any{"kv_transfer_params": 2},
+					},
+				}
+			},
+			wantNames: []string{
+				"kv_transfer_params",
+				"vllm_xargs.kv_transfer_params",
+				"sampling_params.extra_args.kv_transfer_params",
+				"sampling_params.vllm_xargs.kv_transfer_params",
+			},
+			wantBody: `{"vllm_xargs":{},"sampling_params":{"extra_args":{},"vllm_xargs":{}}}`,
+		},
+		{
+			name: "raw_vllm_xargs_with_an_escaped_key",
+			body: func() map[string]any {
+				return map[string]any{"model": "m", "vllm_xargs": json.RawMessage(`{"kv_transfer_\u0070arams":` + kv + `,"k":"v"}`)}
+			},
+			wantNames: []string{"vllm_xargs.kv_transfer_params"},
+			wantBody:  `{"model":"m","vllm_xargs":{"k":"v"}}`,
+		},
+		{
+			name: "raw_parent_with_an_escape_and_without_the_field",
+			body: func() map[string]any {
+				return map[string]any{"sampling_params": json.RawMessage(`{"stop":["\n\n"],"extra_args":{"k":"v"}}`)}
+			},
+			wantBody: `{"sampling_params":{"stop":["\n\n"],"extra_args":{"k":"v"}}}`,
+		},
+		{
+			name: "parents_without_the_field",
+			body: func() map[string]any {
+				return map[string]any{
+					"vllm_xargs":      json.RawMessage(`{"k":"v"}`),
+					"sampling_params": map[string]any{"extra_args": map[string]any{"k": "v"}, "vllm_xargs": json.RawMessage(`{"k":"v"}`)},
+				}
+			},
+			wantBody: `{"vllm_xargs":{"k":"v"},"sampling_params":{"extra_args":{"k":"v"},"vllm_xargs":{"k":"v"}}}`,
+		},
+		{
+			name: "parents_that_are_not_objects",
+			body: func() map[string]any {
+				return map[string]any{
+					"vllm_xargs":      json.RawMessage(`["kv_transfer_params"]`),
+					"sampling_params": map[string]any{"extra_args": "kv_transfer_params", "vllm_xargs": json.RawMessage(`null`)},
+				}
+			},
+			wantBody: `{"vllm_xargs":["kv_transfer_params"],"sampling_params":{"extra_args":"kv_transfer_params","vllm_xargs":null}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			unchanged, err := json.Marshal(tc.body())
+			require.NoError(t, err)
+
+			found := tc.body()
+			require.Equal(t, tc.wantNames, FindKVTransferParams(found))
+			afterFind, err := json.Marshal(found)
+			require.NoError(t, err)
+			require.JSONEq(t, string(unchanged), string(afterFind), "FindKVTransferParams must not change the body")
+
+			stripped := tc.body()
+			require.Equal(t, tc.wantNames, StripKVTransferParams(stripped))
+			afterStrip, err := json.Marshal(stripped)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.wantBody, string(afterStrip))
+			require.Nil(t, FindKVTransferParams(stripped))
+		})
+	}
+}
+
+func TestExternalTextFieldsIncludeNestedKVTransferParams(t *testing.T) {
+	newBody := func() map[string]any {
+		return map[string]any{
+			"model":            "m",
+			"prompt_token_ids": []any{1, 2},
+			"vllm_xargs":       json.RawMessage(`{"kv_transfer_params":{"do_remote_prefill":true},"k":"v"}`),
+		}
+	}
+	want := []string{FieldPromptTokenIDs, "vllm_xargs.kv_transfer_params"}
+
+	require.Equal(t, want, FindExternalTextFields(newBody()))
+
+	body := newBody()
+	require.Equal(t, want, StripExternalTextFields(body))
+	encoded, err := json.Marshal(body)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"model":"m","vllm_xargs":{"k":"v"}}`, string(encoded))
+}
+
+// The EPP keeps nested objects raw, and most requests carry sampling_params or
+// vllm_xargs without kv_transfer_params. The check of such a request must not
+// decode those objects.
+func TestFindKVTransferParamsDoesNotDecodeCleanRawObjects(t *testing.T) {
+	clean := map[string]any{
+		"token_ids":       json.RawMessage(`[1,2,3]`),
+		"vllm_xargs":      json.RawMessage(`{"k":"v"}`),
+		"sampling_params": json.RawMessage(`{"max_tokens":4,"extra_args":{"k":"v"},"vllm_xargs":{"k":"v"}}`),
+	}
+
+	require.Nil(t, FindKVTransferParams(clean))
+	require.Zero(t, testing.AllocsPerRun(100, func() {
+		_ = FindKVTransferParams(clean)
+		_ = FindExternalTextFields(clean)
+	}))
+}
