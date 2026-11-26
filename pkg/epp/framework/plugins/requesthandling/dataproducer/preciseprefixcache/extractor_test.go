@@ -19,7 +19,9 @@ package preciseprefixcache
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,12 +30,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 )
 
 // Avoid a -race ding from subscriber goroutines writing through a t-bound
@@ -257,6 +264,368 @@ func TestProducer_EnsureSubscriber_IPv6BracketsEndpoint(t *testing.T) {
 
 	assert.Equal(t, []string{"tcp://[fd00::1]:5557"}, subscribers.endpoints)
 	assert.Equal(t, []string{"fd00::1:8080"}, subscribers.sourceEndpoints)
+}
+
+// GrpcBasePort set: the dial port follows the rank's reported global DP rank,
+// not the rank index.
+func TestProducer_EnsureSubscriber_DerivesZMQPortFromReportedRank(t *testing.T) {
+	grpcPort := startFakeServerInfoPort(t, serverInfoResponse(2,
+		&apiv1.KvEventSource{DpRank: 2, Endpoint: "tcp://127.0.0.1:5558"}))
+
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = grpcPort
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-0"},
+		Address:   "127.0.0.1",
+		Port:      "30000",
+		RankIndex: 0,
+	}))
+
+	assert.Equal(t, []string{"ns/pod-a-rank-0"}, subscribers.ids)
+	assert.Equal(t, []string{"tcp://127.0.0.1:5559"}, subscribers.endpoints,
+		"rank index 0 must dial SocketPort + reported dpRank (5557+2)")
+	assert.Equal(t, []string{"127.0.0.1:30000"}, subscribers.sourceEndpoints)
+}
+
+func TestProducer_EnsureSubscriber_ServerInfoFailureStartsNoSubscriber(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = 1
+
+	subscriberCtx, cancel := context.WithCancel(discardCtx(t))
+	defer cancel()
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      subscriberCtx,
+	}
+
+	queryCtx, cancelQuery := context.WithCancel(discardCtx(t))
+	cancelQuery()
+	require.NoError(t, p.ensureSubscriber(queryCtx, &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-1"},
+		Address:   "127.0.0.1",
+		Port:      "30001",
+		RankIndex: 1,
+	}))
+
+	assert.Empty(t, subscribers.endpoints)
+}
+
+func TestProducer_ServerInfoRetryUpdatesSubscriber(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(discardCtx(t))
+	p := newExtractorProducer(t, true)
+	p.subscriberCtx = ctx
+	p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort = addrPort(t, listener.Addr())
+	defer func() {
+		cancel()
+		p.subscribersManager.Shutdown(context.Background())
+	}()
+
+	meta := &fwkdl.EndpointMetadata{
+		ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+		Address: "127.0.0.1",
+		Port:    "8080",
+	}
+
+	// The listener is open, but the gRPC server has not started.
+	queryCtx, cancelQuery := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancelQuery()
+	require.NoError(t, p.ensureSubscriber(queryCtx, meta))
+
+	_, endpoints := p.subscribersManager.GetActiveSubscribers()
+	require.Empty(t, endpoints)
+
+	server := grpc.NewServer()
+	apiv1.RegisterSglangServiceServer(server, &fakeServerInfo{
+		resp: serverInfoResponse(2, &apiv1.KvEventSource{DpRank: 2}),
+	})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	require.Eventually(t, func() bool {
+		_, endpoints := p.subscribersManager.GetActiveSubscribers()
+		return len(endpoints) == 1 &&
+			endpoints[0] == "tcp://127.0.0.1:5559"
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+type changingServerInfo struct {
+	apiv1.UnimplementedSglangServiceServer
+	publishes atomic.Bool
+}
+
+type blockingRetryServer struct {
+	apiv1.UnimplementedSglangServiceServer
+	attempts      atomic.Int32
+	retryStarted  chan struct{}
+	retryCanceled chan struct{}
+}
+
+func (s *blockingRetryServer) GetServerInfo(
+	ctx context.Context, _ *apiv1.GetServerInfoRequest,
+) (*apiv1.GetServerInfoResponse, error) {
+	switch s.attempts.Add(1) {
+	case 1:
+		return nil, status.Error(codes.Unavailable, "not ready")
+	case 2:
+		s.retryStarted <- struct{}{}
+		<-ctx.Done()
+		s.retryCanceled <- struct{}{}
+		return nil, ctx.Err()
+	default:
+		return serverInfoResponse(2, &apiv1.KvEventSource{DpRank: 2}), nil
+	}
+}
+
+func TestProducer_CancelsServerInfoRetryOnEndpointDeletion(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	info := &blockingRetryServer{
+		retryStarted:  make(chan struct{}, 1),
+		retryCanceled: make(chan struct{}, 1),
+	}
+	server := grpc.NewServer()
+	apiv1.RegisterSglangServiceServer(server, info)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	ctx, cancel := context.WithCancel(discardCtx(t))
+	p := newExtractorProducer(t, true)
+	p.subscriberCtx = ctx
+	p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort = addrPort(t, listener.Addr())
+	defer func() {
+		cancel()
+		p.subscribersManager.Shutdown(context.Background())
+	}()
+
+	endpoint := newEndpoint("pod-a", "127.0.0.1")
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint,
+	}))
+
+	select {
+	case <-info.retryStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gRPC retry did not start")
+	}
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventDelete, Endpoint: endpoint,
+	}))
+
+	select {
+	case <-info.retryCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("gRPC retry was not cancelled")
+	}
+
+	ids, _ := p.subscribersManager.GetActiveSubscribers()
+	require.Empty(t, ids)
+}
+
+func TestProducer_ReplacesServerInfoRetryOnEndpointUpdate(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	info := &blockingRetryServer{
+		retryStarted:  make(chan struct{}, 1),
+		retryCanceled: make(chan struct{}, 1),
+	}
+	server := grpc.NewServer()
+	apiv1.RegisterSglangServiceServer(server, info)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	ctx, cancel := context.WithCancel(discardCtx(t))
+	defer cancel()
+
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = addrPort(t, listener.Addr())
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      ctx,
+	}
+
+	endpoint := newEndpoint("pod-a", "127.0.0.1")
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint,
+	}))
+
+	select {
+	case <-info.retryStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gRPC retry did not start")
+	}
+
+	updatedMeta := endpoint.GetMetadata().Clone()
+	updatedMeta.Port = "8081"
+	updated := fwkdl.NewEndpoint(updatedMeta, nil)
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: updated,
+	}))
+
+	select {
+	case <-info.retryCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("old gRPC retry was not cancelled")
+	}
+
+	require.Equal(t, []string{"tcp://127.0.0.1:5559"}, subscribers.endpoints)
+	require.Equal(t, []string{"127.0.0.1:8081"}, subscribers.sourceEndpoints)
+}
+
+func (s *changingServerInfo) GetServerInfo(
+	context.Context, *apiv1.GetServerInfoRequest,
+) (*apiv1.GetServerInfoResponse, error) {
+	if s.publishes.Load() {
+		return serverInfoResponse(2, &apiv1.KvEventSource{DpRank: 2}), nil
+	}
+	return serverInfoResponse(2), nil
+}
+
+func TestProducer_RemovesSubscriberWhenRankStopsPublishing(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	info := &changingServerInfo{}
+	info.publishes.Store(true)
+	server := grpc.NewServer()
+	apiv1.RegisterSglangServiceServer(server, info)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	ctx, cancel := context.WithCancel(discardCtx(t))
+	p := newExtractorProducer(t, true)
+	p.subscriberCtx = ctx
+	p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort = addrPort(t, listener.Addr())
+	defer func() {
+		cancel()
+		p.subscribersManager.Shutdown(context.Background())
+	}()
+
+	endpoint := newEndpoint("pod-a", "127.0.0.1")
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint,
+	}))
+
+	_, endpoints := p.subscribersManager.GetActiveSubscribers()
+	require.Equal(t, []string{"tcp://127.0.0.1:5559"}, endpoints)
+
+	info.publishes.Store(false)
+	updatedMeta := endpoint.GetMetadata().Clone()
+	updatedMeta.Port = "8081"
+	updated := fwkdl.NewEndpoint(updatedMeta, nil)
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: updated,
+	}))
+
+	_, endpoints = p.subscribersManager.GetActiveSubscribers()
+	require.Empty(t, endpoints)
+}
+
+func TestProducer_DoesNotReuseServerInfoAfterEndpointRemoval(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	server := grpc.NewServer()
+	apiv1.RegisterSglangServiceServer(server, &fakeServerInfo{
+		resp: serverInfoResponse(2, &apiv1.KvEventSource{DpRank: 2}),
+	})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	ctx, cancel := context.WithCancel(discardCtx(t))
+	p := newExtractorProducer(t, true)
+	p.subscriberCtx = ctx
+	p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort = addrPort(t, listener.Addr())
+	defer func() {
+		cancel()
+		p.subscribersManager.Shutdown(context.Background())
+	}()
+
+	endpoint := newEndpoint("pod-a", "127.0.0.1")
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint,
+	}))
+
+	_, endpoints := p.subscribersManager.GetActiveSubscribers()
+	require.Equal(t, []string{"tcp://127.0.0.1:5559"}, endpoints)
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventDelete, Endpoint: endpoint,
+	}))
+	server.Stop()
+
+	replacement := newEndpoint("pod-a", "127.0.0.2")
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: replacement,
+	}))
+
+	_, endpoints = p.subscribersManager.GetActiveSubscribers()
+	require.Empty(t, endpoints)
+}
+
+// A rank whose GetServerInfo reports no KV-event source gets no subscriber.
+func TestProducer_EnsureSubscriber_RankWithoutSourceGetsNoSubscriber(t *testing.T) {
+	grpcPort := startFakeServerInfoPort(t, serverInfoResponse(3))
+
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = grpcPort
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-0"},
+		Address:   "127.0.0.1",
+		Port:      "30000",
+		RankIndex: 0,
+	}))
+
+	assert.Empty(t, subscribers.ids)
 }
 
 // RankIndex=0 must dial the base SocketPort unchanged.

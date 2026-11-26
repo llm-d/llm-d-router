@@ -72,7 +72,10 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 	case event.Type == fwkdl.EventAddOrUpdate && matchesSelector:
 		return p.ensureSubscriber(ctx, meta)
 	case event.Type == fwkdl.EventAddOrUpdate || event.Type == fwkdl.EventDelete:
+		p.rankMu.Lock()
+		p.cancelRankLookupLocked(endpointKey)
 		removed := p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
+		p.rankMu.Unlock()
 		if !removed && event.Type == fwkdl.EventAddOrUpdate {
 			return nil
 		}
@@ -83,18 +86,27 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
 // endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
-// (one ZMQ PUB socket per DP rank on the same pod IP), or the endpoint's
-// ZMQPort when discovery sets one. A ZMQPort endpoint receives live events
-// only, without replay or snapshot.
+// (one ZMQ PUB socket per DP rank on the same pod IP), the endpoint's ZMQPort
+// when discovery sets one, or SocketPort + the global DP rank reported by the
+// engine's GetServerInfo server when GrpcBasePort is set. A ZMQPort endpoint
+// receives live events only, without replay or snapshot; a rank reporting no
+// KV-event source gets no subscriber.
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.ID.String()
+	logger := log.FromContext(ctx).WithName(p.typedName.String())
+	if meta.ZMQPort == 0 && p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort > 0 {
+		return p.ensureGRPCSubscriber(ctx, meta)
+	}
+	p.rankMu.Lock()
+	defer p.rankMu.Unlock()
+	p.cancelRankLookupLocked(endpointKey)
+
 	zmqEndpoint, replayEndpoint, snapshotEndpoint := p.subscriberEndpoints(meta)
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
 	// down on request completion.
 	if err := p.subscribersManager.EnsureSubscriber(p.subscriberCtx, endpointKey,

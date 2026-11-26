@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -128,9 +129,19 @@ type Producer struct {
 	// Plugin-lifetime, not request-scoped: SubscriberManager binds each
 	// subscriber's goroutine to the ctx passed at registration.
 	subscriberCtx context.Context
+
+	rankMu      sync.Mutex
+	rankLookups map[string]*rankLookup
+
 	// sharedEvents is the index consumer bound to the kv-events-source named
 	// by kvEventsSourceRef; nil when the producer subscribes on its own.
 	sharedEvents *kvevents.Pool
+}
+
+type rankLookup struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	metadata *datalayer.EndpointMetadata
 }
 
 // ConfigParser decodes the plugin parameters over their defaults. The loader
