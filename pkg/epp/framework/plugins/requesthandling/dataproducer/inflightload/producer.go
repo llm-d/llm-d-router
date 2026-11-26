@@ -31,6 +31,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -38,6 +39,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
@@ -73,10 +75,32 @@ type Config struct {
 	// synchronized across EPP replicas when a cross-replica syncer is configured.
 	// Unset defaults to true; set false to keep the load local to this replica.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
+	// KVEventsSourceRef names the kv-events-source covering the engines that
+	// decode the requests. With it set, the producer stamps each request with
+	// a session id the engines echo on their KV events and releases the
+	// request's prefill load when the engine that decodes the request has
+	// stored the prompt's last full block, or a block beyond the prompt when
+	// the stamp is the request's own: the decode engine after pulling the
+	// blocks in disaggregated serving, the computing engine otherwise. The
+	// first response byte remains the fallback release.
+	KVEventsSourceRef string `json:"kvEventsSourceRef,omitempty" pluginRef:""`
 }
 
 func defaultConfig() Config {
 	return Config{AddEstimatedOutputTokens: false}
+}
+
+// ConfigParser decodes the producer parameters over their defaults. The
+// loader uses it to order the producer after the plugin kvEventsSourceRef
+// names.
+func ConfigParser(decoder *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	cfg := defaultConfig()
+	if decoder != nil {
+		if err := decoder.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("failed to decode inflight-load-producer parameters: %w", err)
+		}
+	}
+	return cfg, nil
 }
 
 func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -88,10 +112,16 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		ctx = context.Background()
 	}
 
-	cfg := defaultConfig()
-	if decoder != nil {
-		if err := decoder.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("failed to decode inflight-load-producer parameters: %w", err)
+	parsed, err := ConfigParser(decoder, handle)
+	if err != nil {
+		return nil, err
+	}
+	cfg := parsed.(Config)
+
+	var source *srckvevents.Source
+	if cfg.KVEventsSourceRef != "" {
+		if source, err = fwkplugin.PluginByType[*srckvevents.Source](handle, cfg.KVEventsSourceRef); err != nil {
+			return nil, fmt.Errorf("inflight-load-producer kvEventsSourceRef: %w", err)
 		}
 	}
 
@@ -108,7 +138,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	return &InFlightLoadProducer{
+	p := &InFlightLoadProducer{
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
@@ -122,7 +152,15 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		uncachedRequestTokensSlot: datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
 		syncCrossReplicaState:     syncCrossReplicaState,
 		PluginState:               fwkplugin.NewPluginState(ctx),
-	}, nil
+		prefillFromKVEvents:       source != nil,
+		watch:                     newPrefillWatch(prefillPending.WithLabelValues(name)),
+	}
+	if source != nil {
+		if err := source.AddConsumer(p.TypedName(), p); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
 var (
@@ -165,6 +203,8 @@ type InFlightLoadProducer struct {
 	// enabled but no outlen-bucket attribute is present on requests (the outlen-bucket
 	// plugin is not configured or is ordered after this producer).
 	outlenBucketMissingWarn sync.Once
+	prefillFromKVEvents     bool
+	watch                   *prefillWatch
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -187,6 +227,9 @@ type addedTokensEntry struct {
 	// or decrement a replacement endpoint's series with the same labels.
 	tokenGauge   prometheus.Gauge
 	requestGauge prometheus.Gauge
+	// onRelease drops the request's KV-event watch when the entry is evicted
+	// by any path, so a watch never outlives the load it would release.
+	onRelease func()
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -204,6 +247,7 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 		requestCounter: e.requestCounter,
 		tokenGauge:     e.tokenGauge,
 		requestGauge:   e.requestGauge,
+		onRelease:      e.onRelease,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
@@ -218,6 +262,9 @@ func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
 		e.requestGauge.Dec()
+	}
+	if e.onRelease != nil {
+		e.onRelease()
 	}
 }
 
@@ -466,6 +513,15 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		}
 	}
 
+	var stamp string
+	var ownStamp bool
+	var targets map[string]fwksched.Endpoint
+	if p.prefillFromKVEvents && request.Body != nil && request.Body.TokenizedRequest != nil {
+		if stamp, ownStamp, _ = sessionStamp(request); stamp != "" {
+			targets = make(map[string]fwksched.Endpoint, len(result.ProfileResults))
+		}
+	}
+
 	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -507,12 +563,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
-		p.PluginState.Write(
-			request.RequestID,
-			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
-			entry,
-		)
+		key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
+		if stamp != "" {
+			entry.onRelease = func() { p.watch.remove(request.RequestID) }
+			targets[profileName] = endpoint
+		}
+		p.PluginState.Write(request.RequestID, key, entry)
 		tracked = true
+	}
+	if stamp != "" && tracked {
+		p.watchPrefill(ctx, request, result, stamp, ownStamp, targets)
 	}
 
 	// ctx is the ext_proc stream context: it stays alive for the request's full
@@ -603,41 +663,11 @@ func (p *InFlightLoadProducer) ResponseBody(
 		return
 	}
 
-	// When output tokens are excluded, the in-flight token estimate represents only
-	// the prompt cost, which is consumed by prefill. As soon as the first chunk
-	// arrives (StartOfStream), prefill is done across all profiles, so free the
-	// token counters for every targeted endpoint regardless of profile name.
-	// The prefill profile's entry is released in full (request counter included):
-	// the first chunk means the prefill worker has finished and handed off, so
-	// the request is no longer in flight on that endpoint. Other profiles'
-	// request counters are released on EndOfStream below via PluginState.Delete.
-	if !p.addEstimatedOutputTokens && resp.StartOfStream {
-		for profileName, profileResult := range result.ProfileResults {
-			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
-				continue
-			}
-			endpoint := profileResult.TargetEndpoints[0]
-			if endpoint == nil || endpoint.GetMetadata() == nil {
-				continue
-			}
-			if profileName == profilePrefill {
-				p.release(endpoint, request, profileName)
-			} else {
-				p.releaseTokensEarly(endpoint, request, profileName)
-			}
-		}
-	}
-
-	// Early prefill release (on first chunk). Frees the primary profile's
-	// prefill contribution as soon as prefill completes, while other profiles'
-	// entries remain until EndOfStream.
-	if p.addEstimatedOutputTokens && resp.StartOfStream {
-		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
-			endpoint := prefillResult.TargetEndpoints[0]
-			if endpoint != nil && endpoint.GetMetadata() != nil {
-				p.release(endpoint, request, profilePrefill)
-			}
-		}
+	// The first response byte means the prefill worker has finished and handed
+	// off. It is the fallback completion signal; with KVEventsSourceRef
+	// the engine's store events usually report completion before it.
+	if resp.StartOfStream {
+		p.onPrefillComplete(ctx, request.RequestID, result, signalFirstByte)
 	}
 
 	// Full cleanup on completion vs. lifetime extension on an intermediate chunk.
@@ -645,7 +675,10 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
-		if request.Body != nil && resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
+		// TTS completion tokens are codec frames, not text output-length
+		// samples; they must not train the text UNKNOWN average.
+		if request.Body != nil && !isTextToSpeech(request) &&
+			resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
 			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))
 			if ok {
@@ -658,16 +691,31 @@ func (p *InFlightLoadProducer) ResponseBody(
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
+		// Refresh access time before unbinding so a concurrent janitor sweep cannot
+		// reap the first chunk when prefill exceeded stalenessThreshold.
 		p.PluginState.Touch(request.RequestID)
+		if resp.StartOfStream {
+			p.PluginState.UnbindLiveness(request.RequestID)
+		}
 	}
+}
+
+// isTextToSpeech reports whether request is a text-to-speech request. Once the
+// request is forwarded the handler keeps only the response-phase view of the
+// body, which drops TextToSpeech, so the path decides from then on.
+func isTextToSpeech(request *fwksched.InferenceRequest) bool {
+	if request.Body != nil && request.Body.TextToSpeech != nil {
+		return true
+	}
+	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(request.Headers)) == reqcommon.APITypeAudioSpeech
 }
 
 // release surgically deletes a single profile's entry from PluginState,
 // triggering OnEvicted to roll back that profile's counter contribution.
 // Used at StartOfStream when a single profile needs to be released ahead of
 // the EndOfStream bulk Delete.
-func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
-	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
+func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, requestID string, profileName string) {
+	if endpoint == nil || requestID == "" || p.PluginState == nil {
 		return
 	}
 	meta := endpoint.GetMetadata()
@@ -679,15 +727,15 @@ func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwks
 
 	// DeleteKey triggers OnEvicted, which decrements the counters exactly once.
 	// If the janitor already reaped the request, this is a no-op.
-	p.PluginState.DeleteKey(request.RequestID, key)
+	p.PluginState.DeleteKey(requestID, key)
 }
 
 // releaseTokensEarly frees only the token portion of a profile's entry
 // (request counter stays held), used at StartOfStream for the
 // addEstimatedOutputTokens=false path where prefill completion frees tokens
 // but the request remains in-flight until EndOfStream.
-func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
-	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
+func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, requestID string, profileName string) {
+	if endpoint == nil || requestID == "" || p.PluginState == nil {
 		return
 	}
 	meta := endpoint.GetMetadata()
@@ -697,7 +745,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	eid := meta.ID.String()
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
-	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
+	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, requestID, key); err == nil {
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
 			entry.tokenGauge.Sub(float64(t))
@@ -777,9 +825,20 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 // (approximate by default, or a precise-prefix-cache producer). The outlen
 // bucket is optional too: without it the output estimate falls back to UNKNOWN.
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
+	var tokenized any = fwkrequest.TokenizedRequest{}
+	if p.prefillFromKVEvents {
+		// The event match compares the request's token ids with the engine's,
+		// so estimated ids would never complete a request.
+		tokenized = fwkplugin.ConsumedData{
+			Type: fwkrequest.TokenizedRequest{},
+			Matches: fwkplugin.MatchKeyValues(map[string]string{
+				tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+			}),
+		}
+	}
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: tokenized,
 		},
 		Optional: map[fwkplugin.DataKey]any{
 			p.prefixMatchInfoDK:       attrprefix.PrefixCacheMatchInfo{},

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
@@ -327,7 +328,9 @@ func (fr *FlowRegistry) WithConnection(key flowcontrol.FlowKey, fn func(conn con
 	if state.initErr != nil {
 		// If provisioning failed, this state object is invalid.
 		// We remove it from the map so that subsequent requests will attempt to create a fresh state object.
-		fr.flowStates.Delete(key)
+		// Another holder of this state may already have removed it and a newer state may have taken its
+		// place, so remove only this one.
+		fr.flowStates.CompareAndDelete(key, state)
 
 		// Release the band lease if we created the flow.
 		if isNewFlow {
@@ -492,11 +495,14 @@ func (fr *FlowRegistry) gcFlows() {
 
 		// Prune the flows' metric series. Fairness IDs come from client input, so without pruning the
 		// per-flow metric vectors grow monotonically with every fairness ID ever observed. Done after
-		// cleanupFlowResources and outside fr.mu: DeletePartialMatch scans whole metric vectors, which
-		// must not run under the registry write lock.
-		for _, key := range keysToClean {
-			metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
-		}
+		// cleanupFlowResources, on a separate goroutine: DeletePartialMatch scans whole metric vectors,
+		// which must not run under the registry write lock or on the Processor loop that runs GC.
+		go func() {
+			defer utilruntime.HandleCrashWithLogger(fr.logger)
+			for _, key := range keysToClean {
+				metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
+			}
+		}()
 	}
 }
 

@@ -36,6 +36,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -48,14 +50,30 @@ func hashTokens(t []uint32) uint64 {
 	return xxhash.Sum64(unsafe.Slice((*byte)(unsafe.Pointer(&t[0])), len(t)*4)) //#nosec G103 -- mirrors HashBlock's production reinterpretation, length guarded above
 }
 
+func TestPackBytes(t *testing.T) {
+	assert.Nil(t, PackBytes(nil))
+	assert.Equal(t, []uint32{0x64636261}, PackBytes([]byte("abcd")))
+	assert.Equal(t, []uint32{0x64636261, 0x65}, PackBytes([]byte("abcde")), "tail is zero-padded")
+}
+
 // TestPackBytes_KeyPreserving asserts packed-token hashing matches raw-byte
 // hashing, so the scorer's cache keys are unchanged.
 func TestPackBytes_KeyPreserving(t *testing.T) {
 	raw := []byte("the quick brown fox jumps over!!") // len 32, 4-byte aligned
 	require.Zero(t, len(raw)%fwkrequest.BytesPerToken, "fixture must be %d-byte aligned, got len %d", fwkrequest.BytesPerToken, len(raw))
-	tokens := packBytes(raw)
+	tokens := PackBytes(raw)
 	require.Len(t, tokens, len(raw)/fwkrequest.BytesPerToken)
 	assert.Equal(t, xxhash.Sum64(raw), hashTokens(tokens), "packed-token hash != raw-byte hash; estimate path is not key-preserving")
+}
+
+// TestEstimateBackend_UnsupportedBody asserts a body the backend cannot read
+// is reported as unsupported rather than estimated as an empty prompt.
+func TestEstimateBackend_UnsupportedBody(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Payload: fwkrequest.RawPayload(`{"prompt":"hi"}`),
+	})
+	require.ErrorIs(t, err, errUnsupportedBody)
+	assert.Nil(t, tp)
 }
 
 // TestEstimateBackend_GeneratePassthrough asserts pre-tokenized input is kept
@@ -78,7 +96,7 @@ func TestEstimateBackend_GenerateTextEstimatesPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesEstimatesPromptPseudoTokens asserts an
@@ -93,7 +111,7 @@ func TestEstimateBackend_ImagesEstimatesPromptPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesIncludesNegativePrompt asserts an
@@ -106,7 +124,7 @@ func TestEstimateBackend_ImagesIncludesNegativePrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a cat wearing a hat\nblurry")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a cat wearing a hat\nblurry")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt asserts a
@@ -117,7 +135,7 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
 // pngBytes encodes a width x height PNG so a captured image head carries a
@@ -148,7 +166,7 @@ func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
 	png := pngBytes(t, 128, 64)
 	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: int64(len(png)), Head: png, Hash: xxhash.Sum64(png)}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
-		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
@@ -157,8 +175,34 @@ func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
 	assert.Equal(t, reqcommon.ModalityImage, features[0].Modality)
 	assert.Equal(t, imageTokens(128, 64), features[0].Length)
 	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
-	assert.Equal(t, len(packBytes([]byte("add a hat"))), features[0].Offset)
+	assert.Equal(t, len(PackBytes([]byte("add a hat"))), features[0].Offset)
 	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestImagesEstimator_MultipleImagesSumTokens asserts a multi-image edit
+// reports one image feature per uploaded image, in order and back to back, and
+// its token count is the text plus the placeholders of every image.
+func TestImagesEstimator_MultipleImagesSumTokens(t *testing.T) {
+	first, second := pngBytes(t, 128, 64), pngBytes(t, 256, 128)
+	images := []fwkrequest.UploadedMedia{
+		{ContentType: "image/png", SizeBytes: int64(len(first)), Head: first, Hash: xxhash.Sum64(first)},
+		{ContentType: "image/png", SizeBytes: int64(len(second)), Head: second, Hash: xxhash.Sum64(second)},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: images},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 2)
+	textTokens := len(PackBytes([]byte("add a hat")))
+	assert.Equal(t, textTokens, features[0].Offset)
+	assert.Equal(t, imageTokens(128, 64), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(images[0].Hash, 16), features[0].Hash)
+	assert.Equal(t, features[0].Offset+features[0].Length, features[1].Offset)
+	assert.Equal(t, imageTokens(256, 128), features[1].Length)
+	assert.Equal(t, strconv.FormatUint(images[1].Hash, 16), features[1].Hash)
+	assert.Equal(t, textTokens+imageTokens(128, 64)+imageTokens(256, 128), tp.TokenCount())
 }
 
 // TestImagesEstimator_UndecodableHeadUsesDefaultResolution asserts an image
@@ -167,7 +211,7 @@ func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
 func TestImagesEstimator_UndecodableHeadUsesDefaultResolution(t *testing.T) {
 	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: 4096, Head: []byte("not an image header")}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
-		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
 	})
 	require.NoError(t, err)
 	features := tp.Prompts[0].MultiModalFeatures
@@ -182,7 +226,7 @@ func TestImagesEstimator_WebPHeadDimensions(t *testing.T) {
 	head := webpHeader("VP8L", 512, 256)
 	media := fwkrequest.UploadedMedia{ContentType: "image/webp", SizeBytes: int64(len(head)), Head: head, Hash: xxhash.Sum64(head)}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
-		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
 	})
 	require.NoError(t, err)
 	features := tp.Prompts[0].MultiModalFeatures
@@ -200,7 +244,7 @@ func TestImagesEstimator_GenerationsCarriesNoFeature(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
 	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
-	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateEstimatesPromptPseudoTokens asserts an
@@ -213,7 +257,7 @@ func TestEstimateBackend_AudioGenerateEstimatesPromptPseudoTokens(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateIncludesNegativePrompt asserts an
@@ -226,7 +270,7 @@ func TestEstimateBackend_AudioGenerateIncludesNegativePrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a dog barking\nsilence")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a dog barking\nsilence")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateIgnoresWhitespaceOnlyNegativePrompt
@@ -237,7 +281,7 @@ func TestEstimateBackend_AudioGenerateIgnoresWhitespaceOnlyNegativePrompt(t *tes
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a dog barking")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a dog barking")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechEstimatesPseudoTokens asserts TTS input text
@@ -249,7 +293,7 @@ func TestEstimateBackend_TextToSpeechEstimatesPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(input)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(input)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesInstructions asserts TTS
@@ -261,7 +305,7 @@ func TestEstimateBackend_TextToSpeechIncludesInstructions(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions asserts
@@ -274,7 +318,7 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions(t *testin
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesRefText asserts a voice-cloning
@@ -287,7 +331,7 @@ func TestEstimateBackend_TextToSpeechIncludesRefText(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText asserts
@@ -298,7 +342,7 @@ func TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText(t *testing.T
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText asserts a
@@ -309,7 +353,7 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
@@ -380,7 +424,7 @@ func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Len(t, tp.Prompts, 1)
-			assert.Equal(t, packBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
+			assert.Equal(t, PackBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
 		})
 	}
 }
@@ -1276,7 +1320,7 @@ func TestTranscriptionsEstimator_WAVDuration(t *testing.T) {
 	assert.Equal(t, reqcommon.ModalityAudio, features[0].Modality)
 	assert.Equal(t, audioTokens(1.5), features[0].Length)
 	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
-	assert.Equal(t, len(packBytes([]byte("hint"))), features[0].Offset)
+	assert.Equal(t, len(PackBytes([]byte("hint"))), features[0].Offset)
 	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
 }
 
@@ -1644,4 +1688,152 @@ func TestAudioEstimator_UndecodableBase64UsesByteRate(t *testing.T) {
 	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
 	assert.NotEqual(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length,
 		"an undecodable payload must not fall back to the default duration")
+}
+
+// speechPrefixHashes estimates a speech body and returns its prefix block
+// hashes, applying the cache salt the way Plugin.Produce does.
+func speechPrefixHashes(t *testing.T, speech *fwkrequest.TextToSpeechRequest) [][]prefixhash.BlockHash {
+	t.Helper()
+	body := &fwkrequest.InferenceRequestBody{TextToSpeech: speech}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	body.TokenizedRequest = tp
+	tp.CacheSalt = CacheSaltFromBody(body)
+	return prefixhash.GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "qwen3-tts",
+		Body:        body,
+	}, 16, 2048)
+}
+
+// The engine salts a speech request's prefix cache on its full conditioning,
+// so the router's fingerprint must separate requests that differ only in
+// conditioning: the estimate carries the spoken text alone, and without the
+// salt two voices over the same text would fingerprint identically and the
+// prefix-cache-affinity-filter would stick them to an endpoint holding no
+// shared prefix.
+func TestSpeechPrefixFingerprint_SeparatesConditioning(t *testing.T) {
+	base := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{Input: "hello there", Instructions: "cheerfully"}
+	}
+
+	vivian := speechPrefixHashes(t, base())
+	ryan := base()
+	ryan.Voice = "ryan"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, ryan), "a different voice must change the fingerprint")
+
+	french := base()
+	french.Language = "fr"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, french), "a different language must change the fingerprint")
+
+	clone := base()
+	clone.RefAudio = json.RawMessage(`"https://example.com/voice.wav"`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, clone), "reference-audio conditioning must change the fingerprint")
+
+	secondSpeaker := base()
+	secondSpeaker.RefAudio2 = json.RawMessage(`"https://example.com/second-voice.wav"`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, secondSpeaker), "second-speaker reference-audio conditioning must change the fingerprint")
+
+	references := base()
+	references.References = json.RawMessage(`[{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, references), "the references alias must change the fingerprint")
+
+	assert.Equal(t, vivian, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
+
+	salted := base()
+	salted.CacheSalt = "tenant-a"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, salted), "a client salt must compose into the fingerprint")
+}
+
+// The engine hashes the full input into its conditioning salt over placeholder
+// token IDs, so requests sharing a text prefix but differing in suffix share no
+// prompt block. The salt must separate them at block 0, not just at the block
+// where the suffixes diverge.
+func TestSpeechPrefixFingerprint_SharedTextPrefixDoesNotMatch(t *testing.T) {
+	prefix := strings.Repeat("welcome to customer support ", 8)
+	first := speechPrefixHashes(t, &fwkrequest.TextToSpeechRequest{Input: prefix + "alpha", Voice: "vivian"})
+	second := speechPrefixHashes(t, &fwkrequest.TextToSpeechRequest{Input: prefix + "bravo", Voice: "vivian"})
+	require.Greater(t, len(first[0]), 1)
+	assert.NotEqual(t, first[0][0], second[0][0], "a shared text prefix with a different suffix must not match block 0")
+}
+
+// A decoded JSON string can contain a literal NUL; length-prefixing each field
+// keeps a value from shifting into the next field.
+func TestSpeechCacheSalt_EmbeddedNULDoesNotCollide(t *testing.T) {
+	first := &fwkrequest.TextToSpeechRequest{Input: "a\x00b", Instructions: "c"}
+	second := &fwkrequest.TextToSpeechRequest{Input: "a", Instructions: "b\x00c"}
+	assert.NotEqual(t,
+		CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: first}),
+		CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: second}),
+		"a NUL inside a field must not merge it with the next field")
+}
+
+// The conditioning salt composes with a client-supplied one rather than
+// replacing it, mirroring the engine's composition.
+func TestSpeechCacheSalt_ComposesClientSalt(t *testing.T) {
+	base := &fwkrequest.TextToSpeechRequest{Input: "hello", Voice: "vivian"}
+	salted := *base
+	salted.CacheSalt = "tenant-a"
+
+	derived := CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: base})
+	composed := CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: &salted})
+	assert.Equal(t, "tenant-a:"+derived, composed)
+	assert.NotEqual(t, derived, composed)
+}
+
+// Conditioning changes the fingerprint but not the input weight: the salt
+// seeds block hashes only, so the token estimate stays the spoken text.
+func TestSpeechPrefixFingerprint_ConditioningLeavesWeightUnchanged(t *testing.T) {
+	plain := &fwkrequest.TextToSpeechRequest{Input: "hello there"}
+	voiced := &fwkrequest.TextToSpeechRequest{Input: "hello there", Voice: "ryan", Language: "en", TaskType: "CustomVoice"}
+
+	plainTP, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{TextToSpeech: plain})
+	require.NoError(t, err)
+	voicedTP, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{TextToSpeech: voiced})
+	require.NoError(t, err)
+
+	assert.Equal(t, plainTP.Prompts[0].TokenIDs, voicedTP.Prompts[0].TokenIDs)
+	assert.Equal(t, plainTP.TokenCount(), voicedTP.TokenCount())
+}
+
+// The adapter-folded conditioning fields separate fingerprints the way the
+// engine's per-adapter salts do: fish omni's pre-computed reference codes and
+// indextts2's extra-params emotion settings.
+func TestSpeechPrefixFingerprint_AdapterConditioning(t *testing.T) {
+	base := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{Input: "hello there", Voice: "vivian"}
+	}
+	plain := speechPrefixHashes(t, base())
+
+	codes := base()
+	codes.RefAudioCodes = json.RawMessage(`[[1,2,3],[4,5,6]]`)
+	assert.NotEqual(t, plain, speechPrefixHashes(t, codes), "different reference codes must change the fingerprint")
+
+	emotion := base()
+	emotion.ExtraParams = json.RawMessage(`{"emo_alpha": 0.8, "use_emo_text": true}`)
+	assert.NotEqual(t, plain, speechPrefixHashes(t, emotion), "emotion conditioning must change the fingerprint")
+
+	assert.Equal(t, plain, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
+}
+
+// Randomized conditioning (indextts2's use_random) salts every engine request
+// freshly, so two identical requests must not fingerprint alike: the router
+// would otherwise predict a shared prefix the engine never holds.
+func TestSpeechPrefixFingerprint_UseRandomIsolatesRequests(t *testing.T) {
+	body := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{
+			Input:       "hello there",
+			Voice:       "vivian",
+			ExtraParams: json.RawMessage(`{"use_random": true}`),
+		}
+	}
+	first := speechPrefixHashes(t, body())
+	second := speechPrefixHashes(t, body())
+	assert.NotEqual(t, first, second, "two use_random requests must not share a fingerprint")
+
+	stable := &fwkrequest.TextToSpeechRequest{
+		Input:       "hello there",
+		Voice:       "vivian",
+		ExtraParams: json.RawMessage(`{"use_random": false}`),
+	}
+	assert.Equal(t, speechPrefixHashes(t, stable), speechPrefixHashes(t, stable), "use_random false must fingerprint stably")
 }

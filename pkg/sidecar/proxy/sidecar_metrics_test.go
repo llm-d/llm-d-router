@@ -660,7 +660,7 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 				case "nixl", "parallel":
 					s.handleNIXLV2(rw, r, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 				case "p2p":
-					s.handleP2P(rw, r, prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
+					s.handleP2P(rw, r, prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 				case "peer":
 					s.decodeWithP2PSource(rw, r, p2pRouting{source: &kvSource{kvRequestID: "request", p2pPeer: p2pPeer{host: "peer", port: 8000}}})
 				case "mooncake":
@@ -2348,7 +2348,7 @@ func TestP2PToolCallingMetrics(t *testing.T) {
 							target = "%invalid"
 						}
 						s.handleP2P(rw, r, target, p2pRouting{
-							prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort},
+							prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort},
 							source:  &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.0.0.2", port: 8000}},
 						}, tt.api)
 					} else {
@@ -2443,7 +2443,7 @@ func TestP2PDispatchedToolCallingMetrics(t *testing.T) {
 					before := toolFieldCounters(t)
 					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(original))
 					rw := httptest.NewRecorder()
-					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields)
+					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields, false)
 					require.Equal(t, code, rw.Code)
 					require.Equal(t, tt.prefillStatus == 0, decodeCount == 1)
 					delta := toolFieldDelta(before, toolFieldCounters(t))
@@ -2511,7 +2511,7 @@ func TestHandleP2PMetrics(t *testing.T) {
 			s.decoderProxy = tt.decoder
 
 			before := snapshotStageMetrics(t)
-			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
+			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
 		})
@@ -2538,7 +2538,7 @@ func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.handleP2P(httptest.NewRecorder(), chatRequest(t, body), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
+		s.handleP2P(httptest.NewRecorder(), chatRequest(t, body), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},

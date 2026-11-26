@@ -98,6 +98,11 @@ func EstimateOutlen(body *fwkrequest.InferenceRequestBody) Bucket {
 	if body == nil {
 		return Unknown
 	}
+	// TTS output length is codec frames, not text tokens. The SHORT/LONG bins
+	// and their max-output-token thresholds do not apply to speech requests.
+	if body.TextToSpeech != nil {
+		return Unknown
+	}
 
 	var enableThinking *bool
 	var thinkingBudget *int64

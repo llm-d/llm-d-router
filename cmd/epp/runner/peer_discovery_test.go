@@ -174,10 +174,20 @@ func TestSetupPeerDiscoveryWithoutSyncer(t *testing.T) {
 
 // Without dataLayer.discovery.peers nothing is registered.
 func TestSetupPeerDiscoveryDisabled(t *testing.T) {
-	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), &peerConsumingSyncer{})
+	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), &externalStoreSyncer{})
 	mgr := &addOnlyManager{}
 
 	require.NoError(t, r.setupPeerDiscovery(mgr, &configapiv1.EndpointPickerConfig{}, "pool-ns"))
+	assert.Empty(t, mgr.added)
+}
+
+// A syncer that consumes the peer set needs peer discovery to exchange state.
+func TestSetupPeerDiscoveryRequiredByPeerConsumingSyncer(t *testing.T) {
+	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), &peerConsumingSyncer{})
+	mgr := &addOnlyManager{}
+
+	err := r.setupPeerDiscovery(mgr, &configapiv1.EndpointPickerConfig{}, "pool-ns")
+	assert.ErrorContains(t, err, "dataLayer.discovery.peers")
 	assert.Empty(t, mgr.added)
 }
 

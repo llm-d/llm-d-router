@@ -229,12 +229,17 @@ const (
 func keepaliveServerOptions(pingAfter, ackTimeout time.Duration) []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: pingAfter, Timeout: ackTimeout}),
-		// The default policy drops clients that ping more often than every 5 minutes.
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             grpcKeepaliveMinTime,
-			PermitWithoutStream: true,
-		}),
+		KeepaliveEnforcementPolicy(),
 	}
+}
+
+// KeepaliveEnforcementPolicy accepts the proxy's HTTP/2 keepalive pings, including on idle
+// connections. The default policy drops clients that ping more often than every 5 minutes.
+func KeepaliveEnforcementPolicy() grpc.ServerOption {
+	return grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+		MinTime:             grpcKeepaliveMinTime,
+		PermitWithoutStream: true,
+	})
 }
 
 // AsRunnable returns a Runnable that can be used to start the ext-proc gRPC server.

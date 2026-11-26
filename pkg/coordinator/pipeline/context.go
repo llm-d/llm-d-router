@@ -216,15 +216,16 @@ type RequestContext struct {
 	// prompt-cache hits of its own, so its count describes the handoff rather
 	// than the prompt cache.
 	//
-	// A zero value is a measurement, not an absent one: vLLM sends the details
-	// object as null when nothing hit the prompt cache. nil means no prefill
-	// measurement applies to this request, and the decode worker's own count
-	// must reach the client unchanged. PrefillStep leaves it nil when prefill
-	// did not run, when the prefill response carried no usage block at all, and
-	// when a kv-nixl handoff returned no transfer params, since decode then
-	// recomputes the prompt and nothing inflates the count it reports. A
-	// consumer that treats nil as zero reports no cache hits for a request that
-	// had them.
+	// A non-nil value, zero included, is a measurement: the details object
+	// carried the number. nil means no prefill measurement applies to this
+	// request, and the decode worker's own usage must reach the client
+	// unchanged. PrefillStep leaves it nil when prefill did not run, when the
+	// prefill response carried no usage block, when that block's details object
+	// carried no number (vLLM without --enable-prompt-tokens-details sends no
+	// details however many tokens were cached), and when a kv-nixl handoff
+	// returned no transfer params, since decode then recomputes the prompt and
+	// nothing inflates the count it reports. A consumer that treats nil as zero
+	// reports no cache hits for a request that had them.
 	PrefillCachedTokens *int
 	// PeerTopology carries the prefill endpoint's encoded topology from the
 	// prefill response to the decode request, for topology-affinity-filter
@@ -243,6 +244,9 @@ type RequestContext struct {
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
+	// stepRerunsLeft counts the StepRerunError requests that the pipeline
+	// still honors for this request. Pipeline.Execute sets it.
+	stepRerunsLeft int
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
@@ -336,6 +340,13 @@ func (rc *RequestContext) IsGRPC() bool {
 // gRPC RPC rather than an HTTP JSON request.
 func (rc *RequestContext) IsNativeGRPC() bool {
 	return rc != nil && rc.GRPC != nil && rc.GRPC.isNativeGRPC()
+}
+
+// CanRerunStep reports whether the pipeline still honors a StepRerunError for
+// this request. A step checks it before it holds back an upstream error from
+// the client.
+func (rc *RequestContext) CanRerunStep() bool {
+	return rc != nil && rc.stepRerunsLeft > 0
 }
 
 // ClosePrefillStream cancels and releases any active concurrent prefill stream.

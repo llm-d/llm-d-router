@@ -85,6 +85,8 @@ func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
 }
 
 func TestTextToSpeechCacheSaltEndpointScores(t *testing.T) {
+	// The raised staleness threshold keeps the saturation detector's filter from dropping a pod
+	// whose metrics poll lags, so every request scores both pods.
 	configText := `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -100,6 +102,9 @@ plugins:
   - type: prefix-cache-scorer
   - type: max-score-picker
   - type: mock-metrics-source
+  - type: utilization-detector
+    parameters:
+      metricsStalenessThreshold: 1h
 schedulingProfiles:
   - name: default
     plugins:
@@ -112,10 +117,13 @@ dataLayer:
   injectDefaults: false
   sources:
     - pluginRef: mock-metrics-source
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText), eppharness.WithEmitEndpointScores()).WithBaseResources()
 	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 0, 0.1, modelMyModelTarget)}
-	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
 	sendSpeech := func(t *testing.T, requestID, salt string) (string, map[string]*structpb.Value) {
 		t.Helper()
@@ -207,6 +215,8 @@ dataLayer:
 // endpoint that served one image must not score as a full prefix hit for
 // another.
 func TestMultiModalGenerateEndpointScores(t *testing.T) {
+	// The raised staleness threshold keeps the saturation detector's filter from dropping a pod
+	// whose metrics poll lags, so every request scores both pods.
 	configText := `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -222,6 +232,9 @@ plugins:
   - type: prefix-cache-scorer
   - type: max-score-picker
   - type: mock-metrics-source
+  - type: utilization-detector
+    parameters:
+      metricsStalenessThreshold: 1h
 schedulingProfiles:
   - name: default
     plugins:
@@ -234,10 +247,13 @@ dataLayer:
   injectDefaults: false
   sources:
     - pluginRef: mock-metrics-source
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText), eppharness.WithEmitEndpointScores()).WithBaseResources()
 	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 0, 0.1, modelMyModelTarget)}
-	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
 	// 100 text tokens, a 256-token image, 20 text tokens: six 64-token blocks,
 	// the image starting in block 1.

@@ -49,6 +49,7 @@ const (
 	defaultResponseFailureThreshold = 5
 	defaultEjectionDuration         = 30 * time.Second
 	defaultMaxEjectionDuration      = 5 * time.Minute
+	defaultMaxEjectionPercent       = 100
 
 	// pruneInterval is how often the state of endpoints that left the pool is dropped.
 	pruneInterval = time.Minute
@@ -92,6 +93,11 @@ type parameters struct {
 	// MaxEjectionDuration caps the length of a response ejection.
 	// Defaults to 5m.
 	MaxEjectionDuration *metav1.Duration `json:"maxEjectionDuration,omitempty"`
+
+	// MaxEjectionPercent caps the endpoints under a response ejection at once,
+	// as a percentage of the endpoints the filter tracks, rounded down. One
+	// endpoint can always be ejected. Defaults to 100.
+	MaxEjectionPercent *int `json:"maxEjectionPercent,omitempty"`
 }
 
 // config is the validated, defaulted form of parameters.
@@ -103,6 +109,7 @@ type config struct {
 	responseFailureCodes     map[int]struct{}
 	ejectionDuration         time.Duration
 	maxEjectionDuration      time.Duration
+	maxEjectionPercent       int
 }
 
 func (p *parameters) applyDefaults() {
@@ -126,6 +133,9 @@ func (p *parameters) applyDefaults() {
 	}
 	if p.MaxEjectionDuration == nil {
 		p.MaxEjectionDuration = &metav1.Duration{Duration: defaultMaxEjectionDuration}
+	}
+	if p.MaxEjectionPercent == nil {
+		p.MaxEjectionPercent = ptr.To(defaultMaxEjectionPercent)
 	}
 }
 
@@ -162,6 +172,9 @@ func (p *parameters) toConfig() (config, error) {
 			errs = append(errs, fmt.Errorf("maxEjectionDuration (%v) must be at least ejectionDuration (%v)",
 				p.MaxEjectionDuration.Duration, p.EjectionDuration.Duration))
 		}
+		if *p.MaxEjectionPercent < 1 || *p.MaxEjectionPercent > 100 {
+			errs = append(errs, fmt.Errorf("maxEjectionPercent must be between 1 and 100, got %d", *p.MaxEjectionPercent))
+		}
 	}
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
@@ -174,6 +187,7 @@ func (p *parameters) toConfig() (config, error) {
 		responseFailureCodes:     codes,
 		ejectionDuration:         p.EjectionDuration.Duration,
 		maxEjectionDuration:      p.MaxEjectionDuration.Duration,
+		maxEjectionPercent:       *p.MaxEjectionPercent,
 	}, nil
 }
 

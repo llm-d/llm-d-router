@@ -20,7 +20,9 @@ package loader
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -495,6 +497,31 @@ func buildDataLayerConfig(rawDataConfig *configapiv1.DataLayerConfig, handle fwk
 			return nil, fmt.Errorf("the plugin %s is not a fwkdl.DataSource", source.PluginRef)
 		}
 	}
+	if err := checkCoordination(cfg.Syncer, handle); err != nil {
+		return nil, err
+	}
 	handle.SetCrossReplicaSyncer(cfg.Syncer)
 	return &cfg, nil
+}
+
+// checkCoordination rejects a syncer that cannot serve GetOrSet when a
+// configured plugin requires it, so the mismatch fails startup instead of
+// every coordinated request.
+func checkCoordination(syncer fwkdl.CrossReplicaSyncer, handle fwkplugin.Handle) error {
+	checker, ok := syncer.(fwkdl.CoordinationChecker)
+	if !ok {
+		return nil
+	}
+	unsupported := checker.CheckCoordination()
+	if unsupported == nil {
+		return nil
+	}
+	plugins := handle.GetAllPluginsWithNames()
+	for _, name := range slices.Sorted(maps.Keys(plugins)) {
+		if consumer, ok := plugins[name].(fwkdl.CoordinationConsumer); ok && consumer.RequiresCoordination() {
+			return fmt.Errorf("plugin %s requires request-level coordination, which cross-replica syncer %s does not provide: %w",
+				name, syncer.TypedName().Name, unsupported)
+		}
+	}
+	return nil
 }

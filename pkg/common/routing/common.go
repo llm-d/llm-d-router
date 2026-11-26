@@ -53,6 +53,10 @@ const (
 	// kv_transfer_params.remote_kv_source. It has no pre-convention alias.
 	KVCacheSourceHeader = "x-llm-d-kv-cache-source-p2p-host-port"
 
+	// DataParallelRankHeader names the vLLM data-parallel rank that serves the request,
+	// for a model server that runs several ranks behind one port.
+	DataParallelRankHeader = "x-data-parallel-rank"
+
 	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
 	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
 
@@ -143,6 +147,22 @@ func StripScheme(endpoint string) string {
 		return endpoint // not a valid URL, return as-is
 	}
 	return u.Host
+}
+
+// ExtractHost returns the host portion of a host:port endpoint string,
+// stripping a leading http:// or https:// scheme when present. When
+// hostWithPort has no port, the scheme-stripped input is returned as-is.
+func ExtractHost(hostWithPort string) string {
+	if after, ok := strings.CutPrefix(hostWithPort, "http://"); ok {
+		hostWithPort = after
+	} else if after, ok := strings.CutPrefix(hostWithPort, "https://"); ok {
+		hostWithPort = after
+	}
+	host, _, err := net.SplitHostPort(hostWithPort)
+	if err != nil {
+		return hostWithPort
+	}
+	return host
 }
 
 // HasPreference reports whether the request headers carry the given Prefer

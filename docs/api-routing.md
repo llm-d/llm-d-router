@@ -46,7 +46,11 @@ vLLM-style JSON 400, including on `/v1/messages`. On
 `/vllm.Inference/GenerateStream`, the sidecar answers errors with gRPC status
 trailers. The coordinator answers in the error envelope of the request's API. It
 returns Anthropic errors for `/v1/messages`, gRPC status trailers for gRPC
-routes, and OpenAI errors for the other HTTP paths.
+routes, and OpenAI errors for the other HTTP paths. When the EPP rejects a gRPC
+request, it sets the gRPC status that matches the HTTP status: `INVALID_ARGUMENT`
+for 400, `UNAUTHENTICATED` for 401, `PERMISSION_DENIED` for 403, `NOT_FOUND` for
+404, `FAILED_PRECONDITION` for 412, `RESOURCE_EXHAUSTED` for 413 and 429,
+`INTERNAL` for 500, and `UNAVAILABLE` for 503.
 
 ## Path forms
 

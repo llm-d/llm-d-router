@@ -62,6 +62,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"gateway.timeout", cfg.Gateway.Timeout, 60 * time.Second},
 		{"pipeline.worker_protocol", cfg.Pipeline.WorkerProtocol, "http"},
 		{"pipeline.use_openai_format", cfg.Pipeline.UseOpenAIFormat, true},
+		{"pipeline.max_step_reruns", cfg.Pipeline.MaxStepReruns, 0},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -135,6 +136,30 @@ func TestLoadEnvOverride(t *testing.T) {
 			envKey: "COORDINATOR_PIPELINE_WORKER_PROTOCOL",
 			envVal: "grpc",
 			check:  func(c *Config) (any, any) { return c.Pipeline.WorkerProtocol, "grpc" },
+		},
+		{
+			name:   "force stream",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM",
+			envVal: "true",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStream, true },
+		},
+		{
+			name:   "force stream buffer size",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM_BUFFER_SIZE",
+			envVal: "512MiB",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStreamBufferSize, "512MiB" },
+		},
+		{
+			name:   "force stream max request size",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM_MAX_REQUEST_SIZE",
+			envVal: "128KiB",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStreamMaxRequestSize, "128KiB" },
+		},
+		{
+			name:   "max step re-runs",
+			envKey: "COORDINATOR_PIPELINE_MAX_STEP_RERUNS",
+			envVal: "2",
+			check:  func(c *Config) (any, any) { return c.Pipeline.MaxStepReruns, 2 },
 		},
 		{
 			name:   "metrics certificate path",
@@ -268,6 +293,16 @@ func TestLoadExplicitEmptyForwardResponseHeaders(t *testing.T) {
 	}
 	if len(cfg.Pipeline.ForwardResponseHeaders) != 0 {
 		t.Fatalf("pipeline.forward_response_headers = %v, want explicitly disabled", cfg.Pipeline.ForwardResponseHeaders)
+	}
+}
+
+func TestLoadMaxStepReruns(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "pipeline:\n  max_step_reruns: 1\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Pipeline.MaxStepReruns; got != 1 {
+		t.Fatalf("pipeline.max_step_reruns = %d, want 1", got)
 	}
 }
 

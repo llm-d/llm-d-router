@@ -21,12 +21,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"testing"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -95,7 +98,7 @@ func referenceMMExtra(features []fwkrequest.MultiModalFeature, start, end int) [
 	var out []byte
 	var lenBuf [8]byte
 	for _, f := range sorted {
-		if f.Length <= 0 {
+		if f.Length <= 0 || f.Hash == "" {
 			continue
 		}
 		if f.Offset >= end || f.Offset+f.Length <= start {
@@ -126,9 +129,13 @@ func TestGetBlockHashesMatchesReference(t *testing.T) {
 			// lengths, and duplicate offsets, so the reference covers the
 			// mixing, the clamped block end, and the position ordering.
 			for range rng.IntN(4) {
+				hash := fmt.Sprintf("hash-%d", rng.IntN(5))
+				if rng.IntN(4) == 0 {
+					hash = "" // a hashless feature must encode as featureless
+				}
 				prompts[i].MultiModalFeatures = append(prompts[i].MultiModalFeatures, fwkrequest.MultiModalFeature{
 					Modality: "image",
-					Hash:     fmt.Sprintf("hash-%d", rng.IntN(5)),
+					Hash:     hash,
 					Offset:   rng.IntN(len(tokens)+10) - 2,
 					Length:   rng.IntN(9) - 1,
 				})
@@ -152,8 +159,115 @@ func TestGetBlockHashesMatchesReference(t *testing.T) {
 	}
 }
 
+func TestGetBlockHashesMultiModalSpansMatchReference(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		features []fwkrequest.MultiModalFeature
+	}{
+		{
+			name: "disjoint spans across blocks and gaps",
+			features: []fwkrequest.MultiModalFeature{
+				{Hash: "last", Offset: 18, Length: 4},
+				{Hash: "first", Offset: 2, Length: 4},
+				{Hash: "middle", Offset: 10, Length: 2},
+			},
+		},
+		{
+			name: "long span outlives nested spans",
+			features: []fwkrequest.MultiModalFeature{
+				{Hash: "long", Offset: 0, Length: 24},
+				{Hash: "short", Offset: 2, Length: 2},
+				{Hash: "middle", Offset: 6, Length: 4},
+				{Hash: "later", Offset: 18, Length: 2},
+			},
+		},
+		{
+			name: "equal offsets retain input order",
+			features: []fwkrequest.MultiModalFeature{
+				{Hash: "first", Offset: 2, Length: 2},
+				{Hash: "second", Offset: 2, Length: 12},
+				{Hash: "third", Offset: 2, Length: 6},
+			},
+		},
+		{
+			name: "invalid spans and partial final block",
+			features: []fwkrequest.MultiModalFeature{
+				{Hash: "past-end", Offset: 23, Length: 2},
+				{Hash: "negative-start", Offset: -2, Length: 5},
+				{Hash: "empty", Offset: 1, Length: 0},
+				{Hash: "negative-length", Offset: 5, Length: -1},
+				{Hash: "partial", Offset: 21, Length: 8},
+				{Hash: "before-start", Offset: -4, Length: 2},
+			},
+		},
+		{
+			name: "single spanning feature",
+			features: []fwkrequest.MultiModalFeature{
+				{Hash: "single", Offset: 2, Length: 12},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := slices.Clone(tt.features)
+			prompts := []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 23), MultiModalFeatures: tt.features}}
+			req := &fwksched.InferenceRequest{TargetModel: "m", Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: prompts}}}
+			for _, maxBlocks := range []int{3, 6} {
+				wantHashes, wantTokens := referenceBlockHashes("m", "", prompts, 4, maxBlocks)
+				gotHashes, gotTokens := GetBlockHashesWithPromptTokens(context.Background(), req, 4, maxBlocks)
+				assert.Equal(t, wantHashes, gotHashes, "cap %d", maxBlocks)
+				assert.Equal(t, wantTokens, gotTokens, "cap %d", maxBlocks)
+				assert.Equal(t, original, tt.features, "hashing must not mutate the request's features")
+			}
+		})
+	}
+}
+
+func BenchmarkGetBlockHashesMultiModal(b *testing.B) {
+	for _, tt := range []struct {
+		name         string
+		blocks       int
+		featureCount int
+		longSpan     bool
+	}{
+		{name: "single", blocks: 2048, featureCount: 1},
+		{name: "small", blocks: 8, featureCount: 4},
+		{name: "sparse", blocks: 2048, featureCount: 256},
+		{name: "nested", blocks: 2048, featureCount: 256, longSpan: true},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			ctx := log.IntoContext(b.Context(), logr.Discard())
+			tokens := make([]uint32, tt.blocks*64)
+			for i := range tokens {
+				tokens[i] = uint32(i)
+			}
+			features := make([]fwkrequest.MultiModalFeature, tt.featureCount)
+			for i := range features {
+				features[i] = fwkrequest.MultiModalFeature{
+					Modality: "image",
+					Hash:     fmt.Sprintf("%064d", i),
+					Offset:   i * (len(tokens) / tt.featureCount),
+					Length:   96,
+				}
+			}
+			if tt.longSpan {
+				features[0].Length = len(tokens)
+			}
+			req := &fwksched.InferenceRequest{TargetModel: "bench-model", Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+					TokenIDs: tokens, MultiModalFeatures: features,
+				}}}}}
+			b.ReportAllocs()
+			for b.Loop() {
+				GetBlockHashesWithPromptTokens(ctx, req, 64, 2048)
+			}
+		})
+	}
+}
+
 // BenchmarkGetBlockHashes hashes one 32,768-token prompt in 64-token blocks.
 func BenchmarkGetBlockHashes(b *testing.B) {
+	ctx := log.IntoContext(b.Context(), logr.Discard())
 	tokens := make([]uint32, 512*64)
 	for i := range tokens {
 		tokens[i] = uint32(i)
@@ -162,6 +276,6 @@ func BenchmarkGetBlockHashes(b *testing.B) {
 		TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens}}}}}
 	b.ReportAllocs()
 	for b.Loop() {
-		GetBlockHashesWithPromptTokens(context.Background(), req, 64, 2048)
+		GetBlockHashesWithPromptTokens(ctx, req, 64, 2048)
 	}
 }

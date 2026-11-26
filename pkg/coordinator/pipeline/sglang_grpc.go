@@ -18,11 +18,8 @@ package pipeline
 
 import (
 	"context"
-	"net/http"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc/codes"
 )
 
 // SGLangPrefillStream coordinates a concurrent SGLang gRPC prefill stream with
@@ -40,6 +37,7 @@ type SGLangPrefillStream struct {
 	grpcStatus     string
 	grpcMessage    string
 	grpcDetailsBin string
+	retryable      bool
 	// cachedTokens0 and promptTokens0 hold index 0, the only index unless the
 	// request sets n > 1. The maps are allocated only for other indexes.
 	cachedTokens0    uint32
@@ -115,8 +113,19 @@ func (s *SGLangPrefillStream) PromptTokens(index uint32) (uint32, bool) {
 	return tokens, ok
 }
 
-// Fail records a prefill failure and notifies any registered failure callback.
+// Fail records a non-retryable prefill failure and notifies any registered
+// failure callback.
 func (s *SGLangPrefillStream) Fail(err error, grpcStatus, grpcMessage, grpcDetailsBin string) {
+	s.fail(err, grpcStatus, grpcMessage, grpcDetailsBin, false)
+}
+
+// FailRetryable records a retryable prefill failure (a GenerateStreamItem
+// error with retryable=true) and notifies any registered failure callback.
+func (s *SGLangPrefillStream) FailRetryable(err error, grpcStatus, grpcMessage, grpcDetailsBin string) {
+	s.fail(err, grpcStatus, grpcMessage, grpcDetailsBin, true)
+}
+
+func (s *SGLangPrefillStream) fail(err error, grpcStatus, grpcMessage, grpcDetailsBin string, retryable bool) {
 	s.mu.Lock()
 	if s.err != nil {
 		s.mu.Unlock()
@@ -126,6 +135,7 @@ func (s *SGLangPrefillStream) Fail(err error, grpcStatus, grpcMessage, grpcDetai
 	s.grpcStatus = grpcStatus
 	s.grpcMessage = grpcMessage
 	s.grpcDetailsBin = grpcDetailsBin
+	s.retryable = retryable
 	cb := s.onFail
 	s.mu.Unlock()
 	if cb != nil {
@@ -148,11 +158,11 @@ func (s *SGLangPrefillStream) OnFailure(fn func(error)) {
 }
 
 // Failure returns any recorded prefill gRPC status code, message, status
-// details binary trailer, and error.
-func (s *SGLangPrefillStream) Failure() (grpcStatus, grpcMessage, grpcDetailsBin string, err error) {
+// details binary trailer, retryable flag, and error.
+func (s *SGLangPrefillStream) Failure() (grpcStatus, grpcMessage, grpcDetailsBin string, retryable bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.grpcStatus, s.grpcMessage, s.grpcDetailsBin, s.err
+	return s.grpcStatus, s.grpcMessage, s.grpcDetailsBin, s.retryable, s.err
 }
 
 // MarkDone signals that the background prefill reader has finished.
@@ -207,24 +217,4 @@ func (s *SGLangPrefillStream) Close() {
 			s.cancel()
 		}
 	})
-}
-
-// HTTPStatusToGRPCCode maps an upstream HTTP status code to a gRPC status code.
-func HTTPStatusToGRPCCode(status int) codes.Code {
-	switch status {
-	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		return codes.InvalidArgument
-	case http.StatusUnauthorized:
-		return codes.Unauthenticated
-	case http.StatusForbidden:
-		return codes.PermissionDenied
-	case http.StatusNotFound, http.StatusMethodNotAllowed:
-		return codes.Unimplemented
-	case http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
-		return codes.ResourceExhausted
-	case http.StatusGatewayTimeout:
-		return codes.DeadlineExceeded
-	default:
-		return codes.Unavailable
-	}
 }

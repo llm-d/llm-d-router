@@ -47,6 +47,8 @@ type mockPredictor struct {
 	err                     error
 	nilBulkResponse         bool
 	bulkPredictionsOverride []latencypredictor.PredictionResponse
+	// delay is how long PredictBulkStrict takes.
+	delay time.Duration
 	// capturedBulkStrictRequests records the requests passed to the most recent
 	// PredictBulkStrict call, so tests can assert what was sent to the predictor.
 	capturedBulkStrictRequests []latencypredictor.PredictionRequest
@@ -83,6 +85,7 @@ func (m *mockPredictor) PredictBulk(ctx context.Context, requests []latencypredi
 
 func (m *mockPredictor) PredictBulkStrict(ctx context.Context, requests []latencypredictor.PredictionRequest) (*latencypredictor.BulkPredictionResponse, error) {
 	m.capturedBulkStrictRequests = requests
+	time.Sleep(m.delay)
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -149,7 +152,20 @@ func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, 
 			KVCacheUsagePercent: kvCacheUsage,
 			RunningRequestsSize: runningRequestsSize,
 			WaitingQueueSize:    waitingQueueSize,
+			UpdateTime:          time.Now(),
 		},
+		nil,
+	)
+}
+
+// createNeverScrapedTestEndpoint returns an endpoint whose metrics were never scraped.
+func createNeverScrapedTestEndpoint(name string) fwksched.Endpoint {
+	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{
+			Name:      name,
+			Namespace: "default",
+		}},
+		fwkdl.NewMetrics(),
 		nil,
 	)
 }

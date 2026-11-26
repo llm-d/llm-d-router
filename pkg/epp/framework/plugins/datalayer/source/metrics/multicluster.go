@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"errors"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
@@ -52,6 +53,12 @@ func MultiClusterMetricsDataSourceFactory(name string, parameters *json.Decoder,
 		if err := parameters.Decode(cfg); err != nil {
 			return nil, err
 		}
+	}
+
+	// The port override would replace a peer's metricsAddress host with its routable address.
+	if cfg.Port != nil {
+		return nil, errors.New("port is not supported by " + MultiClusterMetricsDataSourceType +
+			"; set metricsAddress and metricsPort labels on the discovered endpoint instead")
 	}
 
 	intervalOpt, err := http.ParseIntervalOption(cfg.Interval)

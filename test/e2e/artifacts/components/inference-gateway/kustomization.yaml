@@ -1,10 +1,9 @@
 # ------------------------------------------------------------------------------
 # Inference Gateway
 #
-# This provides a working stack for an inference Gateway, including the Gateway
-# itself, the Endpoint Picker (EPP) attached to it, and the Inference Pools and
-# Inference Models to collect pods from a model serving framework (e.g. VLLM,
-# or even just the VLLM Simulator).
+# The Gateway routes requests to an InferencePool. The pool references the
+# Endpoint Picker (EPP) and selects pods running a model server such as vLLM or
+# the vLLM Simulator.
 #
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1

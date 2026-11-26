@@ -37,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -118,7 +119,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	logger := log.FromContext(r.Context())
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
-		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
+		logger.Error(err, "cannot build the decode request", "prefill_host", routing.ExtractHost(prefillPodHostPort))
 		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
@@ -135,7 +136,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	kvRequestID := newUUID()
 	kv := make([]any, 0, 8)
 	kv = append(kv,
-		"prefill_host", extractHost(prefillPodHostPort),
+		"prefill_host", routing.ExtractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
 		"p2p_prefill", p2p.prefill.String())
 	if source != nil {
@@ -181,7 +182,8 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		v.Info("decode request body", logBodyBytesKey, len(decodeBody))
 	}
 
-	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, toolFields)
+	streaming, _ := requestData[reqcommon.FieldStream].(bool)
+	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, toolFields, streaming)
 }
 
 // handleP2PSequentialRequests runs the prefill request to completion, then
@@ -207,6 +209,10 @@ type httpSequentialPDLeg struct {
 	prefillBody []byte
 	decodeBody  []byte
 	toolFields  *toolCallingRequest
+	streaming   bool
+	// cachedTokens is the prefill pod's count from its usage block, nil when
+	// prefill returned none.
+	cachedTokens *int
 }
 
 func (l *httpSequentialPDLeg) report(ctx context.Context) {
@@ -229,6 +235,7 @@ func (l *httpSequentialPDLeg) completePrefill(_ context.Context, w http.Response
 	prefillSpan.End()
 	logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
 	if !prefillFailed {
+		l.cachedTokens = prefillCachedTokens(logger, pw.bodyBytes())
 		return true
 	}
 	// Return the prefill error verbatim; decode is never dispatched, so it
@@ -253,15 +260,54 @@ func (l *httpSequentialPDLeg) completePrefill(_ context.Context, w http.Response
 
 func (l *httpSequentialPDLeg) serveDecode(decodeCtx context.Context, decodeWriter http.ResponseWriter, r *http.Request, decodeSpan trace.Span) {
 	l.toolFields.compareDispatchedForSpan(l.decodeBody, decodeSpan)
-	l.s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, l.decodeBody))
+	if l.cachedTokens == nil {
+		l.s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, l.decodeBody))
+		return
+	}
+	// Decode pulls the prompt blocks prefill stored, so its own count reports
+	// the pulled prompt as cached. The prefill count is the one that measured
+	// the prompt cache, as on the vLLM gRPC leg and the coordinator.
+	rewriter, finalize := usage.NewCachedTokensResponseWriter(decodeWriter, *l.cachedTokens, l.streaming)
+	l.s.decoderProxy.ServeHTTP(rewriter, cloneRequestWithBody(decodeCtx, r, l.decodeBody))
+	// A failed flush is a failed write to the client, which the status writer
+	// records, so the decode error is counted by the caller.
+	if err := finalize(); err != nil {
+		log.FromContext(r.Context()).Error(err, "failed to flush cached token response writer")
+		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
+	}
 }
 
-func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest) {
+// prefillCachedTokens returns the cached-token count of a prefill response's
+// usage block, or nil when the body has no usage block, does not decode, or
+// carries no count. A count was measured only when the details object carries
+// a number: vLLM without --enable-prompt-tokens-details sends no details
+// however many tokens were cached, and the decode response is then relayed
+// unchanged.
+func prefillCachedTokens(logger logr.Logger, body []byte) *int {
+	var response map[string]any
+	if err := json.Unmarshal(body, &response); err != nil {
+		// A type error leaves the fields decoded before it in the map.
+		logger.Error(jsonErrorForLog(err), "failed to parse prefill response; decode usage is relayed unchanged")
+		return nil
+	}
+	block := response[reqcommon.FieldUsage]
+	if block == nil {
+		return nil
+	}
+	n, ok := usage.CachedTokens(block)
+	if !ok {
+		return nil
+	}
+	return &n
+}
+
+func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest, streaming bool) {
 	s.runSequentialPD(w, r, prefillHost, constants.KVConnectorOffloading, &httpSequentialPDLeg{
 		s:           s,
 		prefillBody: prefillBody,
 		decodeBody:  decodeBody,
 		toolFields:  toolFields,
+		streaming:   streaming,
 	})
 }
 

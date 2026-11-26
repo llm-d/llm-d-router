@@ -27,11 +27,13 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
@@ -479,11 +481,12 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 }
 
 type replayHarness struct {
-	ctx    context.Context
-	index  kvblock.Index
-	buffer *replayBuffer
-	pub    zmq4.Socket
-	topic  []byte
+	ctx        context.Context
+	index      kvblock.Index
+	buffer     *replayBuffer
+	pub        zmq4.Socket
+	subManager *kvevents.SubscriberManager
+	topic      []byte
 }
 
 func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replayHarness {
@@ -539,11 +542,12 @@ func newReplayHarnessWithBehavior(
 		cancel()
 	})
 	return &replayHarness{
-		ctx:    ctx,
-		index:  index,
-		buffer: buffer,
-		pub:    pub,
-		topic:  []byte("kv@10.0.0.1:8000@TestModel"),
+		ctx:        ctx,
+		index:      index,
+		buffer:     buffer,
+		pub:        pub,
+		subManager: subManager,
+		topic:      []byte("kv@10.0.0.1:8000@TestModel"),
 	}
 }
 
@@ -956,7 +960,7 @@ func newSnapshotReplayHarness(
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", true))
+		ctx, t.Name(), "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", true))
 	time.Sleep(100 * time.Millisecond)
 
 	t.Cleanup(func() {
@@ -966,7 +970,8 @@ func newSnapshotReplayHarness(
 		cancel()
 	})
 	return &replayHarness{
-		ctx: ctx, index: index, buffer: buffer, pub: pub, topic: []byte("kv@10.0.0.1:8000@TestModel"),
+		ctx: ctx, index: index, buffer: buffer, pub: pub, subManager: subManager,
+		topic: []byte("kv@10.0.0.1:8000@TestModel"),
 	}, server
 }
 
@@ -1029,6 +1034,73 @@ func TestZMQSubscriber_SnapshotSequenceResetReloadsPod(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "a sequence reset must replace the pod's state with a new snapshot")
 	assert.False(t, h.indexed(999), "a frame at or before the cut is already in the snapshot")
 	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func TestZMQSubscriber_SnapshotMetrics(t *testing.T) {
+	liveOnly := func() float64 {
+		var m dto.Metric
+		require.NoError(t, metrics.LiveOnlySubscribers.Write(&m))
+		return m.GetGauge().GetValue()
+	}
+	loads := func() uint64 {
+		var m dto.Metric
+		require.NoError(t, metrics.SnapshotLoadDuration.Write(&m))
+		return m.GetHistogram().GetSampleCount()
+	}
+	before := loads()
+	baseline := liveOnly()
+
+	h, server := newSnapshotHarness(t, -2)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a subscriber whose snapshot failed must be counted as live-only")
+	assert.Equal(t, before, loads(), "an unavailable snapshot is not a load")
+
+	// The engine restarted and serves a snapshot.
+	server.set(0, buildDistinctBlockStoredPayload(t, 300))
+	h.send(t, 0, buildEventBatchPayload(t))
+	require.Eventually(t, func() bool { return h.indexed(300) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a loaded snapshot must leave the live-only count")
+	assert.Equal(t, before+1, loads())
+
+	// The snapshot is unavailable when a gap rebuilds the pod.
+	server.set(-2)
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 400))
+	require.Eventually(t, func() bool { return h.indexed(400) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a failed rebuild must count the subscriber as live-only again")
+	assert.Equal(t, before+1, loads())
+
+	require.True(t, h.subManager.RemoveSubscriber(h.ctx, t.Name()))
+	require.Eventually(t, func() bool { return liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a removed live-only subscriber must leave the count")
+
+	// With a replay buffer, the snapshot and the replay both fail on join.
+	h, _ = newSnapshotReplayHarness(t, []replayMessage{}, -2)
+	h.buffer.fail.Store(true)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a subscriber whose snapshot and replay failed must be counted as live-only")
+
+	// The engine restarted and its replay buffer serves the stream; the frame is inside the replay.
+	h.buffer.fail.Store(false)
+	h.buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 200)})
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 999))
+	require.Eventually(t, func() bool { return h.indexed(200) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a completed replay must leave the live-only count")
+	assert.False(t, h.indexed(999), "a frame at or before the replayed sequence is already indexed")
+
+	// A failed gap replay starts the cooldown, so the next frame is indexed live.
+	h.buffer.fail.Store(true)
+	h.send(t, 2, buildEventBatchPayload(t))
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 300))
+	require.Eventually(t, func() bool { return h.indexed(300) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a failed gap replay must count the subscriber as live-only again")
+
+	// A restart from sequence 0 whose rebuild fails still indexes a complete stream.
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 500))
+	require.Eventually(t, func() bool { return h.indexed(500) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a restart from sequence 0 must leave the live-only count")
+	assert.Equal(t, before+1, loads())
 }
 
 func TestZMQSubscriber_SnapshotPreferredOverReplay(t *testing.T) {
