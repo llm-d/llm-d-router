@@ -18,6 +18,7 @@ package inflightload
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -182,5 +183,77 @@ func TestInFlightLoadProducer_SingleTargetPrefillCompletion(t *testing.T) {
 				require.Zero(t, producer.GetTokens(endpointID))
 			})
 		}
+	}
+}
+
+func TestInFlightLoadProducer_PrefillEventTargets(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		prefillAddresses []string
+		decodeAddresses  []string
+		wantSources      []string
+	}{
+		{
+			name:             "decode_targets_take_precedence",
+			prefillAddresses: []string{prefillAddress, "10.0.0.3"},
+			decodeAddresses:  []string{decodeAddress, "10.0.0.4"},
+			wantSources:      []string{decodeSource, "10.0.0.4:8000"},
+		},
+		{
+			name:             "all_prefill_targets_are_fallbacks",
+			prefillAddresses: []string{prefillAddress, "10.0.0.3"},
+			wantSources:      []string{prefillSource, "10.0.0.3:8000"},
+		},
+		{
+			name:             "decode_without_address_uses_prefill_fallbacks",
+			prefillAddresses: []string{prefillAddress, "10.0.0.3"},
+			decodeAddresses:  []string{""},
+			wantSources:      []string{prefillSource, "10.0.0.3:8000"},
+		},
+		{
+			name:             "no_usable_address",
+			prefillAddresses: []string{""},
+			decodeAddresses:  []string{""},
+		},
+		{
+			name:            "decode_only_targets",
+			decodeAddresses: []string{decodeAddress, "10.0.0.4"},
+			wantSources:     []string{decodeSource, "10.0.0.4:8000"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			producer := newKVEventsProducer(t, "event-targets-"+tc.name)
+			ctx := t.Context()
+			res := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{}}
+			for i, address := range tc.prefillAddresses {
+				name := fmt.Sprintf("prompt-stage-%d", i)
+				res.ProfileResults[name] = &fwksched.ProfileRunResult{
+					TargetEndpoints: []fwksched.Endpoint{newEventEndpoint(name, bylabel.RolePrefill, address)},
+				}
+			}
+			for i, address := range tc.decodeAddresses {
+				name := fmt.Sprintf("decode-stage-%d", i)
+				res.ProfileResults[name] = &fwksched.ProfileRunResult{
+					TargetEndpoints: []fwksched.Endpoint{newEventEndpoint(name, bylabel.RoleDecode, address)},
+				}
+			}
+			for _, source := range []string{prefillSource, decodeSource, "10.0.0.3:8000", "10.0.0.4:8000"} {
+				req := newStampedRequest(t.Name()+source, seq(0, blockSize))
+				req.SchedulingResult = res
+				require.NoError(t, producer.PreRequest(ctx, req, res))
+				before := completions(producer.typedName.Name, signalKVEvent)
+				require.NoError(t, producer.ProcessEvents(ctx,
+					kvevents.EventSource{Endpoint: source}, storeBatch(req.RequestID, seq(0, blockSize))))
+				completed := completions(producer.typedName.Name, signalKVEvent) - before
+				if slices.Contains(tc.wantSources, source) {
+					require.Equal(t, float64(1), completed, "source %s must complete prefill", source)
+				} else {
+					require.Zero(t, completed, "source %s must not complete prefill", source)
+				}
+				producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
+				require.Zero(t, pendingWatch(producer.typedName.Name))
+			}
+		})
 	}
 }

@@ -276,24 +276,20 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 	for _, prompt := range tokenized.Prompts {
 		pending.prompts = append(pending.prompts, prompt.TokenIDs)
 	}
-	prefillProfile := result.PrefillProfileName
+	var prefillEndpoints []string
 	for profileName, endpoint := range targets {
-		if isPrefillTarget(prefillProfile, profileName, endpoint) {
+		addr := eventEndpoint(endpoint)
+		if addr == "" {
 			continue
 		}
-		if addr := eventEndpoint(endpoint); addr != "" {
+		if isPrefillTarget(result.PrefillProfileName, profileName, endpoint) {
+			prefillEndpoints = append(prefillEndpoints, addr)
+		} else {
 			pending.endpoints = append(pending.endpoints, addr)
 		}
 	}
 	if len(pending.endpoints) == 0 {
-		for profileName, endpoint := range targets {
-			if !isPrefillTarget(prefillProfile, profileName, endpoint) {
-				continue
-			}
-			if addr := eventEndpoint(endpoint); addr != "" {
-				pending.endpoints = append(pending.endpoints, addr)
-			}
-		}
+		pending.endpoints = prefillEndpoints
 	}
 	if len(pending.endpoints) == 0 {
 		return
