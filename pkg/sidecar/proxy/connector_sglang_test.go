@@ -170,13 +170,53 @@ var _ = Describe("SGLang Connector", func() {
 		return sendRankedBody(`{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`, headers)
 	}
 
-	// The router sets disagg_prefill_dp_rank. A client value would send decode to a
-	// prefill rank that the EPP did not pick.
-	It("drops a client disagg_prefill_dp_rank when the EPP sent no rank", func() {
+	// The router sets disagg_prefill_dp_rank and routed_dp_rank. Client values
+	// would bypass EPP rank selection or send decode to the wrong prefill rank.
+	It("drops client DP rank fields when the EPP sent no rank", func() {
 		prefill, decode, _, _ := sendRankedBody(
-			`{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50, "disagg_prefill_dp_rank": 9}`, nil)
+			`{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50, "disagg_prefill_dp_rank": 9, "routed_dp_rank": 7}`, nil)
 		Expect(prefill).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(prefill).ToNot(HaveKey(reqcommon.FieldRoutedDPRank))
 		Expect(decode).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(decode).ToNot(HaveKey(reqcommon.FieldRoutedDPRank))
+	})
+
+	It("sends prefill-only rank and strips client routed_dp_rank from decode", func() {
+		prefill, decode, prefillHeaders, decodeHeaders := sendRankedBody(
+			`{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50, "disagg_prefill_dp_rank": 9, "routed_dp_rank": 7}`,
+			map[string]string{routing.PrefillDataParallelRankHeader: "3"},
+		)
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(3)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(decode).ToNot(HaveKey(reqcommon.FieldRoutedDPRank))
+		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("3"))
+		Expect(decodeHeaders.Get(routing.DataParallelRankHeader)).To(BeEmpty())
+	})
+
+	It("propagates a gateway-pinned rank to both legs when prefill rank header is absent", func() {
+		prefill, decode, prefillHeaders, decodeHeaders := sendRanked(map[string]string{
+			routing.DataParallelRankHeader: "3",
+		})
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(3)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(3)))
+		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("3"))
+		Expect(decodeHeaders.Get(routing.DataParallelRankHeader)).To(Equal("3"))
+	})
+
+	It("sends identical rank fields when prefill and decode share a rank", func() {
+		prefill, decode, prefillHeaders, decodeHeaders := sendRanked(map[string]string{
+			routing.DataParallelRankHeader:        "2",
+			routing.PrefillDataParallelRankHeader: "2",
+		})
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(2)))
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(2)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(2)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldRoutedDPRank, float64(2)))
+		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("2"))
+		Expect(decodeHeaders.Get(routing.DataParallelRankHeader)).To(Equal("2"))
 	})
 
 	// SGLang's prefill must know its rank was picked externally, or it requires
@@ -370,6 +410,47 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(decodeReq.RoutedDpRank).To(Equal(proto.Int64(1)))
 		Expect(decodeReq.DisaggPrefillDpRank).To(Equal(proto.Int64(3)))
 	})
+
+	DescribeTable("should handle SglangService/Generate DP rank edge cases",
+		func(extraHeaders []string, wantPrefillRouted, wantPrefillDisagg, wantDecodeRouted, wantDecodeDisagg *int64) {
+			prefillBackend := newMockSGLangGRPCServer([]string{""})
+			DeferCleanup(prefillBackend.Stop)
+			decodeBackend := newMockSGLangGRPCServer([]string{"ok"})
+			DeferCleanup(decodeBackend.Stop)
+			startGRPCProxy(Config{DecoderURL: decoderURLOf(decodeBackend), KVConnector: constants.KVConnectorSGLang})
+
+			md := append([]string{routing.PrefillEndpointHeader, prefillBackend.addr}, extraHeaders...)
+			Expect(generateTexts(&sglangapiv1.GenerateRequest{
+				Text:                &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "Hello"}},
+				RoutedDpRank:        proto.Int64(7),
+				DisaggPrefillDpRank: proto.Int64(9),
+			}, md...)).To(Equal([]string{"ok"}))
+
+			Eventually(prefillBackend.RequestCount).Should(Equal(1))
+			prefillReq := prefillBackend.LastRequest()
+			decodeReq := decodeBackend.LastRequest()
+			Expect(prefillReq.RoutedDpRank).To(Equal(wantPrefillRouted))
+			Expect(prefillReq.DisaggPrefillDpRank).To(Equal(wantPrefillDisagg))
+			Expect(decodeReq.RoutedDpRank).To(Equal(wantDecodeRouted))
+			Expect(decodeReq.DisaggPrefillDpRank).To(Equal(wantDecodeDisagg))
+		},
+		Entry("none strips client DP rank fields on prefill",
+			[]string{routing.DataParallelRankHeader, "1", routing.PrefillDataParallelRankHeader, routing.NoDataParallelRank},
+			nil, nil, proto.Int64(1), nil,
+		),
+		Entry("prefill-only rank strips client routed_dp_rank on decode",
+			[]string{routing.PrefillDataParallelRankHeader, "3"},
+			proto.Int64(3), proto.Int64(3), nil, proto.Int64(3),
+		),
+		Entry("gateway-pinned rank applies to both legs when prefill rank header is absent",
+			[]string{routing.DataParallelRankHeader, "3"},
+			proto.Int64(3), proto.Int64(3), proto.Int64(3), proto.Int64(3),
+		),
+		Entry("same prefill and decode rank shares the leg payload",
+			[]string{routing.DataParallelRankHeader, "2", routing.PrefillDataParallelRankHeader, "2"},
+			proto.Int64(2), proto.Int64(2), proto.Int64(2), proto.Int64(2),
+		),
+	)
 
 	It("should pass through SglangService/Generate over h2c when prefill header is absent", func() {
 		decodeBackend := newMockSGLangGRPCServer([]string{"direct decode"})

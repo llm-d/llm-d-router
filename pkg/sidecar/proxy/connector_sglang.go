@@ -81,9 +81,18 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	// Inject bootstrap info for both prefill and decode
 	bootstrapInfo := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
 	delete(bootstrapInfo, reqcommon.FieldDisaggPrefillDPRank)
+	delete(bootstrapInfo, reqcommon.FieldRoutedDPRank)
 
+	// Write both disagg_prefill_dp_rank and routed_dp_rank in the JSON body so
+	// native /generate and OpenAI routes agree on each leg's rank.
 	prefillRank, decodeRank := sglangLegDPRanks(r)
-	if prefillRank == nil && decodeRank == nil {
+	if prefillRank != nil {
+		bootstrapInfo[reqcommon.FieldDisaggPrefillDPRank] = *prefillRank
+	}
+	if equalRank(prefillRank, decodeRank) {
+		if prefillRank != nil {
+			bootstrapInfo[reqcommon.FieldRoutedDPRank] = *prefillRank
+		}
 		body, err := json.Marshal(bootstrapInfo)
 		if err != nil {
 			if err := errorJSONInvalid(w, r, err); err != nil {
@@ -95,16 +104,9 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 		return
 	}
 
-	// Write both disagg_prefill_dp_rank and routed_dp_rank in the JSON body so
-	// native /generate and OpenAI routes agree on each leg's rank.
-	if prefillRank != nil {
-		bootstrapInfo[reqcommon.FieldDisaggPrefillDPRank] = *prefillRank
-	}
 	prefillData := maps.Clone(bootstrapInfo)
 	if prefillRank != nil {
 		prefillData[reqcommon.FieldRoutedDPRank] = *prefillRank
-	} else {
-		delete(prefillData, reqcommon.FieldRoutedDPRank)
 	}
 	if decodeRank != nil {
 		bootstrapInfo[reqcommon.FieldRoutedDPRank] = *decodeRank
@@ -165,7 +167,7 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefil
 	}
 	prefillBody := slices.Concat(prefillHead, scanned.Payload, prefillTail)
 	decodeBody := prefillBody
-	if prefillRank != nil || decodeRank != nil {
+	if !equalRank(prefillRank, decodeRank) {
 		decodeHead, decodeTail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
 			Host:                bootstrapHost,
 			Port:                int64(sglangBootstrapPort),
@@ -200,11 +202,21 @@ func parseDPRank(raw string) *int64 {
 	return &v
 }
 
+func equalRank(a, b *int64) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
 // sglangLegDPRanks returns the rank the EPP picked on the prefill worker and the
-// rank of the decode request, each nil when the request names none.
+// rank of the decode request, each nil when the request names none. When
+// prefillDPRankKey is absent (neither pool uses rank endpoints), both legs use
+// the request's x-data-parallel-rank header to match setPrefillDPRank.
 func sglangLegDPRanks(r *http.Request) (prefillRank, decodeRank *int64) {
-	raw, _ := r.Context().Value(prefillDPRankKey).(string)
-	return parseDPRank(raw), parseDPRank(r.Header.Get(routing.DataParallelRankHeader))
+	decodeRank = parseDPRank(r.Header.Get(routing.DataParallelRankHeader))
+	raw, hasPrefill := r.Context().Value(prefillDPRankKey).(string)
+	if !hasPrefill {
+		return decodeRank, decodeRank
+	}
+	return parseDPRank(raw), decodeRank
 }
 
 func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {

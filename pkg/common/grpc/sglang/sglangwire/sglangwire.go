@@ -110,17 +110,17 @@ type Request struct {
 	// Stream is the stream field.
 	Stream bool
 	// Payload is the request payload without any bootstrap_host,
-	// bootstrap_port, bootstrap_room, or disagg_prefill_dp_rank field, which a
-	// client may not set. When the client sent none, Payload aliases the
-	// scanned payload with no copy. Both legs of a request share it. See
-	// LegEnvelope.
+	// bootstrap_port, bootstrap_room, routed_dp_rank, or disagg_prefill_dp_rank
+	// field, which a client may not set. When the client sent none, Payload
+	// aliases the scanned payload with no copy. Both legs of a request share
+	// it. See LegEnvelope.
 	Payload []byte
 }
 
 // ScanGenerateRequest checks that payload is well-formed GenerateRequest wire
 // data at the top level, reads the stream field, and drops client bootstrap
-// and prefill DP-rank fields. Nested messages are left for the SGLang worker
-// to validate.
+// and DP-rank fields. Nested messages are left for the SGLang worker to
+// validate.
 func ScanGenerateRequest(payload []byte) (Request, error) {
 	req := Request{Payload: payload}
 	var stripped []byte // set once the first bootstrap field is dropped
@@ -134,7 +134,8 @@ func ScanGenerateRequest(payload []byte) (Request, error) {
 			return Request{}, ErrMalformed
 		}
 		end := pos + n + m
-		if num == reqBootstrapHost || num == reqBootstrapPort || num == reqBootstrapRoom || num == reqDisaggPrefillDPRank {
+		if num == reqBootstrapHost || num == reqBootstrapPort || num == reqBootstrapRoom ||
+			num == reqRoutedDPRank || num == reqDisaggPrefillDPRank {
 			if stripped == nil {
 				stripped = make([]byte, 0, len(payload)-(n+m))
 				stripped = append(stripped, payload[:pos]...)
