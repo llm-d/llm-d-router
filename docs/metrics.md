@@ -566,6 +566,15 @@ and updated when the filter observes a change in an endpoint's health. The `reas
 | `llm_d_epp_endpoint_health_readmissions_total` | Counter | `plugin_name`, `reason` | Unhealthy marks cleared. An endpoint is readmitted once no reason marks it. |
 | `llm_d_epp_endpoint_health_fail_open_total` | Counter | `plugin_name` | Scheduling cycles in which every candidate was unhealthy and all were kept. Alert on a non-zero rate. |
 
+### Models responder
+
+These metrics belong to `models-responder`. They are registered when the plugin is configured and
+updated once per inference request it screens.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_models_responder_screen_decisions_total` | Counter | `plugin_name`, `model_name`, `outcome` | Requests screened, by target model and by which endpoints were kept. The outcomes are described in the [plugin README](../pkg/epp/framework/plugins/requesthandling/responder/models/README.md#metrics). |
+
 ### Prefix cache indexer (approximate)
 
 These metrics belong to the `approx-prefix-cache-producer`. They describe its approximate prefix

@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -447,27 +449,43 @@ func TestScreenUsesPerEndpointModelData(t *testing.T) {
 		target    string
 		endpoints []fwksched.Endpoint
 		want      []fwksched.Endpoint
+		outcome   string
 	}{
-		{name: "base model on both endpoints", target: "base", endpoints: []fwksched.Endpoint{servingBase, servingAdapter}, want: []fwksched.Endpoint{servingBase, servingAdapter}},
-		{name: "adapter on one endpoint", target: "adapter", endpoints: []fwksched.Endpoint{servingBase, servingAdapter}, want: []fwksched.Endpoint{servingAdapter}},
-		{name: "adapter with unscraped endpoint", target: "adapter", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, unlisted}, want: []fwksched.Endpoint{servingAdapter}},
-		{name: "base model on one endpoint", target: "base", endpoints: []fwksched.Endpoint{servingBase, otherModel}, want: []fwksched.Endpoint{servingBase}},
-		{name: "base model with unscraped endpoint", target: "base", endpoints: []fwksched.Endpoint{servingBase, unlisted}, want: []fwksched.Endpoint{servingBase, unlisted}},
-		{name: "no model data", target: "anything", endpoints: []fwksched.Endpoint{unlisted}, want: []fwksched.Endpoint{unlisted}},
-		{name: "different base model on one endpoint", target: "base2", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, want: []fwksched.Endpoint{otherModel, unlisted}},
-		{name: "no match with unscraped endpoint", target: "base", endpoints: []fwksched.Endpoint{otherModel, unlisted}, want: []fwksched.Endpoint{unlisted}},
-		{name: "unknown target with collected data", target: "missing", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel}, want: []fwksched.Endpoint{servingBase, servingAdapter, otherModel}},
-		{name: "empty target keeps all endpoints", target: "", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, want: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}},
-		{name: "empty endpoint pool", target: "anything", endpoints: nil, want: nil},
+		{name: "base model on both endpoints", target: "base", endpoints: []fwksched.Endpoint{servingBase, servingAdapter}, want: []fwksched.Endpoint{servingBase, servingAdapter}, outcome: outcomeBase},
+		{name: "adapter on one endpoint", target: "adapter", endpoints: []fwksched.Endpoint{servingBase, servingAdapter}, want: []fwksched.Endpoint{servingAdapter}, outcome: outcomeAdapter},
+		{name: "adapter with unscraped endpoint", target: "adapter", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, unlisted}, want: []fwksched.Endpoint{servingAdapter}, outcome: outcomeAdapter},
+		{name: "base model on one endpoint", target: "base", endpoints: []fwksched.Endpoint{servingBase, otherModel}, want: []fwksched.Endpoint{servingBase}, outcome: outcomeBase},
+		{name: "base model with unscraped endpoint", target: "base", endpoints: []fwksched.Endpoint{servingBase, unlisted}, want: []fwksched.Endpoint{servingBase, unlisted}, outcome: outcomeBase},
+		{name: "no model data", target: "anything", endpoints: []fwksched.Endpoint{unlisted}, want: []fwksched.Endpoint{unlisted}, outcome: outcomeUnreported},
+		{name: "different base model on one endpoint", target: "base2", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, want: []fwksched.Endpoint{otherModel, unlisted}, outcome: outcomeBase},
+		{name: "no match with unscraped endpoint", target: "base", endpoints: []fwksched.Endpoint{otherModel, unlisted}, want: []fwksched.Endpoint{unlisted}, outcome: outcomeUnreported},
+		{name: "unknown target with collected data", target: "missing", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel}, want: []fwksched.Endpoint{servingBase, servingAdapter, otherModel}, outcome: outcomeNotFound},
+		{name: "empty target keeps all endpoints", target: "", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, want: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, outcome: outcomeNotApplicable},
+		{name: "empty endpoint pool", target: "anything", endpoints: nil, want: nil, outcome: outcomeNotFound},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			request := &fwksched.InferenceRequest{TargetModel: test.target}
-			got := New().Screen(context.Background(), request, test.endpoints)
+			// Each case records under its own plugin name, cleared first so the
+			// test can run more than once in a process.
+			screener := New().WithName("screen-" + test.name)
+			screenDecisions.DeletePartialMatch(prometheus.Labels{"plugin_name": screener.TypedName().Name})
+			got := screener.Screen(t.Context(), request, test.endpoints)
 			require.Len(t, got, len(test.want))
 			for i := range test.want {
 				assert.Same(t, test.want[i], got[i])
+			}
+			model := test.target
+			if model == "" {
+				model = "unknown"
+			}
+			for _, outcome := range []string{outcomeAdapter, outcomeBase, outcomeUnreported, outcomeNotFound, outcomeNotApplicable} {
+				want := 0.0
+				if outcome == test.outcome {
+					want = 1
+				}
+				assert.Equal(t, want, testutil.ToFloat64(screenDecisions.WithLabelValues(screener.TypedName().Name, model, outcome)), outcome)
 			}
 		})
 	}
