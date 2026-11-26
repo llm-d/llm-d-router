@@ -597,3 +597,41 @@ func TestPassthrough_RegisteredPathsBypass(t *testing.T) {
 		t.Fatalf("registered path expected 200, got %d", rec.Code)
 	}
 }
+
+type passthroughRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f passthroughRoundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestPassthrough_ConnectionHeaderCannotStripStampedHeaders(t *testing.T) {
+	upstream, cap := newCapturingUpstream(t, http.StatusOK, `{"data":[]}`)
+	gatewayURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+
+	var outboundXForwardedFor string
+	transport := passthroughRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		outboundXForwardedFor = r.Header.Get("X-Forwarded-For")
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	proxy := newPassthroughProxy(logr.Discard(), gatewayURL, transport, "req-direct")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Add("Connection", "x-llm-d-epp-profile, x-request-id, x-hop-only")
+	req.Header.Set("X-Hop-Only", "drop-me")
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	req.Header.Set("X-Keep", "kept")
+
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, outboundXForwardedFor, "10.0.0.1")
+
+	_, _, _, headers, _ := cap.get()
+	require.Equal(t, gateway.PhaseDecode, headers.Get(reqcommon.EPPProfileHeaderKey))
+	require.NotEmpty(t, headers.Get(reqcommon.RequestIDHeaderKey))
+	require.Empty(t, headers.Values("X-Hop-Only"))
+	require.Equal(t, "kept", headers.Get("X-Keep"))
+}

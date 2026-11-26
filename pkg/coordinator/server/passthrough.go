@@ -98,21 +98,25 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // newPassthroughProxy builds the reverse proxy that streams to the gateway.
-// The director rewrites the outbound scheme/host to the gateway, strips the
+// The rewrite routes the outbound scheme/host to the gateway, strips the
 // coordinator-owned headers, and stamps the decode profile and sanitized
 // request id. Transport errors return 502; a failure after the upstream
 // response has started can only surface through ErrorLog, so it is wired to
 // the request-scoped logger.
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Director: func(r *http.Request) { //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
-			r.URL.Scheme = gatewayURL.Scheme
-			r.URL.Host = gatewayURL.Host
-			r.Host = gatewayURL.Host
-			pipeline.StripInternalHeaders(r.Header)
-			r.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
-			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
-			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
+			pr.SetXForwarded()
+
+			pr.Out.URL.Scheme = gatewayURL.Scheme
+			pr.Out.URL.Host = gatewayURL.Host
+			pr.Out.Host = gatewayURL.Host
+
+			pipeline.StripInternalHeaders(pr.Out.Header)
+			pr.Out.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
+			pr.Out.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
+			pr.Out.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 		},
 		// A plugin on the decode profile can stamp coordinator-owned headers on
 		// the response.
