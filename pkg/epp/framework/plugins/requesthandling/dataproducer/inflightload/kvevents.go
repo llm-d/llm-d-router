@@ -253,10 +253,10 @@ func eventEndpoint(endpoint fwksched.Endpoint) string {
 
 // watchPrefill registers the dispatched request for completion from KV
 // events. targets maps each profile name to the request's endpoint for that
-// profile. The engines that decode the request complete it: every profile's
-// endpoint other than the prefill profile's, or the prefill endpoint when the
-// request has no other. The prefill engine holds the request's blocks until
-// the decode engine has pulled them, so the decode engine's store event marks
+// profile. Events from non-prefill targets complete it, falling back to
+// prefill targets when no other event endpoint is available. The prefill
+// engine holds the request's blocks until the decode engine has pulled them,
+// so the decode engine's store event marks
 // the end of the request's prefill footprint; a single engine serving both
 // phases stores the blocks as it computes them.
 func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksched.InferenceRequest,
@@ -278,7 +278,7 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 	}
 	prefillProfile := result.PrefillProfileName
 	for profileName, endpoint := range targets {
-		if profileName == prefillProfile {
+		if isPrefillTarget(prefillProfile, profileName, endpoint) {
 			continue
 		}
 		if addr := eventEndpoint(endpoint); addr != "" {
@@ -286,7 +286,10 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 		}
 	}
 	if len(pending.endpoints) == 0 {
-		if endpoint, ok := targets[prefillProfile]; ok {
+		for profileName, endpoint := range targets {
+			if !isPrefillTarget(prefillProfile, profileName, endpoint) {
+				continue
+			}
 			if addr := eventEndpoint(endpoint); addr != "" {
 				pending.endpoints = append(pending.endpoints, addr)
 			}
@@ -328,10 +331,17 @@ func (p *InFlightLoadProducer) Reset(ctx context.Context, source kvevents.EventS
 	return nil
 }
 
-// onPrefillComplete frees what prefill completion frees: the prefill
-// profile's entry in full, and with output tokens excluded the other
-// profiles' tokens as well. It runs once per request; a later signal for the
-// same request finds nothing pending and changes nothing.
+func isPrefillTarget(prefillProfile, profileName string, endpoint fwksched.Endpoint) bool {
+	// An explicit profile assignment takes precedence over endpoint capabilities.
+	if prefillProfile != "" {
+		return profileName == prefillProfile
+	}
+	return endpointHasPrefillOnlyRole(endpoint)
+}
+
+// onPrefillComplete releases prefill targets in full and, with output tokens
+// excluded, the other targets' tokens. Per-entry deletion and atomic swaps
+// make repeated completion signals safe.
 func (p *InFlightLoadProducer) onPrefillComplete(ctx context.Context, requestID string,
 	result *fwksched.SchedulingResult, signal string,
 ) {
@@ -348,7 +358,7 @@ func (p *InFlightLoadProducer) onPrefillComplete(ctx context.Context, requestID 
 			continue
 		}
 		switch {
-		case profileName == result.PrefillProfileName:
+		case isPrefillTarget(result.PrefillProfileName, profileName, endpoint):
 			p.release(endpoint, requestID, profileName)
 		case !p.addEstimatedOutputTokens:
 			p.releaseTokensEarly(endpoint, requestID, profileName)
