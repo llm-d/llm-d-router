@@ -19,8 +19,10 @@ package vllminference
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -29,6 +31,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/protoscan"
@@ -153,6 +156,108 @@ func TestVllmInferenceParser_ParseRequest(t *testing.T) {
 			},
 			wantMaxTokens: &maxTokens64,
 			wantStream:    true,
+		},
+		{
+			// A raw uuid item and a preprocessed item of one modality would
+			// pair the uuid with the other item's token span, so that
+			// modality keeps its hashes and drops its placeholder ranges.
+			// A modality with preprocessed items only keeps both.
+			name: "a modality that mixes raw uuid and preprocessed items keeps hashes in order and no placeholder ranges",
+			path: vllmpb.Inference_Generate_FullMethodName,
+			req: &vllmpb.GenerateRequest{
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "describe media"},
+				Media: []*vllmpb.MediaItem{
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Uuid:     "raw-first",
+						Source:   &vllmpb.MediaItem_Url{Url: "https://example.com/a.png"},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "img-hash-2", Offset: 5, Length: 4},
+						},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_AUDIO,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "audio-hash", Offset: 12, Length: 2},
+						},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe media",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityImage): {"raw-first", "img-hash-2"},
+						string(reqcommon.ModalityAudio): {"audio-hash"},
+					},
+					MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+						string(reqcommon.ModalityAudio): {{Offset: 12, Length: 2}},
+					},
+				},
+			},
+		},
+		{
+			name: "a single modality with a preprocessed item before a raw uuid item drops MMPlaceholders to nil",
+			path: vllmpb.Inference_Generate_FullMethodName,
+			req: &vllmpb.GenerateRequest{
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "describe media"},
+				Media: []*vllmpb.MediaItem{
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "img-hash-1", Offset: 2, Length: 3},
+						},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Uuid:     "raw-second",
+						Source:   &vllmpb.MediaItem_Url{Url: "https://example.com/b.png"},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe media",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityImage): {"img-hash-1", "raw-second"},
+					},
+				},
+			},
+		},
+		{
+			name: "a preprocessed modality before a raw uuid modality keeps the preprocessed modality placeholders",
+			path: vllmpb.Inference_Generate_FullMethodName,
+			req: &vllmpb.GenerateRequest{
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "describe media"},
+				Media: []*vllmpb.MediaItem{
+					{
+						Modality: vllmpb.Modality_MODALITY_AUDIO,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "audio-hash", Offset: 1, Length: 2},
+						},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Uuid:     "raw-img",
+						Source:   &vllmpb.MediaItem_Url{Url: "https://example.com/a.png"},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe media",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityAudio): {"audio-hash"},
+						string(reqcommon.ModalityImage): {"raw-img"},
+					},
+					MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+						string(reqcommon.ModalityAudio): {{Offset: 1, Length: 2}},
+					},
+				},
+			},
 		},
 		{
 			name: "raw media items with uuid populate MMHashes without placeholder ranges while skipping unnamed raw media",
@@ -662,6 +767,138 @@ func TestVllmInferenceParser_RewriteModelName(t *testing.T) {
 
 		_, err = parser.RewriteModelName(fwkrequest.PayloadBytes(grpctest.FramePayload(t, []byte{0x12, 0x05, 'a'})), "m")
 		require.ErrorIs(t, err, vllmwire.ErrMalformed)
+	})
+}
+
+func TestVllmInferenceParser_RewriteModelName_BaseModelsConfig(t *testing.T) {
+	newConfigured := func(t *testing.T) *VllmInferenceParser {
+		t.Helper()
+		plugin, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(
+			`{"baseModels":["meta-llama/Llama-3.1-8B","Qwen/Qwen3-0.6B"]}`)), nil)
+		require.NoError(t, err)
+		parser, ok := plugin.(*VllmInferenceParser)
+		require.True(t, ok)
+		return parser
+	}
+
+	t.Run("adapter target on a base-model request writes lora_name and keeps model", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "Qwen/Qwen3-0.6B",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel(), "vLLM's gRPC server accepts only base model names in model")
+		require.Equal(t, "sql-lora", decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an adapter request rewrites lora_name", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:    "Qwen/Qwen3-0.6B",
+			LoraName: "sql-lora",
+			Prompt:   &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "code-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel())
+		require.Equal(t, "code-lora", decoded.GetLoraName())
+	})
+
+	t.Run("base-model target on an adapter request rewrites model and clears lora_name", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:    "Qwen/Qwen3-0.6B",
+			LoraName: "sql-lora",
+			Prompt:   &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "meta-llama/Llama-3.1-8B")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "meta-llama/Llama-3.1-8B", decoded.GetModel())
+		require.Empty(t, decoded.GetLoraName())
+	})
+
+	t.Run("base-model target on a base-model request rewrites model", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "alias-model",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "Qwen/Qwen3-0.6B")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel())
+		require.Empty(t, decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an alias request writes the only base model", func(t *testing.T) {
+		plugin, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(
+			`{"baseModels":["Qwen/Qwen3-0.6B"]}`)), nil)
+		require.NoError(t, err)
+		parser := plugin.(*VllmInferenceParser)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "my-alias",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Equal(t, "Qwen/Qwen3-0.6B", decoded.GetModel(), "vLLM rejects an alias in model")
+		require.Equal(t, "sql-lora", decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on a lora_name-only request keeps model empty", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			LoraName: "ad0",
+			Prompt:   &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		got, err := parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.NoError(t, err)
+		var decoded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &decoded)
+		require.Empty(t, decoded.GetModel(), "vLLM accepts an empty model when lora_name is set")
+		require.Equal(t, "sql-lora", decoded.GetLoraName())
+	})
+
+	t.Run("adapter target on an alias request with several base models is a typed error", func(t *testing.T) {
+		parser := newConfigured(t)
+		orig, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+			Model:  "my-alias",
+			Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		})
+		require.NoError(t, err)
+		_, err = parser.RewriteModelName(fwkrequest.PayloadBytes(orig), "sql-lora")
+		require.ErrorContains(t, err, "cannot resolve base model")
+		var errCommon errcommon.Error
+		require.ErrorAs(t, err, &errCommon)
+		require.Equal(t, errcommon.Internal, errCommon.Code,
+			"a plain error aborts the ext_proc stream and fails open instead of returning the error envelope")
+	})
+
+	t.Run("factory rejects invalid parameters", func(t *testing.T) {
+		_, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(`{"baseModels":`)), nil)
+		require.ErrorContains(t, err, "parameters")
+
+		for _, params := range []string{`{"baseModels":[""]}`, `{"baseModels":["Qwen/Qwen3-0.6B","  "]}`} {
+			_, err := VllmInferenceParserPluginFactory("cfg", json.NewDecoder(strings.NewReader(params)), nil)
+			require.ErrorContains(t, err, "baseModels must not contain empty strings", params)
+		}
 	})
 }
 

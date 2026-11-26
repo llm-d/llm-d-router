@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
@@ -146,6 +147,14 @@ func (t *tracker) observeResponse(logger logr.Logger, id fwkdl.ID, address strin
 		return
 	}
 
+	if t.ejectionCapReached(now) {
+		// The failure run stays at the threshold, so the endpoint's next
+		// failure ejects it once another ejection ends.
+		logger.V(logutil.DEBUG).Info("Endpoint returned consecutive failed responses, but maxEjectionPercent of the pool is already ejected",
+			"endpoint", id, "consecutiveFailures", st.responseFailures)
+		return
+	}
+
 	wasExcluded := st.excluded()
 	st.ejections++
 	duration := min(t.cfg.ejectionDuration*time.Duration(st.ejections), t.cfg.maxEjectionDuration)
@@ -155,6 +164,22 @@ func (t *tracker) observeResponse(logger logr.Logger, id fwkdl.ID, address strin
 		"endpoint", id, "consecutiveFailures", st.responseFailures, "ejectionDuration", duration)
 	st.responseFailures = 0
 	t.updateExcluded(wasExcluded, st.excluded())
+}
+
+// ejectionCapReached reports whether maxEjectionPercent of the tracked
+// endpoints are under a response ejection. It counts an ejection that ended but
+// that no evaluation has cleared yet as ended. Callers hold mu.
+func (t *tracker) ejectionCapReached(now time.Time) bool {
+	if t.cfg.maxEjectionPercent >= 100 {
+		return false
+	}
+	ejected := 0
+	for _, st := range t.endpoints {
+		if st.ejected() && now.Before(st.ejectedUntil) {
+			ejected++
+		}
+	}
+	return ejected >= max(1, len(t.endpoints)*t.cfg.maxEjectionPercent/100)
 }
 
 // prune drops the state of endpoints that are no longer in the pool.

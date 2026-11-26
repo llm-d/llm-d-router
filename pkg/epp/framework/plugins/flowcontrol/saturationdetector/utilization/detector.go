@@ -37,6 +37,8 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -127,26 +129,38 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 
 // Consumes declares InFlightLoad as an optional dependency: it supplies the
 // scrape-lag compensation in Saturation and Filter, but the detector still functions on
-// scraped metrics alone when no inflight-load-producer is configured.
+// scraped metrics alone when no inflight-load-producer is configured. DeferredQueueSize is
+// optional too: only engine configs with a deferredRequestsSpec publish it.
 func (d *Detector) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
-		Optional: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
+		Optional: map[fwkplugin.DataKey]any{
+			d.inFlightLoadDataKey:    attrconcurrency.InFlightLoad{},
+			deferredQueueSizeDataKey: attrmetrics.ScalarMetricValue(0),
+		},
 	}
 }
 
-// queueDepth returns the scraped waiting queue plus the in-flight requests the
-// scrape does not yet reflect (see Saturation).
+var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
+
+// queueDepth returns the scraped waiting queue less DeferredQueueSize, plus
+// the in-flight requests the scrape does not yet reflect (see Saturation). A
+// deferred count above the waiting queue comes from series scraped out of
+// step and leaves the queue term unchanged.
 func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap) int64 {
 	waiting := int64(m.WaitingQueueSize)
 	if attrs == nil {
 		return waiting
 	}
+	queued := waiting
+	if deferred, ok := attrmetrics.ReadScalarMetricValue(attrs, deferredQueueSizeDataKey); ok && deferred >= 0 && float64(deferred) <= float64(waiting) {
+		queued = waiting - int64(deferred)
+	}
 	if val, ok := attrs.Get(d.inFlightLoadDataKey); ok {
 		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-			return waiting + max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
+			queued += max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
 		}
 	}
-	return waiting
+	return queued
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -163,6 +177,9 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 // For each pod, the score is determined by the most constrained resource (Compute or Memory):
 //
 //	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
+//
+// WaitingQueue is WaitingQueueSize less the DeferredQueueSize attribute when the extractor
+// publishes one.
 //
 // Pods with missing or stale metrics contribute 1.0 under the saturated policy, or are excluded
 // from the average under the ignore policy.

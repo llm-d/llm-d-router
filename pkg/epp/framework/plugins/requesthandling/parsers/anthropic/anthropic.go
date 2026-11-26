@@ -267,7 +267,7 @@ func parseStreamResponse(chunk []byte) *fwkrh.ParsedResponse {
 	completion := 0
 	hasUsage := false
 	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
-		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
+		content, ok := reqcommon.SSEDataPayload(bytes.TrimSuffix(line, []byte("\r")))
 		if !ok {
 			continue
 		}

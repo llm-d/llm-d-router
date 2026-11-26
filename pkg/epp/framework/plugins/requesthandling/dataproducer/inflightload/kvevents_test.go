@@ -25,6 +25,7 @@ import (
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -35,6 +36,7 @@ import (
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -117,9 +119,10 @@ func newEventEndpoint(name, role, address string) *stubSchedulingEndpoint {
 func pdResult(prefill, decode fwksched.Endpoint) *fwksched.SchedulingResult {
 	return &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			profilePrefill: {TargetEndpoints: []fwksched.Endpoint{prefill}},
-			"decode":       {TargetEndpoints: []fwksched.Endpoint{decode}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decode}},
 		},
 	}
 }
@@ -203,6 +206,41 @@ func TestKVEventPrefillCompletion_ReleasesWhenDecodeStoresLastBlock(t *testing.T
 	require.Equal(t, float64(0), completions(name, signalFirstByte))
 	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
+}
+
+// An SGLang decode engine publishes the pulled prompt at its default page size
+// of 1, stamped with the request's session id.
+func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
+	t.Parallel()
+	const name = "kv-release-sglang"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+	prefillID := fullEndpointName("prefill-0")
+
+	prompt := seq(0, 200)
+	req := newStampedRequest("req-sglang", prompt)
+	require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+
+	payload, err := msgpack.Marshal([]any{1.0, []any{map[string]any{
+		"type":         "BlockStored",
+		"block_hashes": seq(1000, len(prompt)),
+		"token_ids":    prompt,
+		"block_size":   1,
+		"medium":       "GPU",
+		"session_id":   req.Headers[sessionIDHeader],
+	}}, nil})
+	require.NoError(t, err)
+	_, _, batch, err := engineadapter.NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic: "kv@" + decodeSource + "@model", Payload: payload,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource}, batch))
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }
 
 func TestKVEventPrefillCompletion_IgnoresOtherBlocks(t *testing.T) {
@@ -431,6 +469,29 @@ func TestKVEventPrefillCompletion_EndOfStreamDropsWatch(t *testing.T) {
 	require.Equal(t, float64(0), completions(name, signalFirstByte))
 }
 
+func TestKVEventPrefillCompletion_RenamedPrefillProfileIsNotWatched(t *testing.T) {
+	t.Parallel()
+	const name = "kv-renamed-prefill"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+
+	req := newStampedRequest("req-10", seq(0, 200))
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill-h200",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill-h200": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+			"decode":       {TargetEndpoints: []fwksched.Endpoint{decode}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	require.NotNil(t, producer.watch.lookup(decodeSource, "req-10"))
+	require.Nil(t, producer.watch.lookup(prefillSource, "req-10"),
+		"the prefill profile the result names is not watched whatever it is called")
+}
+
 func TestKVEventPrefillCompletion_MultiPrompt(t *testing.T) {
 	t.Parallel()
 	producer := newKVEventsProducer(t, "kv-multi")
@@ -501,13 +562,30 @@ func TestKVEventPrefillCompletion_SingleEngineCompletesOnItsOwnEvents(t *testing
 	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }
 
-func TestKVEventPrefillCompletion_RequiresVLLMTokenBackend(t *testing.T) {
+func TestKVEventPrefillCompletion_RequiresExactTokens(t *testing.T) {
 	t.Parallel()
 	dep := newKVEventsProducer(t, "kv-backend").Consumes().Required[tokenproducer.TokenizedPromptDataKey]
 	consumed, ok := dep.(fwkplugin.ConsumedData)
 	require.True(t, ok, "the tokenized request dependency carries a producer matcher")
-	require.NoError(t, consumed.Matches(map[string]string{"backend": tokenproducer.BackendVLLM}))
-	require.Error(t, consumed.Matches(map[string]string{"backend": tokenproducer.BackendEstimate}))
+	require.NoError(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     tokenproducer.BackendVLLM,
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+	}))
+	require.NoError(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     tokenproducer.BackendPassthrough,
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+	}))
+	require.NoError(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     "sglang",
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+	}))
+	require.Error(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend:     tokenproducer.BackendEstimate,
+		tokenproducer.AttrExactTokens: tokenproducer.ExactTokensFalse,
+	}))
+	require.Error(t, consumed.Matches(map[string]string{
+		tokenproducer.AttrBackend: tokenproducer.BackendVLLM,
+	}))
 }
 
 func TestKVEventPrefillCompletion_OffByDefault(t *testing.T) {
@@ -531,4 +609,71 @@ func TestKVEventPrefillCompletion_OffByDefault(t *testing.T) {
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+}
+
+func TestKVEventPrefillCompletion_RankEndpointCompletesOnlyOnOwnRank(t *testing.T) {
+	t.Parallel()
+	const name = "kv-rank-complete"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0-rank-1", bylabel.RoleDecode, decodeAddress)
+	decode.GetMetadata().RankByHeader = true
+	decode.GetMetadata().RankIndex = 1
+	prefillID := fullEndpointName("prefill-0")
+
+	prompt := seq(0, 200)
+	req := newStampedRequest("req-rank-1", prompt)
+	res := pdResult(prefill, decode)
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+
+	// Plain host:port and sibling rank events must not release rank 1's prefill.
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource}, storeBatch("req-rank-1", prompt[:192])))
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource + "/rank-0"}, storeBatch("req-rank-1", prompt[:192])))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(200), producer.tokenTracker.get(prefillID))
+	require.Equal(t, float64(0), completions(name, signalKVEvent))
+
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource + "/rank-1"}, storeBatch("req-rank-1", prompt[:192])))
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID))
+	require.Equal(t, float64(1), completions(name, signalKVEvent))
+}
+
+func TestKVEventPrefillCompletion_RankEndpointResetDropsOnlyOwnRank(t *testing.T) {
+	t.Parallel()
+	const name = "kv-rank-reset"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill0 := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	prefill1 := newEventEndpoint("prefill-1", bylabel.RolePrefill, "10.0.0.3")
+	decode0 := newEventEndpoint("decode-0-rank-0", bylabel.RoleDecode, decodeAddress)
+	decode0.GetMetadata().RankByHeader = true
+	decode0.GetMetadata().RankIndex = 0
+	decode1 := newEventEndpoint("decode-0-rank-1", bylabel.RoleDecode, decodeAddress)
+	decode1.GetMetadata().RankByHeader = true
+	decode1.GetMetadata().RankIndex = 1
+
+	prompt := seq(0, 200)
+	req0 := newStampedRequest("req-reset-0", prompt)
+	res0 := pdResult(prefill0, decode0)
+	require.NoError(t, producer.PreRequest(ctx, req0, res0))
+	req1 := newStampedRequest("req-reset-1", prompt)
+	res1 := pdResult(prefill1, decode1)
+	require.NoError(t, producer.PreRequest(ctx, req1, res1))
+
+	require.NoError(t, producer.Reset(ctx, kvevents.EventSource{Endpoint: decodeSource + "/rank-1"}))
+
+	// Rank 1 lost its watch and falls back to first-byte completion.
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource + "/rank-1"}, storeBatch("req-reset-1", prompt[:192])))
+	require.Equal(t, int64(1), producer.requestTracker.get(fullEndpointName("prefill-1")))
+	req1.SchedulingResult = res1
+	producer.ResponseBody(ctx, req1, &fwkrh.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(fullEndpointName("prefill-1")))
+	require.Equal(t, float64(1), completions(name, signalFirstByte))
+
+	// Rank 0's watch is unaffected and completes via KV event.
+	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource + "/rank-0"}, storeBatch("req-reset-0", prompt[:192])))
+	require.Equal(t, int64(0), producer.requestTracker.get(fullEndpointName("prefill-0")))
+	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }

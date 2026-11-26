@@ -53,6 +53,46 @@ helm install my-standalone-router ./config/charts/llm-d-router-standalone \
   --set router.proxy.replicas=3
 ```
 
+#### Several Standalone Routers in One Umbrella Chart
+An umbrella chart can declare `llm-d-router-standalone` once per model under different aliases. The instances share the release name, which is the default base of every resource name, so they would render the same objects. Each instance sets `router.fullnameOverride` to a distinct value, used as the base of its resource names in place of the release name: with the values below, the first instance creates `qwen-epp`, `qwen-envoy` and so on, the second `gemma-epp`, `gemma-envoy`.
+
+Each instance also sets `router.inferencePool.create=false`. The `InferencePool` keeps the release name, so two instances creating one would collide.
+
+Changing `router.fullnameOverride` on an installed release renames its resources: Helm deletes the old objects and creates new ones, which interrupts traffic.
+
+```yaml
+# Chart.yaml
+dependencies:
+  - name: llm-d-router-standalone
+    alias: router-qwen
+    version: <chart-version>
+    repository: oci://ghcr.io/llm-d/charts
+  - name: llm-d-router-standalone
+    alias: router-gemma
+    version: <chart-version>
+    repository: oci://ghcr.io/llm-d/charts
+```
+
+```yaml
+# values.yaml
+router-qwen:
+  router:
+    fullnameOverride: qwen
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: qwen
+router-gemma:
+  router:
+    fullnameOverride: gemma
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: gemma
+```
+
 ---
 
 ### 2. Gateway Mode (`llm-d-router-gateway`)
@@ -110,7 +150,7 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 > When EPP is scaled (`router.epp.replicas > 1`):
 > *   **Active-Passive Mode (Default)**: The chart automatically enables the `--ha-enable-leader-election` flag. Only one leader replica active-routes traffic, coordinates lease status, and maintains absolute routing state, while other replicas act as warm standbys.
 > *   **Active-Active Mode**: Set `router.epp.haMode: all-active` to disable leader election and let all replicas process traffic. Setting `router.epp.crossReplica.enabled: true` also selects this mode. The existing `router.epp.flags.ha-enable-leader-election: false` setting remains supported.
->     *   **Plugin compatibility**: Stateless plugins and plugins that read backend metrics can run independently. The optional Redis syncer shares in-flight load between replicas. Approximate prefix-cache state remains local, so this option does not make approximate prefix routing consistent across replicas.
+>     *   **Plugin compatibility**: Stateless plugins and plugins that read backend metrics can run independently. The optional Redis syncer shares in-flight load and a capped recent window of approximate prefix-cache hashes across replicas (when `syncCrossReplicaState` is left at its default `true` on both producers; set `syncCrossReplicaState: false` to keep either local).
 >
 > Setting `router.epp.flags.ha-enable-leader-election: true` also enables leader
 > election for a single replica. The chart grants the EPP ServiceAccount the
@@ -249,7 +289,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, sglanggrpc-parser, sglanghttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.metricsDataSource.scheme` | Scheme EPP uses to scrape model server metrics (`http` or `https`). | `http` |
 | `router.epp.metricsDataSource.path` | URL path on model server pods that serves Prometheus metrics. | `/metrics` |
 | `router.epp.metricsDataSource.port` | Port override for model server metrics scrapes (1-65535), such as `8000` when inference uses gRPC on `50051`. Unset scrapes each endpoint's inference port. Do not set on multi-port data-parallel pools. | `null` |
@@ -273,10 +313,11 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.autoscaling.targetMemoryUtilizationPercentage` | Target average memory utilization percentage across EPP pods (1-100). | `""` |
 | `router.epp.autoscaling.behavior` | Scaling behavior policies for HPA scale-up and scale-down. | `{}` |
 | `router.epp.autoscaling.metrics` | Custom HPA v2 metrics override; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
-| `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
+| `router.epp.extProcPort` | Port used by the EPP listener and its chart-managed gRPC clients. An explicit `router.epp.flags.grpc-port` takes precedence. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |
 | `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker` |
-| `router.epp.image.tag` | EPP container image tag. | `main` |
+| `router.epp.image.tag` | EPP container image tag. Ignored when `digest` is set. | `main` |
+| `router.epp.image.digest` | Pins the EPP image by digest, e.g. `sha256:<64 hex characters>`. When set, the image renders as `registry/repository@digest` and the tag is dropped (CRI-O rejects references with both). An invalid digest fails the render. | `""` |
 | `router.epp.image.pullPolicy` | EPP container image pull policy. | `Always` |
 | `router.epp.env` | Extra environment variables for EPP container. | `[]` |
 | `router.epp.extraContainerPorts` | Extra ports to expose on the EPP container. | `[]` |
@@ -434,7 +475,7 @@ Configuration for the backend model servers that EPP routes traffic to. These se
 | `router.modelServers.protocol` | Protocol used by model servers. Options: `[http, grpc]`. | `http` |
 | `router.modelServers.targetPorts` | Port(s) EPP routes traffic to on the model servers. | `[{number: 8000}]` |
 | `router.modelServers.targetPortNumber` | Legacy fallback port number for GKE health check policies. | `8000` |
-| `router.modelServers.grpcServiceName` | Service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `type=vllm` and `protocol=grpc`. Set `""` for overall server health or `"vllm.grpc.engine.VllmEngine"` for legacy `VllmEngine` servers. | `vllm.Inference` |
+| `router.modelServers.grpcServiceName` | Optional service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `protocol=grpc`. Empty omits `grpcServiceName` to query overall server health. | `""` |
 
 #### Complete Model Server Example
 
@@ -571,7 +612,8 @@ The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs re
 | `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.31.0` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. Ignored when `digest` is set. | `v0.31.0` |
+| `router.tokenizer.image.digest` | Pins the tokenizer image by digest; same rules as `router.epp.image.digest`. | `""` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
@@ -640,8 +682,8 @@ Runs a latency training server and one or more prediction servers that feed a la
 | `router.latencyPredictor.podSecurityContext` | Pod-level `securityContext` for the training and prediction pods in `service` mode. | `{}` |
 | `router.latencyPredictor.affinity` | Affinity for the training and prediction pods in `service` mode. Empty uses `router.epp.affinity`. | `{}` |
 | `router.latencyPredictor.tolerations` | Tolerations for the training and prediction pods in `service` mode. Empty uses `router.epp.tolerations`. | `[]` |
-| `router.latencyPredictor.trainingServer.image` | Latency training server image configuration. | |
-| `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration. | |
+| `router.latencyPredictor.trainingServer.image` | Latency training server image configuration (`registry`, `repository`, `tag`, `digest`, `pullPolicy`). `digest` follows the same rules as `router.epp.image.digest`. | |
+| `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration (`registry`, `repository`, `tag`, `digest`, `pullPolicy`). `digest` follows the same rules as `router.epp.image.digest`. | |
 | `router.latencyPredictor.predictionServers.count` | Number of prediction servers: containers in the EPP pod in `sidecar` mode, pods in `service` mode. | `1` |
 | `router.latencyPredictor.trainingServer.securityContext` | Container-level `securityContext` for the training server container. | `{}` |
 | `router.latencyPredictor.predictionServers.securityContext` | Container-level `securityContext` for each prediction server container. | `{}` |
@@ -696,7 +738,7 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
 
 ### 7. RBAC
 
-The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name; `<ns>` is the release namespace.
+The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name, or `router.fullnameOverride` when it is set in the standalone chart; `<ns>` is the release namespace.
 
 | Name | Kind | Rendered when | Grants |
 |---|---|---|---|
@@ -804,7 +846,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |
 | `router.proxy.tracing.samplingPercentage` | Percentage of requests without an incoming sampling decision that Envoy traces (`random_sampling`). | `10` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
-| `router.proxy.image` | Sidecar container image. | `""` |
+| `router.proxy.image` | Sidecar container image, as a full reference. To pin by digest, write `repository@sha256:...` without a tag. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |
 | `router.proxy.command` | Sidecar container command. | `""` |
 | `router.proxy.args` | Sidecar container arguments. | `[]` |

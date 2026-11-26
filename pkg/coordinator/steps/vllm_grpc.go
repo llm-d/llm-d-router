@@ -156,6 +156,8 @@ func (s *EncodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Reque
 		return err
 	}
 	vllmReq.EncodeRan = true
+	// A re-run of this step replaces the descriptors of the earlier attempt.
+	reqCtx.ECTransferParams = nil
 	s.ec.MergeEncodeResponse(ctx, reqCtx, res.ecParams)
 	reqCtx.CaptureResponseHeaders(resp.Header)
 
@@ -215,6 +217,9 @@ func (s *PrefillStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Requ
 
 	reqCtx.KVTransferParams = res.kvParams
 	vllmReq.PrefillRan = true
+	// A re-run of this step must not keep the counts of the earlier attempt.
+	vllmReq.PrefillPromptTokens = nil
+	reqCtx.PrefillCachedTokens = nil
 	if res.info.HasPromptInfo {
 		n := res.info.NumPromptTokens
 		vllmReq.PrefillPromptTokens = &n
@@ -473,6 +478,9 @@ func forwardVLLMAsHTTPUnaryGenerate(
 			return out, nil
 		}
 		if ok && st.status != grpcframe.StatusOK {
+			if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+				return out, err
+			}
 			return out, &pipeline.UpstreamError{Step: step, StatusCode: grpcStatusToHTTPStatus(st.status)}
 		}
 		return out, fmt.Errorf("%s: %w: upstream unary Generate returned no message", step, &pipeline.UpstreamError{Step: step})
@@ -711,6 +719,9 @@ func forwardVLLMAsHTTPStreamGenerate(
 	if st.status != grpcframe.StatusOK {
 		httpStatus := grpcStatusToHTTPStatus(st.status)
 		if !out.Committed {
+			if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+				return out, err
+			}
 			return out, &pipeline.UpstreamError{Step: step, StatusCode: httpStatus}
 		}
 		return out, &pipeline.UpstreamStreamedError{Step: step, StatusCode: httpStatus}

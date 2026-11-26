@@ -19,11 +19,13 @@ package grpcframe
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -667,7 +669,93 @@ func TestReadUnaryRequest(t *testing.T) {
 			_, code, rErr := ReadUnaryRequest(req, limit)
 			require.ErrorIs(t, rErr, tc.wantErr)
 			require.Equal(t, tc.wantCode, code)
+			require.Equal(t, tc.wantErr.Error(), ReadErrorMessage(rErr))
 			require.True(t, body.closed)
 		})
 	}
+
+	require.Equal(t, "failed to read request body", ReadErrorMessage(errors.New("secret socket detail")))
+}
+
+func TestHTTPStatusToCodeMappings(t *testing.T) {
+	require.Equal(t, codes.InvalidArgument, UpstreamHTTPStatusToCode(http.StatusBadRequest))
+	require.Equal(t, codes.InvalidArgument, UpstreamHTTPStatusToCode(http.StatusUnprocessableEntity))
+	require.Equal(t, codes.Unauthenticated, UpstreamHTTPStatusToCode(http.StatusUnauthorized))
+	require.Equal(t, codes.PermissionDenied, UpstreamHTTPStatusToCode(http.StatusForbidden))
+	require.Equal(t, codes.Unimplemented, UpstreamHTTPStatusToCode(http.StatusNotFound))
+	require.Equal(t, codes.Unimplemented, UpstreamHTTPStatusToCode(http.StatusMethodNotAllowed))
+	require.Equal(t, codes.ResourceExhausted, UpstreamHTTPStatusToCode(http.StatusRequestEntityTooLarge))
+	require.Equal(t, codes.ResourceExhausted, UpstreamHTTPStatusToCode(http.StatusTooManyRequests))
+	require.Equal(t, codes.DeadlineExceeded, UpstreamHTTPStatusToCode(http.StatusGatewayTimeout))
+	require.Equal(t, codes.Unavailable, UpstreamHTTPStatusToCode(http.StatusInternalServerError))
+	require.Equal(t, codes.Unavailable, UpstreamHTTPStatusToCode(http.StatusBadGateway))
+
+	require.Equal(t, codes.InvalidArgument, LocalHTTPStatusToCode(http.StatusBadRequest))
+	require.Equal(t, codes.PermissionDenied, LocalHTTPStatusToCode(http.StatusForbidden))
+	require.Equal(t, codes.Unavailable, LocalHTTPStatusToCode(http.StatusBadGateway))
+	require.Equal(t, codes.Unavailable, LocalHTTPStatusToCode(http.StatusServiceUnavailable))
+	require.Equal(t, codes.DeadlineExceeded, LocalHTTPStatusToCode(http.StatusGatewayTimeout))
+	require.Equal(t, codes.Internal, LocalHTTPStatusToCode(http.StatusInternalServerError))
+}
+
+func TestHTTPStatus(t *testing.T) {
+	for code, want := range map[codes.Code]int{
+		codes.OK:                 http.StatusOK,
+		codes.Canceled:           499,
+		codes.Unknown:            http.StatusInternalServerError,
+		codes.InvalidArgument:    http.StatusBadRequest,
+		codes.DeadlineExceeded:   http.StatusGatewayTimeout,
+		codes.NotFound:           http.StatusNotFound,
+		codes.AlreadyExists:      http.StatusConflict,
+		codes.PermissionDenied:   http.StatusForbidden,
+		codes.ResourceExhausted:  http.StatusTooManyRequests,
+		codes.FailedPrecondition: http.StatusBadRequest,
+		codes.Aborted:            http.StatusConflict,
+		codes.OutOfRange:         http.StatusBadRequest,
+		codes.Unimplemented:      http.StatusNotImplemented,
+		codes.Internal:           http.StatusInternalServerError,
+		codes.Unavailable:        http.StatusServiceUnavailable,
+		codes.DataLoss:           http.StatusInternalServerError,
+		codes.Unauthenticated:    http.StatusUnauthorized,
+	} {
+		require.Equal(t, want, HTTPStatus(strconv.FormatUint(uint64(code), 10)), "code %d", code)
+	}
+
+	// A value that does not name a code is a server error, not a success.
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus(""))
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus("not a number"))
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus("-1"))
+	require.Equal(t, http.StatusInternalServerError, HTTPStatus("99"))
+}
+
+func TestNewH2CAwareTransport(t *testing.T) {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proto-Major", string(rune('0'+r.ProtoMajor)))
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Config.Protocols = protocols
+	srv.Start()
+	defer srv.Close()
+
+	client := &http.Client{Transport: NewH2CAwareTransport(&http.Transport{})}
+
+	httpReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/v1/completions", nil)
+	require.NoError(t, err)
+	httpReq.Header.Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+	httpResp, err := client.Do(httpReq)
+	require.NoError(t, err)
+	_ = httpResp.Body.Close()
+	require.Equal(t, "1", httpResp.Header.Get("X-Proto-Major"))
+
+	grpcReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/vllm.Inference/Generate", nil)
+	require.NoError(t, err)
+	grpcReq.Header.Set(reqcommon.HeaderContentType, MediaType)
+	grpcResp, err := client.Do(grpcReq)
+	require.NoError(t, err)
+	_ = grpcResp.Body.Close()
+	require.Equal(t, "2", grpcResp.Header.Get("X-Proto-Major"))
 }

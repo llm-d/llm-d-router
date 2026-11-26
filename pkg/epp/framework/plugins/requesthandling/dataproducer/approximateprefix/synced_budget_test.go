@@ -38,3 +38,16 @@ func TestSyncedHashBudget(t *testing.T) {
 		t.Fatalf("unset tokens budget = %d, want %d", got, defaultLRUCapacityPerServer)
 	}
 }
+
+// A blockSizeTokens below minBlockSizeTokens is raised to the floor when
+// prompts are hashed (GetBlockSize), so each recorded hash covers
+// minBlockSizeTokens tokens. The hash budget must divide by the same block
+// size, or the window holds more tokens than maxSyncedTokens.
+func TestSyncedHashBudgetAppliesBlockSizeFloor(t *testing.T) {
+	cfg := config{BlockSizeTokens: 16, MaxSyncedTokens: 640}
+	want := 640 / minBlockSizeTokens
+	if got := syncedHashBudget(cfg); got != want {
+		t.Fatalf("budget for blockSizeTokens=16 = %d hashes (%d tokens at the %d-token floor), want %d",
+			got, got*minBlockSizeTokens, minBlockSizeTokens, want)
+	}
+}

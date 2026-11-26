@@ -62,16 +62,26 @@ func TestFactory_UnknownStrategy(t *testing.T) {
 }
 
 func TestFactory_InvalidConfig(t *testing.T) {
-	cases := map[string]string{
-		"negative ttl":       `{"evictionTtlSeconds":-1}`,
-		"zero sweep":         `{"evictionSweepSeconds":0}`,
-		"negative weight":    `{"lasWeightService":-0.1}`,
-		"negative half life": `{"lasHalfLifeSeconds":-1}`,
+	cases := map[string]struct {
+		cfg     string
+		wantErr string
+	}{
+		"negative ttl":       {cfg: `{"evictionTtlSeconds":-1}`},
+		"zero sweep":         {cfg: `{"evictionSweepSeconds":0}`},
+		"sweep under 1ns":    {cfg: `{"evictionSweepSeconds":1e-10}`, wantErr: "evictionSweepSeconds 1e-10 is too small to represent as a duration"},
+		"sweep too long":     {cfg: `{"evictionSweepSeconds":1e10}`, wantErr: "evictionSweepSeconds 1e+10 exceeds the representable duration"},
+		"ttl under 1ns":      {cfg: `{"evictionTtlSeconds":1e-10}`, wantErr: "evictionTtlSeconds 1e-10 is too small to represent as a duration"},
+		"ttl too long":       {cfg: `{"evictionTtlSeconds":1e10}`, wantErr: "evictionTtlSeconds 1e+10 exceeds the representable duration"},
+		"negative weight":    {cfg: `{"lasWeightService":-0.1}`},
+		"negative half life": {cfg: `{"lasHalfLifeSeconds":-1}`},
 	}
-	for name, cfg := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := ProgramAwarePluginFactory("test", decoder(cfg), nil)
+			_, err := ProgramAwarePluginFactory("test", decoder(tc.cfg), nil)
 			require.Error(t, err)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+			}
 		})
 	}
 }
@@ -170,7 +180,7 @@ func TestPick_IdleProgramServiceDecaysWithoutVisits(t *testing.T) {
 		LASWeightService:   1.0,
 		LASWeightHeadWait:  0.0,
 		LASHalfLifeSeconds: 1,
-	})
+	}, nil)
 	require.NoError(t, err)
 	las, ok := strategy.(*LASStrategy)
 	require.True(t, ok)
@@ -345,13 +355,9 @@ func TestEvictIdle_EvictsNeverCompletedAfterTTL(t *testing.T) {
 // limit. The gauges start empty and the default cap is restored after the test.
 func newCappedPlugin(t *testing.T, limit int) *ProgramAwarePlugin {
 	t.Helper()
-	avgWaitTimeMs.Reset()
-	attainedServiceTokens.Reset()
 	metricsutil.SetFairnessIDLabelLimit(limit)
 	t.Cleanup(func() {
 		metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit)
-		avgWaitTimeMs.Reset()
-		attainedServiceTokens.Reset()
 	})
 
 	p, err := ProgramAwarePluginFactory("test", nil, nil)
@@ -372,16 +378,16 @@ func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
 		pa.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 	}
 
-	require.Equal(t, testCap, promtestutil.CollectAndCount(avgWaitTimeMs),
+	require.Equal(t, testCap, promtestutil.CollectAndCount(pa.avgWaitTimeMs),
 		"100 distinct program IDs must leave only the cap's series, with no overflow series")
-	require.Equal(t, testCap, promtestutil.CollectAndCount(attainedServiceTokens),
+	require.Equal(t, testCap, promtestutil.CollectAndCount(pa.strategy.(*LASStrategy).attainedServiceTokens),
 		"the attained service gauge must be bounded identically")
 
 	// Eviction deletes an admitted program's series by its ID; a capped-out program has none.
 	pa.evictKey("program-0")
 	pa.evictKey("program-99")
-	require.Equal(t, testCap-1, promtestutil.CollectAndCount(avgWaitTimeMs))
-	require.Equal(t, testCap-1, promtestutil.CollectAndCount(attainedServiceTokens))
+	require.Equal(t, testCap-1, promtestutil.CollectAndCount(pa.avgWaitTimeMs))
+	require.Equal(t, testCap-1, promtestutil.CollectAndCount(pa.strategy.(*LASStrategy).attainedServiceTokens))
 }
 
 // A program whose fairness ID equals the overflow value is a real program while the cap has room,
@@ -394,8 +400,8 @@ func TestMetrics_ProgramNamedLikeOverflowValueIsReported(t *testing.T) {
 	require.NoError(t, pa.PreRequest(ctx, req, nil))
 	pa.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 
-	require.Equal(t, 1, promtestutil.CollectAndCount(avgWaitTimeMs))
-	require.Equal(t, 1, promtestutil.CollectAndCount(attainedServiceTokens))
+	require.Equal(t, 1, promtestutil.CollectAndCount(pa.avgWaitTimeMs))
+	require.Equal(t, 1, promtestutil.CollectAndCount(pa.strategy.(*LASStrategy).attainedServiceTokens))
 }
 
 func TestComputeFairnessIndex_EqualWaits(t *testing.T) {
@@ -483,7 +489,7 @@ func TestNewStrategy_TurnPriority(t *testing.T) {
 		Strategy:                      "turn-priority",
 		TurnPriorityTimeWeight:        0.25,
 		TurnPriorityInactivitySeconds: 120,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	tp, ok := strategy.(*turnPriorityStrategy)
@@ -494,7 +500,7 @@ func TestNewStrategy_TurnPriority(t *testing.T) {
 }
 
 func TestNewStrategy_UnknownRejected(t *testing.T) {
-	_, err := newStrategy(Config{Strategy: "nope"})
+	_, err := newStrategy(Config{Strategy: "nope"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "turn-priority")
 }

@@ -268,3 +268,39 @@ func TestScheduleLogsProcessResultsSuccessOnlyWithoutError(t *testing.T) {
 		})
 	}
 }
+
+// A handler that runs a profile literally named prefill without naming it keeps
+// prefill attribution.
+func TestFillDefaultPrefillProfile(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *fwksched.SchedulingResult
+		want   string
+	}{
+		{
+			name:   "unnamed result carrying the default profile",
+			result: &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"prefill": {}}},
+			want:   "prefill",
+		},
+		{
+			name:   "unnamed result without the default profile",
+			result: &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"decode": {}}},
+			want:   "",
+		},
+		{
+			name:   "named result is left alone",
+			result: &fwksched.SchedulingResult{PrefillProfileName: "prefill-h200", ProfileResults: map[string]*fwksched.ProfileRunResult{"prefill": {}}},
+			want:   "prefill-h200",
+		},
+		{name: "nil result", result: nil, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fillDefaultPrefillProfile(tc.result)
+			if tc.result == nil {
+				return
+			}
+			assert.Equal(t, tc.want, tc.result.PrefillProfileName)
+		})
+	}
+}

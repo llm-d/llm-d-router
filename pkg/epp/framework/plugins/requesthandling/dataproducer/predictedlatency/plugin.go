@@ -57,9 +57,6 @@ const (
 	TTFTSLOHeaderKey = metadata.TTFTSLOHeaderKey
 	// TPOTSLOHeaderKey is the header key for the TPOT SLO.
 	TPOTSLOHeaderKey = metadata.TPOTSLOHeaderKey
-
-	// ExperimentalDefaultPrefillProfile is the default profile name for prefill endpoints in disaggregated serving.
-	ExperimentalDefaultPrefillProfile = "prefill"
 )
 
 // PredictedLatency is the latency data provider plugin. It handles:
@@ -416,6 +413,9 @@ type predictedLatencyCtx struct {
 
 	ttftSLO    float64
 	avgTPOTSLO float64
+	// elapsedMs is the time from the request's arrival at the EPP until its
+	// predictions returned, which counts against its TTFT SLO.
+	elapsedMs float64
 
 	predictionsForScheduling map[string]endpointPredictionResult
 
@@ -429,13 +429,18 @@ type predictedLatencyCtx struct {
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
+	incomingModelName := ""
 	if request.Body != nil {
 		if tp := request.Body.TokenizedRequest; tp != nil {
 			inputTokenCount = tp.TokenCount()
 		}
+		// Body.Model is the model the client asked for. A rewrite changes TargetModel
+		// and the payload but not Body.Model, so this is the director's IncomingModelName.
+		incomingModelName = request.Body.Model
 	}
 	return &predictedLatencyCtx{
 		targetModel:                    request.TargetModel,
+		incomingModelName:              incomingModelName,
 		inputTokenCount:                inputTokenCount,
 		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints:  make(map[string]float64),
@@ -443,6 +448,15 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
 		predictionsForScheduling:       make(map[string]endpointPredictionResult),
 	}
+}
+
+// msSinceReceived returns the time from the request's arrival at the EPP to t, in
+// milliseconds. It is 0 when the request carries no received time.
+func msSinceReceived(request *fwksched.InferenceRequest, t time.Time) float64 {
+	if request.ReceivedTimestamp.IsZero() {
+		return 0
+	}
+	return float64(t.Sub(request.ReceivedTimestamp)) / float64(time.Millisecond)
 }
 
 func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksched.InferenceRequest) (*predictedLatencyCtx, error) {

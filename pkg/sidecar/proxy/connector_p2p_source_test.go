@@ -115,9 +115,9 @@ var _ = Describe("P2P KV cache source in the request body", func() {
 		<-testInfo.stoppedCh
 	})
 
-	// Without the header the body is not read: the request streams to the
-	// decoder as the client sent it, a client-supplied source included.
-	It("should forward the body unread without the source header", func() {
+	// Without the header the request reaches the decoder as the client sent
+	// it, a client-supplied source included.
+	It("should forward the body as sent without the source header", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		body := sourceBody(validSource, map[string]any{"other": true})
@@ -181,11 +181,11 @@ var _ = Describe("P2P KV cache source in the request body", func() {
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
 		source := map[string]any{
 			reqcommon.FieldKVRequestID: sourceKVRequestID,
-			reqcommon.FieldRemoteHost:  extractHost(prefillHostPort),
+			reqcommon.FieldRemoteHost:  routing.ExtractHost(prefillHostPort),
 			reqcommon.FieldRemotePort:  port,
 		}
 		postChatCompletions(proxyBaseAddr, sourceBody(source, nil), map[string]string{
-			routing.KVCacheSourceHeader:   net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port)),
+			routing.KVCacheSourceHeader:   net.JoinHostPort(routing.ExtractHost(prefillHostPort), strconv.Itoa(port)),
 			routing.PrefillEndpointHeader: prefillHostPort,
 			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
 		})

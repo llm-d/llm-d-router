@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -55,6 +56,8 @@ type InferenceRequest struct {
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
+	// ReceivedTimestamp is when the EPP received the request.
+	ReceivedTimestamp time.Time
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 
@@ -214,10 +217,18 @@ type ProfileRunResult struct {
 	ScoredCandidates []ScoredEndpoint
 }
 
+// DefaultPrefillProfile is the prefill profile name a profile handler runs when
+// it does not name one.
+const DefaultPrefillProfile = "prefill"
+
 // SchedulingResult captures the result of the scheduling cycle.
 type SchedulingResult struct {
 	ProfileResults     map[string]*ProfileRunResult
 	PrimaryProfileName string
+	// PrefillProfileName names the profile that picked the prefill stage, when
+	// the profile handler ran one. The prefill profile name is configurable, so
+	// consumers read it here instead of looking up a fixed name.
+	PrefillProfileName string
 }
 
 // PrimaryEndpoint returns the first endpoint the primary profile picked, as
@@ -228,6 +239,16 @@ func (r *SchedulingResult) PrimaryEndpoint() Endpoint {
 		return nil
 	}
 	return r.ProfileResults[r.PrimaryProfileName].FirstEndpoint()
+}
+
+// PrefillProfile returns the profile result that picked the prefill stage, or
+// nil when the result is nil, has no prefill profile name, or that profile
+// picked none.
+func (r *SchedulingResult) PrefillProfile() *ProfileRunResult {
+	if r == nil || r.PrefillProfileName == "" {
+		return nil
+	}
+	return r.ProfileResults[r.PrefillProfileName]
 }
 
 // FirstEndpoint returns the first endpoint the profile picked, as stored, or

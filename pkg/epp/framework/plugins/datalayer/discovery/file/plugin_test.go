@@ -259,6 +259,68 @@ endpoints:
 	assert.Equal(t, 1, notifier.upserted[1].RankIndex)
 }
 
+// Ranks behind one port are one entry for each rank, with the same address
+// and port. The marker tells them from the ports of a multi-port server.
+func TestStart_RankByHeader(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: decode-rank-0
+    address: "10.0.0.1"
+    port: "8000"
+    rankByHeader: true
+  - name: decode-rank-1
+    address: "10.0.0.1"
+    port: "8000"
+    rankIndex: 1
+    rankByHeader: true
+  - name: other-port
+    address: "10.0.0.2"
+    port: "8001"
+    rankIndex: 1
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, newFD(path, false).Start(ctx, notifier))
+	require.Len(t, notifier.upserted, 3)
+	for i, want := range []struct {
+		rankIndex    int
+		rankByHeader bool
+	}{{0, true}, {1, true}, {1, false}} {
+		assert.Equal(t, want.rankIndex, notifier.upserted[i].RankIndex, "entry %d", i)
+		assert.Equal(t, want.rankByHeader, notifier.upserted[i].RankByHeader, "entry %d", i)
+	}
+}
+
+func TestStart_DuplicateRankByHeaderRejected(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: decode-rank-0
+    address: "10.0.0.1"
+    port: "8000"
+    rankByHeader: true
+  - name: decode-rank-0-dup
+    address: "10.0.0.1"
+    port: "8000"
+    rankByHeader: true
+  - name: decode-rank-1
+    address: "10.0.0.1"
+    port: "8000"
+    rankIndex: 1
+    rankByHeader: true
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := newFD(path, false).Start(ctx, notifier)
+	require.ErrorContains(t, err, `endpoint "decode-rank-0-dup": duplicate rank 0 for 10.0.0.1:8000`)
+	require.Len(t, notifier.upserted, 2)
+	assert.Equal(t, "decode-rank-0", notifier.upserted[0].Name)
+	assert.Equal(t, "decode-rank-1", notifier.upserted[1].Name)
+}
+
 func TestStart_NegativeRankIndex(t *testing.T) {
 	path := writeTemp(t, `
 endpoints:

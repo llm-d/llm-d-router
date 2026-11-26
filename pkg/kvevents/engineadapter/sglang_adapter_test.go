@@ -361,6 +361,8 @@ func TestSGLangBlockStored_WithLoraName(t *testing.T) {
 	require.NotNil(t, blockStored.LoraName)
 	assert.Equal(t, "sql-lora", *blockStored.LoraName)
 	assert.Nil(t, blockStored.ExtraKeys)
+	require.NotNil(t, blockStored.SessionID)
+	assert.Equal(t, "session-1", *blockStored.SessionID)
 }
 
 // TestSGLangBlockStoredNegativeHashPreservesBits verifies the signed hash
@@ -531,8 +533,7 @@ func TestSGLangAllBlocksCleared(t *testing.T) {
 
 // TestSGLangParseMessage_MapEncodedBlockStored verifies the map encoding emitted
 // by SGLang since sgl-project/sglang#37482 dropped msgspec array_like=True:
-// events arrive as field-name maps with the tag under "type". session_id is
-// attribution only and is not reflected in the domain event. The event has a
+// events arrive as field-name maps with the tag under "type". The event has a
 // parent, so its salt is already carried by the parent's request key and no
 // extra keys are emitted.
 func TestSGLangParseMessage_MapEncodedBlockStored(t *testing.T) {
@@ -570,6 +571,8 @@ func TestSGLangParseMessage_MapEncodedBlockStored(t *testing.T) {
 	assert.Equal(t, "GPU", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
 	assert.Nil(t, blockStored.ExtraKeys)
+	require.NotNil(t, blockStored.SessionID)
+	assert.Equal(t, "some-session", *blockStored.SessionID)
 }
 
 // TestSGLangParseMessage_MapEncodedBlockStored_WithLoraName verifies map-encoded
@@ -834,7 +837,7 @@ func decodeSGLangEvent(payload []byte) (kvevents.GenericEvent, error) {
 func TestSGLangParseMessage_EngineSchema(t *testing.T) {
 	stored := []any{eventTagBlockStored, []uint64{1}, nil, []uint32{2}, 1, nil, "GPU"}
 	for name, event := range map[string]any{
-		"array trailing fields": append(stored, nil, 42, nil, "unused", -1),
+		"array trailing fields": append(stored, nil, "session", nil, "unused", -1),
 		"map engine fields": map[string]any{
 			"type": eventTagBlockStored, "block_hashes": []uint64{1},
 			"token_ids": []uint32{2}, "block_size": 1, "medium": "GPU",
@@ -847,7 +850,9 @@ func TestSGLangParseMessage_EngineSchema(t *testing.T) {
 			require.NoError(t, err)
 			_, _, batch, err := NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
 			require.NoError(t, err)
+			session := "session"
 			require.Equal(t, []kvevents.GenericEvent{&kvevents.BlockStoredEvent{
+				SessionID:   &session,
 				BlockHashes: []uint64{1}, Tokens: []uint32{2}, BlockSize: 1, DeviceTier: "GPU",
 			}}, batch.Events)
 		})

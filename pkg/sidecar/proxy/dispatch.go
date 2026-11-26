@@ -148,12 +148,11 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		// The decode pod dials this address. EPP sets it from the prefill
 		// endpoint it chose. Checked only when the host differs from the
 		// prefill target, which IsAllowed already cleared.
-		if p2p.prefill != nil && p2p.prefill.host != extractHost(prefillHostPort) && !s.allowlistValidator.IsAllowedHost(p2p.prefill.host) {
+		if p2p.prefill != nil && p2p.prefill.host != routing.ExtractHost(prefillHostPort) && !s.allowlistValidator.IsAllowedHost(p2p.prefill.host) {
 			denySSRF(w, r, logger, span, "prefill P2P address", p2p.prefill.String())
 			return
 		}
-		// The source header is the signal to read the body: reading every body
-		// to learn that most carry no source would buffer every request. The
+		// The source header is the signal to look for a source block. The
 		// P/D and EC connectors and decodeWithP2PSource take the source from
 		// p2p. The other paths forward r, rebuilt over the body without the
 		// source when one was present, so a rejected source never reaches vLLM.
@@ -262,15 +261,16 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
-		// dataParallelHandler and the decoder passthrough forward r unread, so
-		// the guard in readJSONBody would never run on those branches.
-		// readJSONBody consumes r.Body, so r is rebuilt over the same bytes.
-		if apiType == reqcommon.APITypeResponses && p2p.body == nil {
-			raw, _, ok := s.readJSONBody(r, w)
-			if !ok {
+		// dataParallelHandler and the decoder passthrough forward r as given, so
+		// a caller's P/D flags are removed here for every HTTP branch below. An
+		// unknown data-parallel replica is refused without reading the body.
+		dataParallelTarget := r.Header.Get(routing.DataParallelEndpointHeader)
+		unknownReplica := s.forwardDataParallel && dataParallelTarget != "" && s.dataParallelProxies[dataParallelTarget] == nil
+		if !isGRPCRequest(r) && !unknownReplica {
+			var ok bool
+			if r, ok = s.decoderOnlyRequest(w, r, p2p, apiType); !ok {
 				return
 			}
-			r = cloneRequestWithBody(r.Context(), r, raw)
 		}
 		if p2p.grpcReq != nil {
 			if p2p.source != nil {

@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
@@ -61,7 +62,14 @@ var (
 // VllmInferenceParser implements fwkrh.Parser for vllm.Inference Generate and
 // GenerateStream RPCs.
 type VllmInferenceParser struct {
-	typedName fwkplugin.TypedName
+	typedName  fwkplugin.TypedName
+	baseModels map[string]bool
+}
+
+// Parameters configures the parser. BaseModels names the pool's base models;
+// a model-rewrite target outside the list is a LoRA adapter.
+type Parameters struct {
+	BaseModels []string `json:"baseModels"`
 }
 
 // NewVllmInferenceParser creates a new VllmInferenceParser.
@@ -75,8 +83,22 @@ func NewVllmInferenceParser() *VllmInferenceParser {
 }
 
 // VllmInferenceParserPluginFactory is the factory function used to register the plugin.
-func VllmInferenceParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewVllmInferenceParser().WithName(name), nil
+func VllmInferenceParserPluginFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	parser := NewVllmInferenceParser()
+	if params != nil {
+		var cfg Parameters
+		if err := params.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("%s: parameters: %w", VllmInferenceParserType, err)
+		}
+		parser.baseModels = make(map[string]bool, len(cfg.BaseModels))
+		for _, base := range cfg.BaseModels {
+			if strings.TrimSpace(base) == "" {
+				return nil, fmt.Errorf("%s: parameters: baseModels must not contain empty strings", VllmInferenceParserType)
+			}
+			parser.baseModels[base] = true
+		}
+	}
+	return parser.WithName(name), nil
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -198,6 +220,12 @@ func convertGenerateRequest(req *vllmwire.Request, stream bool) (*fwkrequest.Inf
 	}, nil
 }
 
+// extractMMFeatures reads one hash per media item into MMHashes, keyed by
+// modality and in request order. Consumers zip MMPlaceholders[modality] with
+// MMHashes[modality] by index, so a modality gets placeholder ranges only
+// when every hashed item of that modality carries PreprocessedMediaFeatures.
+// A raw item with a uuid has no token span, and mixing it into the same
+// modality would pair its hash with another item's range.
 func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures, error) {
 	if !req.HasMedia() {
 		return nil, nil //nolint:nilnil
@@ -258,6 +286,14 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 	if len(hashes) == 0 {
 		return nil, nil //nolint:nilnil
 	}
+	for key, ranges := range placeholders {
+		if len(ranges) != len(hashes[key]) {
+			delete(placeholders, key)
+		}
+	}
+	if len(placeholders) == 0 {
+		placeholders = nil
+	}
 	return &tokenization.MultiModalFeatures{
 		MMHashes:       hashes,
 		MMPlaceholders: placeholders,
@@ -277,10 +313,22 @@ func modalityName(m vllmpb.Modality) (reqcommon.Modality, error) {
 	}
 }
 
-// RewriteModelName writes the resolved model into the framed GenerateRequest in
-// one allocation. When lora_name is non-empty, it rewrites lora_name and keeps
-// GenerateRequest.model as the base model. A target equal to the base model
-// clears lora_name, because an empty lora_name selects the base model.
+// RewriteModelName writes the resolved model into the framed GenerateRequest.
+// vLLM's gRPC server accepts only base model names in GenerateRequest.model
+// and resolves adapters from lora_name, so an adapter target is written into
+// lora_name and GenerateRequest.model keeps the base model. A base-model
+// target rewrites model and clears lora_name, because an empty lora_name
+// selects the base model.
+//
+// When BaseModels is configured, a target outside that list is an adapter. A
+// request whose model is not a base model names the pool through an alias, so
+// the rewrite writes the base model alongside the adapter; a single BaseModels
+// entry resolves it, and several without a match return an error. A request
+// that sets only lora_name keeps its empty model, which vLLM accepts.
+// Without BaseModels, the parser cannot tell an adapter from another base
+// model, so only a request that already carries lora_name is rewritten to
+// another adapter (a target other than its base model); a request without
+// lora_name always has its model field rewritten.
 func (p *VllmInferenceParser) RewriteModelName(payload fwkrequest.MarshalablePayload, model string) (fwkrequest.MarshalablePayload, error) {
 	raw, ok := payload.(fwkrequest.PayloadBytes)
 	if !ok {
@@ -294,14 +342,40 @@ func (p *VllmInferenceParser) RewriteModelName(payload fwkrequest.MarshalablePay
 	if err != nil {
 		return nil, fmt.Errorf("rewriting model name: %w", err)
 	}
-	rewrite := vllmwire.RewriteModel
-	if req.LoraName() != "" {
-		rewrite = vllmwire.RewriteLoraName
-		if model == req.Model() {
-			model = ""
+	adapterTarget := req.LoraName() != "" && model != req.Model()
+	baseModel := req.Model()
+	if len(p.baseModels) > 0 {
+		adapterTarget = !p.baseModels[model]
+		// vLLM accepts an empty model when lora_name is set, so a
+		// lora_name-only request needs no base model.
+		if adapterTarget && baseModel != "" && !p.baseModels[baseModel] {
+			if len(p.baseModels) != 1 {
+				return nil, errcommon.Error{
+					Code: errcommon.Internal,
+					Msg: fmt.Sprintf("rewriting model name: cannot resolve base model for adapter target %q: request model %q is not a configured base model and %d base models are configured",
+						model, baseModel, len(p.baseModels)),
+				}
+			}
+			for b := range p.baseModels {
+				baseModel = b
+			}
 		}
 	}
-	framed, err := rewrite(raw, model)
+	var framed []byte
+	switch {
+	case adapterTarget:
+		framed, err = vllmwire.RewriteLoraName(raw, model)
+		if err == nil && baseModel != req.Model() {
+			framed, err = vllmwire.RewriteModel(framed, baseModel)
+		}
+	case req.LoraName() != "":
+		framed, err = vllmwire.RewriteLoraName(raw, "")
+		if err == nil && model != req.Model() {
+			framed, err = vllmwire.RewriteModel(framed, model)
+		}
+	default:
+		framed, err = vllmwire.RewriteModel(raw, model)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("rewriting model name: %w", err)
 	}

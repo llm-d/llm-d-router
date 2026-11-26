@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -291,6 +292,37 @@ func extractorMapWith(contributors ...fwkdl.CrossReplicaContributor) *extractorM
 
 func testCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, contributors ...fwkdl.CrossReplicaContributor) *crossReplicaPublisher {
 	return &crossReplicaPublisher{syncer: syncer, contributors: contributors, publishTimeout: defaultCrossReplicaPublishTimeout}
+}
+
+type startingSyncer struct {
+	fakeSyncer
+	startErr error
+	started  int
+}
+
+func (s *startingSyncer) Start(context.Context) error {
+	s.started++
+	return s.startErr
+}
+
+func TestStartCrossReplicaSync_StartsSyncer(t *testing.T) {
+	syncer := &startingSyncer{}
+	pub := testCrossReplicaPublisher(syncer)
+	pub.interval = time.Hour
+	r := &Runtime{crossReplicaPub: pub}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	require.NoError(t, r.StartCrossReplicaSync(ctx))
+	assert.Equal(t, 1, syncer.started)
+}
+
+func TestStartCrossReplicaSync_ReturnsStartError(t *testing.T) {
+	syncer := &startingSyncer{startErr: errors.New("address already in use")}
+	r := &Runtime{crossReplicaPub: testCrossReplicaPublisher(syncer)}
+
+	err := r.StartCrossReplicaSync(context.Background())
+	require.ErrorContains(t, err, "address already in use")
 }
 
 func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {

@@ -238,14 +238,14 @@ presubmit: LINT_NEW_ONLY=true
 presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-telemetry verify-review-playbook
 
 .PHONY: update-telemetry verify-telemetry test-telemetry
-update-telemetry: image-build-builder ## Generate trace attributes, span names, and the catalog.
+update-telemetry: image-build-builder ## Generate trace attributes, spans, scheduler metrics, and catalogs.
 	$(BUILDER_RUN) 'bash hack/telemetry.sh update'
 
 verify-telemetry: image-build-builder ## Check the telemetry registry and generated files.
 	$(BUILDER_RUN) 'bash hack/telemetry.sh verify'
 
 test-telemetry: image-build-builder ## Test telemetry generation and drift detection.
-	$(BUILDER_RUN) 'bash hack/test-telemetry.sh && go test ./pkg/common/observability/semconv ./pkg/epp/scheduling'
+	$(BUILDER_RUN) 'bash hack/test-telemetry.sh && go test ./pkg/common/observability/semconv ./pkg/epp/scheduling ./pkg/epp/metrics'
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -270,6 +270,10 @@ go-mod-check: image-build-builder
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+.PHONY: mod-download
+mod-download: image-build-builder ## Download every module in the build list into the module cache
+	$(BUILDER_RUN) 'go mod download'
 
 .PHONY: clean
 clean: ## Clean build artifacts, tools and caches
@@ -360,9 +364,9 @@ bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requir
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke
-bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-benchtime=1x) to catch runtime rot
+bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-race -short -benchtime=1x) to catch runtime rot
 	@printf "\033[33;1m==== Running Flow Control Benchmark Smoke ====\033[0m\n"
-	$(BUILDER_RUN) 'go test -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
+	$(BUILDER_RUN) 'go test -race -short -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
 
 .PHONY: post-deploy-test
 post-deploy-test: ## Run post deployment tests

@@ -172,6 +172,8 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
 					assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), e.Headers[errcommon.RequestDroppedReasonHeaderKey],
 						"a shed request must tell the client why it was dropped")
+					assert.NotContains(t, e.Headers, errcommon.RetryAfterHeaderKey,
+						"legacy admission rejections must not attach Retry-After")
 				}
 			}
 		})
@@ -310,6 +312,19 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "queue at capacity",
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+		},
+		{
+			name:            "fc_reject_capacity_with_retry_after",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeRejectedCapacity,
+			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrRejected, &fctypes.QueueCapacityError{RetryAfterHint: 7 * time.Second}),
+			expectErr:       true,
+			expectErrCode:   errcommon.ResourceExhausted,
+			expectErrSubstr: "queue at capacity",
+			expectHeaders: map[string]string{
+				errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated),
+				errcommon.RetryAfterHeaderKey:           "7",
+			},
 		},
 		{
 			name:            "fc_reject_flow_limit",
@@ -499,12 +514,13 @@ func TestTranslateFlowControlError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		err          error
-		ttlPoolEmpty bool
-		wantCode     string
-		wantReason   string
-		wantNil      bool
+		name           string
+		err            error
+		ttlPoolEmpty   bool
+		wantCode       string
+		wantReason     string
+		wantRetryAfter string
+		wantNil        bool
 	}{
 		{
 			name:    "nil means dispatched and returns nil",
@@ -514,6 +530,25 @@ func TestTranslateFlowControlError(t *testing.T) {
 		{
 			name:       "capacity rejection returns 429",
 			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity),
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonSaturated),
+		},
+		{
+			name:           "capacity_rejection_with_retry_after_hint",
+			err:            fmt.Errorf("%w: %w", fctypes.ErrRejected, &fctypes.QueueCapacityError{RetryAfterHint: 5 * time.Second}),
+			wantCode:       errcommon.ResourceExhausted,
+			wantReason:     string(errcommon.RequestDroppedReasonSaturated),
+			wantRetryAfter: "5",
+		},
+		{
+			name:       "capacity_rejection_with_zero_hint_omits_retry_after",
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, &fctypes.QueueCapacityError{}),
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonSaturated),
+		},
+		{
+			name:       "capacity_rejection_with_sub_second_hint_omits_retry_after",
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, &fctypes.QueueCapacityError{RetryAfterHint: 500 * time.Millisecond}),
 			wantCode:   errcommon.ResourceExhausted,
 			wantReason: string(errcommon.RequestDroppedReasonSaturated),
 		},
@@ -621,6 +656,13 @@ func TestTranslateFlowControlError(t *testing.T) {
 			if tt.wantReason != "" {
 				assert.Equal(t, tt.wantReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey],
 					"drop reason header should match")
+			}
+			if tt.wantRetryAfter != "" {
+				assert.Equal(t, tt.wantRetryAfter, e.Headers[errcommon.RetryAfterHeaderKey],
+					"retry-after header should match")
+			} else {
+				assert.NotContains(t, e.Headers, errcommon.RetryAfterHeaderKey,
+					"retry-after header should be omitted")
 			}
 		})
 	}

@@ -142,11 +142,11 @@ func TestMatchBlockKeys(t *testing.T) {
 		{
 			name: "unconfigured tier weighs zero",
 			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
-				10: {{PodIdentifier: podA, DeviceTier: "disk"}},
+				10: {{PodIdentifier: podA, DeviceTier: "tier-z"}},
 			},
 			requestKeys: []kvblock.BlockHash{10},
 			want: map[string]kvcache.PodMatch{
-				podA: {WeightedScore: 0.0, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
+				podA: {WeightedScore: 0.0, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"tier-z": 1}},
 			},
 		},
 		{
@@ -476,6 +476,18 @@ func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
 			backends: kvcache.DefaultKVCacheBackendConfig(),
 			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "object_store"},
 			want:     0.2,
+		},
+		{
+			name:     "default backends score SGLang's disk tier at 0.6",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "disk"},
+			want:     0.6,
+		},
+		{
+			name:     "default backends score SGLang's external storage tier at 0.4",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "external"},
+			want:     0.4,
 		},
 		{
 			name:     "backend names match entry tiers case-insensitively",

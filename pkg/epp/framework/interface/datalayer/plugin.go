@@ -84,6 +84,19 @@ type PollingDispatcher interface {
 	Interval() time.Duration
 }
 
+// StartablePollingSource is an optional interface for a PollingDispatcher with
+// background work (e.g. a client certificate watcher). The runtime calls Start
+// once, synchronously, during startup.
+//
+// Contract:
+//   - Start must not block. Long-running work must be started in a goroutine
+//     that runs until ctx is done; blocking here stalls EPP startup.
+//   - A non-nil return fails startup.
+type StartablePollingSource interface {
+	PollingDispatcher
+	Start(ctx context.Context) error
+}
+
 // EventType identifies the type of mutation that triggered a notification.
 type EventType int
 

@@ -9,7 +9,7 @@ This plugin drops candidate endpoints that are failing, and keeps routing to the
 The plugin tracks two independent health signals per endpoint. An endpoint is excluded while either signal marks it unhealthy.
 
 - **Poll health.** The datalayer collector records every failed poll of a polling data source on the endpoint (see [Inputs consumed](#inputs-consumed)). An endpoint is marked unhealthy once the source configured by `pollSource` has failed at least `pollFailureThreshold` consecutive polls spanning at least `pollFailureDuration`. The first successful poll clears the mark.
-- **Response health.** The plugin reads the status of every response an endpoint returns. After `responseFailureThreshold` consecutive responses with a status in `responseFailureCodes`, the endpoint is ejected for `ejectionDuration`. Each further ejection without a successful response in between lasts one `ejectionDuration` longer, up to `maxEjectionDuration`. Any other status resets the count and the backoff. Responses that arrive while the endpoint is ejected are ignored.
+- **Response health.** The plugin reads the status of every response an endpoint returns. After `responseFailureThreshold` consecutive responses with a status in `responseFailureCodes`, the endpoint is ejected for `ejectionDuration`. Each further ejection without a successful response in between lasts one `ejectionDuration` longer, up to `maxEjectionDuration`. Any other status resets the count and the backoff. Responses that arrive while the endpoint is ejected are ignored. A failure run that would eject an endpoint while `maxEjectionPercent` of the endpoints are already ejected leaves it in place, and its next failure ejects it once an ejection ends.
 
 When every candidate is unhealthy, the plugin keeps all of them, so a pool is never left without endpoints.
 
@@ -21,7 +21,7 @@ The defaults avoid excluding an endpoint that is slow but working:
 
 - A single failed poll never marks an endpoint. Requiring both a count and a duration also keeps a burst of fast failures shorter than `pollFailureDuration`, or one failure of a source with a long interval, from marking it.
 - vLLM serves `/metrics` from its API server process, so a long prefill in the engine does not fail polls. An endpoint is marked only after its polls fail without a single success for `pollFailureDuration`.
-- `responseFailureCodes` defaults to 502 and 503, the statuses a proxy in front of the model server returns when it cannot reach it. A model server returns 500 for errors specific to one request, and requests of one conversation tend to reach the same endpoint, so counting 500 would let one client eject a working endpoint. A proxy returns 504 when a working but slow model server exceeds its timeout.
+- `responseFailureCodes` defaults to 502 and 503, the statuses a proxy in front of the model server returns when it cannot reach it. A model server returns 500 for errors specific to one request, and requests of one conversation tend to reach the same endpoint, so counting 500 would let one client eject a working endpoint. A pool that counts 500 should set `maxEjectionPercent` so that such a client cannot eject most of the pool. A proxy returns 504 when a working but slow model server exceeds its timeout.
 - Poll health clears on the first successful poll without a hysteresis count: marking already takes `pollFailureDuration` of uninterrupted failures, so an endpoint that answers some polls is never marked, and an endpoint that answers but fails requests is caught by response health.
 
 Response health reacts to hard failures within a few requests. Poll health is the slower signal that also covers an endpoint that receives no traffic, and failures the EPP never sees as a response status.
@@ -57,6 +57,7 @@ Response health reads the `:status` response header in the response-received ext
 | `responseFailureCodes`     | no       | Response statuses counted as failures. Each must be a 5xx status. Default `[502, 503]`. |
 | `ejectionDuration`         | no       | Length of the first ejection. Default `30s`. |
 | `maxEjectionDuration`      | no       | Upper bound on the length of an ejection. Must be at least `ejectionDuration`. Default `5m`. |
+| `maxEjectionPercent`       | no       | Upper bound on the endpoints under a response ejection at once, as a percentage of the endpoints the filter instance has seen, rounded down. One endpoint can always be ejected. Poll health is not capped and does not count toward the bound. Must be between `1` and `100`. Default `100`. |
 
 `pollFailureThreshold` and `responseFailureThreshold` cannot both be `0`.
 

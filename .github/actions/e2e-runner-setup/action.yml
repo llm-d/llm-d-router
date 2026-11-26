@@ -1,5 +1,10 @@
 name: E2E runner setup
-description: Frees disk space and restores Go module/build caches for an e2e runner.
+description: Frees disk space when low and restores Go module/build caches for an e2e runner.
+inputs:
+  cache-job:
+    description: Job identifier used to isolate the Go build cache namespace
+    required: false
+    default: e2e
 outputs:
   go-mod-cache:
     description: Absolute path to the Go module cache directory
@@ -7,12 +12,32 @@ outputs:
   go-build-cache:
     description: Absolute path to the Go build cache directory
     value: ${{ steps.go-cache.outputs.build }}
+  go-version:
+    description: Go version parsed from Dockerfile.builder for keying build caches
+    value: ${{ steps.go-cache.outputs.goversion }}
+  go-build-cache-hit:
+    description: Whether the Go build cache key matched exactly on restore
+    value: ${{ steps.go-build-cache.outputs.cache-hit }}
 runs:
   using: "composite"
   steps:
+    - name: Check available disk space
+      id: disk
+      shell: bash
+      run: |
+        avail_gb=$(df -BG --output=avail / | tail -n 1 | tr -dc '0-9')
+        echo "Available disk space on /: ${avail_gb}G"
+        if [[ "${avail_gb:-0}" -lt 40 ]]; then
+          echo "needs_cleanup=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "needs_cleanup=false" >> "$GITHUB_OUTPUT"
+        fi
+
     # Custom profile with directory-only removals.
     # cleanup-profile: max frees more space but takes longer.
+    # Only run when free space is below 40 GB (ubuntu-latest starts with ~88 GB free).
     - name: Free disk space
+      if: steps.disk.outputs.needs_cleanup == 'true'
       # justinthelaw/maximize-github-runner-space@v0.9.0
       uses: justinthelaw/maximize-github-runner-space@ed391644e646cac4b88480d2f9b12d135f1ccf77
       with:
@@ -35,13 +60,21 @@ runs:
         mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
         echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
         echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+        echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
-    - name: Cache Go modules and build cache
-      uses: actions/cache@v5
+    - name: Restore Go modules
+      uses: actions/cache/restore@v6
       with:
-        path: |
-          ${{ steps.go-cache.outputs.mod }}
-          ${{ steps.go-cache.outputs.build }}
-        key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+        path: ${{ steps.go-cache.outputs.mod }}
+        key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
         restore-keys: |
-          go-cache-${{ runner.os }}-
+          gomod-${{ runner.os }}-
+
+    - name: Restore Go build cache
+      id: go-build-cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.go-cache.outputs.build }}
+        key: gobuild-${{ inputs.cache-job }}-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+        restore-keys: |
+          gobuild-${{ inputs.cache-job }}-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-

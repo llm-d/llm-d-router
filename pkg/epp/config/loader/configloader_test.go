@@ -672,6 +672,26 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - requestStreamUsage defaults off",
+			configText: successSchedulerConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.False(t, rawCfg.RequestHandler.RequestStreamUsage)
+				require.False(t, cfg.RequestStreamUsage)
+			},
+		},
+		{
+			name:       "Success - requestStreamUsage enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  requestStreamUsage: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.True(t, rawCfg.RequestHandler.RequestStreamUsage)
+				require.True(t, cfg.RequestStreamUsage)
+			},
+		},
+		{
 			name:       "Success - Default Scorer Weight",
 			configText: successWithNoWeightText,
 			wantErr:    false,

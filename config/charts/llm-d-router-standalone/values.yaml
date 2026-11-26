@@ -1,4 +1,30 @@
 router:
+  # Internal marker read by the templates this chart shares with
+  # llm-d-router-gateway. They cannot rely on the chart name, which Helm
+  # replaces with the alias when the chart is a dependency. Do not modify.
+  chartKind: standalone
+
+  # Base of the names of the resources this chart creates, used in place of the
+  # release name. With fullnameOverride: qwen, the chart creates qwen-epp,
+  # qwen-envoy, qwen-proxy and so on. Where the chart documentation writes
+  # <release> in a resource name, it stands for this value when it is set.
+  # The value is lowercased, and truncated to 40 characters before suffixes
+  # such as -epp.
+  #
+  # Leave it empty for a single installation. Set it when an umbrella chart
+  # declares this chart several times under different aliases: the instances
+  # share the release name, so each one needs a distinct value, for example
+  # router-qwen.router.fullnameOverride=qwen. See "Several Standalone Routers
+  # in One Umbrella Chart" in config/charts/README.md.
+  #
+  # Changing it on an installed release renames its resources: Helm deletes the
+  # old objects and creates new ones, which interrupts traffic.
+  #
+  # The InferencePool created with router.inferencePool.create=true, and the
+  # pool name EPP watches, keep the release name. Aliased instances in one
+  # release therefore need router.inferencePool.create=false.
+  fullnameOverride: ""
+
   modelServers:
     # matchLabels: # REQUIRED
     #   app: vllm-qwen3-32b
@@ -93,11 +119,12 @@ router:
     healthCheckInterval: "10s"
     healthCheckTimeout: "2s"
     healthCheckUnhealthyThreshold: 3
-    healthCheckHealthyThreshold: 2
+    healthCheckHealthyThreshold: 1
     # Probe interval while the ext_proc cluster has not carried traffic, which
-    # includes every EPP pod start. Envoy defaults it to 60s; empty uses
-    # healthCheckInterval.
-    healthCheckNoTrafficInterval: ""
+    # includes every EPP pod start. Until a probe passes, requests reaching the
+    # new pod fail open (no EPP scheduling, or 503 with no fallback endpoints).
+    # Envoy defaults it to 60s; empty uses healthCheckInterval.
+    healthCheckNoTrafficInterval: "1s"
 
     # OpenTelemetry tracing for the Envoy proxy. When enabled, Envoy creates a
     # span per request and propagates the trace context on the ext_proc gRPC
@@ -147,6 +174,7 @@ router:
               -}}
               {{- $eppHealthPortCheck := eq (include "llm-d-router.proxy.eppHealthPortCheck" .) "true" -}}
               {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
+              {{- $extProcPort := include "llm-d-router.epp.extProcPort" . -}}
               admin:
                 address:
                   socket_address:
@@ -315,7 +343,7 @@ router:
                                     grpc_service:
                                       envoy_grpc:
                                         cluster_name: ext_proc
-                                        authority: localhost:9002
+                                        authority: localhost:{{ $extProcPort }}
                                       timeout: 10s
                                     processing_mode:
                                       request_header_mode: SEND
@@ -547,7 +575,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
@@ -566,7 +594,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
@@ -581,7 +609,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}

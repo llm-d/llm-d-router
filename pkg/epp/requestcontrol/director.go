@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +40,7 @@ import (
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -241,6 +244,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
+	// Before any DataProducer runs, so the payload is not written while a
+	// timed-out producer can still read it.
+	d.streamUsageRequestIfNeeded(reqCtx, inferenceRequestBody)
 
 	infObjective := d.getInferenceObjective(ctx, reqCtx)
 	priority := int(*infObjective.Spec.Priority)
@@ -252,20 +258,24 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		attribute.Int("request_prio", priority),
 	)
 
+	if reqCtx.Request.Headers == nil {
+		reqCtx.Request.Headers = map[string]string{}
+	}
 	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
 
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
-		RequestID:        reqCtx.Request.ID,
-		TargetModel:      reqCtx.TargetModelName,
-		Body:             inferenceRequestBody,
-		Headers:          reqCtx.Request.Headers,
-		FairnessID:       fairnessID,
-		Objectives:       requestObjectives,
-		RequestSizeBytes: reqCtx.RequestSize,
+		RequestID:         reqCtx.Request.ID,
+		TargetModel:       reqCtx.TargetModelName,
+		Body:              inferenceRequestBody,
+		Headers:           reqCtx.Request.Headers,
+		FairnessID:        fairnessID,
+		Objectives:        requestObjectives,
+		RequestSizeBytes:  reqCtx.RequestSize,
+		ReceivedTimestamp: reqCtx.RequestReceivedTimestamp,
 	}
 
-	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
+	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "seededPriority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
@@ -338,6 +348,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.AttributeRequest(ctx, span)
 	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
 
+	// A plugin may publish a resolved band: the seeded objective priority, a
+	// parent's band, or the minimum of the two. Applying it here, before
+	// admission, finalizes the request's band: bands resolve once and queued
+	// requests never migrate across them.
+	if resolvedBand, ok := fwksched.ReadRequestAttribute[int](reqCtx.SchedulingRequest, agentlineage.ResolvedBandKey); ok {
+		priority = resolvedBand
+		reqCtx.Priority = resolvedBand
+		reqCtx.SchedulingRequest.Objectives.Priority = resolvedBand
+		span.SetAttributes(attribute.Int("request_prio", priority))
+	}
+
 	admitting = true
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
@@ -391,6 +412,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
 	}
+
+	// A producer timeout can detach the scheduling headers. Keep forwarding
+	// pointed at the map that PreRequest will update.
+	reqCtx.Request.Headers = reqCtx.SchedulingRequest.Headers
 
 	// Run admit request plugins
 	if denier, denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
@@ -492,6 +517,30 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 	inferenceRequestBody.Payload = rewritten
 	inferenceRequestBody.Mutated = true
 	return nil
+}
+
+// streamUsageRequestIfNeeded asks for usage in a streamed response whose client
+// did not ask for it, when requestHandler.requestStreamUsage is enabled, and
+// marks the request so the usage-only frame is removed from the response.
+func (d *Director) streamUsageRequestIfNeeded(reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) {
+	if !d.requestControlPlugins.requestStreamUsage {
+		return
+	}
+	requester, ok := reqCtx.Parser.(fwkrh.StreamUsageRequester)
+	if !ok {
+		return
+	}
+	payload, ok := inferenceRequestBody.Payload.(fwkrequest.MarshalablePayload)
+	if !ok {
+		return
+	}
+	requested, changed := requester.RequestStreamUsage(fwkrequest.GetRequestPath(reqCtx.Request.Headers), payload)
+	if !changed {
+		return
+	}
+	inferenceRequestBody.Payload = requested
+	inferenceRequestBody.Mutated = true
+	reqCtx.StreamUsageRequested = true
 }
 
 func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) error {
@@ -608,27 +657,65 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	}
 	// primary profile is used to set destination
 	primaryResult := result.ProfileResults[result.PrimaryProfileName]
-	targetMetadatas := []*fwkdl.EndpointMetadata{}
-	targetEndpoints := []string{}
 
-	for _, pod := range primaryResult.TargetEndpoints {
+	targets := primaryResult.TargetEndpoints
+	// A data-parallel rank endpoint is reached through its pod's shared port and
+	// the rank header.
+	rankByHeader := func(endpoint fwksched.Endpoint) bool { return endpoint.GetMetadata().RankByHeader }
+	primaryRankByHeader := len(targets) > 0 && rankByHeader(targets[0])
+	switch {
+	case primaryRankByHeader:
+		// The header applies to every destination, so a fallback would run the
+		// request on a rank the scheduler did not pick.
+		targets = targets[:1:1]
+	case slices.ContainsFunc(targets, rankByHeader):
+		// Without a rank from the EPP, a rank endpoint as fallback would run the
+		// request on the rank the client named, or on a rank its server rejects.
+		targets = slices.DeleteFunc(slices.Clone(targets), rankByHeader)
+	}
+	// PreRequest plugins and the response hooks read the result, so it lists
+	// only the endpoints that get the request.
+	primaryResult.TargetEndpoints = targets
+	for profileName, profileResult := range result.ProfileResults {
+		if profileName == result.PrimaryProfileName || profileResult == nil || !slices.ContainsFunc(profileResult.TargetEndpoints, rankByHeader) {
+			continue
+		}
+		// Ranks of one pod share an address, so deduplicate secondary profiles by
+		// host:port to avoid duplicate addresses in headers such as encoder fan-out.
+		seen := make(map[string]struct{}, len(profileResult.TargetEndpoints))
+		deduped := make([]fwksched.Endpoint, 0, len(profileResult.TargetEndpoints))
+		for _, ep := range profileResult.TargetEndpoints {
+			md := ep.GetMetadata()
+			addr := net.JoinHostPort(md.GetIPAddress(), md.GetPort())
+			if _, dup := seen[addr]; dup {
+				continue
+			}
+			seen[addr] = struct{}{}
+			deduped = append(deduped, ep)
+		}
+		profileResult.TargetEndpoints = deduped
+	}
+	targetEndpoints := make([]string, 0, len(targets))
+	for _, pod := range targets {
 		curMetadata := pod.GetMetadata()
-		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
-		targetMetadatas = append(targetMetadatas, curMetadata)
-		targetEndpoints = append(targetEndpoints, curEndpoint)
+		targetEndpoints = append(targetEndpoints, net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort()))
 	}
 
 	multiEndpointString := strings.Join(targetEndpoints, ",")
 	logger.V(logutil.VERBOSE).Info("Request handled", "objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModel", reqCtx.TargetModelName, "endpoint", multiEndpointString)
 
-	reqCtx.TargetPod = targetMetadatas[0]
+	reqCtx.TargetPod = targets[0].GetMetadata()
 	reqCtx.TargetEndpoint = multiEndpointString
 
 	if len(primaryResult.ScoredCandidates) > 0 {
 		scores := make(map[string]float64, len(primaryResult.ScoredCandidates))
 		for _, scoredEndpoint := range primaryResult.ScoredCandidates {
 			curMetadata := scoredEndpoint.GetMetadata()
-			scores[net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())] = scoredEndpoint.Score
+			address := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
+			// The proxy routes by address, so an address shared by data-parallel ranks takes its best rank's score.
+			if score, ok := scores[address]; !ok || scoredEndpoint.Score > score {
+				scores[address] = scoredEndpoint.Score
+			}
 		}
 		reqCtx.TargetEndpointScores = scores
 	}
@@ -649,6 +736,24 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 			}
 		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: err.Error()}
+	}
+
+	if primaryRankByHeader {
+		// Set the rank after the PreRequest plugins, so that a plugin that stamps
+		// or deletes this header cannot change the rank the scheduler picked. The
+		// header mutation is built from Request.Headers. HandleRequest shares that
+		// map with SchedulingRequest.Headers.
+		if reqCtx.Request.Headers == nil {
+			if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.Headers != nil {
+				reqCtx.Request.Headers = reqCtx.SchedulingRequest.Headers
+			} else {
+				reqCtx.Request.Headers = map[string]string{}
+				if reqCtx.SchedulingRequest != nil {
+					reqCtx.SchedulingRequest.Headers = reqCtx.Request.Headers
+				}
+			}
+		}
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(reqCtx.TargetPod.RankIndex)
 	}
 
 	// Default-deny for "Prefer: if-available" when no PreRequest plugin
@@ -741,6 +846,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	response := &fwkrh.Response{
 		RequestID:      reqCtx.Request.ID,
 		Headers:        reqCtx.Response.Headers,
+		ReqMetadata:    reqCtx.Request.Metadata,
 		StartOfStream:  startOfStream,
 		EndOfStream:    endOfStream,
 		Usage:          reqCtx.Usage,
@@ -749,6 +855,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.Completion = reqCtx.Completion
 		response.ReceivedTimestamp = reqCtx.RequestReceivedTimestamp
 		response.FirstTokenTimestamp = reqCtx.FirstTokenTimestamp()
 		response.CompleteTimestamp = reqCtx.ResponseCompleteTimestamp()
@@ -762,6 +869,18 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 			requests = q.requests
 		} else {
 			requests = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
+		}
+		// A gRPC response's final status arrives in trailers, after the headers
+		// were already reported to the plugins. Write it onto the response
+		// headers here, once the async queue has drained, so the plugins that
+		// classify a response by its status see the final one. The header
+		// response to Envoy is already built, so the write cannot reach the
+		// client.
+		if reqCtx.ResponseGRPCStatus != "" {
+			if response.Headers == nil {
+				response.Headers = map[string]string{}
+			}
+			response.Headers[grpcframe.HeaderStatus] = reqCtx.ResponseGRPCStatus
 		}
 		// Run the final chunk synchronously so DynamicMetadata is available for the response.
 		d.runResponseBodyPlugins(ctx, requests, response, reqCtx.TargetPod)

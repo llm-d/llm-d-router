@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -111,6 +112,9 @@ func dataProducerPluginsWithTimeout(ctx context.Context, extensionPoint string, 
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		// A producer may still be reading its scoped headers. Give subsequent
+		// request stages a different map before they can change the headers.
+		request.Headers = maps.Clone(request.Headers)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("DataProducer execution timed out: %w", ctx.Err())
 		}

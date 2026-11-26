@@ -330,8 +330,8 @@ router:
 | `router.proxy.healthCheckInterval` | `10s` | Active gRPC health check probe interval. |
 | `router.proxy.healthCheckTimeout` | `2s` | Health check probe timeout. |
 | `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
-| `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
-| `router.proxy.healthCheckNoTrafficInterval` | `healthCheckInterval` | Probe interval while the `ext_proc` cluster has not carried traffic, such as after an EPP pod starts. |
+| `router.proxy.healthCheckHealthyThreshold` | `1` | Number of passing probes required before admitting recreated pods. |
+| `router.proxy.healthCheckNoTrafficInterval` | `1s` | Probe interval while the `ext_proc` cluster has not carried traffic, such as after an EPP pod starts. Empty uses `healthCheckInterval`. |
 | `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
 
 ### GKE Preferred Backends (Gateway Mode)

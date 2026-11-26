@@ -21,6 +21,7 @@ package predictedlatency
 import (
 	"context"
 	"fmt"
+	"time"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -44,7 +45,7 @@ type endpointPredictionResult struct {
 }
 
 // generatePredictions creates prediction results for all candidate pods
-func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx, candidateEndpoints []fwksched.Endpoint) ([]endpointPredictionResult, error) {
+func (pl *PredictedLatency) generatePredictions(ctx context.Context, request *fwksched.InferenceRequest, predictedLatencyCtx *predictedLatencyCtx, candidateEndpoints []fwksched.Endpoint) ([]endpointPredictionResult, error) {
 	logger := log.FromContext(ctx)
 	predictions := make([]endpointPredictionResult, 0, len(candidateEndpoints))
 
@@ -95,6 +96,10 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	if len(bulkPredictions) != len(candidateEndpoints) {
 		return nil, fmt.Errorf("%w: got %d, want %d", latencypredictor.ErrResponseLengthMismatch, len(bulkPredictions), len(candidateEndpoints))
 	}
+
+	// The clock is read once, after the predictions return: the prediction call counts
+	// against the TTFT SLO, and every endpoint is charged the same elapsed time.
+	predictedLatencyCtx.elapsedMs = msSinceReceived(request, time.Now())
 
 	// Process results
 	for i, endpoint := range candidateEndpoints {
@@ -151,14 +156,27 @@ func (pl *PredictedLatency) updateRequestContextWithPredictions(predictedLatency
 	predictedLatencyCtx.predictionsForScheduling = predMap
 }
 
+// scrapedEndpointsOnly returns the endpoints whose metrics have been scraped.
+// A prediction for a never-scraped endpoint would be computed from zero-value
+// metrics, so such endpoints are not sent to the predictor.
+func scrapedEndpointsOnly(endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+	scraped := make([]fwksched.Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.GetMetrics().Updated() {
+			scraped = append(scraped, endpoint)
+		}
+	}
+	return scraped
+}
+
 func (pl *PredictedLatency) validatePrediction(
 	pred *latencypredictor.PredictionResponse,
 	predictedLatencyCtx *predictedLatencyCtx,
 	podMinTPOTSLO float64,
 ) (ttftOk, tpotOk, isValid bool, headroom float64, ttftHeadroom float64) {
 
-	ttftOk = pred.TTFT < predictedLatencyCtx.ttftSLO
-	ttftHeadroom = predictedLatencyCtx.ttftSLO - pred.TTFT
+	ttftHeadroom = predictedLatencyCtx.ttftSLO - predictedLatencyCtx.elapsedMs - pred.TTFT
+	ttftOk = ttftHeadroom > 0
 
 	tpotOk = true
 	headroom = 0.0

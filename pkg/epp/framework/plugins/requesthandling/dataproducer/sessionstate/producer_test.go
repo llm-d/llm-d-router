@@ -19,6 +19,7 @@ package sessionstate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -86,6 +87,8 @@ func TestFactoryAndProduces(t *testing.T) {
 	assert.IsType(t, SessionState{}, produced)
 	assert.Equal(t, defaultEvictionTTL, producer.evictionTTL)
 	assert.Equal(t, defaultEvictionSweepInterval, producer.evictionSweepInterval)
+	assert.Equal(t, defaultMaxSessions, producer.registry.maxSessions)
+	assert.Equal(t, defaultMaxIdentityBytes, producer.maxIdentityBytes)
 
 	dependencies := producer.Consumes()
 	consumed, ok := dependencies.Required[agentidentity.AgentIdentityKey]
@@ -139,23 +142,55 @@ func TestFactoryParameters(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		parameters      json.RawMessage
-		wantTTL         time.Duration
-		wantSweep       time.Duration
-		wantErrContains string
+		name                 string
+		parameters           json.RawMessage
+		wantTTL              time.Duration
+		wantSweep            time.Duration
+		wantMaxSessions      int
+		wantMaxIdentityBytes int
+		wantErrContains      string
 	}{
 		{
-			name:       "custom durations",
-			parameters: json.RawMessage(`{"evictionTtlSeconds":12.5,"evictionSweepSeconds":1.5}`),
-			wantTTL:    12500 * time.Millisecond,
-			wantSweep:  1500 * time.Millisecond,
+			name:                 "custom durations",
+			parameters:           json.RawMessage(`{"evictionTtlSeconds":12.5,"evictionSweepSeconds":1.5}`),
+			wantTTL:              12500 * time.Millisecond,
+			wantSweep:            1500 * time.Millisecond,
+			wantMaxSessions:      defaultMaxSessions,
+			wantMaxIdentityBytes: defaultMaxIdentityBytes,
 		},
 		{
-			name:       "zero ttl disables eviction",
-			parameters: json.RawMessage(`{"evictionTtlSeconds":0,"evictionSweepSeconds":10}`),
-			wantTTL:    0,
-			wantSweep:  10 * time.Second,
+			name:                 "zero ttl disables eviction",
+			parameters:           json.RawMessage(`{"evictionTtlSeconds":0,"evictionSweepSeconds":10}`),
+			wantTTL:              0,
+			wantSweep:            10 * time.Second,
+			wantMaxSessions:      defaultMaxSessions,
+			wantMaxIdentityBytes: defaultMaxIdentityBytes,
+		},
+		{
+			name:                 "custom bounds",
+			parameters:           json.RawMessage(`{"maxSessions":5,"maxIdentityBytes":64}`),
+			wantTTL:              defaultEvictionTTL,
+			wantSweep:            defaultEvictionSweepInterval,
+			wantMaxSessions:      5,
+			wantMaxIdentityBytes: 64,
+		},
+		{
+			name:                 "zero bounds disable the limits",
+			parameters:           json.RawMessage(`{"maxSessions":0,"maxIdentityBytes":0}`),
+			wantTTL:              defaultEvictionTTL,
+			wantSweep:            defaultEvictionSweepInterval,
+			wantMaxSessions:      0,
+			wantMaxIdentityBytes: 0,
+		},
+		{
+			name:            "negative max sessions",
+			parameters:      json.RawMessage(`{"maxSessions":-1}`),
+			wantErrContains: "maxSessions must be >= 0",
+		},
+		{
+			name:            "negative max identity bytes",
+			parameters:      json.RawMessage(`{"maxIdentityBytes":-1}`),
+			wantErrContains: "maxIdentityBytes must be >= 0",
 		},
 		{
 			name:            "negative ttl",
@@ -171,6 +206,21 @@ func TestFactoryParameters(t *testing.T) {
 			name:            "negative sweep",
 			parameters:      json.RawMessage(`{"evictionSweepSeconds":-1}`),
 			wantErrContains: "evictionSweepSeconds must be > 0",
+		},
+		{
+			name:            "sweep shorter than 1ns",
+			parameters:      json.RawMessage(`{"evictionSweepSeconds":1e-10}`),
+			wantErrContains: "evictionSweepSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
+			name:            "sweep beyond the duration range",
+			parameters:      json.RawMessage(`{"evictionSweepSeconds":1e10}`),
+			wantErrContains: "evictionSweepSeconds 1e+10 exceeds the representable duration",
+		},
+		{
+			name:            "ttl shorter than 1ns",
+			parameters:      json.RawMessage(`{"evictionTtlSeconds":1e-10,"evictionSweepSeconds":10}`),
+			wantErrContains: "evictionTtlSeconds 1e-10 is too small to represent as a duration",
 		},
 		{
 			name:            "unknown field",
@@ -197,6 +247,8 @@ func TestFactoryParameters(t *testing.T) {
 			require.True(t, ok)
 			assert.Equal(t, test.wantTTL, producer.evictionTTL)
 			assert.Equal(t, test.wantSweep, producer.evictionSweepInterval)
+			assert.Equal(t, test.wantMaxSessions, producer.registry.maxSessions)
+			assert.Equal(t, test.wantMaxIdentityBytes, producer.maxIdentityBytes)
 		})
 	}
 }
@@ -469,6 +521,46 @@ func TestPendingRequestKeepsSessionFromEviction(t *testing.T) {
 			assert.Zero(t, registrySessionCount(&producer.registry), "the session is evictable once the request leaves")
 		})
 	}
+}
+
+func TestOversizedAgentIdentityIsNotTracked(t *testing.T) {
+	t.Parallel()
+
+	plg, err := Factory(SessionStateProducerType, fwkplugin.StrictDecoder(json.RawMessage(`{"maxIdentityBytes":8}`)), nil)
+	require.NoError(t, err)
+	producer := plg.(*Producer)
+
+	oversized := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.RequestHeader(context.Background(), oversized))
+	require.NoError(t, producer.PreRequest(context.Background(), oversized, resultWithProfiles(1)))
+	producer.ResponseBody(context.Background(), oversized, finalResponse(fwkrh.TerminationCauseNatural, 1, 1), nil)
+	_, published := ReadSessionState(oversized)
+	assert.False(t, published, "an identity longer than maxIdentityBytes is not tracked")
+	assert.Zero(t, registrySessionCount(&producer.registry))
+
+	atLimit := requestWithAgentIdentity("sessionA")
+	require.NoError(t, producer.RequestHeader(context.Background(), atLimit))
+	_, published = ReadSessionState(atLimit)
+	assert.True(t, published, "an identity of exactly maxIdentityBytes is tracked")
+	assert.Equal(t, 1, registrySessionCount(&producer.registry))
+}
+
+func TestNewIdentityPerRequestIsBounded(t *testing.T) {
+	t.Parallel()
+
+	plg, err := Factory(SessionStateProducerType, fwkplugin.StrictDecoder(json.RawMessage(`{"maxSessions":4}`)), nil)
+	require.NoError(t, err)
+	producer := plg.(*Producer)
+
+	for i := range 100 {
+		request := requestWithAgentIdentity(fmt.Sprintf("session-%d", i))
+		request.RequestID = fmt.Sprintf("request-%d", i)
+		require.NoError(t, producer.RequestHeader(context.Background(), request))
+		require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
+		producer.ResponseBody(context.Background(), request, finalResponse(fwkrh.TerminationCauseNatural, 1, 1), nil)
+	}
+	assert.Equal(t, 4, registrySessionCount(&producer.registry))
+	assertIdleListConsistent(t, &producer.registry)
 }
 
 type sessionStateFairnessConsumer struct {

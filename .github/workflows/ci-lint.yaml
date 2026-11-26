@@ -57,6 +57,7 @@ jobs:
               - hack/**
               - pkg/common/observability/semconv/registry/**
               - docs/telemetry.md
+              - docs/metrics.md
               - test/**
               - .github/workflows/ci-lint.yaml
 
@@ -88,16 +89,24 @@ jobs:
           mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
           echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Go modules and build cache
-        uses: actions/cache@v6
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            ${{ steps.go-cache.outputs.mod }}
-            ${{ steps.go-cache.outputs.build }}
-          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          path: ${{ steps.go-cache.outputs.mod }}
+          key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-cache-${{ runner.os }}-
+            gomod-${{ runner.os }}-
+
+      - name: Restore Go build cache
+        id: go-build-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: gobuild-lint-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-lint-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-
 
       - name: Verify telemetry generation and contracts
         env:
@@ -144,7 +153,7 @@ jobs:
       # workflow, per GitHub's guidance for actions that write security data.
       - name: Upload gosec SARIF
         if: ${{ !cancelled() && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -159,6 +168,13 @@ jobs:
           path: gosec.sarif
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Save Go build cache (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: gobuild-lint-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
   # The configs under test/testdata/plugins/stable/ are the written-down form of the
   # backwards-compatibility promise made when a plugin is promoted to Stable. Editing

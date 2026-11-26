@@ -113,7 +113,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "failed to read request body")
+		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, reqcommon.ReadRequestBodyErrorMessage)
 		return
 	}
 	if int64(len(body)) > s.maxRequestBodySize*config.BytesPerMB {
