@@ -192,12 +192,21 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 // so a long response does not keep the request content in memory. A new field is
 // left out unless it is added here.
 func (b *InferenceRequestBody) ResponsePhaseView() *InferenceRequestBody {
-	return &InferenceRequestBody{
+	view := &InferenceRequestBody{
 		TokenizedRequest: b.TokenizedRequest,
 		Stream:           b.Stream,
 		MaxOutputTokens:  b.MaxOutputTokens,
 		Model:            b.Model,
 	}
+	// Keep modality markers so response-phase guards can identify these
+	// requests after the request content is released.
+	if b.TextToSpeech != nil {
+		view.TextToSpeech = &TextToSpeechRequest{}
+	}
+	if b.Transcriptions != nil {
+		view.Transcriptions = &TranscriptionRequest{}
+	}
+	return view
 }
 
 // BytesPerToken is the average number of request bytes per prompt token, used
@@ -758,12 +767,15 @@ func (v *VideoGenerationRequest) String() string {
 // TranscriptionRequest represents the routing-relevant fields of an
 // OpenAI-compatible /v1/audio/transcriptions or /v1/audio/translations
 // request. Both endpoints are served by the same handler and accept
-// multipart/form-data, so they share this shape. The uploaded audio drives
-// the engine's cost, so it is carried as UploadedMedia; the scalar fields
-// the engine validates are not modeled here.
+// multipart/form-data, so they share this shape. The uploaded audio and
+// conditioning text drive the engine's cost; only routing-relevant fields are
+// modeled here.
 type TranscriptionRequest struct {
 	// Prompt is the optional conditioning text.
 	Prompt string `json:"prompt,omitempty"`
+	// Hotwords is the optional list of important words or phrases passed to
+	// the engine's ASR prompt.
+	Hotwords string `json:"hotwords,omitempty"`
 	// Audio carries the uploaded file part. Its zero value means the request
 	// carried no file part.
 	Audio UploadedMedia `json:"-"`

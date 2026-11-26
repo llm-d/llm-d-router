@@ -352,6 +352,10 @@ func ttsText(r *fwkrequest.TextToSpeechRequest) string {
 // chat multimodal representation so downstream consumers treat both alike.
 func (b estimateBackend) transcriptionsBytes(tr *fwkrequest.TranscriptionRequest, meta mmMetadata) ([]byte, []fwkrequest.MultiModalFeature) {
 	out := []byte(tr.Prompt)
+	if strings.TrimSpace(tr.Hotwords) != "" {
+		out = append(out, '\n')
+		out = append(out, []byte(tr.Hotwords)...)
+	}
 	return appendMMAssetHash(out, nil, reqcommon.ModalityAudio, tr.Audio.Hash,
 		b.aud.placeholderCountUploaded(tr.Audio.Head, tr.Audio.SizeBytes, meta.audio))
 }

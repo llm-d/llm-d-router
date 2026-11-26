@@ -3052,6 +3052,8 @@ func TestOpenAIParser_ParseRequestTranscriptions(t *testing.T) {
 		videoFormPart{name: "model", value: "whisper-large-v3"},
 		videoFormPart{name: "language", value: "en"},
 		videoFormPart{name: "prompt", value: "previous segment text"},
+		videoFormPart{name: "hotwords", value: "llm-d router"},
+		videoFormPart{name: "max_completion_tokens", value: "128"},
 		videoFormPart{name: "response_format", value: "verbose_json"},
 		videoFormPart{name: "stream", value: "true"},
 		videoFormPart{name: "model", value: "uploaded bytes", filename: "model.txt", mediaType: "text/plain"},
@@ -3072,6 +3074,12 @@ func TestOpenAIParser_ParseRequestTranscriptions(t *testing.T) {
 			audio := result.Body.Transcriptions.Audio
 			if result.Body.Transcriptions.Prompt != "previous segment text" {
 				t.Errorf("Prompt = %q, want the conditioning text", result.Body.Transcriptions.Prompt)
+			}
+			if result.Body.Transcriptions.Hotwords != "llm-d router" {
+				t.Errorf("Hotwords = %q, want the hotwords text", result.Body.Transcriptions.Hotwords)
+			}
+			if result.Body.MaxOutputTokens == nil || *result.Body.MaxOutputTokens != 128 {
+				t.Errorf("MaxOutputTokens = %v, want 128", result.Body.MaxOutputTokens)
 			}
 			if audio.SizeBytes != int64(len(media)) || string(audio.Head) != media {
 				t.Errorf("Audio = {SizeBytes:%d HeadLen:%d}, want the file part of %d bytes", audio.SizeBytes, len(audio.Head), len(media))

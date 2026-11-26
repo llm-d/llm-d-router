@@ -506,6 +506,13 @@ func decodeAudioHead(data string) ([]byte, int64) {
 	return head[:n], size
 }
 
+// AudioDurationSeconds returns an uploaded audio clip's duration using the
+// same precedence as the input token estimate: the duration header wins, then
+// the PCM WAV header, then its byte rate, then the built-in default.
+func AudioDurationSeconds(head []byte, size int64, headers map[string]string) float64 {
+	return (audioEstimator{}).durationSecondsUploaded(head, size, parseAudioMetadataHeaders(headers))
+}
+
 // durationSecondsUploaded resolves an uploaded clip's length in seconds,
 // with the same precedence as durationSeconds: a header value wins, then the
 // payload, which is exact for PCM WAV and size/bytesPerSecond for everything

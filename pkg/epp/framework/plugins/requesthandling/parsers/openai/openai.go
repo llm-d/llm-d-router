@@ -866,6 +866,14 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 			extractedBody.Model = string(value)
 		case "prompt":
 			transcriptions.Prompt = string(value)
+		case "hotwords":
+			transcriptions.Hotwords = string(value)
+		case "max_completion_tokens":
+			maxTokens, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid %s max_completion_tokens field: %w", apiType, err)
+			}
+			extractedBody.MaxOutputTokens = &maxTokens
 		case "stream":
 			stream, err := parseFormBool(value)
 			if err != nil {
