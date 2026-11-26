@@ -491,6 +491,31 @@ router:
       - number: 50051
 ```
 
+#### Data-parallel ranks
+
+A model server with several data-parallel ranks has one of two port layouts. [Data-parallel ranks behind one port](../../docs/data-parallel-ranks.md) describes both.
+
+One port for each rank: list the ports in rank order.
+
+```yaml
+router:
+  modelServers:
+    matchLabels:
+      app: my-model-server
+    targetPorts:
+      - number: 8000 # rank 0
+      - number: 8001 # rank 1
+```
+
+Several ranks behind one port: keep one target port. The rank count is an annotation on the model server pods, which the chart does not deploy.
+
+```yaml
+# Pod template of the model server
+metadata:
+  annotations:
+    llm-d.ai/data-parallel-size-local: "2"
+```
+
 ---
 
 ### 3. InferencePool & InferenceObjectives Configuration
