@@ -222,10 +222,19 @@ func (r *cachedTokensUsageRewriter) writePassthrough(next httpsnoop.WriteFunc, b
 // observeSSEChunk runs the observer over the complete SSE lines in body,
 // holding an unterminated tail for the next write. Nothing is rewritten.
 func (r *cachedTokensUsageRewriter) observeSSEChunk(body []byte) {
+	if len(body) == 0 {
+		return
+	}
+	if len(r.streamBuffer) == 0 && sseChunkPassThrough(body) {
+		return
+	}
 	r.streamBuffer = append(r.streamBuffer, body...)
 	for {
 		lineEnd := bytes.IndexByte(r.streamBuffer, '\n')
 		if lineEnd < 0 {
+			if len(r.streamBuffer) == 0 {
+				r.streamBuffer = nil
+			}
 			return
 		}
 		r.processSSELine(r.streamBuffer[:lineEnd+1])
@@ -234,6 +243,12 @@ func (r *cachedTokensUsageRewriter) observeSSEChunk(body []byte) {
 }
 
 func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if len(r.streamBuffer) == 0 && sseChunkPassThrough(body) {
+		return body
+	}
 	r.streamBuffer = append(r.streamBuffer, body...)
 	updated := make([]byte, 0, len(r.streamBuffer))
 	for {
@@ -249,7 +264,30 @@ func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
 		}
 		r.streamBuffer = r.streamBuffer[lineEnd+1:]
 	}
+	if len(r.streamBuffer) == 0 {
+		r.streamBuffer = nil
+	}
 	return updated
+}
+
+// sseChunkPassThrough reports whether every newline-terminated line in body
+// passes processSSELine unchanged, undropped, and without invoking onUsage.
+func sseChunkPassThrough(body []byte) bool {
+	if len(body) == 0 || body[len(body)-1] != '\n' {
+		return false
+	}
+	if !bytes.Contains(body, usageKey) {
+		return true
+	}
+	for len(body) > 0 {
+		lineEnd := bytes.IndexByte(body, '\n')
+		line := bytes.TrimRight(body[:lineEnd], "\r")
+		if data, ok := reqcommon.SSEDataPayload(line); ok && bytes.Contains(data, usageKey) {
+			return false
+		}
+		body = body[lineEnd+1:]
+	}
+	return true
 }
 
 func (r *cachedTokensUsageRewriter) flushSSEBuffer(next httpsnoop.WriteFunc) error {
