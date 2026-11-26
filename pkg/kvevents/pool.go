@@ -805,8 +805,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
 			// Scope for reference-counting this store against duplicate removes.
-			// Mirrors the index eviction identity (pod, tier, group); DP rank is
-			// the sentinel until PR #370 makes the index DP-aware.
+			// Rank endpoints already include the rank in podIdentifier, so
+			// dataParallelRank stays noDataParallelRank.
 			storeScope := blockScope{
 				podIdentifier:    podIdentifier,
 				deviceTier:       deviceTier,
