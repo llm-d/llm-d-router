@@ -698,7 +698,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				z.queueResyncReset(topic, z.resyncThrough)
 				z.enqueueTask(ctx, topic, seq, payload, true)
 			} else {
-				if startSeq == 0 && replayed == 0 && !z.resyncing {
+				if z.liveOnly && startSeq == 0 && replayed == 0 && !z.resyncing {
 					// A full replay replaces events indexed while no replay was available.
 					z.resetForSource(topic)
 				}
