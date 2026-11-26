@@ -54,20 +54,18 @@ type blockScope struct {
 	dataParallelRank int
 }
 
-// dedupKey is the per-block reference-count key within a single pod's bucket.
-type dedupKey struct {
+// podScope is a blockScope within a single pod's bucket.
+type podScope struct {
 	deviceTier       string
 	groupIdx         int
 	dataParallelRank int
-	blockHash        uint64
 }
 
-func (s blockScope) key(blockHash uint64) dedupKey {
-	return dedupKey{
+func (s blockScope) podScope() podScope {
+	return podScope{
 		deviceTier:       s.deviceTier,
 		groupIdx:         s.groupIdx,
 		dataParallelRank: s.dataParallelRank,
-		blockHash:        blockHash,
 	}
 }
 
@@ -99,17 +97,20 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // harmless over-estimate (see above) rather than a correctness error. This
 // mirrors the bounded-by-the-wire behavior of Dynamo's EventDedupFilter.
 //
+// The counts live in one map[uint64]int per (pod, scope), so an entry holds no
+// pointers and the garbage collector does not scan the maps that hold them.
+//
 // It is safe for concurrent use: the single mutex guards the whole cross-pod
 // map. The Pool additionally shards work by pod identifier (see Pool.AddTask),
 // so a given pod's events are serialized onto one worker and mutex contention
 // is low in practice.
 type eventDedupFilter struct {
 	mu   sync.Mutex
-	refs map[string]map[dedupKey]int // podIdentifier -> per-block reference count
+	refs map[string]map[podScope]map[uint64]int // podIdentifier -> scope -> block hash -> reference count
 }
 
 func newEventDedupFilter() *eventDedupFilter {
-	return &eventDedupFilter{refs: make(map[string]map[dedupKey]int)}
+	return &eventDedupFilter{refs: make(map[string]map[podScope]map[uint64]int)}
 }
 
 // trackStore records one reference for each stored block hash within scope.
@@ -122,13 +123,19 @@ func (f *eventDedupFilter) trackStore(scope blockScope, blockHashes []uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	bucket := f.refs[scope.podIdentifier]
-	if bucket == nil {
-		bucket = make(map[dedupKey]int)
-		f.refs[scope.podIdentifier] = bucket
+	pod := f.refs[scope.podIdentifier]
+	if pod == nil {
+		pod = make(map[podScope]map[uint64]int)
+		f.refs[scope.podIdentifier] = pod
+	}
+	ps := scope.podScope()
+	counts := pod[ps]
+	if counts == nil {
+		counts = make(map[uint64]int, len(blockHashes))
+		pod[ps] = counts
 	}
 	for _, h := range blockHashes {
-		bucket[scope.key(h)]++
+		counts[h]++
 	}
 }
 
@@ -145,29 +152,32 @@ func (f *eventDedupFilter) filterRemove(scope blockScope, blockHashes []uint64) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	bucket := f.refs[scope.podIdentifier]
+	pod := f.refs[scope.podIdentifier]
+	ps := scope.podScope()
+	counts := pod[ps]
+	if counts == nil {
+		return blockHashes // unknown pod or scope -> defensive pass-through
+	}
 	kept := make([]uint64, 0, len(blockHashes))
 	for _, h := range blockHashes {
-		if bucket == nil {
-			kept = append(kept, h) // unknown pod -> defensive pass-through
-			continue
-		}
-		k := scope.key(h)
-		count, ok := bucket[k]
+		count, ok := counts[h]
 		if !ok || count <= 0 {
 			kept = append(kept, h) // never tracked -> defensive pass-through
 			continue
 		}
 		count--
 		if count == 0 {
-			delete(bucket, k)
+			delete(counts, h)
 			kept = append(kept, h) // last reference released -> evict for real
 			continue
 		}
-		bucket[k] = count // still referenced -> suppress this remove
+		counts[h] = count // still referenced -> suppress this remove
 	}
-	if bucket != nil && len(bucket) == 0 {
-		delete(f.refs, scope.podIdentifier)
+	if len(counts) == 0 {
+		delete(pod, ps)
+		if len(pod) == 0 {
+			delete(f.refs, scope.podIdentifier)
+		}
 	}
 	return kept
 }
