@@ -130,11 +130,9 @@ jobs:
         id: go-cache
         run: |
           mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
-          {
-            echo "mod=$HOME/.cache/llm-d-gomodcache"
-            echo "build=$HOME/.cache/llm-d-gobuildcache"
-            echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)"
-          } >> "$GITHUB_OUTPUT"
+          echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
+          echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
       # A main push that misses the exact key saves the cache below, so it
       # starts empty: seeding it from an older entry would carry every
@@ -163,7 +161,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ steps.go-cache.outputs.mod }}
-          key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
+          key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
 
       - name: Restore Go build cache
         id: go-build-cache
@@ -288,7 +286,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ steps.go-cache.outputs.build }}
-          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
+          key: gobuild-test-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
       - name: Upload coverage artifact (release branches)
         if: >-
@@ -501,4 +499,4 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ steps.e2e-setup.outputs.go-build-cache }}
-          key: ${{ steps.e2e-setup.outputs.go-build-cache-key }}
+          key: gobuild-e2e-router-${{ runner.os }}-go${{ steps.e2e-setup.outputs.go-version }}-${{ github.sha }}

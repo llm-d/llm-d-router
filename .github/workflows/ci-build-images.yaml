@@ -61,7 +61,6 @@ jobs:
           image-name: ${{ inputs.epp-image-name }}
           registry: ghcr.io/llm-d
           push: 'false'
-          export-cache: 'true'
           buildx-outputs: type=docker,dest=/tmp/epp-image.tar
 
       # Gate the push on the scan: a HIGH/CRITICAL by default when not set but configurable
@@ -112,7 +111,6 @@ jobs:
           image-name: ${{ inputs.sidecar-image-name }}
           registry: ghcr.io/llm-d
           push: 'false'
-          export-cache: 'true'
           buildx-outputs: type=docker,dest=/tmp/sidecar-image.tar
 
       - name: Run Trivy scan on sidecar image on AMD64
@@ -161,7 +159,6 @@ jobs:
           image-name: ${{ inputs.coordinator-image-name }}
           registry: ghcr.io/llm-d
           push: 'false'
-          export-cache: 'true'
           buildx-outputs: type=docker,dest=/tmp/coordinator-image.tar
 
       - name: Run Trivy scan on coordinator image on AMD64
@@ -250,7 +247,6 @@ jobs:
           image-name: llm-d-builder
           registry: ghcr.io/llm-d
           push: 'false'
-          export-cache: 'true'
           buildx-outputs: type=docker,dest=/tmp/builder-image.tar
 
       # Findings in the Go toolchain, podman and the docker CLI never block this

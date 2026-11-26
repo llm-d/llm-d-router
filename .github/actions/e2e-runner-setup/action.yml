@@ -3,7 +3,8 @@ description: Frees disk space when low and restores Go module/build caches for a
 inputs:
   cache-job:
     description: Job identifier used to isolate the Go build cache namespace
-    required: true
+    required: false
+    default: e2e
 outputs:
   go-mod-cache:
     description: Absolute path to the Go module cache directory
@@ -11,9 +12,9 @@ outputs:
   go-build-cache:
     description: Absolute path to the Go build cache directory
     value: ${{ steps.go-cache.outputs.build }}
-  go-build-cache-key:
-    description: Key the Go build cache restore looked up, for saving under the same key
-    value: ${{ steps.go-build-cache.outputs.cache-primary-key }}
+  go-version:
+    description: Go version parsed from Dockerfile.builder for keying build caches
+    value: ${{ steps.go-cache.outputs.goversion }}
   go-build-cache-hit:
     description: Whether the Go build cache key matched exactly on restore
     value: ${{ steps.go-build-cache.outputs.cache-hit }}
@@ -34,8 +35,7 @@ runs:
 
     # Custom profile with directory-only removals.
     # cleanup-profile: max frees more space but takes longer.
-    # Only run when df reports less than 40G free, a value it rounds up
-    # (ubuntu-latest starts with ~88 GB free).
+    # Only run when free space is below 40 GB (ubuntu-latest starts with ~88 GB free).
     - name: Free disk space
       if: steps.disk.outputs.needs_cleanup == 'true'
       # justinthelaw/maximize-github-runner-space@v0.9.0
@@ -58,11 +58,9 @@ runs:
       shell: bash
       run: |
         mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
-        {
-          echo "mod=$HOME/.cache/llm-d-gomodcache"
-          echo "build=$HOME/.cache/llm-d-gobuildcache"
-          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)"
-        } >> "$GITHUB_OUTPUT"
+        echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
+        echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+        echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
     - name: Restore Go modules
       uses: actions/cache/restore@v6
