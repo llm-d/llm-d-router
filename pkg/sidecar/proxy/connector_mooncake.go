@@ -109,17 +109,31 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 func (s *Server) prepareMooncakeKVParams(ctx context.Context, prefillPodHostPort string) (dpRank string, prefillKV, decodeKV map[string]any, err error) {
 	bootstrapAddr := "http://" + net.JoinHostPort(routing.ExtractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
-	engineMap, err := s.getMooncakeEngineMap(ctx, prefillPodHostPort, bootstrapAddr)
+	engineMap, fromCache, err := s.getMooncakeEngineMap(ctx, prefillPodHostPort, bootstrapAddr)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	// Use the prefill rank the EPP picked; otherwise Go map iteration randomizes
-	// rank selection to spread prefill load across multi-rank pods.
+	// Use the prefill rank the EPP picked. Refresh once when a cached map lacks
+	// an explicit rank, and fail if it is still absent. When no rank is set,
+	// Go map iteration spreads prefill load across multi-rank pods.
 	dpRank, _ = ctx.Value(prefillDPRankKey).(string)
-	engineID, ok := engineMap[dpRank]
-	if !ok {
+	var engineID string
+	if dpRank == "" {
 		for dpRank, engineID = range engineMap {
 			break
+		}
+	} else {
+		var ok bool
+		engineID, ok = engineMap[dpRank]
+		if !ok && fromCache {
+			engineMap, err = s.fetchMooncakeEngineMap(ctx, prefillPodHostPort, bootstrapAddr)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			engineID, ok = engineMap[dpRank]
+		}
+		if !ok {
+			return "", nil, nil, fmt.Errorf("mooncake prefill %s has no engine_id for dp_rank %q", prefillPodHostPort, dpRank)
 		}
 	}
 	transferID := "xfer-" + newUUID()
@@ -144,12 +158,19 @@ func (s *Server) prepareMooncakeKVParams(ctx context.Context, prefillPodHostPort
 	return dpRank, prefillKV, decodeKV, nil
 }
 
-// getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.
-func (s *Server) getMooncakeEngineMap(ctx context.Context, prefillHostPort, bootstrapAddr string) (map[string]string, error) {
+// getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given
+// prefill and reports whether the mapping came from the cache.
+func (s *Server) getMooncakeEngineMap(ctx context.Context, prefillHostPort, bootstrapAddr string) (map[string]string, bool, error) {
 	if m, ok := s.mooncakeEngineIDs.Get(prefillHostPort); ok {
-		return m, nil
+		return m, true, nil
 	}
+	m, err := s.fetchMooncakeEngineMap(ctx, prefillHostPort, bootstrapAddr)
+	return m, false, err
+}
 
+// fetchMooncakeEngineMap queries the bootstrap server for the dp_rank -> engine_id
+// mapping and stores the refreshed map in the cache on success.
+func (s *Server) fetchMooncakeEngineMap(ctx context.Context, prefillHostPort, bootstrapAddr string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, mooncakeBootstrapTimeout)
 	defer cancel()
 
