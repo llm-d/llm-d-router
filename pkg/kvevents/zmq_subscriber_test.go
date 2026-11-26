@@ -451,38 +451,43 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 }
 
 // TestZMQSubscriber_ShortSequenceFrameSkipped verifies that a message with a
-// truncated sequence frame (< 8 bytes) is skipped instead of panicking.
+// truncated sequence frame (< 8 bytes) is skipped and the subscriber keeps
+// processing the messages that follow it.
 func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 
-	_, _, pool := newTestPool(t, ctx)
+	index, _, pool := newTestPool(t, ctx)
 
 	endpoint := availableEndpoint(t, ctx)
 	subManager := kvevents.NewSubscriberManager(pool)
 	t.Cleanup(func() { shutdownSubscriberManager(ctx, subManager) })
 	require.NoError(t, subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false))
-	time.Sleep(100 * time.Millisecond)
 
 	// Publisher dials into the subscriber's bound address.
 	pub := zmq4.NewPub(ctx)
 	t.Cleanup(func() { _ = pub.Close() })
 	require.NoError(t, pub.Dial(endpoint))
-	time.Sleep(100 * time.Millisecond)
 
-	// Send malformed messages with a truncated sequence frame (3 bytes instead of 8).
-	// Before the fix this would panic with index-out-of-range in binary.BigEndian.Uint64.
-	// Retry sending for a short window to mitigate ZMQ "slow joiner" behavior where
-	// early sends can be dropped before the subscription is fully established.
+	topic := []byte("kv@10.0.0.1@TestModel")
 	shortSeq := []byte{0x01, 0x02, 0x03}
-	sendDeadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(sendDeadline) {
-		require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte("kv@10.0.0.1@TestModel"), shortSeq, []byte("bad"))))
-		time.Sleep(10 * time.Millisecond)
+	var seq uint64
+	// Each tick publishes a truncated-sequence message ahead of a valid one.
+	sendUntilIndexed := func(hash uint64) {
+		payload := buildDistinctBlockStoredPayload(t, hash)
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			seq++
+			require.NoError(c, pub.Send(zmq4.NewMsgFrom(topic, shortSeq, []byte("bad"))))
+			require.NoError(c, pub.Send(zmq4.NewMsgFrom(topic, seqFrame(seq), payload)))
+			_, err := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", hash))
+			require.NoError(c, err)
+		}, 5*time.Second, 20*time.Millisecond)
 	}
 
-	// Allow a brief moment for any in-flight message to be processed before shutdown.
-	time.Sleep(100 * time.Millisecond)
+	// Indexing the first block shows the subscription is established, so the
+	// truncated messages sent for the second block reach the subscriber.
+	sendUntilIndexed(100)
+	sendUntilIndexed(200)
 }
 
 type replayHarness struct {
