@@ -106,8 +106,19 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
+			inClone := pr.In.Header.Clone()
+			pipeline.StripHopByHopHeaders(inClone)
+			priorXFF := inClone["X-Forwarded-For"]
+
+			if len(priorXFF) > 0 {
+				pr.Out.Header["X-Forwarded-For"] = priorXFF
+			}
+
 			pr.SetXForwarded()
+
+			if len(priorXFF) > 0 && pr.Out.Header.Get("X-Forwarded-For") == "" {
+				pr.Out.Header.Set("X-Forwarded-For", strings.Join(priorXFF, ", "))
+			}
 
 			pr.Out.URL.Scheme = gatewayURL.Scheme
 			pr.Out.URL.Host = gatewayURL.Host
