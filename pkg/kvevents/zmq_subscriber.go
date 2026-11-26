@@ -218,6 +218,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		metrics.MessagesReceived.WithLabelValues(z.podIdentifier).Inc()
 		topic, seq, payload, ok := parseEventFrame(msg.Frames)
 		if !ok {
+			metrics.EventsDropped.WithLabelValues(z.podIdentifier, "malformed_frame").Inc()
 			debugLogger.Error(nil, "Malformed event frame",
 				"frameCount", len(msg.Frames), "endpoint", z.endpoint)
 			continue
@@ -279,7 +280,10 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 
 		if z.hasLastSeq && seq > z.lastSeq+1 {
 			missed := seq - z.lastSeq - 1
+			metrics.EventsSequenceGaps.WithLabelValues(z.podIdentifier).Inc()
+			metrics.EventsMissed.WithLabelValues(z.podIdentifier).Add(float64(missed))
 			if !z.canAttemptReplay() {
+				metrics.EventsDropped.WithLabelValues(z.podIdentifier, "replay_cooldown").Inc()
 				debugLogger.Info("Dropping event while replay is in cooldown",
 					"lastSeq", z.lastSeq, "currentSeq", seq, "missed", missed,
 					"endpoint", z.endpoint)
@@ -332,11 +336,15 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 	}
 }
 
-// addTask hands a received message to the pool, carrying the receive span's
+// addTask hands a live received message to the pool, carrying the receive span's
 // identity so processing rejoins this trace across the worker queue. The span
 // starts after Recv returns so it measures handoff work rather than the idle
 // wait for the next message.
 func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, payload []byte) {
+	z.enqueueTask(ctx, topic, seq, payload, false)
+}
+
+func (z *zmqSubscriber) enqueueTask(ctx context.Context, topic string, seq uint64, payload []byte, replayed bool) {
 	// Spans route through the pool so a single Config.Tracing decision governs
 	// every stage of the pipeline.
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
@@ -361,7 +369,9 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
+		PodIdentifier:  z.podIdentifier,
 		resync:         z.resyncing && z.resyncOpen,
+		replayed:       replayed,
 	}
 	// carried is bound inside the branch on purpose. Taking &sc directly makes
 	// sc escape, so it heap-allocates on every message including the ones the
@@ -517,7 +527,7 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 		// snapshot covers.
 		z.queueResyncReset(topic, uint64(cut)) //nolint:gosec // cut is at least resyncThrough
 		for _, batch := range batches {
-			z.addTask(ctx, topic, 0, batch)
+			z.enqueueTask(ctx, topic, 0, batch, true)
 		}
 		z.resyncOpen = false
 		metrics.SnapshotLoadDuration.Observe(time.Since(started).Seconds())
@@ -529,7 +539,7 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 	z.resetForSource(topic)
 	z.publisherID = bytes.Clone(publisherID)
 	for _, batch := range batches {
-		z.addTask(ctx, topic, 0, batch)
+		z.enqueueTask(ctx, topic, 0, batch, true)
 	}
 	// A cut of -1 is a publisher that has not published yet.
 	z.lastSeq, z.hasLastSeq = 0, false
@@ -686,9 +696,9 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			}
 			if z.resyncing && z.resyncOpen {
 				z.queueResyncReset(topic, z.resyncThrough)
-				z.addTask(ctx, topic, seq, payload)
+				z.enqueueTask(ctx, topic, seq, payload, true)
 			} else {
-				z.addTask(ctx, topic, seq, payload)
+				z.enqueueTask(ctx, topic, seq, payload, true)
 				z.lastSeq = seq
 				z.hasLastSeq = true
 			}

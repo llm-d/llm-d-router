@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net"
 	"slices"
 	"strings"
@@ -524,6 +525,14 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 
 	podID, modelName, batch, err := p.decode(ctx, msg)
 	if err != nil {
+		// Attribute decode drops to the subscriber's pod identifier, or "unknown"
+		// when unset, so CleanupSubscriber removes the series and untrusted
+		// wire topics do not mint unbounded labels.
+		dropPodID := msg.PodIdentifier
+		if dropPodID == "" {
+			dropPodID = "unknown"
+		}
+		metrics.EventsDropped.WithLabelValues(dropPodID, "decode_error").Inc()
 		if tracingActive {
 			span.SetStatus(codes.Error, err.Error())
 		}
@@ -533,6 +542,9 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 
 	if msg.SourceEndpoint != "" {
 		podID = msg.SourceEndpoint
+	}
+	if !msg.replayed && batch.Timestamp > 0 {
+		observeProcessingLag(batch.Timestamp)
 	}
 	if tracingActive {
 		span.SetAttributes(
@@ -785,6 +797,16 @@ func (p *Pool) handleDeviceTierUpdate(
 		return false
 	}
 	return true
+}
+
+func observeProcessingLag(timestamp float64) {
+	sec, nsec := math.Modf(timestamp)
+	eventTime := time.Unix(int64(sec), int64(nsec*float64(time.Second)))
+	lag := time.Since(eventTime).Seconds()
+	if lag < 0 {
+		lag = 0
+	}
+	metrics.EventsProcessingLag.Observe(lag)
 }
 
 // processEventBatch processes a batch of events using type switches.
