@@ -277,14 +277,16 @@ func (s *Server) checkBufferedResponseForCacheThreshold(logger logr.Logger, data
 	// Parse SSE format: "data: {...json...}\n\ndata: {...json...}\n\n"
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || line == reqcommon.SSEDone || !strings.HasPrefix(line, reqcommon.SSEDataPrefix) {
+		if line == "" {
 			continue
 		}
-
-		jsonData := strings.TrimPrefix(line, reqcommon.SSEDataPrefix)
+		jsonData, ok := reqcommon.SSEDataPayload([]byte(line))
+		if !ok || len(jsonData) == 0 || reqcommon.SSEIsDone(jsonData) {
+			continue
+		}
 		var response map[string]any
-		if err := json.Unmarshal([]byte(jsonData), &response); err != nil {
-			logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", jsonData)
+		if err := json.Unmarshal(jsonData, &response); err != nil {
+			logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", string(jsonData))
 			continue
 		}
 

@@ -349,18 +349,12 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 func countStreamEvents(chunk []byte) int {
 	count := 0
 	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
-		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
-		if ok && !isStreamTerminator(content) {
+		payload, ok := reqcommon.SSEDataPayload(bytes.TrimSuffix(line, []byte("\r")))
+		if ok && !reqcommon.SSEIsDone(payload) {
 			count++
 		}
 	}
 	return count
-}
-
-// isStreamTerminator reports whether an SSE data payload is the [DONE] terminator, tolerating a
-// trailing \r left by CRLF line splitting.
-func isStreamTerminator(content []byte) bool {
-	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte(reqcommon.SSEDoneMarker))
 }
 
 func responseMediaType(headers map[string]string) string {
@@ -1084,12 +1078,12 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 	var result *request.Usage
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
+		payload, ok := reqcommon.SSEDataPayload(bytes.TrimSuffix(line, []byte("\r")))
 		if !ok {
 			continue
 		}
 		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if isStreamTerminator(content) || !bytes.Contains(content, []byte("usage")) {
+		if reqcommon.SSEIsDone(payload) || !bytes.Contains(payload, []byte("usage")) {
 			continue
 		}
 		var streamResponse struct {
@@ -1099,7 +1093,7 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 			} `json:"response"`
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal(content, &streamResponse); err != nil {
+		if err := json.Unmarshal(payload, &streamResponse); err != nil {
 			continue
 		}
 		// Standard ChatCompletion / vLLM usage format
