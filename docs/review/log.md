@@ -2,7 +2,7 @@
 
 ## 2026-11-26
 
-* **Update**: Routed two packages that had no row in [review_a_pull_request.md](playbooks/review_a_pull_request.md): `pkg/epp/framework/common/duration/**` (`#4375`) to `None (AGENTS.md and repo search only)`, and `pkg/epp/framework/plugins/requesthandling/forwardtokens/**` (`#3706`) with the engine wire contracts and the compatibility policy, because it writes token IDs into the request body sent to vLLM and registers a configurable plugin type. A `review-playbook` job in the `CI - Lint` workflow runs `python3 hack/render_playbook.py --check`, so a pull request that adds an unrouted production Go file fails there.
+* **Update**: Routed two packages that had no row in [review_a_pull_request.md](playbooks/review_a_pull_request.md): `pkg/epp/framework/common/duration/**` (`#4375`) to `None (AGENTS.md and repo search only)`, and `pkg/epp/framework/plugins/requesthandling/forwardtokens/**` (`#3706`) with the engine wire contracts and the compatibility policy, because it writes token IDs into the request body sent to vLLM and registers a configurable plugin type. A `review-playbook` job in the `CI - Lint` workflow runs `python3 hack/render_playbook.py --check`, so a pull request that adds an unrouted production Go file fails there. [AGENTS.md](../../AGENTS.md) and [maintain_review_bundle.md](playbooks/maintain_review_bundle.md) list adding a package as a case that updates the routing table.
 
 ## 2026-11-21
 

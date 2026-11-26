@@ -189,7 +189,11 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Verify review playbook
-        run: python3 hack/render_playbook.py --check
+        run: |
+          python3 hack/render_playbook.py --check || {
+            echo "::error::Review bundle check failed. A new package under cmd/, pkg/, or internal/ needs a row in docs/review/playbooks/review_a_pull_request.md. See docs/review/playbooks/maintain_review_bundle.md."
+            exit 1
+          }
 
   # The configs under test/testdata/plugins/stable/ are the written-down form of the
   # backwards-compatibility promise made when a plugin is promoted to Stable. Editing
