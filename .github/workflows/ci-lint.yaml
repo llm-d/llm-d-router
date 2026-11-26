@@ -79,16 +79,16 @@ jobs:
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      sarif_uploaded: ${{ steps.upload-sarif-artifact.outputs.artifact-id != '' }}
     permissions:
       contents: read
       actions: read
-      security-events: write
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
 
       - name: Merge PR onto live base branch
-        id: merge-base
         uses: ./.github/actions/merge-pr-onto-base
         with:
           base-sha: ${{ needs.check-changes.outputs.base_sha }}
@@ -162,32 +162,10 @@ jobs:
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make lint-security
 
-      # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
-      # merge_group is excluded because the checked-out ref is the merge
-      # queue's ephemeral gh-readonly-queue branch, which GitHub can delete
-      # before the upload's processing wait completes, failing the call with
-      # "ref not found". The persistent pull_request/push runs already cover
-      # code scanning for the branch.
-      # Pinned to a commit SHA rather than a tag, unlike other actions in this
-      # workflow, per GitHub's guidance for actions that write security data.
-      # codeql-action reads git rev-parse HEAD; point HEAD back to the
-      # GitHub-known commit OID while keeping gosec.sarif on disk.
-      - name: Restore workflow commit ref for SARIF upload
-        if: ${{ !cancelled() && steps.merge-base.outputs.merged == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
-        env:
-          WORKFLOW_SHA: ${{ github.sha }}
-        run: git reset --soft "$WORKFLOW_SHA"
-
-      - name: Upload gosec SARIF
-        if: ${{ !cancelled() && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
-        with:
-          sarif_file: gosec.sarif
-          category: gosec
-
-      # On runs that skip the upload above the artifact is the only way to
-      # reach the findings.
+      # On runs that skip the Code Scanning upload below (fork PRs, merge_group),
+      # this artifact is the only way to reach the findings.
       - name: Upload gosec SARIF artifact
+        id: upload-sarif-artifact
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
@@ -202,6 +180,43 @@ jobs:
         with:
           path: ${{ steps.go-cache.outputs.build }}
           key: gobuild-lint-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+
+  # Separated from lint so security-events: write is never granted to a job that
+  # checks out PR code. Fork PRs run with a read-only GITHUB_TOKEN that cannot
+  # upload SARIF. merge_group is excluded because its ephemeral gh-readonly-queue
+  # branch can be deleted before upload processing completes ("ref not found").
+  upload-gosec-sarif:
+    needs: lint
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.lint.result != 'cancelled' &&
+        needs.lint.result != 'skipped' &&
+        needs.lint.outputs.sarif_uploaded == 'true' &&
+        github.event_name != 'merge_group' &&
+        github.event_name != 'pull_request_target' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Download gosec SARIF artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gosec-sarif
+
+      # Pinned to a commit SHA rather than a tag, unlike other actions in this
+      # workflow, per GitHub's guidance for actions that write security data.
+      - name: Upload gosec SARIF
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+          ref: ${{ github.ref }}
+          sha: ${{ github.sha }}
 
   # The configs under test/testdata/plugins/stable/ are the written-down form of the
   # backwards-compatibility promise made when a plugin is promoted to Stable. Editing
