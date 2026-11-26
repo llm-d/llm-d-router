@@ -759,11 +759,11 @@ func TestServer_P2PSourceBodyReadRejectsUnreadableBody(t *testing.T) {
 	}
 }
 
-// The decoder-only branch forwards the body byte for byte: it does not read
-// the body when the connector cannot pull over the P2P tier or when no source
-// header announces a source, and a body it reads is re-marshaled only when a
-// source block was removed from it.
-func TestServer_DecoderOnlyPassthroughLeavesBodyUnread(t *testing.T) {
+// The decoder-only branch forwards the body byte for byte when the connector
+// cannot pull over the P2P tier or when no source header announces a source.
+// A body is re-marshaled only when a source block or a caller's P/D flag was
+// removed from it.
+func TestServer_DecoderOnlyPassthroughForwardsBodyVerbatim(t *testing.T) {
 	const body = `{"model":"m","messages":[],"kv_transfer_params":{"remote_kv_source":{"remote_host":"10.0.0.5"}}}`
 	// Keys out of sorted order at the top level and inside an inspected field,
 	// which json.Marshal would reorder.
@@ -819,6 +819,61 @@ func TestServer_DecoderOnlyPassthroughLeavesBodyUnread(t *testing.T) {
 			warned := slices.ContainsFunc(*logged, func(line string) bool { return strings.Contains(line, "connector does not support P2P pulls") })
 			if warned != tt.wantWarning {
 				t.Errorf("warning logged = %v, want %v: %v", warned, tt.wantWarning, *logged)
+			}
+		})
+	}
+}
+
+// A caller's do_remote_prefill on the decoder-only path makes vLLM's NIXL
+// scheduler assert and takes the engine down. The P/D connectors set both
+// flags themselves, so a caller's copy is dropped and other keys are kept.
+func TestServer_DecoderOnlyPassthroughDropsCallerPDFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"do_remote_prefill alone",
+			`{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true}}`,
+			`{"messages":[],"model":"m"}`,
+		},
+		{
+			"do_remote_decode alone",
+			`{"model":"m","messages":[],"kv_transfer_params":{"do_remote_decode":true}}`,
+			`{"messages":[],"model":"m"}`,
+		},
+		{
+			"flags beside other keys",
+			`{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true,"do_remote_decode":false,"prompt_token_ids":[1,2],"other":true}}`,
+			`{"kv_transfer_params":{"other":true,"prompt_token_ids":[1,2]},"messages":[],"model":"m"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+
+			var forwarded string
+			var contentLength int64
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				forwarded = string(raw)
+				contentLength = r.ContentLength
+			})
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tt.body))
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected the request to be forwarded, got %d: %s", recorder.Code, recorder.Body.String())
+			}
+			assert.JSONEq(t, tt.want, forwarded)
+			if contentLength != int64(len(forwarded)) {
+				t.Errorf("ContentLength = %d, want %d", contentLength, len(forwarded))
 			}
 		})
 	}
@@ -1196,6 +1251,229 @@ func TestServer_DecodeWithP2PSourceReadsUnreadBody(t *testing.T) {
 	if _, ok := kvParams[reqcommon.FieldRemoteKVSource]; !ok || forwarded["model"] != "m" {
 		t.Errorf("forwarded body = %v, want the client body with remote_kv_source", forwarded)
 	}
+}
+
+// A body that Go cannot decode into typed values, here an overflowing number
+// in an inspected field, is still valid JSON to vLLM, so its flags are removed too.
+func TestServer_DecoderOnlyPassthroughDropsFlagsBesideUndecodableNumber(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+	var forwarded string
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		forwarded = string(raw)
+	})
+
+	const body = `{"model":"m","messages":[],"ec_transfer_params":{"x":1e309},"kv_transfer_params":{"do_remote_prefill":true}}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+
+	assert.Contains(t, forwarded, `"x":1e309`)
+	assert.NotContains(t, forwarded, reqcommon.FieldDoRemotePrefill)
+}
+
+// Python's json.loads reads NaN, a UTF-8 byte order mark, and UTF-16, so a body
+// Go rejects only for one of those would reach vLLM with its flags. It is
+// refused instead.
+func TestServer_DecoderOnlyPassthroughRefusesPythonOnlyBody(t *testing.T) {
+	const flags = `{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true}}`
+	var utf16Body strings.Builder
+	for _, c := range flags {
+		utf16Body.WriteString(string(c) + "\x00")
+	}
+	tests := map[string]string{
+		"NaN":       `{"model":"m","messages":[],"temperature":NaN,"kv_transfer_params":{"do_remote_prefill":true}}`,
+		"UTF-8 BOM": "\xef\xbb\xbf" + flags,
+		"UTF-16LE":  utf16Body.String(),
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decoder must not receive the body")
+			})
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		})
+	}
+}
+
+// The body is read without decoding when it cannot name kv_transfer_params,
+// so a key spelled with \u escapes must still be decoded and its flags dropped.
+func TestServer_DecoderOnlyPassthroughDropsFlagsUnderEscapedKey(t *testing.T) {
+	// One escape from each of the U+005x, U+006x, and U+007x ranges.
+	for _, key := range []string{`kv\u005ftransfer_params`, `\u006bv_transfer_params`, `kv_\u0074ransfer_params`} {
+		t.Run(key, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			var forwarded string
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				forwarded = string(raw)
+			})
+
+			body := `{"model":"m","messages":[],"` + key + `":{"do_remote_prefill":true}}`
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+
+			assert.JSONEq(t, `{"messages":[],"model":"m"}`, forwarded)
+		})
+	}
+}
+
+// vLLM's generate route reads kv_transfer_params from sampling_params.extra_args
+// too, and a flag name can be spelled with an escape.
+func TestServer_DecoderOnlyPassthroughDropsNestedAndEscapedFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		want string
+	}{
+		{
+			"generate extra_args",
+			reqcommon.PathVLLMGenerate,
+			`{"token_ids":[1],"sampling_params":{"max_tokens":1,"extra_args":{"kv_transfer_params":{"do_remote_prefill":true,"other":1},"x":2}}}`,
+			`{"token_ids":[1],"sampling_params":{"max_tokens":1,"extra_args":{"kv_transfer_params":{"other":1},"x":2}}}`,
+		},
+		{
+			"generate extra_args holding only flags",
+			reqcommon.PathVLLMGenerate,
+			`{"token_ids":[1],"sampling_params":{"extra_args":{"kv_transfer_params":{"do_remote_decode":true}}}}`,
+			`{"token_ids":[1],"sampling_params":{"extra_args":{}}}`,
+		},
+		{
+			"escaped flag name",
+			reqcommon.PathChatCompletions,
+			`{"model":"m","messages":[],"kv_transfer_params":{"do\u005fremote_prefill":true,"other":1}}`,
+			`{"model":"m","messages":[],"kv_transfer_params":{"other":1}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			var forwarded string
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				forwarded = string(raw)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+
+			s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(tt.path))(httptest.NewRecorder(), req)
+
+			assert.JSONEq(t, tt.want, forwarded)
+		})
+	}
+}
+
+// A body parsed with inspected fields holds sampling_params as decoded values.
+func TestDeleteCallerPDFlagsDecodedSamplingParams(t *testing.T) {
+	body := map[string]any{reqcommon.FieldSamplingParams: map[string]any{
+		reqcommon.FieldExtraArgs: map[string]any{
+			reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldDoRemotePrefill: true, "other": 1},
+		},
+	}}
+
+	assert.True(t, deleteCallerPDFlags(body))
+	assert.Equal(t, map[string]any{reqcommon.FieldSamplingParams: map[string]any{
+		reqcommon.FieldExtraArgs: map[string]any{reqcommon.FieldKVTransferParams: map[string]any{"other": 1}},
+	}}, body)
+}
+
+// A body that cannot name kv_transfer_params is forwarded as sent without
+// being decoded, so one Go cannot parse still reaches the engine.
+func TestServer_DecoderOnlyPassthroughSkipsDecodingWithoutKey(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+	var forwarded string
+	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		forwarded = string(raw)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	const body = `{"model":"m","messages":[{"role":"user","content":"hi"}],"temperature":NaN}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, body, forwarded)
+}
+
+// The data-parallel proxy forwards a request with a source before
+// decodeWithP2PSource could rebuild kv_transfer_params, so its flags are
+// removed first.
+func TestServer_DataParallelP2PSourceDropsCallerPDFlags(t *testing.T) {
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading})
+	s.allowlistValidator = &AllowlistValidator{}
+	var forwarded string
+	s.dataParallelProxies = map[string]http.Handler{
+		"10.0.0.9:8000": http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			forwarded = string(raw)
+		}),
+	}
+
+	const body = `{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true,` +
+		`"remote_kv_source":{"kv_request_id":"k","remote_host":"10.0.0.5","remote_port":7777}}}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:7777")
+	req.Header.Set(routing.DataParallelEndpointHeader, "10.0.0.9:8000")
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+
+	if forwarded == "" {
+		t.Fatal("data-parallel replica did not receive the request")
+	}
+	assert.NotContains(t, forwarded, reqcommon.FieldDoRemotePrefill)
+}
+
+// A decoder-only request with a source keeps the validated source and the
+// prompt_token_ids, and loses the caller's do_remote_prefill.
+func TestServer_DecoderOnlyP2PSourceKeepsPromptTokenIDs(t *testing.T) {
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading, ForwardPromptTokenIDs: true})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var forwarded map[string]any
+	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &forwarded)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	const body = `{"model":"m","messages":[],"kv_transfer_params":{"do_remote_prefill":true,"prompt_token_ids":[1,2],` +
+		`"remote_kv_source":{"kv_request_id":"k","remote_host":"10.0.0.5","remote_port":7777}}}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:7777")
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	kvParams, _ := forwarded[reqcommon.FieldKVTransferParams].(map[string]any)
+	assert.Contains(t, kvParams, reqcommon.FieldRemoteKVSource)
+	assert.Equal(t, []any{float64(1), float64(2)}, kvParams[reqcommon.FieldPromptTokenIDs])
+	assert.NotContains(t, kvParams, reqcommon.FieldDoRemotePrefill)
 }
 
 // The dispatcher parses the prefill P2P port header once; the encoder path

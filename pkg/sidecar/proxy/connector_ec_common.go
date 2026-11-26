@@ -334,6 +334,10 @@ func (s *Server) runPDPipeline(
 	logger := log.FromContext(r.Context())
 	// Skip decode-first; the encoder has run and prefill must execute.
 	body[reqcommon.FieldCacheHitThreshold] = 0
+	// Behind a prefiller the P/D connector sets the flags.
+	if len(prefillEndPoint) == 0 {
+		deleteCallerPDFlags(body)
+	}
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {

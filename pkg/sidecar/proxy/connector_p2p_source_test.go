@@ -115,9 +115,9 @@ var _ = Describe("P2P KV cache source in the request body", func() {
 		<-testInfo.stoppedCh
 	})
 
-	// Without the header the body is not read: the request streams to the
-	// decoder as the client sent it, a client-supplied source included.
-	It("should forward the body unread without the source header", func() {
+	// Without the header the request reaches the decoder as the client sent
+	// it, a client-supplied source included.
+	It("should forward the body as sent without the source header", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		body := sourceBody(validSource, map[string]any{"other": true})
