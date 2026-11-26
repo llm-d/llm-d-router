@@ -233,15 +233,23 @@ func NewFlowController(
 		if readsPeers {
 			consumer.SetPeerDemand(publisher.PeerDemand())
 		}
-		if detector, ok := fc.saturationDetector.(flowcontrol.PeerDemandConsumer); ok {
+		detector, detectorReadsPeers := fc.saturationDetector.(flowcontrol.PeerDemandConsumer)
+		if detectorReadsPeers {
 			detector.SetPeerDemand(publisher.PeerDemand())
 		}
 		fc.logger.V(logutil.DEFAULT).Info("Starting the cross-replica band demand publisher.",
-			"syncer", cr.Syncer.TypedName(), "scope", poolName, "peerDemandConsumer", readsPeers)
+			"syncer", cr.Syncer.TypedName(), "scope", poolName, "peerDemandConsumer", readsPeers,
+			"saturationDetectorPeerDemandConsumer", detectorReadsPeers)
 		go publisher.Run(fc.parentCtx)
-	} else if _, ok := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer); ok {
-		fc.logger.Info("The usage limit policy reads peer demand, but flowControl.crossReplica is not set; "+
-			"it acts on local state alone.", "policy", fc.usageLimitPolicy.TypedName())
+	} else {
+		if _, ok := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer); ok {
+			fc.logger.Info("The usage limit policy reads peer demand, but flowControl.crossReplica is not set; "+
+				"it acts on local state alone.", "policy", fc.usageLimitPolicy.TypedName())
+		}
+		if _, ok := fc.saturationDetector.(flowcontrol.PeerDemandConsumer); ok {
+			fc.logger.Info("The saturation detector reads peer demand, but flowControl.crossReplica is not set; "+
+				"it acts on local state alone.", "detector", fc.saturationDetector.TypedName())
+		}
 	}
 
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
