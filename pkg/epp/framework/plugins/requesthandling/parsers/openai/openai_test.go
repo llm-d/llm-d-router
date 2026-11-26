@@ -180,6 +180,131 @@ func TestOpenAIParser_RewritePriority(t *testing.T) {
 	}
 }
 
+func TestOpenAIParser_RequestStreamUsage(t *testing.T) {
+	includeUsage := map[string]any{reqcommon.FieldIncludeUsage: true}
+	tests := []struct {
+		name        string
+		path        string
+		payload     request.MarshalablePayload
+		want        map[string]any
+		wantChanged bool
+	}{
+		{
+			name:        "chat completions stream",
+			path:        "/v1/chat/completions",
+			payload:     request.PayloadMap{"model": "m", "stream": true},
+			want:        map[string]any{"model": "m", "stream": true, "stream_options": includeUsage},
+			wantChanged: true,
+		},
+		{
+			name:        "completions stream",
+			path:        "/v1/completions",
+			payload:     request.PayloadMap{"model": "m", "stream": true},
+			want:        map[string]any{"model": "m", "stream": true, "stream_options": includeUsage},
+			wantChanged: true,
+		},
+		{
+			name:    "non-streaming chat completions",
+			path:    "/v1/chat/completions",
+			payload: request.PayloadMap{"model": "m"},
+			want:    map[string]any{"model": "m"},
+		},
+		{
+			name:    "client asked for usage",
+			path:    "/v1/chat/completions",
+			payload: request.PayloadMap{"stream": true, "stream_options": includeUsage},
+			want:    map[string]any{"stream": true, "stream_options": includeUsage},
+		},
+		{
+			name:    "responses stream",
+			path:    "/v1/responses",
+			payload: request.PayloadMap{"stream": true},
+			want:    map[string]any{"stream": true},
+		},
+		{
+			name:    "chat render",
+			path:    "/v1/chat/completions/render",
+			payload: request.PayloadMap{"stream": true},
+			want:    map[string]any{"stream": true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := NewOpenAIParser().RequestStreamUsage(tt.path, tt.payload)
+			if changed != tt.wantChanged {
+				t.Errorf("RequestStreamUsage() changed = %v, want %v", changed, tt.wantChanged)
+			}
+			m, ok := got.(request.PayloadMap)
+			if !ok {
+				t.Fatalf("RequestStreamUsage() payload = %T, want PayloadMap", got)
+			}
+			if diff := cmp.Diff(tt.want, map[string]any(m)); diff != "" {
+				t.Errorf("RequestStreamUsage() payload mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// The option reaches the forwarded bytes once the parsed payload is repackaged,
+// and the fields the parser keeps raw are forwarded as sent.
+func TestOpenAIParser_RequestStreamUsageRepackages(t *testing.T) {
+	for _, tc := range []struct {
+		path      string
+		body      string
+		rawField  string
+		wantField any
+	}{
+		{
+			path:      "/v1/chat/completions",
+			body:      `{"model":"m","stream":true,"stream_options":{"include_obfuscation":false},"messages":[{"role":"user","content":"hi"}]}`,
+			rawField:  "messages",
+			wantField: []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		{
+			path:      "/v1/completions",
+			body:      `{"model":"m","stream":true,"stream_options":{"include_obfuscation":false},"prompt":"hi"}`,
+			rawField:  "prompt",
+			wantField: "hi",
+		},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			parser := NewOpenAIParser()
+			headers := map[string]string{":path": tc.path}
+			result, err := parser.ParseRequest(context.Background(), []byte(tc.body), headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			payload, ok := result.Body.Payload.(request.MarshalablePayload)
+			if !ok {
+				t.Fatalf("payload = %T, want MarshalablePayload", result.Body.Payload)
+			}
+			if _, changed := parser.RequestStreamUsage(tc.path, payload); !changed {
+				t.Fatal("RequestStreamUsage() changed = false, want true")
+			}
+			result.Body.Mutated = true
+			marshaler, ok := result.Body.WirePayload().(request.Marshaler)
+			if !ok {
+				t.Fatalf("wire payload = %T, want Marshaler", result.Body.WirePayload())
+			}
+			out, err := marshaler.Marshal()
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			var forwarded map[string]any
+			if err := json.Unmarshal(out, &forwarded); err != nil {
+				t.Fatalf("forwarded body is not JSON: %v", err)
+			}
+			want := map[string]any{"include_obfuscation": false, "include_usage": true}
+			if diff := cmp.Diff(want, forwarded["stream_options"]); diff != "" {
+				t.Errorf("forwarded stream_options mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantField, forwarded[tc.rawField]); diff != "" {
+				t.Errorf("forwarded %s mismatch (-want +got):\n%s", tc.rawField, diff)
+			}
+		})
+	}
+}
+
 func TestOpenAIParserPluginFactory(t *testing.T) {
 	plugin, err := OpenAIParserPluginFactory("test", nil, nil)
 	if err != nil {

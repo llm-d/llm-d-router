@@ -167,7 +167,11 @@ data: [DONE]
 	`
 )
 
-type mockDirector struct{ stream bool }
+type mockDirector struct {
+	stream bool
+	// usageRequested marks the request as one whose stream usage the director requested.
+	usageRequested bool
+}
 
 func (m *mockDirector) HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext {
 	return reqCtx
@@ -186,6 +190,7 @@ func (m *mockDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext
 	if m.stream {
 		reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{Stream: true}}
 	}
+	reqCtx.StreamUsageRequested = m.usageRequested
 	return reqCtx, nil
 }
 
@@ -1204,6 +1209,144 @@ func TestHandleResponseBodyModelStreaming_LargeResponsesCompletedSplit(t *testin
 			assert.Equal(t, want.PromptTokens, reqCtx.Usage.PromptTokens)
 			assert.Equal(t, want.CompletionTokens, reqCtx.Usage.CompletionTokens)
 			assert.Equal(t, 2, reqCtx.StreamedEvents)
+		})
+	}
+}
+
+// A chat completions stream as vLLM sends it with include_usage set, and as the
+// client receives it once the usage-only frame is removed.
+const (
+	usageStreamContent = "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	usageStreamFrame = "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n"
+	usageStreamDone  = "data: [DONE]\n\n"
+	usageStream      = usageStreamContent + usageStreamFrame + usageStreamDone
+	usageStreamWant  = usageStreamContent + usageStreamDone
+)
+
+// filterChunks runs chunks through one usage frame filter, ending the stream on the last.
+func filterChunks(chunks ...string) string {
+	var f usageFrameFilter
+	var out strings.Builder
+	for i, chunk := range chunks {
+		out.Write(f.filter([]byte(chunk), i == len(chunks)-1))
+	}
+	return out.String()
+}
+
+func TestUsageFrameFilter(t *testing.T) {
+	t.Parallel()
+
+	crlf := strings.ReplaceAll(usageStream, "\n", "\r\n")
+	crlfWant := strings.ReplaceAll(usageStreamWant, "\n", "\r\n")
+	for _, tc := range []struct{ name, stream, want string }{
+		{"LF", usageStream, usageStreamWant},
+		{"CRLF", crlf, crlfWant},
+	} {
+		t.Run(tc.name+" split at every offset", func(t *testing.T) {
+			for i := 0; i <= len(tc.stream); i++ {
+				require.Equal(t, tc.want, filterChunks(tc.stream[:i], tc.stream[i:]), "split at %d", i)
+			}
+		})
+		t.Run(tc.name+" one byte per chunk", func(t *testing.T) {
+			chunks := make([]string, len(tc.stream))
+			for i := range tc.stream {
+				chunks[i] = tc.stream[i : i+1]
+			}
+			require.Equal(t, tc.want, filterChunks(chunks...))
+		})
+	}
+
+	tests := []struct {
+		name   string
+		chunks []string
+		want   string
+	}{
+		{
+			name:   "usage beside choices is the stream's own",
+			chunks: []string{"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":5}}\n\n" + usageStreamDone},
+			want:   "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":5}}\n\n" + usageStreamDone,
+		},
+		{
+			name:   "unterminated usage frame at end of stream",
+			chunks: []string{usageStreamContent, strings.TrimRight(usageStreamFrame, "\n")},
+			want:   usageStreamContent,
+		},
+		{
+			name:   "line after the frame is kept when it is not blank",
+			chunks: []string{strings.TrimSuffix(usageStreamFrame, "\n") + usageStreamDone},
+			want:   usageStreamDone,
+		},
+		{
+			name:   "stream without a usage frame",
+			chunks: []string{usageStreamContent, usageStreamDone},
+			want:   usageStreamContent + usageStreamDone,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, filterChunks(tc.chunks...))
+		})
+	}
+}
+
+func TestUsageFrameFilterHoldsOnlyAPartialLine(t *testing.T) {
+	t.Parallel()
+
+	var f usageFrameFilter
+	chunk := []byte(usageStreamContent)
+	out := f.filter(chunk, false)
+	require.Equal(t, usageStreamContent, string(out))
+	require.Same(t, &chunk[0], &out[0], "a chunk with nothing to drop is forwarded without a copy")
+
+	require.Empty(t, f.filter([]byte(usageStreamDone[:7]), false), "a partial line waits for its end")
+	require.Equal(t, usageStreamDone, string(f.filter([]byte(usageStreamDone[7:]), false)))
+}
+
+func TestUsageFrameFilterForwardsLongLineEarly(t *testing.T) {
+	t.Parallel()
+
+	var f usageFrameFilter
+	head := "data: " + strings.Repeat("x", maxUsageFrameBytes)
+	require.Equal(t, head, string(f.filter([]byte(head), false)), "a line longer than any usage frame is not held")
+	require.Equal(t, "y", string(f.filter([]byte("y"), false)))
+	require.Equal(t, "z\n\n"+usageStreamDone, string(f.filter([]byte("z\n\n"+usageStreamFrame+usageStreamDone), true)))
+}
+
+// A line held across many chunks must not be re-copied on every chunk: the
+// held buffer keeps its spare capacity, so allocations stay logarithmic in the
+// number of chunks rather than one per chunk.
+func TestUsageFrameFilterHoldsLineWithoutCopyingPerChunk(t *testing.T) {
+	const chunks = 200
+	piece := []byte("xxxxxxxxxxxxxxxxxxxx")
+	allocs := testing.AllocsPerRun(5, func() {
+		var f usageFrameFilter
+		for range chunks {
+			f.filter(piece, false)
+		}
+	})
+	require.Less(t, allocs, float64(chunks/4), "a held line was re-copied on every chunk")
+}
+
+func TestDropRequestedUsageFrame(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		requested   bool
+		contentType string
+		want        string
+	}{
+		{"requested on an event stream", true, "text/event-stream; charset=utf-8", usageStreamWant},
+		{"not requested", false, "text/event-stream", usageStream},
+		{"requested on a JSON reply", true, "application/json", usageStream},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &RequestContext{
+				StreamUsageRequested: tc.requested,
+				Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: tc.contentType}},
+			}
+			require.Equal(t, tc.want, string(reqCtx.dropRequestedUsageFrame([]byte(usageStream), true)))
 		})
 	}
 }

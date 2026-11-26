@@ -183,10 +183,15 @@ gauge releases each request when it completes or its ext_proc stream closes.
 vLLM includes `usage` in a chat completions or completions stream only when the request sets
 `stream_options.include_usage` or the server runs with `--enable-force-include-usage`. A stream
 without it adds no observation to these metrics, but `llm_d_epp_request_total` and
-`llm_d_epp_request_ttft_seconds` still count it. Run vLLM with `--enable-force-include-usage`
-when these metrics must cover every stream. Clients then receive `usage` in every chat
-completions and completions stream, including a final chunk with an empty `choices` list.
-Messages and Responses streams carry `usage` without either setting.
+`llm_d_epp_request_ttft_seconds` still count it. To cover every stream, set
+`requestHandler.requestStreamUsage: true` in the EndpointPickerConfig. The EPP then adds
+`stream_options.include_usage` to a stream that does not ask for usage and removes the final chunk
+with an empty `choices` list from the response. vLLM sends `system_fingerprint` on that chunk
+instead of the last content chunk when `include_usage` is set, so the client receives the stream
+without `system_fingerprint`. A stream that sets only `stream_options.continuous_usage_stats` is
+forwarded unchanged. Running vLLM with `--enable-force-include-usage` also covers every stream, but
+clients then receive `usage` in every chat completions and completions stream, including that final
+chunk. Messages and Responses streams carry `usage` without either setting.
 
 Per-surface p95 latency uses the histogram buckets:
 

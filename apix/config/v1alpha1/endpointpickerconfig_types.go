@@ -366,6 +366,16 @@ type RequestHandlerConfig struct {
 	// not key the flow. When enabled, "%" and "/" in the header are
 	// percent-encoded so the tenant part stays unambiguous.
 	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
+
+	// +optional
+	// RequestStreamUsage, when true, lets the EPP add
+	// stream_options.include_usage to a streamed OpenAI chat completions or
+	// completions request that does not ask for usage, so the model server
+	// reports the token usage that the EPP's token metrics and usage-reading
+	// plugins depend on. The EPP removes the usage-only frame this adds from the
+	// response before it reaches the client. It is off by default: when disabled
+	// the request body is forwarded unchanged.
+	RequestStreamUsage bool `json:"requestStreamUsage,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -385,6 +395,9 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.ComposeFairnessIDs {
 		parts = append(parts, "ComposeFairnessIDs: true")
+	}
+	if rhc.RequestStreamUsage {
+		parts = append(parts, "RequestStreamUsage: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
