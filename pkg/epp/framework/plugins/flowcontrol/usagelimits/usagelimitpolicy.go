@@ -45,6 +45,9 @@ func StaticPolicyFactory(name string, rawConfig *json.Decoder, _ plugin.Handle) 
 			return nil, fmt.Errorf("failed to parse static usage limit policy config: %w", err)
 		}
 		if cfg.Threshold != nil {
+			if *cfg.Threshold <= 0.0 || *cfg.Threshold > 1.0 {
+				return nil, fmt.Errorf("threshold must be in (0.0, 1.0], got %f", *cfg.Threshold)
+			}
 			threshold = *cfg.Threshold
 		}
 	}

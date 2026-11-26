@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 func TestStaticPolicyFactory(t *testing.T) {
@@ -86,6 +87,65 @@ func TestStaticPolicyFactoryInvalidJSON(t *testing.T) {
 	dec := json.NewDecoder(bytes.NewReader([]byte(`{not-json`)))
 	if _, err := StaticPolicyFactory("bad", dec, nil); err == nil {
 		t.Fatal("StaticPolicyFactory with invalid JSON should return an error")
+	}
+}
+
+func TestStaticPolicyFactoryAcceptsThreshold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		want float64
+	}{
+		{name: "nil_decoder", raw: "", want: 1.0},
+		{name: "threshold_omitted", raw: `{}`, want: 1.0},
+		{name: "upper_bound", raw: `{"threshold": 1.0}`, want: 1.0},
+		{name: "fraction", raw: `{"threshold": 0.8}`, want: 0.8},
+		{name: "small_positive", raw: `{"threshold": 0.01}`, want: 0.01},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, err := StaticPolicyFactory("static", plugin.StrictDecoder([]byte(tc.raw)), nil)
+			if err != nil {
+				t.Fatalf("StaticPolicyFactory returned error: %v", err)
+			}
+			policy, ok := p.(flowcontrol.UsageLimitPolicy)
+			if !ok {
+				t.Fatalf("StaticPolicyFactory result %T does not implement UsageLimitPolicy", p)
+			}
+			ceilings := make([]float64, 2)
+			policy.ComputeLimit(t.Context(), 0.5, []int{10, 0}, ceilings)
+			if want := []float64{tc.want, tc.want}; !slices.Equal(ceilings, want) {
+				t.Errorf("ComputeLimit ceilings = %v, want %v", ceilings, want)
+			}
+		})
+	}
+}
+
+func TestStaticPolicyFactoryRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "zero", raw: `{"threshold": 0.0}`},
+		{name: "negative", raw: `{"threshold": -0.1}`},
+		{name: "above_one", raw: `{"threshold": 1.1}`},
+		{name: "percentage", raw: `{"threshold": 80}`},
+		{name: "unknown_field", raw: `{"threshold": 0.8, "unknown": true}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, err := StaticPolicyFactory("static", plugin.StrictDecoder([]byte(tc.raw)), nil)
+			if err == nil {
+				t.Fatal("StaticPolicyFactory returned nil error, want error")
+			}
+			if p != nil {
+				t.Errorf("StaticPolicyFactory returned plugin %v, want nil", p)
+			}
+		})
 	}
 }
 
