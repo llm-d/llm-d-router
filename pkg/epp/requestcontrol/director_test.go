@@ -3402,6 +3402,59 @@ func TestDirector_ReleasesDispatchReservationAfterPreRequest(t *testing.T) {
 	require.True(t, released)
 }
 
+func TestDirector_ForwardsRoutingHeadersAfterProducerTimeout(t *testing.T) {
+	for _, phase := range []fwkrh.DataProducerPhase{fwkrh.DataProducerPhaseRequestHandling, fwkrh.DataProducerPhaseScheduling} {
+		t.Run(string(phase), func(t *testing.T) {
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				Address: "192.168.1.100",
+				Port:    "8000",
+				ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+			}, nil, fwkdl.NewAttributes())
+			result := &fwksched.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"decode": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+				},
+			}
+			dir, ctx := newSinglePodDirector(t, result)
+			producer := &lateHeaderPlugin{
+				header:   routing.KVCacheSourceHeader,
+				started:  make(chan struct{}),
+				release:  make(chan struct{}),
+				observed: make(chan string, 1),
+			}
+			t.Cleanup(func() { close(producer.release) })
+			cfg := NewConfig().WithPreRequestPlugins(&mockPreRequestPlugin{
+				name: "stamp-routing-header",
+				modifyFn: func(request *fwksched.InferenceRequest) {
+					routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
+				},
+			})
+			if phase == fwkrh.DataProducerPhaseRequestHandling {
+				cfg.WithRequestHandlingDataProducers(producer)
+			} else {
+				cfg.WithDataProducerPlugins(producer)
+			}
+			dir.requestControlPlugins = *cfg
+
+			body := []byte(`{"model":"m","prompt":"p"}`)
+			originalHeaders := map[string]string{":path": "/v1/completions"}
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{ID: "test-producer-timeout", Headers: originalHeaders, RawBody: body},
+				Parser:  openai.NewOpenAIParser(),
+			}
+			parsed, err := reqCtx.Parser.ParseRequest(ctx, body, originalHeaders)
+			require.NoError(t, err)
+			got, err := dir.HandleRequest(ctx, reqCtx, parsed.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "10.0.0.1:5555", got.Request.Headers[routing.KVCacheSourceHeader])
+			assert.Equal(t, got.SchedulingRequest.Headers, got.Request.Headers)
+			assert.Equal(t, "/v1/completions", got.Request.Headers[":path"])
+			assert.NotContains(t, originalHeaders, routing.KVCacheSourceHeader)
+		})
+	}
+}
+
 // TestDirector_ReleasesProducerStateOnEarlyReturn verifies that per-request state a DataProducer
 // writes in Produce is released before HandleRequest returns when the request never reaches
 // PreRequest, and that PreRequest owns the release on the paths that do reach it.

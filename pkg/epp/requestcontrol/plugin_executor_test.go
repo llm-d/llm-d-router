@@ -24,9 +24,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -216,6 +218,67 @@ func TestDataProducerPluginsWithTimeout_ScopesBeforeLaunch(t *testing.T) {
 	<-plugin.started
 	close(plugin.release)
 	<-plugin.done
+}
+
+// lateHeaderPlugin reads a header after the timeout path has returned and
+// reports the value on observed, so the test goroutine makes every assertion.
+type lateHeaderPlugin struct {
+	header   string
+	started  chan struct{}
+	release  chan struct{}
+	observed chan string
+}
+
+func (p *lateHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock", Name: "late-header"}
+}
+
+func (p *lateHeaderPlugin) Produce(_ context.Context, request *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
+	close(p.started)
+	<-p.release
+	p.observed <- request.Headers[p.header]
+	return nil
+}
+
+func (p *lateHeaderPlugin) Produces() map[fwkplugin.DataKey]any { return nil }
+
+func (p *lateHeaderPlugin) ProduceTimeout() time.Duration { return 20 * time.Millisecond }
+
+func TestDataProducerPluginsWithTimeout_LateHeaderReadIsIsolated(t *testing.T) {
+	originalHeaders := map[string]string{"x-client": "v"}
+	request := &fwksched.InferenceRequest{Headers: originalHeaders}
+	plugin := &lateHeaderPlugin{
+		header:   routing.KVCacheSourceHeader,
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		observed: make(chan string, 1),
+	}
+	defer func() {
+		close(plugin.release)
+		select {
+		case value := <-plugin.observed:
+			assert.Empty(t, value)
+		case <-time.After(time.Second):
+			t.Error("producer did not report its header")
+		}
+	}()
+
+	err := dataProducerPluginsWithTimeout(
+		context.Background(),
+		fwkrh.DataProducerExtensionPoint,
+		plugin.ProduceTimeout(),
+		[]fwkrh.DataProducer{plugin},
+		request,
+		nil,
+	)
+	require.ErrorContains(t, err, "DataProducer execution timed out")
+
+	preRequest, _ := datalayer.ScopeRequest(logr.Discard(), fwkrh.PreRequestExtensionPoint, plugin, request)
+	routing.SetRoutingHeader(preRequest.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
+
+	assert.NotContains(t, originalHeaders, routing.KVCacheSourceHeader)
+	assert.Equal(t, "v", request.Headers["x-client"])
+	assert.Equal(t, "10.0.0.1:5555", request.Headers[routing.KVCacheSourceHeader])
 }
 
 func TestDataProducerPluginsWithTimeout(t *testing.T) {
