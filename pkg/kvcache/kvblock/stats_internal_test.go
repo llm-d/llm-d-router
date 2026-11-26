@@ -17,6 +17,9 @@ limitations under the License.
 package kvblock
 
 import (
+	"fmt"
+	"math/rand"
+	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -64,6 +67,7 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 		stats := idx.Stats()
 		require.Equal(t, 2, stats.ResidentKeys)
 		require.Equal(t, 4, int(idx.entries.Load()))
+		require.Equal(t, int64(4), idx.entrySlots.Load())
 		require.Equal(t, 1, stats.EngineMappings)
 		require.Equal(t, int64(0), stats.TruncatedEntries)
 
@@ -72,20 +76,26 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 		stats = idx.Stats()
 		require.Equal(t, 1, stats.ResidentKeys)
 		require.Equal(t, 2, int(idx.entries.Load()))
-		// Emptying key 1 removed it and its engine mapping.
+		require.Equal(t, int64(2), idx.entrySlots.Load())
+		// Emptying key 1 removed the key; the engine mapping stays behind
+		// and self-heals.
+		require.Equal(t, 1, stats.EngineMappings)
 		require.Equal(t, emptyBefore+1, evictions("empty"))
 	})
 
 	t.Run("per-key cap truncation counts dropped pods", func(t *testing.T) {
 		idx := newStatsTestIndex(t, 100, 2)
+		truncatedBefore := testutil.ToFloat64(metrics.IndexTruncatedEntries)
 		require.NoError(t, idx.Add(ctx, []BlockHash{10}, []BlockHash{1}, []PodEntry{podA, podB}))
 		require.NoError(t, idx.Add(ctx, []BlockHash{10}, []BlockHash{1}, []PodEntry{podC}))
 
 		stats := idx.Stats()
 		require.Equal(t, 1, stats.ResidentKeys)
 		require.Equal(t, 2, int(idx.entries.Load()))
+		// The shift-in-place truncation keeps the slice capacity at 2.
+		require.Equal(t, int64(2), idx.entrySlots.Load())
 		require.Equal(t, int64(1), stats.TruncatedEntries)
-		require.Equal(t, 1.0, testutil.ToFloat64(metrics.IndexTruncatedEntries))
+		require.Equal(t, truncatedBefore+1, testutil.ToFloat64(metrics.IndexTruncatedEntries))
 	})
 
 	t.Run("Clear removes matching entries and observes duration", func(t *testing.T) {
@@ -110,6 +120,7 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 		stats = idx.Stats()
 		require.Equal(t, 0, stats.ResidentKeys)
 		require.Equal(t, 0, int(idx.entries.Load()))
+		require.Equal(t, int64(0), idx.entrySlots.Load())
 		require.Equal(t, 1, stats.EngineMappings)
 		require.Equal(t, clearBefore+1, evictions("clear"))
 		require.Equal(t, emptyBefore, evictions("empty"))
@@ -126,6 +137,7 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 		stats := idx.Stats()
 		require.Equal(t, 2, stats.ResidentKeys)
 		require.Equal(t, 2, int(idx.entries.Load()))
+		require.Equal(t, int64(2), idx.entrySlots.Load())
 		require.Equal(t, capacityBefore+1, evictions("capacity"))
 	})
 
@@ -137,4 +149,60 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 		require.Equal(t, float64(1), testutil.ToFloat64(metrics.IndexResidentKeys))
 		require.Equal(t, float64(stats.ResidentBytes), testutil.ToFloat64(metrics.IndexResidentBytes))
 	})
+}
+
+// TestInMemoryStatsNoDrift runs concurrent Adds, Evicts, and Clears over a
+// small index, then empties it: the entry and entry-slot counters must return
+// to zero, so no removal path subtracts what another already drained.
+func TestInMemoryStatsNoDrift(t *testing.T) {
+	ctx := t.Context()
+	const (
+		numKeys  = 16
+		numPods  = 4
+		workers  = 8
+		overview = 200
+	)
+	pods := make([]PodEntry, numPods)
+	for i := range pods {
+		pods[i] = PodEntry{PodIdentifier: fmt.Sprintf("10.0.0.%d:8000", i+1), DeviceTier: "gpu"}
+	}
+	allPods := make([]PodEntry, 0, numPods*2)
+	for _, p := range pods {
+		allPods = append(allPods, p, p) // duplicates exercise the refresh path
+	}
+	keys := make([]BlockHash, numKeys)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+
+	idx := newStatsTestIndex(t, numKeys, numPods)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(int64(w + 1)))
+			for i := 0; i < overview; i++ {
+				key := keys[rng.Intn(numKeys)]
+				pod := pods[rng.Intn(numPods)]
+				switch i % 4 {
+				case 0, 1:
+					engineKey := BlockHash(100 + rng.Intn(4))
+					_ = idx.Add(ctx, []BlockHash{engineKey}, []BlockHash{key}, []PodEntry{pod})
+				case 2:
+					_ = idx.Evict(ctx, RequestKey, []BlockHash{key}, allPods)
+				case 3:
+					_ = idx.Clear(ctx, pod.PodIdentifier)
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Empty every key; whatever remains must account to zero.
+	for _, key := range keys {
+		require.NoError(t, idx.Evict(ctx, RequestKey, []BlockHash{key}, allPods))
+	}
+	require.Equal(t, 0, int(idx.entries.Load()))
+	require.Equal(t, int64(0), idx.entrySlots.Load())
 }

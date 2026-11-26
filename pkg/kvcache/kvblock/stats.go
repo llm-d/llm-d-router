@@ -17,11 +17,12 @@ limitations under the License.
 package kvblock
 
 import (
+	"unsafe"
+
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
-// MemoryIndexStats is a snapshot of a memory backend's residency. It is an
-// optional Index capability, asserted alongside KeyWalker.
+// MemoryIndexStats is a snapshot of a memory backend's residency.
 type MemoryIndexStats struct {
 	// ResidentKeys is the number of request keys held.
 	ResidentKeys int
@@ -29,28 +30,34 @@ type MemoryIndexStats struct {
 	ResidentBytes int64
 	// EngineMappings is the engine-key map's mapping count.
 	EngineMappings int
-	// GroupRows is the group side table's live row count.
-	GroupRows int
 	// TruncatedEntries is the cumulative count of pods dropped by the
 	// per-key pod cap.
 	TruncatedEntries int64
 }
 
-// StatsProvider is an optional Index capability: a snapshot of the backend's
-// storage state.
-type StatsProvider interface {
-	Stats() MemoryIndexStats
-}
-
 // Per-structure residency estimates for the in-memory backend: one lruStore
-// map entry plus a PodCache allocation per key, one EntryRef per entry, and
-// one mapping with its request-key slice in the engine-key map. The
-// estimates size the resident-bytes gauge, which informs capacity sizing;
-// measured heap density, not this gauge, is the memory gate.
+// map entry plus a PodCache allocation per key, one EntryRef per allocated
+// entry slot (PodCache entries double on growth and never shrink, so the
+// estimate follows slot capacity, not entry count), and one mapping with its
+// request-key slice in the engine-key map. The estimates size the
+// resident-bytes gauge, which informs capacity sizing; measured heap density,
+// not this gauge, is the memory gate.
 const (
-	inMemoryBytesPerKey    = 185
-	inMemoryBytesPerEntry  = 48
+	inMemoryBytesPerKey    = 177
 	inMemoryBytesPerEngine = 140
+)
+
+// inMemoryBytesPerSlot is the per-slot cost of a PodCache entry: EntryRef
+// itself, sized from the type so the estimate cannot drift from it.
+var inMemoryBytesPerSlot = int64(unsafe.Sizeof(EntryRef{})) //#nosec G103 -- sizing a resident struct, no pointer arithmetic
+
+// The eviction-cause children are resolved once: WithLabelValues runs a label
+// lookup per call, and the capacity path runs it while the store's write lock
+// is held.
+var (
+	evictionsCapacity = metrics.IndexEvictions.WithLabelValues("capacity")
+	evictionsClear    = metrics.IndexEvictions.WithLabelValues("clear")
+	evictionsEmpty    = metrics.IndexEvictions.WithLabelValues("empty")
 )
 
 // Stats returns a snapshot of the index's residency.
@@ -63,11 +70,11 @@ func (m *InMemoryIndex) Stats() MemoryIndexStats {
 	}
 }
 
-// residentBytes estimates the resident bytes from the key, entry, and
+// residentBytes estimates the resident bytes from the key, entry-slot, and
 // engine-mapping counts.
 func (m *InMemoryIndex) residentBytes() int64 {
 	bytes := int64(m.data.Len()) * inMemoryBytesPerKey
-	bytes += m.entries.Load() * inMemoryBytesPerEntry
+	bytes += m.entrySlots.Load() * inMemoryBytesPerSlot
 	bytes += int64(m.engineToRequestKeys.Len()) * inMemoryBytesPerEngine
 	return bytes
 }

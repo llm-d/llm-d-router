@@ -232,14 +232,14 @@ var (
 		Buckets: prometheus.DefBuckets,
 	})
 
-	// IndexEvictions counts index keys and engine mappings removed by the
-	// memory backend's own eviction paths, labeled by cause: "capacity" (the
-	// main-store LRU bound), "clear" (a cleared pod's emptied keys), "empty"
+	// IndexEvictions counts request keys removed by the memory backend's own
+	// eviction paths, labeled by cause: "capacity" (the main-store LRU
+	// bound), "clear" (a cleared pod's emptied keys), "empty"
 	// (delete-on-empty after eviction).
 	IndexEvictions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_index_evictions_by_cause_total",
 		Help: metricsutil.HelpMsgWithStability(
-			"Index keys and engine mappings removed by the backend's eviction paths, by cause",
+			"Request keys removed by the backend's eviction paths, by cause",
 			compbasemetrics.ALPHA),
 	}, []string{reasonLabel})
 	// IndexTruncatedEntries counts pods dropped by the per-key pod cap when a

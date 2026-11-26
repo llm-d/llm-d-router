@@ -28,6 +28,7 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -131,25 +132,32 @@ type InMemoryIndex struct {
 	// a cap fails rather than admitting an entry that cannot be matched.
 	pods  *interner
 	tiers *interner
-	// entries is the live entry count across every resident key, and
-	// truncated the cumulative per-key pod-cap drops. Both feed the
-	// residency gauges and Stats.
-	entries   atomic.Int64
-	truncated atomic.Int64
+	// entries is the live entry count across every resident key, entrySlots
+	// the sum of the PodCache entry-slice capacities (the slices double on
+	// growth and never shrink, so slots track allocated heap), and truncated
+	// the cumulative per-key pod-cap drops. All three feed the residency
+	// gauges and Stats.
+	entries    atomic.Int64
+	entrySlots atomic.Int64
+	truncated  atomic.Int64
 }
-
-var _ StatsProvider = &InMemoryIndex{}
 
 // onKeyEvicted accounts a main-store LRU eviction. Remove fires the same
 // callback for keys the backend removes deliberately, but those are emptied
-// first, so a non-empty cache here is a capacity eviction.
+// first, so a non-empty cache here is a capacity eviction. The cache is
+// drained under its own lock, so an Evict or Clear that peeked it
+// concurrently cannot subtract the same entries here and in removeAll.
 func (m *InMemoryIndex) onKeyEvicted(pc *PodCache) {
 	if pc == nil {
 		return
 	}
-	m.entries.Add(-int64(pc.size()))
-	if pc.size() > 0 {
-		metrics.IndexEvictions.WithLabelValues("capacity").Add(1)
+	entries, slots := pc.drain()
+	if entries > 0 {
+		m.entries.Add(-int64(entries))
+		evictionsCapacity.Inc()
+	}
+	if slots > 0 {
+		m.entrySlots.Add(-int64(slots))
 	}
 }
 
@@ -171,11 +179,12 @@ type PodCache struct {
 
 // addAll inserts records with LRU semantics: an existing entry refreshes its
 // recency, a new entry appends, and overflow evicts the entry overflowVictim
-// selects. It returns the entry-count change and the count of pods dropped
-// by the capacity bound.
-func (pc *PodCache) addAll(recs []EntryRef) (delta, truncated int) {
+// selects. It returns the entry-count change, the count of pods dropped by
+// the capacity bound, and the growth of the entry-slice capacity.
+func (pc *PodCache) addAll(recs []EntryRef) (delta, truncated, slots int) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	before := cap(pc.entries)
 	for _, rec := range recs {
 		found := false
 		for i := range pc.entries {
@@ -202,7 +211,18 @@ func (pc *PodCache) addAll(recs []EntryRef) (delta, truncated int) {
 		pc.entries = append(pc.entries, rec)
 		delta++
 	}
-	return delta, truncated
+	return delta, truncated, cap(pc.entries) - before
+}
+
+// drain empties the cache and reports the entry and slot counts it held.
+// Called only from the store's eviction callback, after the key left the
+// store, to keep the entry counters exact across a concurrent removeAll.
+func (pc *PodCache) drain() (entries, slots int) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	n, c := len(pc.entries), cap(pc.entries)
+	pc.entries = nil
+	return n, c
 }
 
 // overflowVictim returns the position of the entry a new record replaces in a
@@ -446,8 +466,9 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 			}
 		}
 
-		delta, truncated := podCache.addAll(records)
+		delta, truncated, slots := podCache.addAll(records)
 		m.entries.Add(int64(delta))
+		m.entrySlots.Add(int64(slots))
 		if truncated > 0 {
 			m.truncated.Add(int64(truncated))
 			metrics.IndexTruncatedEntries.Add(float64(truncated))
@@ -542,7 +563,7 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 	}
 
 	m.mu.Lock()
-	removed := m.removeIfEmptyLocked(requestKey, "empty")
+	removed := m.removeIfEmptyLocked(requestKey, evictionsEmpty)
 	m.mu.Unlock()
 	if removed && traceLogger.Enabled() {
 		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
@@ -550,10 +571,10 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 }
 
 // removeIfEmptyLocked removes requestKey from the index if its cache holds no
-// entries, and reports whether it did, counting the removal under cause. The
+// entries, and reports whether it did, counting the removal on cause. The
 // caller holds m.mu, so an Add that already fetched this cache has finished
 // its write before the check.
-func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash, cause string) bool {
+func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash, cause prometheus.Counter) bool {
 	podCache, found := m.data.Peek(requestKey)
 	if !found || podCache == nil {
 		return false
@@ -566,11 +587,11 @@ func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash, cause string) 
 		return false
 	}
 	// podCache.mu is released before the removal because data.Remove fires
-	// the eviction callback, which reads the cache's size under that lock.
+	// the eviction callback, which drains the cache under that lock.
 	// The cache cannot gain entries in between: Add holds m.mu across its
 	// inserts, and the caller holds m.mu here.
 	m.data.Remove(requestKey)
-	metrics.IndexEvictions.WithLabelValues(cause).Add(1)
+	cause.Inc()
 	return true
 }
 
@@ -623,7 +644,7 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	for chunk := range slices.Chunk(emptied, clearChunkSize) {
 		m.mu.Lock()
 		for _, requestKey := range chunk {
-			m.removeIfEmptyLocked(requestKey, "clear")
+			m.removeIfEmptyLocked(requestKey, evictionsClear)
 		}
 		m.mu.Unlock()
 	}

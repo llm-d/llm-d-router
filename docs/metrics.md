@@ -1321,6 +1321,13 @@ index and KV-event pool register these metrics in the router pod's EPP registry,
 available from the existing EPP `/metrics` endpoint. Index metrics are unlabeled. KV-event metrics
 use the labels shown below.
 
+The memory backend's own series (`llm_d_epp_kv_cache_index_evictions_by_cause_total`,
+`llm_d_epp_kv_cache_index_truncated_entries_total`, `llm_d_epp_kv_cache_index_clear_duration_seconds`,
+`llm_d_epp_kv_cache_index_resident_keys`, and `llm_d_epp_kv_cache_index_resident_bytes`) are emitted
+by the backend directly and the KV-event pool registers their collectors unconditionally, so they
+report whether or not `enableMetrics` is set; the other index series stay absent until an operator
+opts in.
+
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_kv_cache_index_admissions_total` | Counter | - | Blocks admitted to the index. |
@@ -1346,7 +1353,7 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_missed_total` | Counter | `pod_identifier` | Missed KV-event sequence numbers inferred from detected gaps. |
 | `llm_d_epp_kv_cache_events_dropped_total` | Counter | `pod_identifier`, `reason` | KV-event messages dropped before indexing (`malformed_frame`, `replay_cooldown`, `decode_error`). Decode failures without a subscriber-bound `PodIdentifier` report `pod_identifier="unknown"`. |
 | `llm_d_epp_kv_cache_events_processing_lag_seconds` | Histogram | - | Elapsed time from the engine batch timestamp (`EventBatch.Timestamp > 0`) to event-pool processing for live batches, clamped at zero under clock skew. Replayed and snapshot rebuild batches are excluded. |
-| `llm_d_epp_kv_cache_index_evictions_by_cause_total` | Counter | `reason` | Index keys and engine mappings removed by the memory backend's own eviction paths: `capacity` (main-store LRU bound), `clear` (a cleared pod's emptied keys), `empty` (delete-on-empty after an eviction). |
+| `llm_d_epp_kv_cache_index_evictions_by_cause_total` | Counter | `reason` | Request keys removed by the memory backend's own eviction paths: `capacity` (main-store LRU bound), `clear` (a cleared pod's emptied keys), `empty` (delete-on-empty after an eviction). The series counts request keys; engine mappings are not counted. |
 | `llm_d_epp_kv_cache_index_truncated_entries_total` | Counter | - | Pods dropped by the index's per-key pod cap. |
 | `llm_d_epp_kv_cache_index_clear_duration_seconds` | Histogram | - | Index Clear call duration. |
 | `llm_d_epp_kv_cache_index_resident_keys` | Gauge | - | Request keys resident in the index; refreshed at the end of each mutating call. |
