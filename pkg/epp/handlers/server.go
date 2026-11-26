@@ -162,6 +162,9 @@ type RequestContext struct {
 	StreamedEvents           int
 	// Completion is set at end of stream from a response with a 200 status.
 	Completion *fwkrh.Completion
+	// StopReason is the last normalized stop reason observed on the response stream.
+	// It is empty when none was observed; the end-of-stream Response normalizes it.
+	StopReason fwkrh.StopReason
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
 	Request             *Request

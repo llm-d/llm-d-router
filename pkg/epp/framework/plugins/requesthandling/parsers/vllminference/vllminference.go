@@ -383,6 +383,9 @@ func (p *VllmInferenceParser) ParseResponse(_ context.Context, body []byte, _ ma
 			promptTokens = parsers.ClampToInt(item.NumPromptTokens)
 		}
 		if item.HasFinishInfo {
+			if item.HasFinishReason {
+				result.StopReason = parsers.NormalizeStopReason(item.FinishReason.String())
+			}
 			if item.NumOutputTokens > 0 {
 				completionTokens = parsers.ClampToInt(item.NumOutputTokens)
 			}

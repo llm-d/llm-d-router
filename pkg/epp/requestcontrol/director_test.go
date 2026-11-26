@@ -3823,6 +3823,84 @@ func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testin
 		"mid-stream chunks carry no cause: the stream has not ended")
 }
 
+func TestDirector_HandleResponseBody_StopReasonAtEndOfStream(t *testing.T) {
+	testCases := []struct {
+		name     string
+		recorded fwkrh.StopReason
+		want     fwkrh.StopReason
+	}{
+		{
+			name: "no_observed_reason_becomes_unknown",
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
+			name:     "recorded_reason_survives_to_record",
+			recorded: fwkrh.StopReasonToolCall,
+			want:     fwkrh.StopReasonToolCall,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := newTestResponseStreaming("ps")
+			ctx := logutil.NewTestLoggerIntoContext(context.Background())
+			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+				NewConfig().WithResponseStreamingPlugins(ps), "")
+
+			reqCtx := newResponseBodyTestRequestContext("test-req-id")
+			reqCtx.StopReason = tc.recorded
+
+			director.HandleResponseBody(ctx, reqCtx, true)
+
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+			require.Len(t, ps.respsOnStreaming, 1)
+			assert.Equal(t, tc.want, ps.respsOnStreaming[0].StopReason)
+		})
+	}
+}
+
+func TestDirector_HandleResponseBody_StopReasonOnlyAtEndOfStream(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps), "")
+
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	reqCtx.StopReason = fwkrh.StopReasonToolCall
+
+	director.HandleResponseBody(ctx, reqCtx, false)
+
+	require.Eventually(t, func() bool {
+		ps.mu.Lock()
+		defer ps.mu.Unlock()
+		return len(ps.respsOnStreaming) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	assert.Empty(t, ps.respsOnStreaming[0].StopReason,
+		"mid-stream chunks carry no stop reason: the stream has not ended")
+}
+
+func TestDirector_HandleResponseBody_NonNaturalCauseKeepsStopReasonUnknown(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps), "")
+
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	reqCtx.TerminationCause = fwkrh.TerminationCauseEvicted
+
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	require.Len(t, ps.respsOnStreaming, 1)
+	assert.Equal(t, fwkrh.TerminationCauseEvicted, ps.respsOnStreaming[0].TerminationCause)
+	assert.Equal(t, fwkrh.StopReasonUnknown, ps.respsOnStreaming[0].StopReason)
+}
+
 func TestDirector_HandleResponseBody_CompletionAtEndOfStream(t *testing.T) {
 	for _, endOfStream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("endOfStream=%v", endOfStream), func(t *testing.T) {

@@ -472,6 +472,8 @@ func TestRewritePriority(t *testing.T) {
 
 func TestScanStreamItem(t *testing.T) {
 	stop := &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}}
+	length := &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Length{Length: &sglangapiv1.FinishLength{}}}
+	abort := &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Abort{Abort: &sglangapiv1.FinishAbort{}}}
 	tests := []struct {
 		name string
 		item *sglangapiv1.GenerateStreamItem
@@ -492,7 +494,21 @@ func TestScanStreamItem(t *testing.T) {
 				Index:    proto.Uint32(2),
 				MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: stop, PromptTokens: 64, CompletionTokens: 12, CachedTokens: 48},
 			}}},
-			want: StreamItem{HasFrame: true, Index: 2, HasMetaInfo: true, Finished: true, PromptTokens: 64, CompletionTokens: 12, CachedTokens: 48},
+			want: StreamItem{HasFrame: true, Index: 2, HasMetaInfo: true, Finished: true, FinishReason: "stop", PromptTokens: 64, CompletionTokens: 12, CachedTokens: 48},
+		},
+		{
+			name: "terminal length frame",
+			item: &sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: length},
+			}}},
+			want: StreamItem{HasFrame: true, HasMetaInfo: true, Finished: true, FinishReason: "length"},
+		},
+		{
+			name: "terminal abort frame",
+			item: &sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: abort},
+			}}},
+			want: StreamItem{HasFrame: true, HasMetaInfo: true, Finished: true, FinishReason: "abort"},
 		},
 		{
 			name: "empty finish_reason is still set",
@@ -586,7 +602,7 @@ func TestScanStreamItemOneofSwitchDiscardsEarlierFields(t *testing.T) {
 		{
 			name:    "frame, frame merges",
 			payload: bytes.Join([][]byte{terminal, complMeta}, nil),
-			want:    StreamItem{HasFrame: true, Index: 3, HasMetaInfo: true, Finished: true, PromptTokens: 64, CompletionTokens: 9, CachedTokens: 48},
+			want:    StreamItem{HasFrame: true, Index: 3, HasMetaInfo: true, Finished: true, FinishReason: "stop", PromptTokens: 64, CompletionTokens: 9, CachedTokens: 48},
 		},
 	}
 	for _, tc := range tests {

@@ -100,6 +100,13 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil {
 		reqCtx.StreamedEvents += parsedResp.StreamedEvents
+		if parsedResp.StopReason != "" {
+			// A tool-call item can arrive in an earlier chunk than the terminal
+			// response event. Do not let a later turn_ended erase it.
+			if reqCtx.StopReason != fwkrh.StopReasonToolCall || parsedResp.StopReason != fwkrh.StopReasonTurnEnded {
+				reqCtx.StopReason = parsedResp.StopReason
+			}
+		}
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)

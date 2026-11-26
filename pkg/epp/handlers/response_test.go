@@ -252,6 +252,74 @@ func TestHandleResponseBody(t *testing.T) {
 	}
 }
 
+func TestHandleResponseBodyStopReasonAcrossChunks(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		chunks []string
+		want   fwkrh.StopReason
+	}{
+		{
+			name: "openai_finish_reason_before_empty_eos",
+			path: reqcommon.APITypeChatCompletions.Path(),
+			chunks: []string{
+				"data: " + `{"choices":[{"finish_reason":"tool_calls"}]}` + "\n\n",
+				"",
+			},
+			want: fwkrh.StopReasonToolCall,
+		},
+		{
+			name: "openai_responses_function_call_before_completed",
+			path: reqcommon.APITypeResponses.Path(),
+			chunks: []string{
+				"event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}}` + "\n\n",
+				"event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_1"}}` + "\n\n",
+			},
+			want: fwkrh.StopReasonToolCall,
+		},
+		{
+			name: "openai_responses_function_call_then_failed",
+			path: reqcommon.APITypeResponses.Path(),
+			chunks: []string{
+				"event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}}` + "\n\n",
+				"event: response.failed\ndata: " + `{"type":"response.failed","response":{"status":"failed"}}` + "\n\n",
+			},
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
+			name: "anthropic_stop_reason_before_message_stop",
+			path: reqcommon.APITypeMessages.Path(),
+			chunks: []string{
+				"event: message_delta\ndata: " + `{"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\n",
+				"event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n",
+			},
+			want: fwkrh.StopReasonTurnEnded,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{
+					openai.NewOpenAIParser(), anthropic.NewAnthropicParser(),
+				}, logr.Discard()),
+				director: &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response: &Response{Headers: map[string]string{
+					reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream,
+				}},
+				Request:           &Request{Headers: map[string]string{":path": tc.path}},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			}
+			for i, chunk := range tc.chunks {
+				server.HandleResponseBody(t.Context(), reqCtx, []byte(chunk), i == len(tc.chunks)-1)
+			}
+			assert.Equal(t, tc.want, reqCtx.StopReason)
+		})
+	}
+}
+
 type terminatedProcessServer struct {
 	replayProcessServer
 	terminalErr     error

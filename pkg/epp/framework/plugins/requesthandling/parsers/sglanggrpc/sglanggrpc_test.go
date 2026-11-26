@@ -505,6 +505,51 @@ func TestSGLangGRPCParser_ParseResponse(t *testing.T) {
 		}, res.Usage)
 	})
 
+	t.Run("finish reason is normalized", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			reason *sglangapiv1.FinishReason
+			want   fwkrh.StopReason
+		}{
+			{
+				name:   "stop",
+				reason: &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}},
+				want:   fwkrh.StopReasonTurnEnded,
+			},
+			{
+				name:   "length",
+				reason: &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Length{Length: &sglangapiv1.FinishLength{}}},
+				want:   fwkrh.StopReasonTurnEnded,
+			},
+			{
+				name:   "abort",
+				reason: &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Abort{Abort: &sglangapiv1.FinishAbort{}}},
+				want:   fwkrh.StopReasonUnknown,
+			},
+			{
+				name:   "unknown",
+				reason: &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Unknown{Unknown: "other"}},
+				want:   fwkrh.StopReasonUnknown,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				frame, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+					Item: &sglangapiv1.GenerateStreamItem_Frame{
+						Frame: &sglangapiv1.GenerateResponse{
+							MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: tt.reason},
+						},
+					},
+				})
+				require.NoError(t, err)
+				res, err := parser.ParseResponse(context.Background(), frame, nil, true)
+				require.NoError(t, err)
+				require.Equal(t, tt.want, res.StopReason)
+			})
+		}
+	})
+
 	t.Run("in-stream error frame is tolerated without usage", func(t *testing.T) {
 		errFrame, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
 			Item: &sglangapiv1.GenerateStreamItem_Error{

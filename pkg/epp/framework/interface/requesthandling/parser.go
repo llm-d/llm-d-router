@@ -139,6 +139,10 @@ type ParsedResponse struct {
 	// exactly one choice that finished with "stop" or "length". Nil otherwise, including
 	// when the response body exceeds the parser's size limit.
 	Completion *Completion
+	// StopReason is the normalized reason this response ended. It is empty when the
+	// parser observed no recognized reason; use OrUnknown to consume it, or read
+	// Response.StopReason at end of stream, which is always normalized.
+	StopReason StopReason
 }
 
 // DisjointInputTokens holds the input token counts one parse observed, split by

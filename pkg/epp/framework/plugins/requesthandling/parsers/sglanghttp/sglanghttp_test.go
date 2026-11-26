@@ -562,6 +562,108 @@ func TestSGLangHTTPParser_RejectsPathWithoutSegmentBoundary(t *testing.T) {
 	}
 }
 
+func TestSGLangHTTPParser_StopReason(t *testing.T) {
+	parser := NewSGLangHTTPParser()
+	tests := []struct {
+		name    string
+		body    string
+		headers map[string]string
+		want    fwkrh.StopReason
+	}{
+		{
+			name: "non_streaming_stop",
+			body: `{"text":"hi","meta_info":{"finish_reason":{"type":"stop"}}}`,
+			want: fwkrh.StopReasonTurnEnded,
+		},
+		{
+			name: "non_streaming_length",
+			body: `{"text":"hi","meta_info":{"finish_reason":{"type":"length"}}}`,
+			want: fwkrh.StopReasonTurnEnded,
+		},
+		{
+			name: "non_streaming_abort",
+			body: `{"text":"hi","meta_info":{"finish_reason":{"type":"abort"}}}`,
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
+			name: "streaming_stop",
+			headers: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			body: "data: " + `{"text":"hi","meta_info":{"finish_reason":{"type":"stop"}}}` + "\n\n",
+			want: fwkrh.StopReasonTurnEnded,
+		},
+		{
+			name: "streaming_abort",
+			headers: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			body: "data: " + `{"text":"hi","meta_info":{"finish_reason":{"type":"abort"}}}` + "\n\n",
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
+			name: "parallel_sampling_skips_empty_sample",
+			body: `[{"meta_info":{}},{"meta_info":{"finish_reason":{"type":"stop"}}}]`,
+			want: fwkrh.StopReasonTurnEnded,
+		},
+		{
+			name: "parallel_sampling_no_finish_reason",
+			body: `[{"meta_info":{}},{"meta_info":{}}]`,
+		},
+		{
+			name: "parallel_sampling_abort_only",
+			body: `[{"meta_info":{"finish_reason":{"type":"abort"}}}]`,
+			want: fwkrh.StopReasonUnknown,
+		},
+		{
+			name: "no_finish_reason",
+			body: `{"text":"hi","meta_info":{"prompt_tokens":1}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(t.Context(), []byte(tt.body), tt.headers, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if got.StopReason != tt.want {
+				t.Fatalf("StopReason = %q, want %q", got.StopReason, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkSGLangHTTPParser_ParseResponse_Streaming(b *testing.B) {
+	parser := NewSGLangHTTPParser()
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "with_finish_reason",
+			body: []byte("data: " + `{"text":"hello","meta_info":{"prompt_tokens":10,"completion_tokens":5,"finish_reason":{"type":"stop"}}}` + "\n\n"),
+		},
+		{
+			name: "intermediate",
+			body: []byte("data: " + `{"text":"part","meta_info":{"prompt_tokens":10,"completion_tokens":2}}` + "\n\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.ParseResponse(b.Context(), tt.body, map[string]string{
+					"Content-Type": "text/event-stream",
+				}, false); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestSGLangHTTPParser_Claims(t *testing.T) {
 	parser := NewSGLangHTTPParser()
 	got := parser.Claims()

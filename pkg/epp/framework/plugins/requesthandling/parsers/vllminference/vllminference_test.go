@@ -803,6 +803,35 @@ func TestVllmInferenceParser_ParseResponse(t *testing.T) {
 		}, res.Usage)
 	})
 
+	t.Run("finish reason is normalized", func(t *testing.T) {
+		tests := []struct {
+			name string
+			in   vllmpb.FinishInfo_FinishReason
+			want fwkrh.StopReason
+		}{
+			{name: "stop", in: vllmpb.FinishInfo_STOP, want: fwkrh.StopReasonTurnEnded},
+			{name: "length", in: vllmpb.FinishInfo_LENGTH, want: fwkrh.StopReasonTurnEnded},
+			{name: "aborted", in: vllmpb.FinishInfo_ABORTED, want: fwkrh.StopReasonUnknown},
+			{name: "not_finished", in: vllmpb.FinishInfo_NOT_FINISHED, want: ""},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				frame, err := grpcframe.MarshalProto(&vllmpb.GenerateResponse{
+					Outputs: &vllmpb.SequenceOutput{
+						FinishInfo: &vllmpb.FinishInfo{
+							NumOutputTokens: 1,
+							FinishReason:    tt.in,
+						},
+					},
+				})
+				require.NoError(t, err)
+				res, err := parser.ParseResponse(context.Background(), frame, nil, true)
+				require.NoError(t, err)
+				require.Equal(t, tt.want, res.StopReason)
+			})
+		}
+	})
+
 	t.Run("finish_info without num_cached_tokens leaves PromptTokenDetails nil", func(t *testing.T) {
 		frame, err := grpcframe.MarshalProto(&vllmpb.GenerateResponse{
 			PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 15},

@@ -180,6 +180,9 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 
 	case *pb.GenerateResponse_Complete:
 		logger.V(logutil.DEBUG).Info("parsed GenerateResponse_Complete", "finishReason", v.Complete.FinishReason)
+		if v.Complete.FinishReason != "" {
+			result.StopReason = parsers.NormalizeStopReason(v.Complete.FinishReason)
+		}
 		// Populate Usage for complete, non-streaming responses.
 		promptToken, completionToken, cachedToken := int(v.Complete.PromptTokens), int(v.Complete.CompletionTokens), int(v.Complete.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
