@@ -184,6 +184,7 @@ func allCollectors() []resettableCollector {
 		requestRunning,
 		stepDuration,
 		stepErrorTotal,
+		stepRerunTotal,
 		stepRunning,
 		upstreamRequestTotal,
 		upstreamRequestDuration,

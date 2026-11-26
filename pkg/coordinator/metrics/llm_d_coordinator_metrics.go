@@ -117,6 +117,15 @@ var (
 		withLabel(stepLabel, "error_code"),
 	)
 
+	stepRerunTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "step_reruns_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of re-runs that a pipeline step requested after a retryable upstream failure.", compbasemetrics.ALPHA),
+		},
+		stepLabel,
+	)
+
 	stepRunning = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,

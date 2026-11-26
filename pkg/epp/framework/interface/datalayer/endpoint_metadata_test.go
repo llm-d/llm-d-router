@@ -82,6 +82,10 @@ func TestEndpointMetadataEqual(t *testing.T) {
 
 	assert.True(t, base.Equal(base.Clone()))
 
+	byHeader := base.Clone()
+	byHeader.RankByHeader = true
+	assert.True(t, byHeader.Clone().RankByHeader, "Clone keeps RankByHeader")
+
 	var nilMetadata *EndpointMetadata
 	assert.True(t, nilMetadata.Equal(nil))
 	assert.False(t, nilMetadata.Equal(base))
@@ -141,6 +145,12 @@ func TestEndpointMetadataEqual(t *testing.T) {
 			name: "zmq port",
 			mutate: func(meta *EndpointMetadata) {
 				meta.ZMQPort = 7002
+			},
+		},
+		{
+			name: "rank by header",
+			mutate: func(meta *EndpointMetadata) {
+				meta.RankByHeader = true
 			},
 		},
 	}

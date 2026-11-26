@@ -103,7 +103,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
-		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
+		prefillReq.Header.Set(routing.DataParallelRankHeader, dpRank)
 	}, toolFields)
 }
 

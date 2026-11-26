@@ -1721,3 +1721,55 @@ if ! ${YQ} -N 'select(.kind == "Deployment") | .metadata.name' "${blank_override
   echo "Whitespace-only router.fullnameOverride did not fall back to the release name"
   exit 1
 fi
+
+echo "Verifying the configured EPP ext_proc port across chart modes..."
+for mode in gateway envoy-sidecar envoy-service envoy-priority agentgateway legacy-flag; do
+  chart=llm-d-router-standalone
+  port=9102
+  args=(--set router.epp.extProcPort=9102)
+  case "${mode}" in
+    gateway)
+      chart=llm-d-router-gateway
+      ;;
+    envoy-service)
+      args+=(--set router.proxy.mode=service)
+      ;;
+    envoy-priority)
+      args+=(--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true)
+      ;;
+    agentgateway)
+      args+=(--set router.proxy.proxyType=agentgateway)
+      ;;
+    legacy-flag)
+      port=9202
+      args+=(--set router.epp.flags.grpc-port=9202)
+      ;;
+  esac
+  if [ "${chart}" = llm-d-router-standalone ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  ext_proc_render_output="${TEMP_DIR}/ext-proc-port-${mode}.yaml"
+  "${HELM}" template "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    "${args[@]}" > "${ext_proc_render_output}" || exit 1
+
+  if [ "$(grep -c -- '--grpc-port=' "${ext_proc_render_output}")" != 1 ] ||
+     ! grep -q -- "--grpc-port=${port}" "${ext_proc_render_output}" ||
+     ! grep -q -- "containerPort: ${port}$" "${ext_proc_render_output}" ||
+     ! grep -q -- "port: ${port}$" "${ext_proc_render_output}"; then
+    echo "${mode}: expected the EPP argument, container port and Service port to agree on ${port}"
+    exit 1
+  fi
+
+  if [ "${mode}" = gateway ]; then
+    expected="number: ${port}$"
+  elif [ "${mode}" = agentgateway ]; then
+    expected="host: .*:${port}\"$"
+  else
+    expected="port_value: ${port}$"
+  fi
+  if ! grep -q -- "${expected}" "${ext_proc_render_output}"; then
+    echo "${mode}: expected the ext_proc client to use port ${port}"
+    exit 1
+  fi
+done

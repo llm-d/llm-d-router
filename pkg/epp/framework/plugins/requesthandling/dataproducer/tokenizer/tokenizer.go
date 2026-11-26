@@ -68,8 +68,21 @@ const (
 // Backend identifiers, used by the 'backend' config field and reported on the
 // tokenize span and by Plugin.Backend.
 const (
-	BackendVLLM     = "vllm"
-	BackendEstimate = "estimate"
+	BackendVLLM        = "vllm"
+	BackendEstimate    = "estimate"
+	BackendPassthrough = "passthrough"
+)
+
+// ProducedData attribute keys and values published by token-producer for
+// Level-2 consumer dependency matching.
+const (
+	// AttrBackend names the configured token-producer backend.
+	AttrBackend = "backend"
+	// AttrExactTokens reports whether the configured backend emits exact
+	// engine token IDs ("true") rather than byte-packed estimates ("false").
+	AttrExactTokens  = "exact_tokens"
+	ExactTokensTrue  = "true"
+	ExactTokensFalse = "false"
 )
 
 // resultSkippedNoTokens marks a tokenize span whose backend returned no tokens,
@@ -85,8 +98,8 @@ var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 // backend, `estimate` selects the tokenizer-free byte-packing backend, which is
 // also the zero-config default when neither is set.
 type tokenizerPluginConfig struct {
-	// Backend selects the backend ("vllm" or "estimate"); when set, all
-	// backend-specific fields must match it.
+	// Backend selects the backend ("vllm", "passthrough", or "estimate"); when
+	// set, all backend-specific fields must match it.
 	Backend string `json:"backend,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
@@ -262,8 +275,13 @@ func (c *tokenizerPluginConfig) resolveBackend() (string, error) {
 				return "", fmt.Errorf("'backend' is %q but 'vllm' or 'modelName' is set", BackendEstimate)
 			}
 			return BackendEstimate, nil
+		case BackendPassthrough:
+			if c.VLLM != nil || c.ModelName != "" || c.Estimate != nil {
+				return "", fmt.Errorf("'backend' is %q but 'vllm', 'modelName', or 'estimate' is set", BackendPassthrough)
+			}
+			return BackendPassthrough, nil
 		default:
-			return "", fmt.Errorf("'backend' must be %q or %q, got %q", BackendEstimate, BackendVLLM, c.Backend)
+			return "", fmt.Errorf("'backend' must be %q, %q, or %q, got %q", BackendEstimate, BackendPassthrough, BackendVLLM, c.Backend)
 		}
 	}
 	if c.Estimate != nil && (c.VLLM != nil || c.ModelName != "") {
@@ -359,6 +377,8 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
+	case BackendPassthrough:
+		backend = passthroughBackend{}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
 	}
@@ -409,9 +429,21 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// Backend returns the configured backend identifier (BackendVLLM or BackendEstimate).
+// Backend returns the configured backend identifier (BackendVLLM,
+// BackendPassthrough, or BackendEstimate).
 func (p *Plugin) Backend() string {
 	return p.backendName
+}
+
+// exactTokensAttr returns ExactTokensTrue for backends that emit exact engine
+// token IDs and ExactTokensFalse otherwise (fail-closed for unknown backends).
+func (p *Plugin) exactTokensAttr() string {
+	switch p.backendName {
+	case BackendVLLM, BackendPassthrough:
+		return ExactTokensTrue
+	default:
+		return ExactTokensFalse
+	}
 }
 
 // Consumes declares request attributes used for render session affinity.
@@ -420,13 +452,16 @@ func (p *Plugin) Consumes() plugin.DataDependencies {
 }
 
 // Produces returns the data keys this plugin produces, along with the
-// configured tokenization backend attribute ("backend": BackendVLLM or BackendEstimate)
-// for Level-2 consumer dependency validation.
+// configured backend name and exact_tokens capability attribute for Level-2
+// consumer dependency validation.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{
 		p.dk: plugin.ProducedData{
-			Type:       fwkrequest.TokenizedRequest{},
-			Attributes: map[string]string{"backend": p.backendName},
+			Type: fwkrequest.TokenizedRequest{},
+			Attributes: map[string]string{
+				AttrBackend:     p.backendName,
+				AttrExactTokens: p.exactTokensAttr(),
+			},
 		},
 	}
 }
