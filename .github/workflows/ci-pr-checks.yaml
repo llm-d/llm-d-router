@@ -416,12 +416,6 @@ jobs:
           commit-sha: ${{ github.sha }}
           build-ref: ${{ github.head_ref || github.ref_name }}
 
-      - name: Pull ${{ matrix.image.name }} image
-        if: ${{ matrix.image.source == 'pull' }}
-        run: |
-          docker pull --platform linux/amd64 "${{ matrix.image.image }}"
-          docker save "${{ matrix.image.image }}" -o "${{ runner.temp }}/${{ matrix.image.archive }}.tar"
-
       - name: Upload ${{ matrix.image.name }} image
         uses: actions/upload-artifact@v7
         with:
