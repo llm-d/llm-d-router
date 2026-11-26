@@ -74,6 +74,8 @@ As `llm-d` shifts toward `Coordinator + EPP` as its default deployment, this pro
 
 **Fallback:** The delivery order limits the risk when upstream items stall. Passthrough modes need no `Render` or `Derender`, and an API whose stage items stay open keeps its HTTP route. On SGLang, the worker renders the prompt on that route, as it does today. On vLLM, Coordinator forwards the rendered `prompt_token_ids` on that route, and the worker builds the response ([#3656](https://github.com/llm-d/llm-d-router/issues/3656), [#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3741](https://github.com/llm-d/llm-d-router/pull/3741)). Python workers reuse those IDs without a KV connector today ([vllm#62307](https://github.com/vllm-project/vllm/issues/62307)), and open PR [vllm#62333](https://github.com/vllm-project/vllm/pull/62333) proposes the `--enable-prompt-token-ids` gate. Rust workers render the prompt again until [vllm#65502](https://github.com/vllm-project/vllm/issues/65502) ([vllm#68230](https://github.com/vllm-project/vllm/pull/68230)) lands.
 
+**Unsupported options:** A request on a supported API can use an option that `Derender` does not support yet, for example `n > 1` on vLLM. Coordinator opens the `Derender` stream before the worker stages, and the sidecar rejects such a request at that point ([vllm#68943](https://github.com/vllm-project/vllm/pull/68943)). Coordinator then returns a client error, and no worker generates. A later change can send such a request on the HTTP route.
+
 ### 3.3 Pruning Remaining Combinations
 
 Of the eight `Tokens -> Tokens` combinations, Principles **P4** and **P5** exclude two (`Text -> Text` client with `EPP alone` and `Tokens -> Tokens` server). Raw token IDs cannot satisfy an OpenAI, Messages, or Responses client without response translation, which standalone EPP never performs.
@@ -156,10 +158,10 @@ sequenceDiagram
     C->>Co: Text request (Chat, Completions, Messages, or Responses)
     Co->>R: Render(API type, raw request body)
     R-->>Co: token_ids, generation params, parse_context, render_fingerprint
+    Co->>R: Open Derender stream(request or parse_context)
     Co->>G: Streaming gRPC Generate(token_ids, profile metadata)
     Note over G: EPP reads token_ids from gRPC payload and scores prefix cache
     G->>S: Forward gRPC stream to selected worker
-    Co->>R: Open Derender stream(request or parse_context)
     loop Per streamed output frame
         S-->>Co: Output token_ids and optional text
         Co->>R: Derender(output frame)
