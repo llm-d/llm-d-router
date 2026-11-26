@@ -586,6 +586,7 @@ func TestVLLMGRPC_EncodePrefillDecodeMultimodalAndSkipsJSONSteps(t *testing.T) {
 					mu.Unlock()
 					kvOut, sErr := structpb.NewStruct(map[string]any{
 						"do_remote_prefill": true,
+						"remote_block_ids":  []any{[]any{1}},
 						"remote_host":       "10.8.0.2",
 						"remote_port":       6002,
 					})
@@ -1164,6 +1165,7 @@ func TestVLLMHTTPGenerate_WorkerProtocolGRPCAndHTTPDefault(t *testing.T) {
 				mu.Unlock()
 				kvOut, err := structpb.NewStruct(map[string]any{
 					"do_remote_prefill": true,
+					"remote_block_ids":  []any{[]any{1}},
 					"remote_host":       "10.7.0.2",
 					"remote_port":       7002,
 				})

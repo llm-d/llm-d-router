@@ -105,6 +105,7 @@ func writeLegOK(t *testing.T, w http.ResponseWriter, phase string, attempt int) 
 	case gateway.PhasePrefill:
 		finish.KvTransferParams, err = structpb.NewStruct(map[string]any{
 			"do_remote_prefill": true,
+			"remote_block_ids":  []any{[]any{1}},
 			"remote_host":       host,
 		})
 	case gateway.PhaseDecode:

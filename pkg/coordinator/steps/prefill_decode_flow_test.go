@@ -92,9 +92,10 @@ func TestECTransferParams_NotForwardedToDecodeBackend(t *testing.T) {
 func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	const revisionDecisionID = "decision-id"
 	expectedKVParams := map[string]any{
-		"block_id":  "block-999",
-		"peer_host": "10.0.0.42",
-		"peer_port": float64(7777),
+		"block_id":         "block-999",
+		"remote_block_ids": []any{float64(1)},
+		"peer_host":        "10.0.0.42",
+		"peer_port":        float64(7777),
 	}
 
 	var decodeReceivedKVParams map[string]any
@@ -361,7 +362,7 @@ func TestCachedTokens_FlowFromPrefillToDecode(t *testing.T) {
 				switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 				case gateway.PhasePrefill:
 					_ = json.NewEncoder(w).Encode(map[string]any{
-						"kv_transfer_params": map[string]any{"block_id": "block-1"},
+						"kv_transfer_params": map[string]any{"block_id": "block-1", "remote_block_ids": []any{1}},
 						"usage":              usageBlockFor(responses, prefillCachedTokens),
 					})
 				case gateway.PhaseDecode:
@@ -429,7 +430,7 @@ func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T
 		{name: "no prefill step"},
 		{
 			name:        "prefill response without a usage block",
-			prefillBody: map[string]any{"kv_transfer_params": map[string]any{"block_id": "block-1"}},
+			prefillBody: map[string]any{"kv_transfer_params": map[string]any{"remote_block_ids": []any{1}}},
 			connector:   kv.NIXL,
 			runPrefill:  true,
 		},
@@ -442,11 +443,20 @@ func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T
 			runPrefill:  true,
 		},
 		{
+			name: "kv-nixl params without remote block IDs",
+			prefillBody: map[string]any{
+				"kv_transfer_params": map[string]any{"remote_host": "prefill"},
+				"usage":              usageBlock(11),
+			},
+			connector:  kv.NIXL,
+			runPrefill: true,
+		},
+		{
 			// vLLM without --enable-prompt-tokens-details sends a usage block
 			// with no details object however many tokens were cached.
 			name: "prefill usage without prompt token details",
 			prefillBody: map[string]any{
-				"kv_transfer_params": map[string]any{"block_id": "block-1"},
+				"kv_transfer_params": map[string]any{"remote_block_ids": []any{1}},
 				"usage":              map[string]any{"prompt_tokens": 64},
 			},
 			connector:  kv.NIXL,
