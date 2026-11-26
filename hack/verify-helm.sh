@@ -77,6 +77,7 @@ test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredic
 test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_gateway["image-digest"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model --set router.tokenizer.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.latencyPredictor.enabled=true --set router.latencyPredictor.trainingServer.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --set router.latencyPredictor.predictionServers.image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # Run the install command in case this script runs from a different bash
 # source (such as in the verify-all script)
@@ -224,7 +225,31 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
     fi
   fi
 
+  if [ "${key}" == "image-digest" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    for image in ghcr.io/llm-d/llm-d-router-endpoint-picker docker.io/vllm/vllm-openai-cpu \
+                 ghcr.io/llm-d/llm-d-latency-predictor-training-server ghcr.io/llm-d/llm-d-latency-predictor-prediction-server; do
+      if ! grep -q "image: ${image}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$" "${epp_yaml}"; then
+        echo "Validation failed: ${image} not pinned by digest for test: ${key}"
+        exit 1
+      fi
+    done
+    if grep -E -q "image: [^ ]+:[^ /@]+@sha256:" "${epp_yaml}"; then
+      echo "Validation failed: an image renders with both a tag and a digest for test: ${key}"
+      exit 1
+    fi
+  fi
+
   echo "Test case ${key} passed validation."
+done
+
+echo "Verifying an invalid image digest fails the render..."
+for bad_digest in "sha256:abc" "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef" "not-a-digest"; do
+  if ${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.epp.image.digest="${bad_digest}" > /dev/null 2>&1; then
+    echo "Invalid router.epp.image.digest ${bad_digest} rendered without an error"
+    exit 1
+  fi
 done
 
 echo "Verifying latency predictor service mode keeps EPP config checksum and scheduling..."
@@ -1696,3 +1721,55 @@ if ! ${YQ} -N 'select(.kind == "Deployment") | .metadata.name' "${blank_override
   echo "Whitespace-only router.fullnameOverride did not fall back to the release name"
   exit 1
 fi
+
+echo "Verifying the configured EPP ext_proc port across chart modes..."
+for mode in gateway envoy-sidecar envoy-service envoy-priority agentgateway legacy-flag; do
+  chart=llm-d-router-standalone
+  port=9102
+  args=(--set router.epp.extProcPort=9102)
+  case "${mode}" in
+    gateway)
+      chart=llm-d-router-gateway
+      ;;
+    envoy-service)
+      args+=(--set router.proxy.mode=service)
+      ;;
+    envoy-priority)
+      args+=(--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true)
+      ;;
+    agentgateway)
+      args+=(--set router.proxy.proxyType=agentgateway)
+      ;;
+    legacy-flag)
+      port=9202
+      args+=(--set router.epp.flags.grpc-port=9202)
+      ;;
+  esac
+  if [ "${chart}" = llm-d-router-standalone ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  ext_proc_render_output="${TEMP_DIR}/ext-proc-port-${mode}.yaml"
+  "${HELM}" template "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    "${args[@]}" > "${ext_proc_render_output}" || exit 1
+
+  if [ "$(grep -c -- '--grpc-port=' "${ext_proc_render_output}")" != 1 ] ||
+     ! grep -q -- "--grpc-port=${port}" "${ext_proc_render_output}" ||
+     ! grep -q -- "containerPort: ${port}$" "${ext_proc_render_output}" ||
+     ! grep -q -- "port: ${port}$" "${ext_proc_render_output}"; then
+    echo "${mode}: expected the EPP argument, container port and Service port to agree on ${port}"
+    exit 1
+  fi
+
+  if [ "${mode}" = gateway ]; then
+    expected="number: ${port}$"
+  elif [ "${mode}" = agentgateway ]; then
+    expected="host: .*:${port}\"$"
+  else
+    expected="port_value: ${port}$"
+  fi
+  if ! grep -q -- "${expected}" "${ext_proc_render_output}"; then
+    echo "${mode}: expected the ext_proc client to use port ${port}"
+    exit 1
+  fi
+done

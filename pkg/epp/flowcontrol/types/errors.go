@@ -19,6 +19,7 @@ package types
 
 import (
 	"errors"
+	"time"
 )
 
 // --- High-Level Outcome Errors ---
@@ -55,6 +56,21 @@ var (
 	// rejection reflects genuine unavailability rather than backpressure against a contended pool.
 	ErrNoEndpoints = errors.New("no endpoints available")
 )
+
+// QueueCapacityError is the cause carried by a band or global queue-capacity rejection. It unwraps
+// to ErrQueueAtCapacity so sentinel checks with errors.Is keep matching, and carries the
+// controller's advisory Retry-After projection when available.
+type QueueCapacityError struct {
+	// RetryAfterHint is the projected wait until the rejecting scope next fits the request, rounded up
+	// to whole seconds. Zero means no hint should be emitted.
+	RetryAfterHint time.Duration
+}
+
+// Error formats the queue capacity rejection message.
+func (e *QueueCapacityError) Error() string { return ErrQueueAtCapacity.Error() }
+
+// Unwrap returns ErrQueueAtCapacity.
+func (e *QueueCapacityError) Unwrap() error { return ErrQueueAtCapacity }
 
 // --- Post-Enqueue Eviction Errors ---
 

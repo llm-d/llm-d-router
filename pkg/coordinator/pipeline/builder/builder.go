@@ -40,6 +40,9 @@ func validatePipeline(p config.PipelineConfig) error {
 	if err := config.ValidateWorkerProtocol(p.WorkerProtocol); err != nil {
 		return err
 	}
+	if p.MaxStepReruns < 0 {
+		return fmt.Errorf("pipeline.max_step_reruns must not be negative, got %d", p.MaxStepReruns)
+	}
 	hasRender := false
 	for i, s := range p.Steps {
 		if s.Type == asyncbroker.StepName && i > 0 {
@@ -115,5 +118,10 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 	if err := steps.EnableForceStream(forceStreamSteps, cfg.Pipeline.ForceStreamBufferSize, cfg.Pipeline.ForceStreamMaxRequestSize); err != nil {
 		return nil, fmt.Errorf("pipeline: %w", err)
 	}
-	return pipeline.NewWithForwardResponseHeaders(pipelineSteps, cfg.Pipeline.ForwardResponseHeaders)
+	p, err := pipeline.NewWithForwardResponseHeaders(pipelineSteps, cfg.Pipeline.ForwardResponseHeaders)
+	if err != nil {
+		return nil, err
+	}
+	p.SetMaxStepReruns(cfg.Pipeline.MaxStepReruns)
+	return p, nil
 }

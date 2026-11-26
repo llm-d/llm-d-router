@@ -926,6 +926,68 @@ func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
 	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), epErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }
 
+func TestFallbackToEndpoint_DataParallelRankHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		endpoint *datalayer.EndpointMetadata
+		wantRank string
+		wantSet  bool
+	}{
+		{
+			name: "rank endpoint sets x-data-parallel-rank",
+			endpoint: &datalayer.EndpointMetadata{
+				Address:      "10.0.0.1",
+				Port:         "8000",
+				RankIndex:    3,
+				RankByHeader: true,
+			},
+			wantRank: "3",
+			wantSet:  true,
+		},
+		{
+			// A port of a multi-port pod has a RankIndex and no marker.
+			name: "endpoint without the marker leaves x-data-parallel-rank unset",
+			endpoint: &datalayer.EndpointMetadata{
+				Address:   "10.0.0.1",
+				Port:      "8001",
+				RankIndex: 1,
+			},
+			wantSet: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{
+				director: &mockDirectorRequest{endpoint: tc.endpoint},
+			}
+			reqCtx := &RequestContext{
+				Request:  &Request{Headers: make(map[string]string)},
+				Response: &Response{Headers: make(map[string]string)},
+			}
+
+			require.NoError(t, server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0))
+			mutation := reqCtx.reqHeaderResp.GetRequestHeaders().GetResponse().GetHeaderMutation()
+			require.NotNil(t, mutation)
+
+			var gotRank string
+			var found bool
+			for _, h := range mutation.GetSetHeaders() {
+				if h.GetHeader().GetKey() == routing.DataParallelRankHeader {
+					gotRank = string(h.GetHeader().GetRawValue())
+					found = true
+				}
+			}
+			assert.Equal(t, tc.wantSet, found)
+			if tc.wantSet {
+				assert.Equal(t, tc.wantRank, gotRank)
+			}
+		})
+	}
+}
+
 type emptyPoolDirector struct {
 	Director
 }

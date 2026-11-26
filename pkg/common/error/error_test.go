@@ -259,24 +259,28 @@ func TestBuildErrResponse(t *testing.T) {
 			name:           "BadRequest returns 400",
 			err:            Error{Code: BadRequest, Msg: "invalid model name"},
 			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.InvalidArgument)},
 			wantBody:       `{"error":{"message":"invalid model name","type":"invalid_request_error","code":400}}`,
 		},
 		{
 			name:           "Unauthorized returns 401",
 			err:            Error{Code: Unauthorized, Msg: "missing token"},
 			wantHTTPStatus: envoyTypePb.StatusCode_Unauthorized,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.Unauthenticated)},
 			wantBody:       `{"error":{"message":"missing token","type":"authentication_error","code":401}}`,
 		},
 		{
 			name:           "Forbidden returns 403",
 			err:            Error{Code: Forbidden, Msg: "unsafe content blocked"},
 			wantHTTPStatus: envoyTypePb.StatusCode_Forbidden,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.PermissionDenied)},
 			wantBody:       `{"error":{"message":"unsafe content blocked","type":"permission_error","code":403}}`,
 		},
 		{
 			name:           "NotFound returns 404",
 			err:            Error{Code: NotFound, Msg: "model not found"},
 			wantHTTPStatus: envoyTypePb.StatusCode_NotFound,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.NotFound)},
 			wantBody:       `{"error":{"message":"model not found","type":"not_found_error","code":404}}`,
 		},
 		{
@@ -290,36 +294,42 @@ func TestBuildErrResponse(t *testing.T) {
 			name:           "PayloadTooLarge returns 413",
 			err:            Error{Code: PayloadTooLarge, Msg: "request body too large"},
 			wantHTTPStatus: envoyTypePb.StatusCode_PayloadTooLarge,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.ResourceExhausted)},
 			wantBody:       `{"error":{"message":"request body too large","type":"invalid_request_error","code":413}}`,
 		},
 		{
 			name:           "ResourceExhausted returns 429",
 			err:            Error{Code: ResourceExhausted, Msg: "no capacity"},
 			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.ResourceExhausted)},
 			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
 		},
 		{
 			name:           "Internal returns 500",
 			err:            Error{Code: Internal, Msg: "unexpected failure"},
 			wantHTTPStatus: envoyTypePb.StatusCode_InternalServerError,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.Internal)},
 			wantBody:       `{"error":{"message":"unexpected failure","type":"server_error","code":500}}`,
 		},
 		{
 			name:           "ServiceUnavailable returns 503",
 			err:            Error{Code: ServiceUnavailable, Msg: "no endpoints"},
 			wantHTTPStatus: envoyTypePb.StatusCode_ServiceUnavailable,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.Unavailable)},
 			wantBody:       `{"error":{"message":"no endpoints","type":"server_error","code":503}}`,
 		},
 		{
 			name:           "message is JSON-escaped",
 			err:            Error{Code: BadRequest, Msg: `json: cannot unmarshal string into Go struct field "messages"`},
 			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.InvalidArgument)},
 			wantBody:       `{"error":{"message":"json: cannot unmarshal string into Go struct field \"messages\"","type":"invalid_request_error","code":400}}`,
 		},
 		{
 			name:           "HTML characters are not escaped",
 			err:            Error{Code: BadRequest, Msg: "invalid character '<' looking for beginning of value"},
 			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.InvalidArgument)},
 			wantBody:       `{"error":{"message":"invalid character '<' looking for beginning of value","type":"invalid_request_error","code":400}}`,
 		},
 		{
@@ -327,6 +337,7 @@ func TestBuildErrResponse(t *testing.T) {
 			err:            Error{Code: BadRequest, Msg: "must have valid messages field"},
 			apiType:        reqcommon.APITypeMessages,
 			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.InvalidArgument)},
 			wantBody:       `{"type":"error","error":{"type":"invalid_request_error","message":"must have valid messages field"}}`,
 		},
 		{
@@ -334,6 +345,7 @@ func TestBuildErrResponse(t *testing.T) {
 			err:            Error{Code: Internal, Msg: "no pods available in datastore"},
 			apiType:        reqcommon.APITypeMessages,
 			wantHTTPStatus: envoyTypePb.StatusCode_InternalServerError,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.Internal)},
 			wantBody:       `{"type":"error","error":{"type":"api_error","message":"no pods available in datastore"}}`,
 		},
 		{
@@ -341,6 +353,7 @@ func TestBuildErrResponse(t *testing.T) {
 			err:            Error{Code: ServiceUnavailable, Msg: "no endpoints"},
 			apiType:        reqcommon.APITypeMessages,
 			wantHTTPStatus: envoyTypePb.StatusCode_ServiceUnavailable,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.Unavailable)},
 			wantBody:       `{"type":"error","error":{"type":"overloaded_error","message":"no endpoints"}}`,
 		},
 		{
@@ -348,6 +361,7 @@ func TestBuildErrResponse(t *testing.T) {
 			err:            Error{Code: PayloadTooLarge, Msg: "request body too large"},
 			apiType:        reqcommon.APITypeMessages,
 			wantHTTPStatus: envoyTypePb.StatusCode_PayloadTooLarge,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.ResourceExhausted)},
 			wantBody:       `{"type":"error","error":{"type":"request_too_large","message":"request body too large"}}`,
 		},
 		{
@@ -357,10 +371,11 @@ func TestBuildErrResponse(t *testing.T) {
 		},
 		{
 			name:           "headers follow content-type",
-			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)}},
+			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated), RetryAfterHeaderKey: "5"}},
 			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
+			wantGRPCStatus: &extProcPb.GrpcStatus{Status: uint32(codes.ResourceExhausted)},
 			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
-			wantHeaders:    map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)},
+			wantHeaders:    map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated), RetryAfterHeaderKey: "5"},
 		},
 	}
 

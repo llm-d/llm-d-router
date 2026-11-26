@@ -66,7 +66,6 @@ type InferenceObjectiveReconciler struct {
 // versions must not be dual-written (see SecondaryObjectiveGV).
 func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).V(logutil.DEFAULT)
-	ctx = ctrl.LoggerInto(ctx, logger)
 
 	logger.Info("Reconciling InferenceObjective")
 
@@ -142,7 +141,7 @@ func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// No served version targets this inferencePool.
-	logger.V(logutil.DEBUG).Info("Ignoring InferenceObjective without pool match",
+	log.FromContext(ctx).V(logutil.DEBUG).Info("Ignoring InferenceObjective without pool match",
 		"candidates", len(candidates),
 		"poolRefs", candidates[0].Spec.PoolRefs,
 		"poolSelector", candidates[0].Spec.PoolSelector)
