@@ -1027,9 +1027,14 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 			// Index.Add infers the engine->request mapping from the ratio of
-			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many).
+			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many), and
+			// needs the block sizes to place the canonical block boundaries.
 			engineKeys = coveredEngineKeys(ev, engineKeys, len(requestKeys), format.BlockSize)
-			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
+			geometry := kvblock.EngineGeometry{
+				BlockSize:          engineBlockSize(ev),
+				CanonicalBlockSize: format.BlockSize,
+			}
+			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries, geometry); err != nil {
 				debugLogger.Error(err, "Failed to add event to index",
 					"podIdentifier", podIdentifier, "event", ev)
 				continue

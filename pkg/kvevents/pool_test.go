@@ -561,7 +561,7 @@ func TestCanonicalWritePath_InteriorParentBlock(t *testing.T) {
 		return pool, idx, canonicalKeys
 	}
 
-	t.Run("an interior engine block names no request key", func(t *testing.T) {
+	t.Run("an_interior_engine_block_names_no_request_key", func(t *testing.T) {
 		ctx := context.Background()
 		_, idx, canonicalKeys := store(t)
 		for _, i := range []int{0, 1, 2, 4, 5, 6} {
@@ -575,7 +575,7 @@ func TestCanonicalWritePath_InteriorParentBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("a child of an interior block is skipped", func(t *testing.T) {
+	t.Run("a_child_of_an_interior_block_is_skipped", func(t *testing.T) {
 		ctx := logging.NewTestLoggerIntoContext(context.Background())
 		pool, idx, _ := store(t)
 		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
@@ -596,7 +596,7 @@ func TestCanonicalWritePath_InteriorParentBlock(t *testing.T) {
 		assert.Error(t, err, "a child chained inside a canonical block is not indexed")
 	})
 
-	t.Run("another pod's recompute leaves the boundary block alone", func(t *testing.T) {
+	t.Run("another_pods_recompute_leaves_the_boundary_block_alone", func(t *testing.T) {
 		ctx := logging.NewTestLoggerIntoContext(context.Background())
 		pool, idx, canonicalKeys := store(t)
 		// pod-b holds the same blocks, so canonical block 0 is shared.
@@ -688,6 +688,73 @@ func TestCanonicalWritePath_NonDividingInteriorParentBlock(t *testing.T) {
 		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
 		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[0]))
 		assert.Error(t, err, "a child chained inside a canonical block is not indexed")
+	})
+}
+
+// TestCanonicalWritePath_StraddlingParentBlock covers sub-canonical stores that
+// stop short of a canonical block boundary: 24-token engine blocks against
+// 64-token canonical blocks. coveredEngineKeys keeps the block that straddles
+// the boundary, and no block ends on one, so none names a request key.
+func TestCanonicalWritePath_StraddlingParentBlock(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+
+	store := func(t *testing.T, numBlocks int) (*Pool, kvblock.Index, []kvblock.BlockHash) {
+		t.Helper()
+		pool, idx, tp := newTestPool(t, 64)
+		tokens := makeTokens(numBlocks * 24)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: makeEngineKeys(numBlocks, 100), Tokens: tokens, BlockSize: 24},
+		}}, "pod-a", "test-model")
+		canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+		require.NoError(t, err)
+		return pool, idx, canonicalKeys
+	}
+
+	t.Run("three_blocks_name_no_request_key", func(t *testing.T) {
+		_, idx, canonicalKeys := store(t, 3)
+		require.Len(t, canonicalKeys, 1)
+		for i := 0; i < 3; i++ {
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 100+uint64(i)))
+			assert.Error(t, err, "engine block %d ends at token %d, inside canonical block 0", i, (i+1)*24)
+		}
+		found, err := idx.Lookup(ctx, canonicalKeys, nil)
+		require.NoError(t, err)
+		require.Len(t, found[canonicalKeys[0]], 1, "the store still covers canonical block 0")
+	})
+
+	t.Run("a_child_of_the_straddling_block_is_skipped", func(t *testing.T) {
+		pool, idx, _ := store(t, 3)
+		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
+			cacheKindLabel(""), "unresolved_sub_canonical_parent")
+		before := counterValue(t, skipped)
+
+		childKeys := makeEngineKeys(4, 200)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: childKeys, Tokens: makeTokens(168)[72:],
+				ParentHash: 102, BlockSize: 24,
+			},
+		}}, "pod-a", "test-model")
+
+		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
+		for _, ck := range childKeys {
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", ck))
+			assert.Error(t, err, "a child chained on a straddling block is not indexed")
+		}
+	})
+
+	t.Run("six_blocks_stop_short_of_the_second_canonical_block", func(t *testing.T) {
+		_, idx, canonicalKeys := store(t, 6)
+		require.Len(t, canonicalKeys, 2)
+		for i := 0; i < 6; i++ {
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 100+uint64(i)))
+			assert.Error(t, err, "engine block %d ends at token %d, inside a canonical block", i, (i+1)*24)
+		}
+		found, err := idx.Lookup(ctx, canonicalKeys, nil)
+		require.NoError(t, err)
+		for _, ck := range canonicalKeys {
+			require.Len(t, found[ck], 1, "the store still covers both canonical blocks")
+		}
 	})
 }
 

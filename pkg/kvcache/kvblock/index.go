@@ -136,7 +136,11 @@ type Index interface {
 	// The others end inside it, so their mapping holds the request key followed by
 	// EmptyBlockHash and GetRequestKey rejects them: a child chained on such a key
 	// would be hashed from that block's offset.
-	Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error
+	//
+	// A sub-canonical store passes EngineGeometry so the boundaries come from token
+	// positions. Without it the key counts stand in, which is exact only when the
+	// store ends on a canonical block boundary.
+	Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry, geometry ...EngineGeometry) error
 	// Evict removes keys and their associated pod entries from the index backend.
 	// keyType indicates whether the keys are EngineKeys (each resolved
 	// independently via the engine→request mapping) or RequestKeys (used directly).
@@ -204,12 +208,19 @@ func (e *PodEntry) String() string {
 	return fmt.Sprintf("%s@%s%s", e.PodIdentifier, e.DeviceTier, suffix)
 }
 
+// EngineGeometry carries the block sizes behind an Add call: the engine block
+// size the event reported and the canonical block size the request keys use.
+type EngineGeometry struct {
+	BlockSize          int
+	CanonicalBlockSize int
+}
+
 // engineToRequestMapping computes engine-key → request-key mappings using
 // proportional distribution based on the lengths of both slices.
 // Each engine key maps to an ordered slice of request keys; callers that need
 // positional scores (e.g. Redis ZAdd) can iterate the slice and use the index.
 // Returns an empty map if either slice is empty.
-func engineToRequestMapping(engineKeys, requestKeys []BlockHash) map[BlockHash][]BlockHash {
+func engineToRequestMapping(engineKeys, requestKeys []BlockHash, geometry ...EngineGeometry) map[BlockHash][]BlockHash {
 	mappings := make(map[BlockHash][]BlockHash, len(engineKeys))
 	if len(engineKeys) == 0 || len(requestKeys) == 0 {
 		return mappings
@@ -220,19 +231,32 @@ func engineToRequestMapping(engineKeys, requestKeys []BlockHash) map[BlockHash][
 		rk := requestKeys[i*len(requestKeys)/n]
 		mappings[ek] = append(mappings[ek], rk)
 	}
-	// A many:1 engine block ends a canonical block only when
-	// (i+1)*len(requestKeys) is a multiple of len(engineKeys): every
-	// len(engineKeys)/len(requestKeys)-th block when the counts divide evenly,
-	// otherwise only the last block. Any other block ends inside a canonical
-	// block, so it names no request key, and a child chained on it would be
-	// hashed from that block's offset. Mark it for GetRequestKey; the request key
-	// it maps to stays in the slice so eviction still reaches it.
+	// A many:1 engine block names a request key only when it ends one. A child
+	// chained on a block that ends inside a canonical block would be hashed from
+	// that block's offset. Mark the others for GetRequestKey; the request key they
+	// map to stays in the slice so eviction still reaches it.
 	if len(engineKeys) > len(requestKeys) {
+		var sizes EngineGeometry
+		if len(geometry) > 0 {
+			sizes = geometry[0]
+		}
 		for i, key := range engineKeys {
-			if (i+1)*len(requestKeys)%len(engineKeys) != 0 {
+			if !endsCanonicalBlock(i, len(engineKeys), len(requestKeys), sizes) {
 				mappings[key] = append(mappings[key], EmptyBlockHash)
 			}
 		}
 	}
 	return mappings
+}
+
+// endsCanonicalBlock reports whether engine block i ends where a canonical block
+// ends, so that a child chained on it can be hashed from that boundary.
+func endsCanonicalBlock(i, engineBlocks, requestBlocks int, sizes EngineGeometry) bool {
+	if sizes.BlockSize > 0 && sizes.BlockSize < sizes.CanonicalBlockSize {
+		return (i+1)*sizes.BlockSize%sizes.CanonicalBlockSize == 0
+	}
+	// Without the block sizes the key counts are the only signal, and they match
+	// token positions only when the store ends on a canonical block boundary:
+	// every len(engineKeys)/len(requestKeys)-th block, otherwise only the last.
+	return (i+1)*requestBlocks%engineBlocks == 0
 }

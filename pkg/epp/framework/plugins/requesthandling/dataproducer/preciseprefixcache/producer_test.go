@@ -93,7 +93,7 @@ func (f *fakeKVBlockIndex) Lookup(_ context.Context, _ []kvblock.BlockHash, _ se
 	return map[kvblock.BlockHash][]kvblock.PodEntry{}, nil
 }
 
-func (f *fakeKVBlockIndex) Add(ctx context.Context, prevKeys, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+func (f *fakeKVBlockIndex) Add(ctx context.Context, prevKeys, keys []kvblock.BlockHash, entries []kvblock.PodEntry, _ ...kvblock.EngineGeometry) error {
 	if f.addFn != nil {
 		return f.addFn(ctx, prevKeys, keys, entries)
 	}

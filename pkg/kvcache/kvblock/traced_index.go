@@ -72,7 +72,7 @@ func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	return nil
 }
 
-func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
+func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry, geometry ...EngineGeometry) error {
 	tracer := tracing.Tracer(TracerScope)
 	ctx, span := tracer.Start(ctx, "index_add",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -86,7 +86,7 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 		semconv.LLMDKVCacheIndexAddDeviceTierCount(deviceTierCount(entries)),
 	)
 
-	err := t.next.Add(ctx, engineKeys, requestKeys, entries)
+	err := t.next.Add(ctx, engineKeys, requestKeys, entries, geometry...)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err

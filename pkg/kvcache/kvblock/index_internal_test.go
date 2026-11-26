@@ -74,6 +74,30 @@ func TestEngineToRequestMapping_NonDividing(t *testing.T) {
 	}
 }
 
+func TestEngineToRequestMapping_StraddlingStore(t *testing.T) {
+	// A sub-canonical store that stops short of a canonical block boundary keeps
+	// an engine block that straddles one, so the key counts no longer say where a
+	// canonical block ends; the block sizes do.
+	geometry := EngineGeometry{BlockSize: 24, CanonicalBlockSize: 64}
+
+	threeBlocks := []BlockHash{10, 11, 12}
+	mappings := engineToRequestMapping(threeBlocks, []BlockHash{9000}, geometry)
+	require.Len(t, mappings, 3)
+	for i, ek := range threeBlocks {
+		assert.Equal(t, []BlockHash{9000, EmptyBlockHash}, mappings[ek],
+			"engine block %d ends at token %d, inside canonical block 0", i, (i+1)*24)
+	}
+
+	sixBlocks := []BlockHash{20, 21, 22, 23, 24, 25}
+	requestKeys := []BlockHash{9000, 9001}
+	mappings = engineToRequestMapping(sixBlocks, requestKeys, geometry)
+	require.Len(t, mappings, 6)
+	for i, ek := range sixBlocks {
+		assert.Equal(t, []BlockHash{requestKeys[i/3], EmptyBlockHash}, mappings[ek],
+			"engine block %d ends at token %d, inside a canonical block", i, (i+1)*24)
+	}
+}
+
 func TestEngineToRequestMapping_OneToMany(t *testing.T) {
 	engineKeys := []BlockHash{100}
 	requestKeys := []BlockHash{1000, 2000, 3000, 4000}

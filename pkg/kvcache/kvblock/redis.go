@@ -199,7 +199,7 @@ func isPipelineFailure(results []*redis.StringSliceCmd) bool {
 // If engineKeys is nil, only requestKey -> PodEntry mappings are created (no engineKey -> requestKey mapping).
 // This is used for speculative entries where engine keys are not yet known.
 // When engineKeys is non-nil, the mapping type is inferred from the ratio of array lengths.
-func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
+func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry, geometry ...EngineGeometry) error {
 	if len(requestKeys) == 0 || len(entries) == 0 {
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
@@ -215,7 +215,7 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
-		mappings := engineToRequestMapping(engineKeys, requestKeys)
+		mappings := engineToRequestMapping(engineKeys, requestKeys, geometry...)
 		for ek, rks := range mappings {
 			for j, rk := range rks {
 				pipe.ZAdd(ctx, redisEngineKey(ek), redis.Z{Score: float64(j), Member: rk.String()})

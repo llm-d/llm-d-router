@@ -45,8 +45,8 @@ func NewInstrumentedIndex(next Index) Index {
 	return m
 }
 
-func (m *instrumentedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
-	err := m.next.Add(ctx, engineKeys, requestKeys, entries)
+func (m *instrumentedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry, geometry ...EngineGeometry) error {
+	err := m.next.Add(ctx, engineKeys, requestKeys, entries, geometry...)
 	if err == nil {
 		metrics.Admissions.Add(float64(len(requestKeys)))
 	}
