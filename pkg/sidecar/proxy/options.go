@@ -301,7 +301,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup,
 		"Kubernetes resource group of the InferencePool this sidecar is associated with. "+
 			"Only `inference.networking.k8s.io` is currently supported.")
-	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
+	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "Deprecated: chunked decode will be removed in a future release. Enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
 	fs.BoolVar(&opts.EnableToolCallingTelemetry, toolCallingTelemetryFlag, opts.EnableToolCallingTelemetry, "Enable tool-calling request telemetry")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* and llm_d_disagg_sidecar_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")

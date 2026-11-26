@@ -370,7 +370,12 @@ The **vLLM sidecar** handles orchestration between Encode, Prefill and Decode st
 
 ---
 
-## Chunked Decode (Experimental)
+## Chunked Decode (Experimental, Deprecated)
+
+> [!WARNING]
+> Chunked decode is deprecated and will be removed after the two-release deprecation period.
+> Deployments that set `--decode-chunk-size` still get chunked decode and log a deprecation
+> warning at startup.
 
 Chunked decode is an experimental feature of the pd-sidecar that splits the decode stage into a
 sequence of shorter decode calls, each capped at a configurable token budget.
@@ -402,11 +407,11 @@ chunk continues seamlessly from where the previous one left off.
 
 ### Configuration
 
-Enable chunked decode via the pd-sidecar flag:
+Chunked decode is enabled with the deprecated pd-sidecar flag:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--decode-chunk-size` | `0` (disabled) | Token budget per chunk. Set to a positive integer to enable chunked decode. For best performance use a multiple of the KV cache block size. |
+| `--decode-chunk-size` | `0` (disabled) | Deprecated. Token budget per chunk. Set to a positive integer to enable chunked decode. For best performance use a multiple of the KV cache block size. |
 
 > [!NOTE]
 > The sidecar falls back to a single regular decode call without chunking in any of these cases:

@@ -434,6 +434,15 @@ func TestSidecarConfiguration(t *testing.T) {
 	}
 }
 
+func TestDecodeChunkSizeFlagDeprecated(t *testing.T) {
+	_, fs := newTestOptions(t)
+
+	decodeChunkSizeFlag := fs.Lookup(decodeChunkSize)
+	require.NotNil(t, decodeChunkSizeFlag)
+	require.Contains(t, decodeChunkSizeFlag.Usage, "Deprecated")
+	require.False(t, decodeChunkSizeFlag.Hidden, "a deprecated flag without a replacement stays visible in help")
+}
+
 func TestSecureServingFlag(t *testing.T) {
 	_, fs := newTestOptions(t)
 
