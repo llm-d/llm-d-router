@@ -1884,6 +1884,7 @@ func TestInFlightLoadProducer_CompletionRate_PD(t *testing.T) {
 	req := makeTokenRequest("rate-req-pd", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
@@ -1919,6 +1920,7 @@ func TestInFlightLoadProducer_CompletionRate_PDAbortedBeforeFirstChunk(t *testin
 	req := makeTokenRequest("rate-req-pd-aborted", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
@@ -1975,6 +1977,7 @@ func TestInFlightLoadProducer_CompletionRate_PDSameEndpoint(t *testing.T) {
 	req := makeTokenRequest("rate-req-pd-shared", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
@@ -1988,6 +1991,40 @@ func TestInFlightLoadProducer_CompletionRate_PDSameEndpoint(t *testing.T) {
 
 	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(endpointID, time.Now()), 1e-9)
+}
+
+// TestInFlightLoadProducer_CompletionRate_RenamedPrefillProfile verifies that the
+// prefill endpoint is found by the name in the scheduling result.
+func TestInFlightLoadProducer_CompletionRate_RenamedPrefillProfile(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	prefillID := fullEndpointName("prefill-endpoint")
+	decodeID := fullEndpointName("decode-endpoint")
+
+	producer.completionTracker.add(prefillID)
+	producer.completionTracker.add(decodeID)
+
+	req := makeTokenRequest("rate-req-pd-renamed", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		PrefillProfileName: "first-stage",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"first-stage": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
+			"decode":      {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.Zero(t, producer.completionTracker.rate(decodeID, time.Now()))
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(decodeID, time.Now()), 1e-9)
 }
 
 func TestInFlightLoadProducer_CrossReplicaState(t *testing.T) {

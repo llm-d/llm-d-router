@@ -674,7 +674,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// The prefill endpoint finishes its part of the request at the first chunk,
 	// unless another profile of the request also uses it.
 	if resp.StartOfStream {
-		if eid, ok := primaryEndpointID(result.ProfileResults[profilePrefill]); ok && !usedByOtherProfile(result, eid) {
+		if eid, ok := primaryEndpointID(result.PrefillProfile()); ok && !usedByOtherProfile(result, eid) {
 			p.completionTracker.record(eid, time.Now())
 		}
 		p.onPrefillComplete(ctx, request.RequestID, result, signalFirstByte)
@@ -739,7 +739,7 @@ func (p *InFlightLoadProducer) recordEndOfStreamCompletions(result *fwksched.Sch
 	now := time.Now()
 	var recorded []string
 	for profileName, profileResult := range result.ProfileResults {
-		if profileName == profilePrefill {
+		if result.PrefillProfileName != "" && profileName == result.PrefillProfileName {
 			continue
 		}
 		eid, ok := primaryEndpointID(profileResult)
@@ -755,7 +755,7 @@ func (p *InFlightLoadProducer) recordEndOfStreamCompletions(result *fwksched.Sch
 // request to the endpoint.
 func usedByOtherProfile(result *fwksched.SchedulingResult, endpointID string) bool {
 	for profileName, profileResult := range result.ProfileResults {
-		if profileName == profilePrefill {
+		if result.PrefillProfileName != "" && profileName == result.PrefillProfileName {
 			continue
 		}
 		if eid, ok := primaryEndpointID(profileResult); ok && eid == endpointID {
