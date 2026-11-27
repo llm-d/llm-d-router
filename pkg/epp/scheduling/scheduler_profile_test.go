@@ -480,46 +480,41 @@ func TestRequestSpanAttributes(t *testing.T) {
 	}
 }
 
+// TestRunWithOutOfRangeScores checks that Run clamps each scorer's output to
+// [0, 1] before applying its weight. Each row uses a single scorer so that the
+// expected total differs from both the unclamped total and the total obtained
+// by clamping after weighting.
 func TestRunWithOutOfRangeScores(t *testing.T) {
-	// Scorer that returns negative score
-	negativeScorer := &testPlugin{
-		TypeRes:   "negative",
-		ScoreRes:  -0.5,
-		FilterRes: []k8stypes.NamespacedName{{Name: "pod1"}},
+	tests := []struct {
+		name      string
+		score     float64
+		weight    float64
+		wantTotal float64
+	}{
+		// Unclamped: -0.5 * 1 = -0.5.
+		{name: "negative_score_clamped_to_zero", score: -0.5, weight: 1, wantTotal: 0},
+		// Unclamped: 1.5 * 2 = 3. Clamping after weighting: 1.
+		{name: "score_above_one_clamped_before_weighting", score: 1.5, weight: 2, wantTotal: 2},
 	}
-	// Scorer that returns score > 1
-	overScorer := &testPlugin{
-		TypeRes:   "over",
-		ScoreRes:  1.5,
-		FilterRes: []k8stypes.NamespacedName{{Name: "pod1"}},
-	}
-	pickerPlugin := &testPlugin{
-		TypeRes: "picker",
-		PickRes: k8stypes.NamespacedName{Name: "pod1"},
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scorer := &testPlugin{TypeRes: "out-of-range", ScoreRes: test.score}
+			picker := &testPlugin{TypeRes: "picker", PickRes: k8stypes.NamespacedName{Name: "pod1"}}
+			profile := NewSchedulerProfile().
+				WithScorers(NewWeightedScorer(scorer, test.weight)).
+				WithPicker(picker)
+			input := []fwksched.Endpoint{
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+			}
+			request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
 
-	profile := NewSchedulerProfile().
-		WithFilters().
-		WithScorers(NewWeightedScorer(negativeScorer, 1), NewWeightedScorer(overScorer, 1)).
-		WithPicker(pickerPlugin)
-
-	input := []fwksched.Endpoint{
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
-	}
-
-	request := &fwksched.InferenceRequest{
-		TargetModel: "test-model",
-		RequestID:   uuid.NewString(),
-	}
-
-	_, err := profile.Run(context.Background(), request, input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// negative score clamped to 0, over score clamped to 1: total = 0*1 + 1*1 = 1.0
-	if pickerPlugin.WinnerEndpointScore != 1.0 {
-		t.Errorf("expected winner score 1.0, got %v", pickerPlugin.WinnerEndpointScore)
+			if _, err := profile.Run(t.Context(), request, input); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if picker.WinnerEndpointScore != test.wantTotal {
+				t.Errorf("winner score = %v, want %v", picker.WinnerEndpointScore, test.wantTotal)
+			}
+		})
 	}
 }
 
