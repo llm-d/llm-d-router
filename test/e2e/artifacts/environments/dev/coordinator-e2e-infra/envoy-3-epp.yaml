@@ -284,7 +284,9 @@ data:
         # override selects which one handles a given x-llm-d-epp-profile request.
         - name: ext_proc_encode
           type: STRICT_DNS
-          connect_timeout: 86400s
+          # Fail fast on unreachable EPP connects so a stalled handshake does
+          # not stay pending in the HTTP/2 pool.
+          connect_timeout: 1s
           lb_policy: LEAST_REQUEST
           circuit_breakers:
             thresholds:
@@ -330,7 +332,9 @@ data:
                     load_balancing_weight: 1
         - name: ext_proc_prefill
           type: STRICT_DNS
-          connect_timeout: 86400s
+          # Fail fast on unreachable EPP connects so a stalled handshake does
+          # not stay pending in the HTTP/2 pool.
+          connect_timeout: 1s
           lb_policy: LEAST_REQUEST
           circuit_breakers:
             thresholds:
@@ -375,7 +379,9 @@ data:
                     load_balancing_weight: 1
         - name: ext_proc_decode
           type: STRICT_DNS
-          connect_timeout: 86400s
+          # Fail fast on unreachable EPP connects so a stalled handshake does
+          # not stay pending in the HTTP/2 pool.
+          connect_timeout: 1s
           lb_policy: LEAST_REQUEST
           circuit_breakers:
             thresholds:

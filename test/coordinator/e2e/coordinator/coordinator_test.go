@@ -166,11 +166,19 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	createInferencePool(nsName, true)
 	expectPoolExists()
 
-	createEndPointPickers(nsName)
-
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
-	createModelServers(nsName, encodeReplicas, prefillReplicas, decodeReplicas)
+	cfg := coordinatorConfigNIXL
+	if len(coordinatorConfig) > 0 {
+		cfg = coordinatorConfig[0]
+	}
+
+	workloads := createEndPointPickers(nsName)
+	workloads = append(workloads, createModelServers(nsName, encodeReplicas, prefillReplicas, decodeReplicas)...)
+	workloads = append(workloads, createCoordinator(nsName, cfg)...)
+	podsInDeploymentsReady(nsName, workloads)
+
 	waitForPhaseRoutesReady()
+	waitForCoordinatorReady()
 
 	encodePods := getPodNames(encodeSelector)
 	prefillPods := getPodNames(prefillSelector)
@@ -178,12 +186,6 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 	gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 	gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
-
-	cfg := coordinatorConfigNIXL
-	if len(coordinatorConfig) > 0 {
-		cfg = coordinatorConfig[0]
-	}
-	createCoordinator(nsName, cfg)
 
 	req, err := http.NewRequest(http.MethodPost,
 		gatewayBaseURL()+path,

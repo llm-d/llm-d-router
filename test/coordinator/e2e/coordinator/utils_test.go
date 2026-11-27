@@ -84,27 +84,23 @@ func podIPs(labels map[string]string) map[string]bool {
 // podsInDeploymentsReady waits until every Deployment named in objects reports
 // all replicas ready in nsName. Non-Deployment entries are ignored.
 func podsInDeploymentsReady(nsName string, objects []string) {
-	isDeploymentReady := func(deploymentName string) bool {
-		var deployment appsv1.Deployment
-		err := testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
-		if err != nil || deployment.Spec.Replicas == nil {
-			return false
-		}
-		ginkgo.By(fmt.Sprintf("Waiting for deployment %q to be ready: replicas=%d, status=%#v",
-			deploymentName, *deployment.Spec.Replicas, deployment.Status))
-		return *deployment.Spec.Replicas == deployment.Status.Replicas &&
-			deployment.Status.Replicas == deployment.Status.ReadyReplicas
-	}
-
 	for _, kindAndName := range objects {
 		split := strings.Split(kindAndName, "/")
-		if len(split) == 2 && strings.EqualFold(split[0], "Deployment") {
-			gomega.Eventually(isDeploymentReady).
-				WithArguments(split[1]).
-				WithPolling(defaultInterval).
-				WithTimeout(readyTimeout).
-				Should(gomega.BeTrue())
+		if len(split) != 2 || !strings.EqualFold(split[0], "Deployment") {
+			continue
 		}
+		deploymentName := split[1]
+		ginkgo.By(fmt.Sprintf("Waiting for deployment %q to be ready", deploymentName))
+		gomega.Eventually(func(g gomega.Gomega) {
+			var deployment appsv1.Deployment
+			err := testConfig.K8sClient.Get(testConfig.Context,
+				types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(deployment.Spec.Replicas).NotTo(gomega.BeNil())
+			g.Expect(deployment.Status.Replicas).To(gomega.Equal(*deployment.Spec.Replicas),
+				"deployment %q status: %#v", deploymentName, deployment.Status)
+			g.Expect(deployment.Status.ReadyReplicas).To(gomega.Equal(deployment.Status.Replicas),
+				"deployment %q status: %#v", deploymentName, deployment.Status)
+		}).WithPolling(defaultInterval).WithTimeout(readyTimeout).Should(gomega.Succeed())
 	}
 }
