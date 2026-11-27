@@ -482,8 +482,8 @@ func TestRequestSpanAttributes(t *testing.T) {
 
 // TestRunWithOutOfRangeScores checks that Run clamps each scorer's output to
 // [0, 1] before applying its weight. Each row uses a single scorer so that the
-// expected total differs from both the unclamped total and the total obtained
-// by clamping after weighting.
+// expected total differs from the unclamped total. The weight of 2 on the
+// over-range row also separates clamping before weighting from clamping after.
 func TestRunWithOutOfRangeScores(t *testing.T) {
 	tests := []struct {
 		name      string
