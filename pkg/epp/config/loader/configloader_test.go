@@ -692,6 +692,24 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - forwardInputControlHeaders defaults off",
+			configText: successSchedulerConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.False(t, rawCfg.RequestHandler.ForwardInputControlHeaders)
+				require.False(t, cfg.ForwardInputControlHeaders)
+			},
+		},
+		{
+			name:       "Success - forwardInputControlHeaders enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  forwardInputControlHeaders: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.True(t, rawCfg.RequestHandler.ForwardInputControlHeaders)
+				require.True(t, cfg.ForwardInputControlHeaders)
+			},
+		},
+		{
 			name:       "Success - Default Scorer Weight",
 			configText: successWithNoWeightText,
 			wantErr:    false,

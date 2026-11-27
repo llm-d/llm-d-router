@@ -485,12 +485,8 @@ func TestGenerateRequestHeaderResponse_HubForwardsInputControlHeaders(t *testing
 			assert.NotContains(t, removed, key)
 		}
 	})
-	t.Run("hub forwards the tenant it resolved", func(t *testing.T) {
+	t.Run("hub forwards the client's tenant, not the one it resolved", func(t *testing.T) {
 		set, _ := mutate(true, "tenant-a/agent-42")
-		assert.Equal(t, "tenant-a/agent-42", set[metadata.FlowFairnessIDKey])
-	})
-	t.Run("hub keeps the client tenant when it resolved only the default", func(t *testing.T) {
-		set, _ := mutate(true, reqcommon.DefaultFairnessID)
 		assert.Equal(t, "tenant-a", set[metadata.FlowFairnessIDKey])
 	})
 }

@@ -241,6 +241,8 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 			PropagatePriority:  true,
 			ComposeFairnessIDs: true,
 			RequestStreamUsage: true,
+
+			ForwardInputControlHeaders: true,
 		},
 	}
 }

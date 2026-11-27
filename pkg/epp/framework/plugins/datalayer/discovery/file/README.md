@@ -124,6 +124,8 @@ endpoints:
 
 `multicluster-file-discovery` is the cluster-scoped variant: it discovers peer clusters as endpoints, differing from the pod file discovery only in address validation. A cluster is reached by its gateway host, so an address may be an RFC-1123 hostname or an IP, not only an IPv4 pod address.
 
+When the peers are cluster EPPs (a multi-cluster hub), set `requestHandler.forwardInputControlHeaders: true` so the hub passes the client's objective, fairness ID and other input-control headers to them unchanged; otherwise every request reaches the cluster as priority 0 with no tenant. Leave it off when the peers are model servers.
+
 A peer may serve its pool metrics on a different host or port than its routable address. Set a `metricsAddress` label (and an optional `metricsPort` label, defaulting to the endpoint port) on the entry, and the metrics source scrapes there instead of the endpoint address.
 
 ## Endpoint attributes
