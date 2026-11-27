@@ -236,6 +236,10 @@ type RequestContext struct {
 	grpcFrameSkipRemaining uint64
 	grpcStreamCorrupted    bool
 
+	// modelNameRewriteCarry is the tail of the previous streamed response chunk that
+	// could be the start of a model-name occurrence split across chunks.
+	modelNameRewriteCarry []byte
+
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
 	toolCallingResponseEventStream bool
@@ -1003,7 +1007,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				chunk = reqCtx.dropRequestedUsageFrame(upstreamChunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk = reqCtx.rewriteStreamedModelName(chunk, endOfStream)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -1027,11 +1031,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			}
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
 			// Trailers end a stream whose last body chunk had no end of stream, so
-			// the line dropRequestedUsageFrame still holds is forwarded here.
+			// the line dropRequestedUsageFrame still holds is forwarded here, behind
+			// any model-name prefix held back from the chunk before it.
 			if reqCtx.modelServerStreaming {
-				if held := reqCtx.dropRequestedUsageFrame(nil, true); len(held) > 0 {
-					held, _ = rewriteModelName(held, reqCtx.TargetModelName, reqCtx.IncomingModelName)
-					reqCtx.respBodyResp = generateResponseBodyResponses(held, false, reqCtx.Response.DynamicMetadata)
+				held := reqCtx.dropRequestedUsageFrame(nil, true)
+				if len(held) > 0 || len(reqCtx.modelNameRewriteCarry) > 0 {
+					pending := reqCtx.rewriteStreamedModelName(held, true)
+					reqCtx.respBodyResp = generateResponseBodyResponses(pending, false, reqCtx.Response.DynamicMetadata)
 				}
 			}
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
@@ -1168,6 +1174,12 @@ func (r *RequestContext) clearToolCallingResponseDetectors() {
 	}
 }
 
+// The two JSON encodings of a model name in a response body that the rewrite matches.
+const (
+	modelNamePrefix       = `"model":"`
+	modelNamePrefixSpaced = `"model": "`
+)
+
 // rewriteModelName replaces occurrences of the target (internal) model name with the
 // incoming (client-facing) model name in the response body bytes. This ensures clients
 // see the model name they originally requested, not the internal backend model name.
@@ -1179,18 +1191,61 @@ func rewriteModelName(body []byte, targetModel, incomingModel string) ([]byte, b
 	if targetModel == "" || incomingModel == "" || targetModel == incomingModel {
 		return body, false
 	}
-	old := []byte(`"model":"` + targetModel + `"`)
-	new := []byte(`"model":"` + incomingModel + `"`)
+	old := []byte(modelNamePrefix + targetModel + `"`)
+	new := []byte(modelNamePrefix + incomingModel + `"`)
 	if bytes.Contains(body, old) {
 		return bytes.ReplaceAll(body, old, new), true
 	}
 	// Also handle the case where JSON has spaces after the colon: "model": "..."
-	old = []byte(`"model": "` + targetModel + `"`)
-	new = []byte(`"model": "` + incomingModel + `"`)
+	old = []byte(modelNamePrefixSpaced + targetModel + `"`)
+	new = []byte(modelNamePrefixSpaced + incomingModel + `"`)
 	if bytes.Contains(body, old) {
 		return bytes.ReplaceAll(body, old, new), true
 	}
 	return body, false
+}
+
+// modelNameRewriteCarryLen returns the length of the longest suffix of body that is a
+// proper prefix of a model-name occurrence, so the caller can hold those bytes back:
+// they may complete a match after the next chunk arrives.
+func modelNameRewriteCarryLen(body []byte, targetModel string) int {
+	carry := 0
+	for _, prefix := range []string{modelNamePrefix, modelNamePrefixSpaced} {
+		pattern := []byte(prefix + targetModel + `"`)
+		for n := min(len(body), len(pattern)-1); n > carry; n-- {
+			if bytes.Equal(body[len(body)-n:], pattern[:n]) {
+				carry = n
+				break
+			}
+		}
+	}
+	return carry
+}
+
+// rewriteStreamedModelName applies the model-name rewrite to one streamed response chunk.
+// Envoy splits a streamed body at arbitrary offsets, so an occurrence can straddle two
+// chunks; the suffix that could start one is held back and prepended to the next chunk,
+// and flushed on the end-of-stream chunk.
+func (r *RequestContext) rewriteStreamedModelName(chunk []byte, endOfStream bool) []byte {
+	if r.TargetModelName == "" || r.IncomingModelName == "" || r.TargetModelName == r.IncomingModelName {
+		return chunk
+	}
+	body := chunk
+	if len(r.modelNameRewriteCarry) > 0 {
+		body = append(append([]byte(nil), r.modelNameRewriteCarry...), chunk...)
+		r.modelNameRewriteCarry = nil
+	}
+	rewritten, _ := rewriteModelName(body, r.TargetModelName, r.IncomingModelName)
+	if endOfStream {
+		return rewritten
+	}
+	// Hold back the tail that could still become an occurrence once the next chunk
+	// arrives. Rewriting first keeps a complete occurrence at the boundary intact.
+	if carry := modelNameRewriteCarryLen(rewritten, r.TargetModelName); carry > 0 {
+		r.modelNameRewriteCarry = append([]byte(nil), rewritten[len(rewritten)-carry:]...)
+		return rewritten[:len(rewritten)-carry]
+	}
+	return rewritten
 }
 
 // updateStateAndSendIfNeeded checks state and can send multiple responses in a single pass, but only if ordered properly.
