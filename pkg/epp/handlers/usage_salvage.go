@@ -120,7 +120,7 @@ func (s *usageSalvager) step(c byte) {
 		case c == '\\':
 			s.escape = true
 		case c == '"':
-			if string(s.str) == "usage" {
+			if string(s.str) == reqcommon.FieldUsage {
 				s.state = scanAfterUsageKey
 			} else {
 				s.state = scanOutsideString
@@ -128,7 +128,7 @@ func (s *usageSalvager) step(c byte) {
 		default:
 			// Longer strings are not the key, but keep one extra byte so an
 			// overlong string never equals the candidate.
-			if len(s.str) <= len("usage") {
+			if len(s.str) <= len(reqcommon.FieldUsage) {
 				s.str = append(s.str, c)
 			}
 		}
