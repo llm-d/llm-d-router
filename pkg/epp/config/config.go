@@ -46,6 +46,10 @@ type Config struct {
 	// the director asks for usage in OpenAI chat completions and completions
 	// streams whose client did not.
 	RequestStreamUsage bool
+	// ForwardInputControlHeaders mirrors requestHandler.forwardInputControlHeaders:
+	// when true the EPP passes the client's input-control headers to the chosen
+	// endpoint (a multi-cluster hub's cluster EPPs).
+	ForwardInputControlHeaders bool
 	// DataProducerPhases places the producers listed in
 	// requestHandler.dataProducers, keyed by plugin name, in
 	// DataProducerPhaseRequestHandling. Producers not listed are absent.

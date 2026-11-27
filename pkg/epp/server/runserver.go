@@ -93,6 +93,10 @@ type ExtProcServerRunner struct {
 	// server. Each is asked in turn before an endpoint is selected, and the first one to
 	// return a response ends the exchange.
 	Responders []fwkrh.Responder
+	// ForwardInputControlHeaders passes the client's input-control headers to the
+	// chosen endpoint. A multi-cluster hub sets it: its endpoints are cluster EPPs
+	// that apply the objective and fairness ID in their own flow control.
+	ForwardInputControlHeaders bool
 
 	// keepaliveTime and keepaliveTimeout are overridden only by tests.
 	keepaliveTime    time.Duration
@@ -322,6 +326,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		extProcServer.SetToolCallingTelemetryEnabled(r.EnableToolCallingTelemetry)
 		extProcServer.SetMaxRequestBodySize(r.MaxRequestBodySize)
 		extProcServer.SetResponders(r.Responders)
+		extProcServer.SetForwardInputControlHeaders(r.ForwardInputControlHeaders)
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
 		}

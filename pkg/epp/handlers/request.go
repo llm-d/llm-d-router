@@ -227,7 +227,13 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Request.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		// A hub forwards the client's input-control headers, raw, to the cluster EPP
+		// that reads them: all of them, not only objective and fairness ID. The
+		// cluster EPP resolves the tenant itself. The TTL is forwarded unchanged; a
+		// hub normally runs without flow control, so the request has not waited at
+		// the hub.
+		forwarded := s.forwardInputControlHeaders && request.InputControlHeaders.Has(key)
+		if request.IsSystemOwnedHeader(key) && !forwarded {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{

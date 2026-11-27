@@ -589,6 +589,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	serverRunner := runserver.NewExtProcServerRunner(opts, *gknn, controllerCfg, ds, director,
 		r.parserRegistry, eppConfig.SaturationDetector, priorityBandControlPlane)
 	serverRunner.Responders = r.requestControlConfig.Responders()
+	serverRunner.ForwardInputControlHeaders = eppConfig.ForwardInputControlHeaders
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
@@ -1461,6 +1462,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	serverRunner := runserver.NewExtProcServerRunner(opts, gknn, runserver.NewControllerConfig(false),
 		ds, director, r.parserRegistry, eppConfig.SaturationDetector, nil)
 	serverRunner.Responders = r.requestControlConfig.Responders()
+	serverRunner.ForwardInputControlHeaders = eppConfig.ForwardInputControlHeaders
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}

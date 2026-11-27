@@ -89,7 +89,7 @@ type stubBands struct {
 // a new Options flag reach only one of the two hand-written composite literals.
 func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	// Fields the caller sets after construction, not the factory.
-	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true}
+	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true, "ForwardInputControlHeaders": true}
 
 	opts := server.NewOptions()
 	// AddFlags registers the logging flag set that Complete() dereferences.

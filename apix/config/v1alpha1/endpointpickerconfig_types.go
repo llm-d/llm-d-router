@@ -376,6 +376,14 @@ type RequestHandlerConfig struct {
 	// response before it reaches the client. It is off by default: when disabled
 	// the request body is forwarded unchanged.
 	RequestStreamUsage bool `json:"requestStreamUsage,omitempty"`
+
+	// +optional
+	// ForwardInputControlHeaders, when true, lets the EPP pass the client's
+	// input-control headers (objective, fairness ID, TTL, ...) to the chosen
+	// endpoint unchanged instead of stripping them. Set it only on a multi-cluster
+	// hub, whose endpoints are cluster EPPs that apply those headers themselves.
+	// It is off by default: a model server has no use for them.
+	ForwardInputControlHeaders bool `json:"forwardInputControlHeaders,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -398,6 +406,9 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.RequestStreamUsage {
 		parts = append(parts, "RequestStreamUsage: true")
+	}
+	if rhc.ForwardInputControlHeaders {
+		parts = append(parts, "ForwardInputControlHeaders: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
