@@ -74,14 +74,55 @@ type RevisionGating struct {
 	Affinity            *RevisionAffinity `json:"affinity,omitempty"`
 }
 
-// RevisionOverflow sends a request to another revision when the guard admits
-// no endpoint of Role in the drawn revision; see the README's Revision Overflow.
+// RevisionOverflow selects an alternative when a configured role has no room.
 type RevisionOverflow struct {
+	Guards       []RevisionOverflowGuard `json:"guards,omitempty"`
+	legacyFields bool
 	// Role is the role whose endpoints must have room. Defaults to prefill.
 	Role string `json:"role,omitempty"`
 	// GuardPluginName names the fail-closed scheduling filter that decides
 	// room, typically the concurrency-detector of Role's profile.
-	GuardPluginName string `json:"guardPluginName" pluginRef:""`
+	GuardPluginName string `json:"guardPluginName,omitempty" pluginRef:""`
+}
+
+// UnmarshalJSON retains legacy field presence to reject mixed configuration forms.
+func (o *RevisionOverflow) UnmarshalJSON(data []byte) error {
+	type raw RevisionOverflow
+	var parsed raw
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&parsed); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key, value := range fields {
+		switch {
+		case strings.EqualFold(key, "role"), strings.EqualFold(key, "guardPluginName"):
+			parsed.legacyFields = true
+		case strings.EqualFold(key, "guards"):
+			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return errors.New("revisionGating.overflow.guards must not be null")
+			}
+		}
+	}
+	*o = RevisionOverflow(parsed)
+	return nil
+}
+
+// RevisionOverflowGuard checks capacity for one required role.
+type RevisionOverflowGuard struct {
+	Role            string `json:"role"`
+	GuardPluginName string `json:"guardPluginName"`
+}
+
+func (o *RevisionOverflow) guards() []RevisionOverflowGuard {
+	if o.Guards != nil {
+		return o.Guards
+	}
+	return []RevisionOverflowGuard{{Role: o.Role, GuardPluginName: o.GuardPluginName}}
 }
 
 // DefaultOverflowRole is the role checked for room by default.
@@ -247,14 +288,33 @@ func (c *Config) Validate() error {
 		if !c.RevisionGating.Active() {
 			return fmt.Errorf("revisionGating.overflow requires revisionGating.mode %s or %s", GatingModeSum, GatingModeMaxRole)
 		}
-		if overflow.GuardPluginName == "" {
-			return errors.New("revisionGating.overflow.guardPluginName is required")
+		if overflow.Guards != nil {
+			if len(overflow.Guards) == 0 {
+				return errors.New("revisionGating.overflow.guards must not be empty")
+			}
+			if overflow.legacyFields || overflow.Role != "" || overflow.GuardPluginName != "" {
+				return errors.New("revisionGating.overflow cannot mix guards with role or guardPluginName")
+			}
+		} else {
+			if overflow.GuardPluginName == "" {
+				return errors.New("revisionGating.overflow.guardPluginName is required")
+			}
+			if overflow.Role == "" {
+				overflow.Role = DefaultOverflowRole
+			}
 		}
-		if overflow.Role == "" {
-			overflow.Role = DefaultOverflowRole
-		}
-		if !slices.Contains(c.RevisionGating.RequiredRoles, overflow.Role) {
-			return fmt.Errorf("revisionGating.overflow.role %q must be one of revisionGating.requiredRoles", overflow.Role)
+		seen := map[string]bool{}
+		for _, guard := range overflow.guards() {
+			if guard.Role == "" || guard.GuardPluginName == "" {
+				return errors.New("revisionGating.overflow guards require role and guardPluginName")
+			}
+			if seen[guard.Role] {
+				return fmt.Errorf("revisionGating.overflow duplicate role %q", guard.Role)
+			}
+			seen[guard.Role] = true
+			if !slices.Contains(c.RevisionGating.RequiredRoles, guard.Role) {
+				return fmt.Errorf("revisionGating.overflow.role %q must be one of revisionGating.requiredRoles", guard.Role)
+			}
 		}
 	}
 
