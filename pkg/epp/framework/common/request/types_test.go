@@ -631,9 +631,9 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 }
 
 func TestTextToSpeechRequest_String(t *testing.T) {
-	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 0}", (&TextToSpeechRequest{Input: "hello"}).String())
-	assert.Equal(t, "{InputLength: 5, InstructionsLength: 8, RefTextLength: 0}", (&TextToSpeechRequest{Input: "hello", Instructions: "cheerful"}).String())
-	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 11}", (&TextToSpeechRequest{Input: "hello", RefText: "hello there"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 0, Voice: , Language: , TaskType: }", (&TextToSpeechRequest{Input: "hello"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 8, RefTextLength: 0, Voice: , Language: , TaskType: }", (&TextToSpeechRequest{Input: "hello", Instructions: "cheerful"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 11, Voice: ryan, Language: en, TaskType: CustomVoice}", (&TextToSpeechRequest{Input: "hello", RefText: "hello there", Voice: "ryan", Language: "en", TaskType: "CustomVoice"}).String())
 	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
 }
 
@@ -786,49 +786,16 @@ func TestGenerateRequest_UnmarshalJSONCanonicalPreservesAbsentFeatures(t *testin
 	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
 }
 
-func TestMaxOutputTokensFromPayload(t *testing.T) {
-	tests := []struct {
-		name string
-		m    PayloadMap
-		keys []string
-		want *int64
-	}{
-		{name: "absent", m: PayloadMap{"other": float64(1)}, keys: []string{"max_tokens"}, want: nil},
-		{name: "float64 value", m: PayloadMap{"max_tokens": float64(64)}, keys: []string{"max_tokens"}, want: ptr.To(int64(64))},
-		{name: "json.Number value", m: PayloadMap{"max_tokens": json.Number("128")}, keys: []string{"max_tokens"}, want: ptr.To(int64(128))},
-		{name: "explicit zero binds", m: PayloadMap{"max_tokens": float64(0)}, keys: []string{"max_tokens"}, want: ptr.To(int64(0))},
-		{name: "negative ignored", m: PayloadMap{"max_tokens": float64(-1)}, keys: []string{"max_tokens"}, want: nil},
-		{name: "non-integral ignored", m: PayloadMap{"max_tokens": float64(1.5)}, keys: []string{"max_tokens"}, want: nil},
-		{name: "wrong type ignored", m: PayloadMap{"max_tokens": "64"}, keys: []string{"max_tokens"}, want: nil},
-		{
-			name: "precedence: first present key wins",
-			m:    PayloadMap{"max_completion_tokens": float64(100), "max_tokens": float64(50)},
-			keys: []string{"max_completion_tokens", "max_tokens"},
-			want: ptr.To(int64(100)),
-		},
-		{
-			name: "precedence: fall back to absent second key",
-			m:    PayloadMap{"max_tokens": float64(50)},
-			keys: []string{"max_completion_tokens", "max_tokens"},
-			want: ptr.To(int64(50)),
-		},
-		{
-			name: "fall back when primary is negative",
-			m:    PayloadMap{"max_completion_tokens": float64(-1), "max_tokens": float64(50)},
-			keys: []string{"max_completion_tokens", "max_tokens"},
-			want: ptr.To(int64(50)),
-		},
-		{
-			name: "fall back when primary is wrong type",
-			m:    PayloadMap{"max_completion_tokens": "bad", "max_tokens": float64(50)},
-			keys: []string{"max_completion_tokens", "max_tokens"},
-			want: ptr.To(int64(50)),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, MaxOutputTokensFromPayload(tt.m, tt.keys...))
-		})
+func TestCompletionsRequestEchoDisabled(t *testing.T) {
+	for raw, want := range map[string]bool{
+		`{"prompt":"p"}`:              true,
+		`{"prompt":"p","echo":false}`: true,
+		`{"prompt":"p","echo":null}`:  true,
+		`{"prompt":"p","echo":true}`:  false,
+		`{"prompt":"p","echo":"yes"}`: false,
+	} {
+		var r CompletionsRequest
+		require.NoError(t, json.Unmarshal([]byte(raw), &r), raw)
+		assert.Equal(t, want, r.EchoDisabled(), raw)
 	}
 }

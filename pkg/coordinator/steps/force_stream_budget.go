@@ -23,9 +23,10 @@ import (
 )
 
 // forceStreamBudget bounds the total bytes concurrent forced requests may reserve
-// at once. One decode step instance serves every request, so a single budget is
-// process-global. The pod carries no memory limit, so an exhausted budget sends a
-// forced request down the non-buffering pass-through rather than growing the heap.
+// at once. The pipeline builds one and shares it between the steps that
+// force-stream (see EnableForceStream), so a single budget is process-global. The
+// pod carries no memory limit, so an exhausted budget sends a forced request down
+// the non-buffering pass-through rather than growing the heap.
 //
 // The budget counts wire bytes. Peak heap is larger: a forced request also holds
 // the scanner frame buffer, the decoded map (several times its JSON size), the
@@ -51,7 +52,8 @@ func newForceStreamBudget(maxBytes, perRequestMax int64) *forceStreamBudget {
 // A value that is not positive is refused, so an overflowed sum cannot grow the
 // budget; a value above max is refused like any other that does not fit. current
 // stays in [0, max], so max-current never underflows an int64.
-func (b *forceStreamBudget) tryReserve(n int64) bool {
+// step labels the reservation on the buffered-bytes gauge.
+func (b *forceStreamBudget) tryReserve(step string, n int64) bool {
 	if n <= 0 {
 		return false
 	}
@@ -61,15 +63,16 @@ func (b *forceStreamBudget) tryReserve(n int64) bool {
 			return false
 		}
 		if b.current.CompareAndSwap(cur, cur+n) {
-			coordmetrics.AddForceStreamBufferedBytes(n)
+			coordmetrics.AddForceStreamBufferedBytes(step, n)
 			return true
 		}
 	}
 }
 
-// release returns a prior reservation of n bytes. Each tryReserve that returns
-// true is balanced by exactly one release, so the live total cannot drift.
-func (b *forceStreamBudget) release(n int64) {
+// release returns a prior reservation of n bytes made by step. Each tryReserve
+// that returns true is balanced by exactly one release, so the live total cannot
+// drift.
+func (b *forceStreamBudget) release(step string, n int64) {
 	b.current.Add(-n)
-	coordmetrics.SubForceStreamBufferedBytes(n)
+	coordmetrics.SubForceStreamBufferedBytes(step, n)
 }

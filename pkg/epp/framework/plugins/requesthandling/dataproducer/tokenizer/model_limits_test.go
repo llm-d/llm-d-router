@@ -53,22 +53,22 @@ func TestDiscoveredModelLimits(t *testing.T) {
 	require.NoError(t, err)
 	ep := discoveredEndpointWithRank("a", host, port, 0, map[string]string{"render-limit": "265088"})
 	require.NoError(t, p.Upsert(ep.GetMetadata()))
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.Error(t, err, "unknown capacity must not be selectable")
 	p.refreshModelLimits(context.Background(), server.Client(), "glm")
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.NoError(t, err)
 	limit.Store(240000)
 	p.refreshModelLimits(context.Background(), server.Client(), "glm")
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.Error(t, err, "shrunk capacity must be excluded")
 	limit.Store(300000)
 	p.refreshModelLimits(context.Background(), server.Client(), "glm")
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.NoError(t, err)
 	bad.Store(true)
 	p.refreshModelLimits(context.Background(), server.Client(), "glm")
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.Error(t, err, "failed metadata refresh must not retain an unverified target")
 	p.Delete(ep.GetMetadata())
 	require.Empty(t, p.capabilities)
@@ -85,7 +85,7 @@ func TestModelLimitLabelValidation(t *testing.T) {
 	require.NoError(t, err)
 	ep := discoveredEndpointWithRank("a", "127.0.0.1", "8000", 0, map[string]string{"limit": "265088"})
 	require.NoError(t, p.Upsert(ep.GetMetadata()))
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.Error(t, err)
 }
 
@@ -154,7 +154,7 @@ func TestModelLimitProbeDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	p.refreshModelLimits(ctx, server.Client(), "glm")
-	_, err := p.Pick()
+	_, err := p.Pick("")
 	require.Error(t, err)
 }
 
@@ -307,11 +307,11 @@ func TestModelLimitEndpointReplacement(t *testing.T) {
 	c := p.capabilities[old.GetMetadata().ID.String()]
 	c.observed, c.refreshed = 300000, time.Now()
 	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: old}))
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.NoError(t, err, "same-object updates must preserve observations")
 	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: replacement}))
 	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: old}))
-	_, err = p.Pick()
+	_, err = p.Pick("")
 	require.Error(t, err, "replacement must be probed before selection")
 	require.NotSame(t, c, p.capabilities[replacement.GetMetadata().ID.String()], "in-flight probes must lose their generation")
 }
@@ -335,7 +335,7 @@ func TestModelLimitStaleProbeCannotResurrectDeletedEndpoint(t *testing.T) {
 	require.NoError(t, p.Upsert(ep.GetMetadata()))
 	close(release)
 	<-done
-	_, err := p.Pick()
+	_, err := p.Pick("")
 	require.Error(t, err)
 }
 

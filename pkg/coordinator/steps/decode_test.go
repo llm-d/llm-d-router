@@ -549,31 +549,7 @@ func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) 
 // requests and requests render did not tokenize, and that nothing is sent
 // when the parameter is unset.
 func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
-	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
-	forward := map[string]any{ParamForwardPromptTokenIDs: true}
-	tests := []struct {
-		name    string
-		params  map[string]any
-		path    string
-		tokens  []int
-		entries []pipeline.MultimodalEntry
-		extra   map[string]any
-		want    bool
-	}{
-		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
-		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
-		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
-		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
-		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
-		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
-		{name: "return_prompt_text on responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
-		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
-		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
-		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
-		{name: "off by default", params: map[string]any{}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
-		{name: "off", params: map[string]any{ParamForwardPromptTokenIDs: false}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
-	}
-	for _, tc := range tests {
+	for _, tc := range promptTokenIDsCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
 			if err != nil {

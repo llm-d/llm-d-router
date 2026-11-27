@@ -41,6 +41,51 @@ const maxGRPCFrameBytes = 64 << 20
 
 var failedPreconditionStatus = strconv.FormatUint(uint64(codes.FailedPrecondition), 10)
 
+var unavailableStatus = strconv.FormatUint(uint64(codes.Unavailable), 10)
+
+// rerunOnUnavailable returns the error that asks the pipeline to run step
+// again, or nil when st does not qualify. It applies to an UNAVAILABLE status
+// of a vLLM prefill or decode leg while the request has a re-run left. A
+// caller must return the error before it writes to the client.
+func rerunOnUnavailable(step string, reqCtx *pipeline.RequestContext, st grpcStatusWire) error {
+	if st.status != unavailableStatus || !reqCtx.CanRerunStep() {
+		return nil
+	}
+	// SGLang re-runs on retryable GenerateStreamItem.error items in
+	// sglang_grpc.go, not on gRPC UNAVAILABLE trailers.
+	vllmReq, ok := reqCtx.GRPC.(*pipeline.VLLMGRPCRequest)
+	if !ok {
+		return nil
+	}
+	from, ok := rerunFrom(step, vllmReq)
+	if !ok {
+		return nil
+	}
+	return &pipeline.StepRerunError{
+		Step:  step,
+		From:  from,
+		Cause: &pipeline.UpstreamError{Step: step, StatusCode: grpcStatusToHTTPStatus(st.status)},
+	}
+}
+
+// rerunFrom returns the step that a re-run of step starts from, and false for
+// a step that cannot run again. The re-run starts from the step whose output
+// the failed leg loads. Decode loads the KV blocks of prefill, or the encoder
+// cache of encode when prefill did not run. Prefill loads the encoder cache of
+// encode. When no such step ran, step runs again alone.
+func rerunFrom(step string, vllmReq *pipeline.VLLMGRPCRequest) (string, bool) {
+	switch {
+	case step != PrefillStepName && step != DecodeStepName:
+		return "", false
+	case step == DecodeStepName && vllmReq.PrefillRan:
+		return PrefillStepName, true
+	case vllmReq.EncodeRan:
+		return EncodeStepName, true
+	default:
+		return step, true
+	}
+}
+
 type grpcStatusWire struct {
 	status     string
 	message    string
@@ -59,11 +104,46 @@ type relayOutcome struct {
 
 type frameRewriter func(frame []byte) ([]byte, error)
 
+// peerFailure describes a recorded failure of a concurrent peer leg (such as
+// SGLang's concurrent prefill stream). Retryable reports whether the failure
+// qualifies for a pre-commit step re-run.
+type peerFailure struct {
+	step      string
+	status    grpcStatusWire
+	cause     error
+	retryable bool
+}
+
 // peerFailureCheck inspects whether a concurrent peer leg (such as SGLang's
 // concurrent prefill stream) has failed. When wait is true (at stream EOF
 // before reading decode trailers), it may wait briefly for the peer leg to
 // report its status.
-type peerFailureCheck func(wait bool) (peerStep string, st grpcStatusWire, cause error, failed bool)
+type peerFailureCheck func(wait bool) (peerFailure, bool)
+
+func handlePeerFailure(
+	w http.ResponseWriter,
+	reqCtx *pipeline.RequestContext,
+	committed bool,
+	pf peerFailure,
+) error {
+	if !committed && pf.retryable && reqCtx.CanRerunStep() {
+		return &pipeline.StepRerunError{
+			Step:  pf.step,
+			From:  pf.step,
+			Cause: &pipeline.UpstreamError{Step: pf.step, StatusCode: grpcStatusToHTTPStatus(pf.status.status)},
+		}
+	}
+	if !committed {
+		writeRawGRPCError(w, pf.status)
+	} else {
+		setPrefixedGRPCTrailer(w.Header(), pf.status)
+	}
+	return &pipeline.UpstreamStreamedError{
+		Step:       pf.step,
+		StatusCode: grpcStatusToHTTPStatus(pf.status.status),
+		Cause:      pf.cause,
+	}
+}
 
 // relayGRPCStream copies upstream gRPC frames to reqCtx.ResponseWriter,
 // applying rewrite to each frame when non-nil, and writes the terminal gRPC
@@ -107,17 +187,8 @@ func relayGRPCStream(
 				return out, fmt.Errorf("%s: %w", step, ctxErr)
 			}
 			if checkPeer != nil {
-				if peerStep, pWire, peerErr, failed := checkPeer(false); failed {
-					if !out.Committed {
-						writeRawGRPCError(w, pWire)
-					} else {
-						setPrefixedGRPCTrailer(w.Header(), pWire)
-					}
-					return out, &pipeline.UpstreamStreamedError{
-						Step:       peerStep,
-						StatusCode: grpcStatusToHTTPStatus(pWire.status),
-						Cause:      peerErr,
-					}
+				if pf, failed := checkPeer(false); failed {
+					return out, handlePeerFailure(w, reqCtx, out.Committed, pf)
 				}
 			}
 			wrappedErr := fmt.Errorf("%s: %w: %w", step, &pipeline.UpstreamError{Step: step}, readErr)
@@ -141,6 +212,10 @@ func relayGRPCStream(
 		if rewrite != nil {
 			rewritten, rewriteErr := rewrite(frame)
 			if rewriteErr != nil {
+				var rerun *pipeline.StepRerunError
+				if !out.Committed && errors.As(rewriteErr, &rerun) {
+					return out, rewriteErr
+				}
 				if !loggedRewriteErr {
 					logger.Error(rewriteErr, "failed to rewrite gRPC stream frame", "step", step)
 					loggedRewriteErr = true
@@ -161,17 +236,8 @@ func relayGRPCStream(
 	}
 
 	if checkPeer != nil {
-		if peerStep, pWire, peerErr, failed := checkPeer(true); failed {
-			if !out.Committed {
-				writeRawGRPCError(w, pWire)
-			} else {
-				setPrefixedGRPCTrailer(w.Header(), pWire)
-			}
-			return out, &pipeline.UpstreamStreamedError{
-				Step:       peerStep,
-				StatusCode: grpcStatusToHTTPStatus(pWire.status),
-				Cause:      peerErr,
-			}
+		if pf, failed := checkPeer(true); failed {
+			return out, handlePeerFailure(w, reqCtx, out.Committed, pf)
 		}
 	}
 
@@ -203,6 +269,9 @@ func relayGRPCStream(
 			return out, nil
 		}
 		if st.status != grpcframe.StatusOK {
+			if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+				return out, err
+			}
 			writeRawGRPCError(w, st)
 			return out, &pipeline.UpstreamStreamedError{Step: step, StatusCode: grpcStatusToHTTPStatus(st.status)}
 		}
@@ -369,6 +438,9 @@ func isHTTPTranslatedGRPC(reqCtx *pipeline.RequestContext) bool {
 }
 
 func upstreamGRPCError(step string, reqCtx *pipeline.RequestContext, st grpcStatusWire) error {
+	if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+		return err
+	}
 	httpStatus := grpcStatusToHTTPStatus(st.status)
 	if isHTTPTranslatedGRPC(reqCtx) {
 		return &pipeline.UpstreamError{Step: step, StatusCode: httpStatus}
@@ -382,6 +454,9 @@ func upstreamGRPCError(step string, reqCtx *pipeline.RequestContext, st grpcStat
 }
 
 func decodePreCommitGRPCError(step string, reqCtx *pipeline.RequestContext, st grpcStatusWire) error {
+	if err := rerunOnUnavailable(step, reqCtx, st); err != nil {
+		return err
+	}
 	httpStatus := grpcStatusToHTTPStatus(st.status)
 	if isHTTPTranslatedGRPC(reqCtx) {
 		return &pipeline.UpstreamError{Step: step, StatusCode: httpStatus}
@@ -410,7 +485,7 @@ func uncommittedHTTPError(step string, reqCtx *pipeline.RequestContext, resp *ht
 	}
 	grpcframe.WriteError(
 		reqCtx.ResponseWriter,
-		pipeline.HTTPStatusToGRPCCode(resp.StatusCode),
+		grpcframe.UpstreamHTTPStatusToCode(resp.StatusCode),
 		fmt.Sprintf("upstream HTTP %d (request_id: %s)", resp.StatusCode, reqCtx.RequestID),
 	)
 	return &pipeline.ResponseWrittenError{

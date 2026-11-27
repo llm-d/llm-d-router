@@ -44,7 +44,6 @@ type InferencePoolReconciler struct {
 
 func (c *InferencePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).V(logutil.DEFAULT)
-	ctx = ctrl.LoggerInto(ctx, logger)
 
 	logger.Info("Reconciling InferencePool")
 

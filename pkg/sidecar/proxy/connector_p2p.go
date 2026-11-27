@@ -119,7 +119,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	logger := log.FromContext(r.Context())
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
-		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
+		logger.Error(err, "cannot build the decode request", "prefill_host", routing.ExtractHost(prefillPodHostPort))
 		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
@@ -136,7 +136,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	kvRequestID := newUUID()
 	kv := make([]any, 0, 8)
 	kv = append(kv,
-		"prefill_host", extractHost(prefillPodHostPort),
+		"prefill_host", routing.ExtractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
 		"p2p_prefill", p2p.prefill.String())
 	if source != nil {
@@ -278,7 +278,11 @@ func (l *httpSequentialPDLeg) serveDecode(decodeCtx context.Context, decodeWrite
 }
 
 // prefillCachedTokens returns the cached-token count of a prefill response's
-// usage block, or nil when the body has no usage block or does not decode.
+// usage block, or nil when the body has no usage block, does not decode, or
+// carries no count. A count was measured only when the details object carries
+// a number: vLLM without --enable-prompt-tokens-details sends no details
+// however many tokens were cached, and the decode response is then relayed
+// unchanged.
 func prefillCachedTokens(logger logr.Logger, body []byte) *int {
 	var response map[string]any
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -290,7 +294,10 @@ func prefillCachedTokens(logger logr.Logger, body []byte) *int {
 	if block == nil {
 		return nil
 	}
-	n, _ := usage.CachedTokens(block)
+	n, ok := usage.CachedTokens(block)
+	if !ok {
+		return nil
+	}
 	return &n
 }
 

@@ -173,6 +173,21 @@ func TestFactoryParameters(t *testing.T) {
 			wantErrContains: "evictionSweepSeconds must be > 0",
 		},
 		{
+			name:            "sweep shorter than 1ns",
+			parameters:      json.RawMessage(`{"evictionSweepSeconds":1e-10}`),
+			wantErrContains: "evictionSweepSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
+			name:            "sweep beyond the duration range",
+			parameters:      json.RawMessage(`{"evictionSweepSeconds":1e10}`),
+			wantErrContains: "evictionSweepSeconds 1e+10 exceeds the representable duration",
+		},
+		{
+			name:            "ttl shorter than 1ns",
+			parameters:      json.RawMessage(`{"evictionTtlSeconds":1e-10,"evictionSweepSeconds":10}`),
+			wantErrContains: "evictionTtlSeconds 1e-10 is too small to represent as a duration",
+		},
+		{
 			name:            "unknown field",
 			parameters:      json.RawMessage(`{"unknown":1}`),
 			wantErrContains: "unknown field",

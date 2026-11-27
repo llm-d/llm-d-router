@@ -45,6 +45,7 @@ func init() {
 
 type PrefillStep struct {
 	useOpenAIFormat bool
+	forwardTokenIDs bool
 	gwClient        *gateway.Client
 	kv              kv.Connector
 	ec              ec.Connector
@@ -66,8 +67,16 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
+	forwardTokenIDs, _, err := paramBool(params, ParamForwardPromptTokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("prefill: %w", err)
+	}
+	if forwardTokenIDs && !useOpenAI {
+		return nil, fmt.Errorf("prefill: %s requires use_openai_format=true (the tokens-in format sends the token IDs as token_ids)", ParamForwardPromptTokenIDs)
+	}
 	return &PrefillStep{
 		useOpenAIFormat: useOpenAI,
+		forwardTokenIDs: forwardTokenIDs,
 		gwClient:        gwClient,
 		kv:              kvConn,
 		ec:              ecConn,
@@ -126,8 +135,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
 	var cachedTokens *int
-	if prefillResp.Usage != nil {
-		n, _ := usage.CachedTokens(prefillResp.Usage)
+	if n, ok := usage.CachedTokens(prefillResp.Usage); ok {
 		cachedTokens = &n
 	}
 	recordPrefillOutcome(logger, reqCtx, s.kv.Name(), path, cachedTokens)
@@ -170,6 +178,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
+		if sendsPromptTokenIDs(s.forwardTokenIDs, reqCtx, format) {
+			kvParams[reqcommon.FieldPromptTokenIDs] = reqCtx.TokenIDs
+		}
 		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams

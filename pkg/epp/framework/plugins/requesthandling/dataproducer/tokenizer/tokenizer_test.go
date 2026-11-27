@@ -177,10 +177,33 @@ func TestPluginFactory_Validation(t *testing.T) {
 			errContain: "'backend' is \"estimate\" but 'vllm' or 'modelName' is set",
 		},
 		{
+			name:      "explicit passthrough backend",
+			params:    `{"backend":"passthrough"}`,
+			expectErr: false,
+		},
+		{
+			name:       "explicit passthrough backend rejects vllm parameters",
+			params:     `{"backend":"passthrough","vllm":{}}`,
+			expectErr:  true,
+			errContain: "'backend' is \"passthrough\" but 'vllm', 'modelName', or 'estimate' is set",
+		},
+		{
+			name:       "explicit passthrough backend rejects modelName",
+			params:     `{"backend":"passthrough","modelName":"m"}`,
+			expectErr:  true,
+			errContain: "'backend' is \"passthrough\" but 'vllm', 'modelName', or 'estimate' is set",
+		},
+		{
+			name:       "explicit passthrough backend rejects estimate parameters",
+			params:     `{"backend":"passthrough","estimate":{}}`,
+			expectErr:  true,
+			errContain: "'backend' is \"passthrough\" but 'vllm', 'modelName', or 'estimate' is set",
+		},
+		{
 			name:       "unknown backend",
 			params:     `{"backend":"uds"}`,
 			expectErr:  true,
-			errContain: "'backend' must be \"estimate\" or \"vllm\", got \"uds\"",
+			errContain: "'backend' must be \"estimate\", \"passthrough\", or \"vllm\", got \"uds\"",
 		},
 		{
 			name:       "estimates and vllm stay mutually exclusive without backend",
@@ -230,6 +253,7 @@ func TestPluginFactory_BackendSelection(t *testing.T) {
 			wantErr: "'backend' is \"estimate\" but 'vllm' or 'modelName' is set",
 		},
 		{name: "explicit vllm", params: `{"backend":"vllm","modelName":"m"}`, want: BackendVLLM},
+		{name: "explicit passthrough", params: `{"backend":"passthrough"}`, want: BackendPassthrough},
 	}
 
 	for _, tt := range tests {
@@ -481,6 +505,24 @@ func TestConvertMMFeaturesNil(t *testing.T) {
 	assert.Nil(t, r)
 }
 
+func TestConvertMMFeaturesExcludesHashlessFeatures(t *testing.T) {
+	// A missing hash carries no content identity; hashing it would make
+	// prompts with different media collide on those blocks (issue #4155).
+	// Such features stay in MultiModalFeatures for media detection and token
+	// accounting, but never reach the cache-key maps.
+	features := []fwkrequest.MultiModalFeature{
+		{Modality: reqcommon.ModalityImage, Hash: "h1", Offset: 1, Length: 2},
+		{Modality: reqcommon.ModalityImage, Hash: "", Offset: 5, Length: 3},
+		{Modality: reqcommon.ModalityImage, Hash: "h2", Offset: 10, Length: 3},
+	}
+	hashes, ranges := ConvertMMFeaturesFromUpstream(features)
+	assert.Equal(t, []string{"h1", "h2"}, hashes["image"])
+	assert.Equal(t,
+		[]kvblock.PlaceholderRange{{Offset: 1, Length: 2}, {Offset: 10, Length: 3}},
+		ranges["image"],
+		"the hashless span must not shift later items' pairing")
+}
+
 func TestProduces_PublishesBackendAttribute(t *testing.T) {
 	ctx := context.Background()
 
@@ -488,17 +530,159 @@ func TestProduces_PublishesBackendAttribute(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[plugin.DataKey]any{
 		TokenizedPromptDataKey: plugin.ProducedData{
-			Type:       fwkrequest.TokenizedRequest{},
-			Attributes: map[string]string{"backend": BackendVLLM},
+			Type: fwkrequest.TokenizedRequest{},
+			Attributes: map[string]string{
+				AttrBackend:     BackendVLLM,
+				AttrExactTokens: ExactTokensTrue,
+			},
 		},
 	}, vp.Produces())
+
+	pp, err := NewPlugin(ctx, PluginType, &tokenizerPluginConfig{Backend: BackendPassthrough})
+	require.NoError(t, err)
+	assert.Equal(t, map[plugin.DataKey]any{
+		TokenizedPromptDataKey: plugin.ProducedData{
+			Type: fwkrequest.TokenizedRequest{},
+			Attributes: map[string]string{
+				AttrBackend:     BackendPassthrough,
+				AttrExactTokens: ExactTokensTrue,
+			},
+		},
+	}, pp.Produces())
 
 	ep, err := NewPlugin(ctx, PluginType, &tokenizerPluginConfig{Estimate: &estimateConfig{}})
 	require.NoError(t, err)
 	assert.Equal(t, map[plugin.DataKey]any{
 		TokenizedPromptDataKey: plugin.ProducedData{
-			Type:       fwkrequest.TokenizedRequest{},
-			Attributes: map[string]string{"backend": BackendEstimate},
+			Type: fwkrequest.TokenizedRequest{},
+			Attributes: map[string]string{
+				AttrBackend:     BackendEstimate,
+				AttrExactTokens: ExactTokensFalse,
+			},
 		},
 	}, ep.Produces())
+}
+
+func TestProduce_PassthroughBackend(t *testing.T) {
+	ctx := context.Background()
+	p, err := NewPlugin(ctx, PluginType, &tokenizerPluginConfig{Backend: BackendPassthrough})
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), p.ProduceTimeout())
+
+	t.Run("generate token IDs with multimodal features and cache salt", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Generate: &fwkrequest.GenerateRequest{
+					TokenIDs:  []uint32{10, 20, 30},
+					CacheSalt: "salt-gen",
+					Features: &tokenization.MultiModalFeatures{
+						MMHashes: map[string][]string{"image": {"img-hash"}},
+						MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+							"image": {{Offset: 1, Length: 2}},
+						},
+					},
+				},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		require.NotNil(t, req.Body.TokenizedRequest)
+		assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+		assert.Equal(t, "salt-gen", req.Body.TokenizedRequest.CacheSalt)
+		assert.Equal(t, []fwkrequest.MultiModalFeature{{
+			Modality: reqcommon.ModalityImage,
+			Hash:     "img-hash",
+			Offset:   1,
+			Length:   2,
+		}}, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures)
+	})
+
+	t.Run("embeddings token IDs", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Embeddings: &fwkrequest.EmbeddingsRequest{
+					Input:     fwkrequest.EmbeddingsInput{TokenIDs: [][]uint32{{7, 8, 9}}},
+					CacheSalt: "salt-emb",
+				},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		require.NotNil(t, req.Body.TokenizedRequest)
+		assert.Equal(t, []uint32{7, 8, 9}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+		assert.Equal(t, "salt-emb", req.Body.TokenizedRequest.CacheSalt)
+	})
+
+	t.Run("completions token array prompt", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt:    fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
+					CacheSalt: "salt-comp",
+				},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		require.NotNil(t, req.Body.TokenizedRequest)
+		assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+		assert.Equal(t, "salt-comp", req.Body.TokenizedRequest.CacheSalt)
+	})
+
+	t.Run("pre-populated TokenizedRequest preserves tokens and fills cache salt", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Completions:      &fwkrequest.CompletionsRequest{CacheSalt: "salt-pre"},
+				TokenizedRequest: fwkrequest.NewTokenizedRequest([][]uint32{{4, 5}}),
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+		assert.Equal(t, "salt-pre", req.Body.TokenizedRequest.CacheSalt)
+	})
+
+	t.Run("text chat request produces no pseudo-tokens", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+					Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Raw: "hello"}}},
+				},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		assert.Nil(t, req.Body.TokenizedRequest)
+	})
+
+	t.Run("text generate request produces no pseudo-tokens", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Generate: &fwkrequest.GenerateRequest{Text: "hello"},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		assert.Nil(t, req.Body.TokenizedRequest)
+	})
+
+	t.Run("completions token array with truncate_prompt_tokens produces no tokens", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
+				},
+				Payload: fwkrequest.PayloadMap{reqcommon.FieldTruncatePromptTokens: float64(2)},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		assert.Nil(t, req.Body.TokenizedRequest)
+	})
+
+	t.Run("embeddings token IDs with truncate_prompt_tokens produces no tokens", func(t *testing.T) {
+		req := &scheduling.InferenceRequest{
+			Body: &fwkrequest.InferenceRequestBody{
+				Embeddings: &fwkrequest.EmbeddingsRequest{
+					Input: fwkrequest.EmbeddingsInput{TokenIDs: [][]uint32{{7, 8, 9}}},
+				},
+				Payload: fwkrequest.PayloadMap{reqcommon.FieldTruncatePromptTokens: float64(2)},
+			},
+		}
+		require.NoError(t, p.Produce(ctx, req, nil))
+		assert.Nil(t, req.Body.TokenizedRequest)
+	})
 }

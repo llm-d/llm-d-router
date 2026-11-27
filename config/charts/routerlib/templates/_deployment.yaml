@@ -5,8 +5,13 @@
       {{- $proxySidecar := and $proxy.enabled (eq $proxyMode "sidecar") }}
       {{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . }}
       {{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml }}
+      {{- $extProcPort := include "llm-d-router.epp.extProcPort" . }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}
+      {{- end }}
+      {{- /* Outlast Envoy's health-check ejection of a draining EPP: 3 failed checks at 10s by default. */}}
+      {{- if and (include "llm-d-router.proxy.eppHealthPortCheck" .) (not (hasKey $eppFlags "drain-timeout")) }}
+        {{- $_ := set $eppFlags "drain-timeout" "45s" }}
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
       {{- with .Values.router.epp.priorityClassName }}
@@ -92,7 +97,7 @@
         {{- end }}
         {{- end }}
         - name: epp
-          image: {{ .Values.router.epp.image.registry }}/{{ .Values.router.epp.image.repository }}:{{ .Values.router.epp.image.tag }}
+          image: {{ include "llm-d-router.image" (dict "image" .Values.router.epp.image "path" "router.epp.image") }}
           imagePullPolicy: {{ .Values.router.epp.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
@@ -133,6 +138,9 @@
           {{- if include "llm-d-router.epp.healthCheckingRequired" . }}
               - --health-checking=true
           {{- end }}
+          {{- if and (ne $extProcPort "9002") (not (hasKey $eppFlags "grpc-port")) }}
+              - --grpc-port={{ $extProcPort }}
+          {{- end }}
               # Pass additional flags via the router.epp.flags field in values.yaml.
               # Render them as --flag=value so boolean values are parsed correctly.
           {{- range $key, $value := $eppFlags }}
@@ -156,7 +164,7 @@
           {{- end }}
           ports:
             - name: grpc
-              containerPort: 9002
+              containerPort: {{ $extProcPort }}
             - name: grpc-health
               containerPort: {{ $grpcHealthPort }}
             - name: metrics
@@ -265,7 +273,7 @@
         {{- $renderPort := $tokenizer.port | default 8000 | int }}
         {{- $flavor := $tokenizer.flavor | default "python" | lower }}
         - name: vllm-render
-          image: {{ $tokenizer.image.registry }}/{{ $tokenizer.image.repository }}:{{ $tokenizer.image.tag }}
+          image: {{ include "llm-d-router.image" (dict "image" $tokenizer.image "path" "router.tokenizer.image") }}
           imagePullPolicy: {{ $tokenizer.image.pullPolicy | default "IfNotPresent" }}
           command:
           {{- if $tokenizer.command }}
@@ -426,6 +434,15 @@ spec:
     type: Recreate
     {{- end }}
     {{- end }}
+  {{- $eppMinReadySeconds := .Values.router.epp.minReadySeconds }}
+  {{- /* "invalid" = unset or explicit null, the two forms that mean "keep the
+       Kubernetes default"; every other value, however falsy, is validated. */ -}}
+  {{- if not (kindIs "invalid" $eppMinReadySeconds) }}
+  {{- if not (regexMatch "^(0|[1-9][0-9]?|[1-5][0-9]{2})$" (toString $eppMinReadySeconds)) }}
+  {{- fail "router.epp.minReadySeconds must be a whole number from 0 to 599: the Deployment's progressDeadlineSeconds (the Kubernetes default of 600; the chart does not set it) has to exceed it, and the API server rejects anything else" }}
+  {{- end }}
+  minReadySeconds: {{ $eppMinReadySeconds }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.selectorLabels" . | nindent 6 }}

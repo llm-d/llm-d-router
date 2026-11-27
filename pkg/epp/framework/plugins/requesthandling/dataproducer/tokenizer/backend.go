@@ -18,10 +18,15 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
+	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -34,9 +39,27 @@ import (
 var errUnsupportedBody = errors.New("unsupported request body type")
 
 // tokenInputProducer turns a request body into a TokenizedRequest. Backends vary
-// in fidelity (render vs estimate); callers never branch on which produced it.
+// in fidelity (render, passthrough, or estimate); callers never branch on which produced it.
 type tokenInputProducer interface {
 	produce(ctx context.Context, body *fwkrequest.InferenceRequestBody) (*fwkrequest.TokenizedRequest, error)
+}
+
+// passthroughBackend accepts only pre-tokenized Generate requests that already
+// carry exact engine token IDs (token-array Completions, token-array
+// Embeddings, and kv_transfer_params.prompt_token_ids are handled before
+// backend dispatch by clientPromptTokenIDs, and pre-populated TokenizedRequest
+// skips Produce). Text prompts return errUnsupportedBody so pseudo-tokens never
+// reach exact-token consumers.
+type passthroughBackend struct{}
+
+func (passthroughBackend) produce(_ context.Context, body *fwkrequest.InferenceRequestBody) (*fwkrequest.TokenizedRequest, error) {
+	if body.Generate != nil && len(body.Generate.TokenIDs) > 0 {
+		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           body.Generate.TokenIDs,
+			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
+		}}}, nil
+	}
+	return nil, errUnsupportedBody
 }
 
 // timeoutAware is implemented by backends (and the tokenizers they wrap) whose
@@ -194,7 +217,9 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrequest.InferenceRe
 
 // CacheSaltFromBody returns the cache salt from whichever protocol is populated.
 // The protocol switch lives here so producers populate TokenizedRequest.CacheSalt
-// from one place and consumers read only that field.
+// from one place and consumers read only that field. A speech request with
+// extra_params.use_random carries a fresh random component, so the result must be
+// derived once per request and stored.
 func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 	switch {
 	case body.Conversations != nil:
@@ -212,10 +237,79 @@ func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 	case body.Generate != nil:
 		return body.Generate.CacheSalt
 	case body.TextToSpeech != nil:
-		return body.TextToSpeech.CacheSalt
+		return speechCacheSalt(body.TextToSpeech)
 	default:
 		return ""
 	}
+}
+
+// speechCacheSalt derives the prefix-cache salt for a speech request from its
+// text and conditioning, mirroring the engine's conditioning salt. The engine
+// hashes the full input into that salt over placeholder token IDs, so requests
+// sharing a text prefix but differing in suffix share no prompt block.
+// Seeding the router's block hashes the same way keeps its fingerprint aligned
+// with the engine's cache; without the salt, requests differing only in voice,
+// language, or reference audio would fingerprint identically. A client-supplied
+// salt composes with the derived one, the way the engine composes them.
+// Server-side conditioning the request cannot carry, such as a re-uploaded
+// voice's creation time, stays outside the router's fingerprint.
+//
+// extra_params.use_random selects randomized conditioning: the engine salts
+// every such request freshly, so no two of them share a prefix cache entry
+// even when the request bytes are identical. The derived salt appends a fresh
+// random component for those, keeping the router's fingerprint as isolated as
+// the engine's.
+func speechCacheSalt(tts *fwkrequest.TextToSpeechRequest) string {
+	d := xxhash.New()
+	var lenBuf [8]byte
+	writeString := func(s string) {
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(s)))
+		_, _ = d.Write(lenBuf[:])
+		_, _ = d.WriteString(s)
+	}
+	writeRaw := func(b []byte) {
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(b)))
+		_, _ = d.Write(lenBuf[:])
+		_, _ = d.Write(b)
+	}
+	for _, part := range []string{
+		tts.Input,
+		tts.Instructions,
+		tts.RefText,
+		tts.Voice,
+		tts.Language,
+		tts.TaskType,
+	} {
+		writeString(part)
+	}
+	for _, raw := range [][]byte{tts.RefAudio, tts.RefAudio2, tts.References, tts.RefAudioCodes, tts.ExtraParams, tts.SpeakerEmbedding} {
+		writeRaw(raw)
+	}
+	xVector := ""
+	if tts.XVectorOnlyMode != nil {
+		xVector = strconv.FormatBool(*tts.XVectorOnlyMode)
+	}
+	writeString(xVector)
+	derived := strconv.FormatUint(d.Sum64(), 16)
+	if extraParamsUseRandom(tts.ExtraParams) {
+		derived += ":" + uuid.NewString()
+	}
+	if tts.CacheSalt == "" {
+		return derived
+	}
+	return tts.CacheSalt + ":" + derived
+}
+
+// extraParamsUseRandom reports whether the raw extra-params object selects
+// randomized conditioning. A malformed object selects nothing.
+func extraParamsUseRandom(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var extra struct {
+		UseRandom bool `json:"use_random"`
+	}
+	return json.Unmarshal(raw, &extra) == nil && extra.UseRandom
 }
 
 // renderCompletions delegates every prompt shape, including token IDs, to vLLM.

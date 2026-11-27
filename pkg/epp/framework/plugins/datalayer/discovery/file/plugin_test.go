@@ -259,6 +259,68 @@ endpoints:
 	assert.Equal(t, 1, notifier.upserted[1].RankIndex)
 }
 
+// Ranks behind one port are one entry for each rank, with the same address
+// and port. The marker tells them from the ports of a multi-port server.
+func TestStart_RankByHeader(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: decode-rank-0
+    address: "10.0.0.1"
+    port: "8000"
+    rankByHeader: true
+  - name: decode-rank-1
+    address: "10.0.0.1"
+    port: "8000"
+    rankIndex: 1
+    rankByHeader: true
+  - name: other-port
+    address: "10.0.0.2"
+    port: "8001"
+    rankIndex: 1
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, newFD(path, false).Start(ctx, notifier))
+	require.Len(t, notifier.upserted, 3)
+	for i, want := range []struct {
+		rankIndex    int
+		rankByHeader bool
+	}{{0, true}, {1, true}, {1, false}} {
+		assert.Equal(t, want.rankIndex, notifier.upserted[i].RankIndex, "entry %d", i)
+		assert.Equal(t, want.rankByHeader, notifier.upserted[i].RankByHeader, "entry %d", i)
+	}
+}
+
+func TestStart_DuplicateRankByHeaderRejected(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: decode-rank-0
+    address: "10.0.0.1"
+    port: "8000"
+    rankByHeader: true
+  - name: decode-rank-0-dup
+    address: "10.0.0.1"
+    port: "8000"
+    rankByHeader: true
+  - name: decode-rank-1
+    address: "10.0.0.1"
+    port: "8000"
+    rankIndex: 1
+    rankByHeader: true
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := newFD(path, false).Start(ctx, notifier)
+	require.ErrorContains(t, err, `endpoint "decode-rank-0-dup": duplicate rank 0 for 10.0.0.1:8000`)
+	require.Len(t, notifier.upserted, 2)
+	assert.Equal(t, "decode-rank-0", notifier.upserted[0].Name)
+	assert.Equal(t, "decode-rank-1", notifier.upserted[1].Name)
+}
+
 func TestStart_NegativeRankIndex(t *testing.T) {
 	path := writeTemp(t, `
 endpoints:
@@ -269,6 +331,45 @@ endpoints:
 `)
 	err := newFD(path, false).Start(context.Background(), &recordingNotifier{})
 	assert.ErrorContains(t, err, "invalid rankIndex")
+}
+
+func TestStart_ZMQPort(t *testing.T) {
+	tests := []struct {
+		name     string
+		zmqPort  string // YAML line; empty means the field is omitted
+		wantErr  bool
+		wantPort int
+	}{
+		{name: "unset keeps default", zmqPort: "", wantPort: 0},
+		{name: "zero is rejected", zmqPort: "zmqPort: 0", wantErr: true},
+		{name: "negative is rejected", zmqPort: "zmqPort: -1", wantErr: true},
+		{name: "above range is rejected", zmqPort: "zmqPort: 65536", wantErr: true},
+		{name: "lower bound", zmqPort: "zmqPort: 1", wantPort: 1},
+		{name: "upper bound", zmqPort: "zmqPort: 65535", wantPort: 65535},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTemp(t, `
+endpoints:
+  - name: ep1
+    address: "10.0.0.1"
+    port: "8000"
+    `+tc.zmqPort+`
+`)
+			// A cancelled context makes a successful Start return right after the load.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			n := &recordingNotifier{}
+			err := newFD(path, false).Start(ctx, n)
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "invalid zmqPort")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, n.upserted, 1)
+			assert.Equal(t, tc.wantPort, n.upserted[0].ZMQPort)
+		})
+	}
 }
 
 func TestStart_InvalidPort(t *testing.T) {
