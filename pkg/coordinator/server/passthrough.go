@@ -120,6 +120,12 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 				pr.Out.Header.Set("X-Forwarded-For", strings.Join(priorXFF, ", "))
 			}
 
+			for _, h := range []string{"Forwarded", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+				if vals := inClone.Values(h); len(vals) > 0 {
+					pr.Out.Header[h] = vals
+				}
+			}
+
 			pr.Out.URL.Scheme = gatewayURL.Scheme
 			pr.Out.URL.Host = gatewayURL.Host
 			pr.Out.Host = gatewayURL.Host
