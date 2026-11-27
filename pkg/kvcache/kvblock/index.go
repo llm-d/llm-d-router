@@ -215,8 +215,9 @@ type EngineGeometry struct {
 	CanonicalBlockSize int
 }
 
-// engineToRequestMapping computes engine-key → request-key mappings using
-// proportional distribution based on the lengths of both slices.
+// engineToRequestMapping computes engine-key → request-key mappings from the
+// lengths of both slices. With a many:1 store the block sizes name the canonical
+// block a boundary engine block ends.
 // Each engine key maps to an ordered slice of request keys; callers that need
 // positional scores (e.g. Redis ZAdd) can iterate the slice and use the index.
 // Returns an empty map if either slice is empty.
@@ -243,17 +244,35 @@ func engineToRequestMapping(engineKeys, requestKeys []BlockHash, geometry ...Eng
 		for i, key := range engineKeys {
 			if !endsCanonicalBlock(i, len(engineKeys), len(requestKeys), sizes) {
 				mappings[key] = append(mappings[key], EmptyBlockHash)
+				continue
+			}
+			if sizes.valid() {
+				// The count ratio rounds off when coveredEngineKeys keeps a block
+				// past the last request key, so a boundary block takes the
+				// canonical block its last token ends.
+				ri := min((i+1)*sizes.BlockSize/sizes.CanonicalBlockSize-1, len(requestKeys)-1)
+				mappings[key] = []BlockHash{requestKeys[ri]}
 			}
 		}
 	}
 	return mappings
 }
 
+// valid reports whether the sizes place a canonical block boundary.
+func (g EngineGeometry) valid() bool {
+	return g.BlockSize > 0 && g.BlockSize < g.CanonicalBlockSize
+}
+
+// boundary reports whether engine block i ends where a canonical block ends.
+func (g EngineGeometry) boundary(i int) bool {
+	return (i+1)*g.BlockSize%g.CanonicalBlockSize == 0
+}
+
 // endsCanonicalBlock reports whether engine block i ends where a canonical block
 // ends, so that a child chained on it can be hashed from that boundary.
 func endsCanonicalBlock(i, engineBlocks, requestBlocks int, sizes EngineGeometry) bool {
-	if sizes.BlockSize > 0 && sizes.BlockSize < sizes.CanonicalBlockSize {
-		return (i+1)*sizes.BlockSize%sizes.CanonicalBlockSize == 0
+	if sizes.valid() {
+		return sizes.boundary(i)
 	}
 	// Without the block sizes the key counts are the only signal, and they match
 	// token positions only when the store ends on a canonical block boundary:

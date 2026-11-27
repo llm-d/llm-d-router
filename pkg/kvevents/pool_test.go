@@ -659,7 +659,7 @@ func TestCanonicalWritePath_NonDividingInteriorParentBlock(t *testing.T) {
 		return pool, idx, canonicalKeys, tokens
 	}
 
-	t.Run("only the block that ends the canonical chain names one", func(t *testing.T) {
+	t.Run("only_the_block_that_ends_the_canonical_chain_names_one", func(t *testing.T) {
 		_, idx, canonicalKeys, _ := store(t)
 		for i := 0; i < 7; i++ {
 			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 100+uint64(i)))
@@ -670,7 +670,7 @@ func TestCanonicalWritePath_NonDividingInteriorParentBlock(t *testing.T) {
 		assert.Equal(t, canonicalKeys[2], rk)
 	})
 
-	t.Run("a child of block 2 is skipped", func(t *testing.T) {
+	t.Run("a_child_of_block_2_is_skipped", func(t *testing.T) {
 		pool, idx, _, tokens := store(t)
 		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
 			cacheKindLabel(""), "unresolved_sub_canonical_parent")
@@ -3193,4 +3193,56 @@ func counterVecValue(t *testing.T, vec *prometheus.CounterVec, labels ...string)
 	var m dto.Metric
 	require.NoError(t, vec.WithLabelValues(labels...).Write(&m))
 	return m.GetCounter().GetValue()
+}
+
+// TestCanonicalWritePath_StraddlingTailNamesTheCanonicalBlock covers a store
+// whose engine keys reach past its last request key: 10 engine blocks of 48
+// tokens give 480 tokens and 7 request keys, so coveredEngineKeys keeps a block
+// that ends at token 384, the end of canonical block 5.
+func TestCanonicalWritePath_StraddlingTailNamesTheCanonicalBlock(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+
+	store := func(t *testing.T) (*Pool, kvblock.Index, kvblock.TokenProcessor, []kvblock.BlockHash, []uint32) {
+		t.Helper()
+		pool, idx, tp := newTestPool(t, 64)
+		tokens := makeTokens(480)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: makeEngineKeys(10, 100), Tokens: tokens, BlockSize: 48},
+		}}, "pod-a", "test-model")
+		canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, canonicalKeys, 7)
+		return pool, idx, tp, canonicalKeys, tokens
+	}
+
+	t.Run("a_boundary_block_names_the_canonical_block_it_ends", func(t *testing.T) {
+		_, idx, _, canonicalKeys, _ := store(t)
+		rk, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 103))
+		require.NoError(t, err, "engine block 3 ends at token 192")
+		assert.Equal(t, canonicalKeys[2], rk)
+
+		rk, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", 107))
+		require.NoError(t, err, "engine block 7 ends at token 384")
+		assert.Equal(t, canonicalKeys[5], rk)
+	})
+
+	t.Run("a_child_chained_on_the_boundary_block_continues_the_chain", func(t *testing.T) {
+		pool, idx, tp, _, _ := store(t)
+		fullTokens := makeTokens(576)
+		expected, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, fullTokens, "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, expected, 9)
+
+		childKeys := makeEngineKeys(4, 200)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: childKeys, Tokens: fullTokens[384:],
+				ParentHash: 107, BlockSize: 48,
+			},
+		}}, "pod-a", "test-model")
+
+		rk, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[3]))
+		require.NoError(t, err, "the child's fourth block ends at token 576")
+		assert.Equal(t, expected[8], rk)
+	})
 }

@@ -134,3 +134,27 @@ func TestEngineToRequestMapping_ScoreOrder(t *testing.T) {
 			"relative index %d should correspond to requestKeys[%d]", j, j)
 	}
 }
+
+func TestEngineToRequestMapping_StraddlingTail(t *testing.T) {
+	// 10 engine blocks of 48 tokens leave 7 request keys, so the last kept block
+	// stops at token 480 while the canonical chain ends at 448. Blocks 3 and 7 end
+	// at tokens 192 and 384, on canonical boundaries, and the count ratio puts
+	// block 7 on request key 4 instead of 5.
+	geometry := EngineGeometry{BlockSize: 48, CanonicalBlockSize: 64}
+	engineKeys := []BlockHash{10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	requestKeys := []BlockHash{9000, 9001, 9002, 9003, 9004, 9005, 9006}
+
+	mappings := engineToRequestMapping(engineKeys, requestKeys, geometry)
+
+	want := [][]BlockHash{
+		{9000, EmptyBlockHash}, {9000, EmptyBlockHash}, {9001, EmptyBlockHash},
+		{9002},
+		{9002, EmptyBlockHash}, {9003, EmptyBlockHash}, {9004, EmptyBlockHash},
+		{9005},
+		{9005, EmptyBlockHash}, {9006, EmptyBlockHash},
+	}
+	require.Len(t, mappings, len(engineKeys))
+	for i, ek := range engineKeys {
+		assert.Equal(t, want[i], mappings[ek], "engine block %d", i)
+	}
+}
