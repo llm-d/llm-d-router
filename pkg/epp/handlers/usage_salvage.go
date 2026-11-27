@@ -242,15 +242,8 @@ func parseSalvagedUsage(obj []byte) *fwkrequest.Usage {
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
-	var details map[string]any
-	for _, key := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
-		if d, ok := fields[key].(map[string]any); ok {
-			details = d
-			break
-		}
-	}
-	if f, ok := details[reqcommon.FieldCachedTokens].(float64); ok {
-		usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{CachedTokens: int(f)}
+	if cached, ok := usagepkg.CachedTokens(fields); ok {
+		usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{CachedTokens: cached}
 	}
 	// Anthropic reports the cache read at the root of the usage object.
 	// CachedTokens counts that read inside PromptTokens, matching the
