@@ -19,6 +19,7 @@ package kvblock_test
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -185,6 +186,124 @@ func BenchmarkInMemoryIndexWalkKeys(b *testing.B) {
 				if seen != numKeys*numPods {
 					b.Fatalf("visited %d entries, want %d", seen, numKeys*numPods)
 				}
+			}
+		})
+	}
+}
+
+// Key patterns for engineKeyWorkload: spread multiplies by a 64-bit odd
+// constant, sequential keeps the index, and sharedLowBits moves it into the
+// high bits so every key has the same low 40 bits.
+var (
+	spreadKeys        = func(i uint64) kvblock.BlockHash { return kvblock.BlockHash(i * 0x9E3779B97F4A7C15) }
+	sequentialKeys    = func(i uint64) kvblock.BlockHash { return kvblock.BlockHash(i) }
+	sharedLowBitsKeys = func(i uint64) kvblock.BlockHash { return kvblock.BlockHash(i << 40) }
+)
+
+// engineKeyWorkload builds the engine and request keys for numTokens cached
+// tokens at the given engine page size, split into BlockStored-sized events.
+// Engine keys come from key; request keys from spreadKeys.
+func engineKeyWorkload(numTokens, pageSize, eventTokens int, key func(uint64) kvblock.BlockHash) (engineKeys, requestKeys [][]kvblock.BlockHash) {
+	const blockSizeTokens = 16
+	for start := 0; start < numTokens; start += eventTokens {
+		eks := make([]kvblock.BlockHash, eventTokens/pageSize)
+		for i := range eks {
+			eks[i] = key(uint64(start/pageSize + i + 1)) //#nosec G115 -- test data, small positive ints
+		}
+		rks := make([]kvblock.BlockHash, eventTokens/blockSizeTokens)
+		for i := range rks {
+			rks[i] = spreadKeys(uint64(start/blockSizeTokens+i+1)) ^ 1 //#nosec G115 -- test data, small positive ints
+		}
+		engineKeys = append(engineKeys, eks)
+		requestKeys = append(requestKeys, rks)
+	}
+	return engineKeys, requestKeys
+}
+
+func liveHeap() uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
+}
+
+// BenchmarkInMemoryIndexEngineKeyMemory measures the retained heap of an
+// index holding 1M cached tokens for one pod at canonical block size 16.
+// Page size 1 maps 16 engine keys to each request key, page size 16 maps one,
+// and page size 64 maps each engine key to four request keys. Page size 0
+// adds no engine keys, so its B/token is the request-key baseline the other
+// cases are compared against.
+func BenchmarkInMemoryIndexEngineKeyMemory(b *testing.B) {
+	const numTokens = 1 << 20
+	const eventTokens = 1024
+	entries := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}}
+	for _, pageSize := range []int{0, 1, 16, 64} {
+		b.Run(fmt.Sprintf("page_size=%d", pageSize), func(b *testing.B) {
+			engineKeys, requestKeys := engineKeyWorkload(numTokens, max(pageSize, 1), eventTokens, spreadKeys)
+			if pageSize == 0 {
+				clear(engineKeys)
+			}
+			ctx := context.Background()
+			var retained uint64
+			for b.Loop() {
+				b.StopTimer()
+				before := liveHeap()
+				b.StartTimer()
+				idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+				if err != nil {
+					b.Fatal(err)
+				}
+				for i := range engineKeys {
+					if err := idx.Add(ctx, engineKeys[i], requestKeys[i], entries); err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.StopTimer()
+				retained = liveHeap() - before
+				runtime.KeepAlive(idx)
+				b.StartTimer()
+			}
+			b.ReportMetric(float64(retained)/numTokens, "B/token")
+		})
+	}
+}
+
+// BenchmarkInMemoryIndexGetRequestKey measures parent resolution against an
+// index holding 1M engine keys at page size 1, for engine keys that are
+// spread, sequential, or share their low bits.
+func BenchmarkInMemoryIndexGetRequestKey(b *testing.B) {
+	const numTokens = 1 << 20
+	patterns := []struct {
+		name string
+		key  func(uint64) kvblock.BlockHash
+	}{
+		{name: "spread", key: spreadKeys},
+		{name: "sequential", key: sequentialKeys},
+		{name: "shared_low_bits", key: sharedLowBitsKeys},
+	}
+	for _, p := range patterns {
+		b.Run("keys="+p.name, func(b *testing.B) {
+			engineKeys, requestKeys := engineKeyWorkload(numTokens, 1, 1024, p.key)
+			idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+			if err != nil {
+				b.Fatal(err)
+			}
+			ctx := context.Background()
+			entries := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}}
+			var all []kvblock.BlockHash
+			for i := range engineKeys {
+				if err := idx.Add(ctx, engineKeys[i], requestKeys[i], entries); err != nil {
+					b.Fatal(err)
+				}
+				all = append(all, engineKeys[i]...)
+			}
+			b.ReportAllocs()
+			i := 0
+			for b.Loop() {
+				if _, err := idx.GetRequestKey(ctx, all[i%len(all)]); err != nil {
+					b.Fatal(err)
+				}
+				i += 7919
 			}
 		})
 	}
