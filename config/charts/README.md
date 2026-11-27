@@ -536,6 +536,7 @@ Configures metrics scraping via Prometheus (compatible with Google Managed Prome
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
+| `router.metricsPort` | Port used by the EPP metrics endpoint, container port, and Service. An explicit `router.epp.flags.metrics-port` takes precedence. | `9090` |
 | `router.monitoring.provider.name` | Metrics provider. Options: `[gmp, prometheusoperator]`. | `prometheusoperator` |
 | `router.monitoring.provider.gmp.autopilot` | Set to `true` if deploying GMP on GKE Autopilot. | `false` |
 | `router.tracing.enabled` | Enable OpenTelemetry tracing for EPP. | `false` |

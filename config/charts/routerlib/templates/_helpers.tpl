@@ -193,6 +193,44 @@ ServiceMonitor that reads it must use this helper.
 {{- end -}}
 {{- end -}}
 
+{{- define "llm-d-router.epp.metricsPort" -}}
+{{- $flags := .Values.router.epp.flags | default dict -}}
+{{- $portStr := "" -}}
+{{- $source := "" -}}
+{{- if hasKey $flags "metrics-port" -}}
+  {{- $flagVal := index $flags "metrics-port" -}}
+  {{- if not (kindIs "invalid" $flagVal) -}}
+    {{- $trimmed := trim (toString $flagVal) -}}
+    {{- if ne $trimmed "" -}}
+      {{- $portStr = $trimmed -}}
+      {{- $source = ".Values.router.epp.flags.metrics-port" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- if and (eq $portStr "") (hasKey .Values.router "metricsPort") -}}
+  {{- $val := index .Values.router "metricsPort" -}}
+  {{- if not (kindIs "invalid" $val) -}}
+    {{- $trimmed := trim (toString $val) -}}
+    {{- if ne $trimmed "" -}}
+      {{- $portStr = $trimmed -}}
+      {{- $source = ".Values.router.metricsPort" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- if eq $portStr "" -}}
+9090
+{{- else -}}
+  {{- if not (regexMatch "^[0-9]+$" $portStr) -}}
+    {{- fail (printf "%s must be numeric, got %q" $source $portStr) -}}
+  {{- end -}}
+  {{- $port := int $portStr -}}
+  {{- if or (lt $port 1) (gt $port 65535) -}}
+    {{- fail (printf "%s must be between 1 and 65535, got %d" $source $port) -}}
+  {{- end -}}
+  {{- $port -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 ext_proc upstream host the proxy uses to reach EPP. Loopback in sidecar mode;
 the discovery or EPP Service FQDN in service mode.
