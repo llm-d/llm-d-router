@@ -725,7 +725,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 	// Seed the parent at band 5 directly; the Director-level cases below run
 	// the real plugin for the children.
 	require.NoError(t, realLineage.RequestHeader(context.Background(), &fwksched.InferenceRequest{
-		Headers:    map[string]string{agentlineage.OpenCodeSessionHeader: "R"},
+		Headers:    map[string]string{agentidentity.OpenCodeOwnSessionHeader: "R"},
 		FairnessID: "tenant-1",
 		Objectives: fwksched.RequestObjectives{Priority: 5},
 	}))
@@ -1604,8 +1604,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 			fairnessIDHeader:       "tenant-1",
 			requestHeaders: map[string]string{
-				agentlineage.OpenCodeSessionHeader: "S1",
-				agentlineage.ParentSessionHeader:   "R",
+				agentidentity.OpenCodeOwnSessionHeader: "S1",
+				agentidentity.ParentSessionHeader:      "R",
 			},
 			requestHeaderPlugin: realLineage,
 			wantFairnessID:      "tenant-1",
@@ -1625,9 +1625,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: "ioFoodReviewZero",
 			fairnessIDHeader:       "tenant-1",
 			requestHeaders: map[string]string{
-				agentlineage.OpenCodeSessionHeader: "S2",
-				agentlineage.ParentSessionHeader:   "R",
-				metadata.ObjectiveKey:              "ioFoodReviewZero",
+				agentidentity.OpenCodeOwnSessionHeader: "S2",
+				agentidentity.ParentSessionHeader:      "R",
+				metadata.ObjectiveKey:                  "ioFoodReviewZero",
 			},
 			requestHeaderPlugin: realLineage,
 			wantFairnessID:      "tenant-1",

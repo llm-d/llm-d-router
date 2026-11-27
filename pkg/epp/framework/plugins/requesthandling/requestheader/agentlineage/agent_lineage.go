@@ -55,15 +55,8 @@ var ResolvedBandKey = plugin.NewDataKey("resolved-band", "")
 
 const (
 	PluginType = "agent-lineage"
-	// ParentSessionHeader and OpenCodeSessionHeader alias the canonical
-	// wire-header constants declared in agentidentity, so one header has
-	// one constant everywhere (agentidentity cannot import this package
-	// without a cycle). OpenCodeSessionHeader carries the request's own
-	// session ID; it is not interchangeable with
-	// agentidentity.OpenCodeSessionHeader (x-session-affinity), which
-	// carries the parent one hop up.
-	ParentSessionHeader         = agentidentity.ParentSessionHeader
-	OpenCodeSessionHeader       = agentidentity.OpenCodeOwnSessionHeader
+	// OpenCodeParentSessionHeader is opencode's vendor-specific form of the
+	// agentidentity.ParentSessionHeader link; opencode sends both.
 	OpenCodeParentSessionHeader = "x-opencode-parent-session-id"
 	// CodexTurnMetadataHeader carries a JSON blob whose session_id field is
 	// the root session identity shared by every thread in the tree. The flat
@@ -86,7 +79,7 @@ const (
 // Codex's x-codex-parent-thread-id is deliberately absent: it names a thread
 // ID while the parent map is keyed by session IDs, and Codex needs no parent
 // map because the turn-metadata session_id carries the root on every request.
-var defaultParentHeaders = []string{ParentSessionHeader, OpenCodeParentSessionHeader}
+var defaultParentHeaders = []string{agentidentity.ParentSessionHeader, OpenCodeParentSessionHeader}
 
 // defaultSessionHeaders resolves the request's own session ID, in priority
 // order. opencode's own-ID header comes first because x-session-affinity
@@ -94,7 +87,7 @@ var defaultParentHeaders = []string{ParentSessionHeader, OpenCodeParentSessionHe
 // affinity header stays last as a fallback for traffic without the own-ID
 // header. Codex's turn-metadata header is handled before this list.
 var defaultSessionHeaders = []string{
-	OpenCodeSessionHeader,
+	agentidentity.OpenCodeOwnSessionHeader,
 	agentidentity.ClaudeCodeSessionHeader,
 	agentidentity.CodexSessionHeader,
 	agentidentity.CodexSessionHeaderLegacy,
