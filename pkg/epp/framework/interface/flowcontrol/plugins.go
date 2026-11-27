@@ -159,9 +159,9 @@ func SaturationStageFromContext(ctx context.Context) string {
 // reservation against its own capacity.
 //
 // While Saturation rises with each reservation, the processor dispatches several requests in one
-// wake-up of its Run loop. An implementation that counts reservations in Saturation therefore also
-// reads the in-flight load the PreRequest hooks publish, so a request stays in the reading after
-// ReleaseDispatch.
+// wake-up of its Run loop. An implementation that counts reservations in Saturation therefore keeps
+// a request in the reading after ReleaseDispatch until its other inputs show the request, for
+// example through the in-flight load that PreRequest hooks publish.
 //
 // Implementations MUST be goroutine-safe. Request IDs are the reservation identity; duplicate
 // reserve and release calls must be idempotent.
