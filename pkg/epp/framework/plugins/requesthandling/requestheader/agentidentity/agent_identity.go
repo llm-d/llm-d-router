@@ -140,8 +140,10 @@ type Parameters struct {
 	// When false the plugin still resolves the session (for Metrics) but
 	// stores no attribute, so no consumer can act on it.
 	PublishIdentity *bool `json:"publishIdentity,omitempty"`
-	// Metrics exports llm_d_epp_agent_identity_requests_total and
-	// llm_d_epp_agent_identity_active_sessions. Defaults to false. Only one
+	// Metrics exports llm_d_epp_agent_identity_requests_total,
+	// llm_d_epp_agent_identity_active_sessions and
+	// llm_d_epp_agent_identity_active_sessions_untracked_total. Defaults to
+	// false. Only one
 	// agent-identity instance per EPP may enable it.
 	Metrics bool `json:"metrics,omitempty"`
 }
@@ -171,12 +173,13 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		if handle != nil {
 			reg = handle.Metrics()
 		}
-		requests, active, err := registerMetrics(reg)
+		c, err := registerMetrics(reg)
 		if err != nil {
 			return nil, fmt.Errorf("agent-identity: %w", err)
 		}
-		p.requests = requests
-		p.activeGauge = active
+		p.requests = c.requests
+		p.activeGauge = c.active
+		p.untracked = c.untracked
 		p.harnessLabels = newHarnessLabels(maxHarnessLabelValues)
 		p.active = newActiveSessions(maxActiveSessions)
 		if handle != nil {
@@ -220,6 +223,7 @@ type Plugin struct {
 	// The fields below are nil unless metrics is enabled.
 	requests        *prometheus.CounterVec
 	activeGauge     *prometheus.GaugeVec
+	untracked       prometheus.Counter
 	harnessLabels   *metrics.BoundedLabel
 	active          *activeSessions
 	activeHarnesses map[string]int // owned by the refresh goroutine
@@ -230,9 +234,11 @@ func (p *Plugin) TypedName() plugin.TypedName {
 }
 
 // Produces declares the agent identity request attributes written by this
-// request-header processor. With publishIdentity: false it declares nothing,
-// so a plugin that requires one of the attributes fails configuration loading
-// instead of silently reading nothing.
+// request-header processor. With publishIdentity: false it declares nothing:
+// a plugin that requires one of the attributes fails configuration loading
+// instead of silently reading nothing, and a plugin that reads one as an
+// optional source (session affinity with an attribute source, rendezvous)
+// falls back to its next source, as it would without agent-identity.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	if p.silent {
 		return nil
@@ -309,5 +315,7 @@ func (p *Plugin) observe(headers map[string]string, sessionHeader, session strin
 		return
 	}
 	p.requests.WithLabelValues(harness, sessionHeader).Inc()
-	p.active.observe(session, harness, time.Now())
+	if !p.active.observe(session, harness, time.Now()) {
+		p.untracked.Inc()
+	}
 }

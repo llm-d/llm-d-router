@@ -41,6 +41,7 @@ func unregisterAgentIdentityMetrics(t *testing.T) {
 	t.Cleanup(func() {
 		ctrlmetrics.Registry.Unregister(prometheus.NewCounterVec(prometheus.CounterOpts{Name: "llm_d_epp_agent_identity_requests_total"}, []string{"harness", "session_header"}))
 		ctrlmetrics.Registry.Unregister(prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "llm_d_epp_agent_identity_active_sessions"}, []string{"harness"}))
+		ctrlmetrics.Registry.Unregister(prometheus.NewCounter(prometheus.CounterOpts{Name: "llm_d_epp_agent_identity_active_sessions_untracked_total"}))
 	})
 }
 

@@ -365,3 +365,20 @@ func TestActiveSessionsRefreshStopsWithContext(t *testing.T) {
 		t.Fatal("runActiveSessions did not return after cancel")
 	}
 }
+
+// TestUntrackedCountsRequestsWhenFull: once the active-session set is full, a
+// new session's requests are counted as untracked, and known sessions are not.
+func TestUntrackedCountsRequestsWhenFull(t *testing.T) {
+	p, reg := newTestPlugin(t, `{"metrics": true}`)
+	p.active = newActiveSessions(1)
+	for _, id := range []string{"a", "b", "a", "b"} {
+		run(t, p, map[string]string{ClaudeCodeSessionHeader: id})
+	}
+	run(t, p, map[string]string{}) // no session: never untracked
+	if got := testutil.ToFloat64(p.untracked); got != 2 {
+		t.Fatalf("untracked = %v, want 2 (both requests of session b)", got)
+	}
+	if n := testutil.CollectAndCount(reg, "llm_d_epp_agent_identity_active_sessions_untracked_total"); n != 1 {
+		t.Fatalf("untracked counter not registered (%d series)", n)
+	}
+}

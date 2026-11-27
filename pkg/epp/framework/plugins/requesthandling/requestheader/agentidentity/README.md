@@ -61,7 +61,7 @@ Without `metrics` the plugin is stateless. With it, the plugin keeps the bounded
 - `scheduling.InferenceRequest` attribute `"thread-id"` (`string`) — set when a thread header matches or the agent identity is set.
 - `scheduling.InferenceRequest` attribute `"parent-thread-id"` (`string`) — set when the request belongs to a spawned thread; absent on a root.
 
-With `publishIdentity: false` none of the three is stored and `Produces()` declares nothing, so a plugin that requires one of them (for example `session-state-producer`) fails configuration loading rather than silently reading nothing. `publishIdentity: false` requires `metrics: true`; without it the plugin would do nothing and configuration loading fails.
+With `publishIdentity: false` none of the three is stored and `Produces()` declares nothing. A plugin that **requires** one of them (`session-state-producer`, `thunder-agent`) then fails configuration loading rather than silently reading nothing. A plugin that reads one as an **optional** session source (`session-affinity` with an `attribute:` source, the multicluster `rendezvous` filter) falls back to its next source, as it would without agent-identity configured. `publishIdentity: false` requires `metrics: true`; without it the plugin would do nothing and configuration loading fails.
 
 ## Metrics
 
@@ -71,8 +71,9 @@ With `metrics: true`, on the EPP's `/metrics` endpoint:
 |--------|------|--------|-------------|
 | `llm_d_epp_agent_identity_requests_total` | counter | `harness`, `session_header` | Requests seen by the plugin. `session_header` is the header the session identity was resolved from, or `none`. `harness` is the `user-agent` product token (text before the first `/` or space, lowercased, `[a-z0-9._-]`, at most 64 characters): `unknown` when `user-agent` is absent or blank, `other` when it cannot be parsed or beyond 50 distinct values. |
 | `llm_d_epp_agent_identity_active_sessions` | gauge | `harness` | Distinct session identities this EPP replica saw in the last 5 minutes, labelled with the harness of the session's first request. Refreshed every 15 seconds; a harness with no active session has no series. |
+| `llm_d_epp_agent_identity_active_sessions_untracked_total` | counter | — | Requests whose session was not counted in `active_sessions` because the active-session set was full. Non-zero means the gauge is a lower bound. |
 
-No label carries a session ID. To count active sessions the plugin keeps, per session, only a seeded 8-byte hash of the identity, its last-seen time and its harness; sessions idle for more than 5 minutes are dropped. The set holds at most 100000 sessions; sessions first seen while it is full are not counted, so the gauge is then a lower bound. No statistics are kept about what happens within a session.
+No label carries a session ID. To count active sessions the plugin keeps, per session, only a seeded 8-byte hash of the identity, its last-seen time and its harness; sessions idle for more than 5 minutes are dropped. The set holds at most 100000 sessions; sessions first seen while it is full are not counted, so the gauge is then a lower bound, and `active_sessions_untracked_total` counts their requests. No statistics are kept about what happens within a session.
 
 The active-session count is per replica. When several EPP replicas serve the same pool, one session can reach more than one of them, so the distinct count across replicas lies between `max` and `sum` of the per-replica values. Only one `agent-identity` instance per EPP may enable `metrics`; a second fails configuration loading.
 
@@ -98,7 +99,7 @@ Behind a proxy that replaces `user-agent` (for example LiteLLM), `harness` repor
 | `additionalThreadHeaders` | `[]string` | No | `[]` | Extra thread-ID header names, prepended the same way as `additionalSessionHeaders`. |
 | `additionalParentThreadHeaders` | `[]string` | No | `[]` | Extra parent-ID header names, prepended the same way as `additionalSessionHeaders`. |
 | `publishIdentity` | `bool` | No | `true` | Store the resolved identities as request attributes. `false` resolves the session without storing anything, so it cannot affect fairness or scheduling; requires `metrics: true`. |
-| `metrics` | `bool` | No | `false` | Export `llm_d_epp_agent_identity_requests_total` and `llm_d_epp_agent_identity_active_sessions`. One instance per EPP. |
+| `metrics` | `bool` | No | `false` | Export `llm_d_epp_agent_identity_requests_total`, `llm_d_epp_agent_identity_active_sessions` and `llm_d_epp_agent_identity_active_sessions_untracked_total`. One instance per EPP. |
 
 ### Examples
 

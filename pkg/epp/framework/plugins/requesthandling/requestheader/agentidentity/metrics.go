@@ -61,9 +61,27 @@ func newActiveSessionsGauge() *prometheus.GaugeVec {
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 		Name:      "agent_identity_active_sessions",
 		Help: metricsutil.HelpMsgWithStability(
-			"Distinct session identities that sent a request in the last 5 minutes, by the harness of the session's first request. Refreshed every 15 seconds.",
+			"Distinct session identities this EPP replica saw in the last 5 minutes, by the harness of the session's first request. Refreshed every 15 seconds.",
 			compbasemetrics.ALPHA),
 	}, []string{"harness"})
+}
+
+// newUntrackedCounter builds llm_d_epp_agent_identity_active_sessions_untracked_total.
+func newUntrackedCounter() prometheus.Counter {
+	return prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "agent_identity_active_sessions_untracked_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Requests whose session was not counted in agent_identity_active_sessions because the active-session set was full. Non-zero means the gauge is a lower bound.",
+			compbasemetrics.ALPHA),
+	})
+}
+
+// collectors are the plugin's metrics when metrics is enabled.
+type collectors struct {
+	requests  *prometheus.CounterVec
+	active    *prometheus.GaugeVec
+	untracked prometheus.Counter
 }
 
 // errMetricsAlreadyEnabled rejects a second metrics-enabled agent-identity
@@ -72,21 +90,28 @@ func newActiveSessionsGauge() *prometheus.GaugeVec {
 // and make the gauge alternate between the instances' values.
 var errMetricsAlreadyEnabled = errors.New("metrics are already enabled on another agent-identity instance; enable metrics on one instance only")
 
-// registerMetrics registers both collectors on reg (when non-nil).
-func registerMetrics(reg prometheus.Registerer) (*prometheus.CounterVec, *prometheus.GaugeVec, error) {
-	requests := newRequestsCounter()
-	active := newActiveSessionsGauge()
+// registerMetrics registers the collectors on reg (when non-nil). If one fails,
+// those already registered are unregistered again.
+func registerMetrics(reg prometheus.Registerer) (*collectors, error) {
+	c := &collectors{
+		requests:  newRequestsCounter(),
+		active:    newActiveSessionsGauge(),
+		untracked: newUntrackedCounter(),
+	}
 	if reg == nil {
-		return requests, active, nil
+		return c, nil
 	}
-	if err := register(reg, requests); err != nil {
-		return nil, nil, err
+	var done []prometheus.Collector
+	for _, col := range []prometheus.Collector{c.requests, c.active, c.untracked} {
+		if err := register(reg, col); err != nil {
+			for _, d := range done {
+				reg.Unregister(d)
+			}
+			return nil, err
+		}
+		done = append(done, col)
 	}
-	if err := register(reg, active); err != nil {
-		reg.Unregister(requests)
-		return nil, nil, err
-	}
-	return requests, active, nil
+	return c, nil
 }
 
 func register(reg prometheus.Registerer, c prometheus.Collector) error {
