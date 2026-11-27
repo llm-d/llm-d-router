@@ -367,3 +367,68 @@ func TestInitFairnessIDResolutionMetricsCreatesOverflowSeries(t *testing.T) {
 	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues("header", "pool-a")))
 	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues(tracing.AttributionSourceDerivedRoot, "pool-a")))
 }
+
+func TestInterTokenLatencyObserverBoundsLabels(t *testing.T) {
+	t.Run("model_cardinality_cap", func(t *testing.T) {
+		const testCap = 3
+		oldModels := modelLabelLimiter
+		modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
+		resetFairnessLabelLimit(t)
+		metricsutil.SetFairnessIDLabelLimit(10)
+		llmdInterTokenLatency.Reset()
+		t.Cleanup(func() {
+			modelLabelLimiter = oldModels
+			llmdInterTokenLatency.Reset()
+		})
+
+		for i := range 100 {
+			m := fmt.Sprintf("model-%d", i)
+			obs := InterTokenLatencyObserver(m, m, reqcommon.APITypeChatCompletions.Surface(), "tenant-a", "0")
+			require.True(t, ObserveInterTokenLatency(t.Context(), obs, 0.01))
+		}
+
+		require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdInterTokenLatency))
+	})
+
+	t.Run("fairness_cardinality_cap", func(t *testing.T) {
+		const testCap = 3
+		resetFairnessLabelLimit(t)
+		metricsutil.SetFairnessIDLabelLimit(testCap)
+		oldModels := modelLabelLimiter
+		modelLabelLimiter = metricsutil.NewBoundedLabel(10)
+		llmdInterTokenLatency.Reset()
+		t.Cleanup(func() {
+			modelLabelLimiter = oldModels
+			llmdInterTokenLatency.Reset()
+		})
+
+		for i := range 100 {
+			obs := InterTokenLatencyObserver("model-a", "model-a", reqcommon.APITypeChatCompletions.Surface(), fmt.Sprintf("tenant-%d", i), "0")
+			require.True(t, ObserveInterTokenLatency(t.Context(), obs, 0.01))
+		}
+
+		require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdInterTokenLatency))
+	})
+
+	t.Run("non_utf8_and_oversized_labels", func(t *testing.T) {
+		Reset()
+		resetFairnessLabelLimit(t)
+		t.Cleanup(Reset)
+
+		invalid := "model\xff"
+		oversized := strings.Repeat("m", metricsutil.MaxLabelValueLength+1)
+
+		require.NotPanics(t, func() {
+			obs1 := InterTokenLatencyObserver(invalid, invalid, reqcommon.APISurfaceUnknown, invalid, "0")
+			require.True(t, ObserveInterTokenLatency(t.Context(), obs1, 0.01))
+			obs2 := InterTokenLatencyObserver(oversized, oversized, reqcommon.APISurfaceUnknown, oversized, "0")
+			require.True(t, ObserveInterTokenLatency(t.Context(), obs2, 0.02))
+		})
+
+		require.Equal(t, 1, promtestutil.CollectAndCount(llmdInterTokenLatency))
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency,
+			metricsutil.OverflowValue, metricsutil.OverflowValue, metricsutil.OverflowValue, "0", reqcommon.APISurfaceUnknown.String())
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), h.GetSampleCount())
+	})
+}

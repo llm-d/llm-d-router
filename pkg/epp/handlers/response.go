@@ -63,8 +63,6 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		debug.Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
 	}
 
-	fairnessID, priority := extractFairnessAndPriority(reqCtx)
-
 	reqCtx.responseSize += len(responseBytes)
 
 	if reqCtx.firstTokenTimestamp.IsZero() && len(responseBytes) > 0 {
@@ -75,7 +73,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		now := time.Now()
 		if !reqCtx.lastChunkReceivedTimestamp.IsZero() {
 			itl := now.Sub(reqCtx.lastChunkReceivedTimestamp).Seconds()
-			metrics.RecordInterTokenLatency(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, itl)
+			if itl >= 0 && reqCtx.itlObserver == nil {
+				fairnessID, priority := extractFairnessAndPriority(reqCtx)
+				reqCtx.itlObserver = metrics.InterTokenLatencyObserver(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority)
+			}
+			metrics.ObserveInterTokenLatency(ctx, reqCtx.itlObserver, itl)
 		}
 		reqCtx.lastChunkReceivedTimestamp = now
 	}
@@ -94,7 +96,12 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	} else if len(parseBytes) > 0 || endOfStream {
 		before := time.Now()
 		parsedResp, err = parser.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
-		metrics.RecordPluginProcessingLatency(fwkrh.ResponseParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
+		elapsed := time.Since(before).Seconds()
+		if reqCtx.responseParserLatencyObserver == nil {
+			name := parser.TypedName()
+			reqCtx.responseParserLatencyObserver = metrics.PluginProcessingLatencyObserver(fwkrh.ResponseParsingExtensionPoint, name.Type, name.Name)
+		}
+		reqCtx.responseParserLatencyObserver.Observe(elapsed)
 		if err != nil {
 			logger.Error(err, "parsing response")
 		}
@@ -119,6 +126,7 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		reqCtx.Completion = parsedResp.Completion
 	}
 	if endOfStream {
+		fairnessID, priority := extractFairnessAndPriority(reqCtx)
 		// Recorded once here rather than per chunk: a server reporting cumulative
 		// usage on more than one chunk would otherwise be observed once per chunk.
 		// A stream that ends without reaching end of stream records no token counts,

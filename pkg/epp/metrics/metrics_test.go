@@ -20,6 +20,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -1390,6 +1392,105 @@ func TestRecordInterTokenLatency(t *testing.T) {
 	t.Run("negative latency rejected", func(t *testing.T) {
 		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", -0.01))
 	})
+}
+
+func TestObserveInterTokenLatency(t *testing.T) {
+	t.Cleanup(Reset)
+	ctx := logutil.NewTestLoggerIntoContext(t.Context())
+
+	t.Run("valid_observations", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m10", "t10", reqcommon.APITypeChatCompletions.Surface(), "tenant-a", "3")
+		require.True(t, ObserveInterTokenLatency(ctx, obs, 0.05))
+		require.True(t, ObserveInterTokenLatency(ctx, obs, 0.08))
+		require.True(t, ObserveInterTokenLatency(ctx, obs, 0.12))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APITypeChatCompletions.String())
+		require.NoError(t, err)
+		require.Equal(t, uint64(3), h.GetSampleCount())
+		require.InDelta(t, 0.25, h.GetSampleSum(), 0.001)
+	})
+
+	t.Run("zero_latency_accepted", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3")
+		require.True(t, ObserveInterTokenLatency(ctx, obs, 0))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), h.GetSampleCount())
+	})
+
+	t.Run("negative_latency_rejected", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3")
+		require.False(t, ObserveInterTokenLatency(ctx, obs, -0.01))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
+		require.NoError(t, err)
+		require.Zero(t, h.GetSampleCount())
+	})
+
+	t.Run("nan_latency_rejected", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3")
+		require.False(t, ObserveInterTokenLatency(ctx, obs, math.NaN()))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
+		require.NoError(t, err)
+		require.Zero(t, h.GetSampleCount())
+	})
+
+	t.Run("inf_latency_rejected", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3")
+		require.False(t, ObserveInterTokenLatency(ctx, obs, math.Inf(1)))
+		require.False(t, ObserveInterTokenLatency(ctx, obs, math.Inf(-1)))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
+		require.NoError(t, err)
+		require.Zero(t, h.GetSampleCount())
+	})
+
+	t.Run("negative_latency_with_nil_observer", func(t *testing.T) {
+		Reset()
+		require.False(t, ObserveInterTokenLatency(ctx, nil, -0.01))
+		require.Zero(t, promtestutil.CollectAndCount(llmdInterTokenLatency))
+	})
+
+	t.Run("nil_observer_rejected", func(t *testing.T) {
+		Reset()
+		require.False(t, ObserveInterTokenLatency(ctx, nil, 0.05))
+		require.Zero(t, promtestutil.CollectAndCount(llmdInterTokenLatency))
+	})
+
+	t.Run("record_negative_latency_creates_no_series", func(t *testing.T) {
+		Reset()
+		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", -0.01))
+		require.Zero(t, promtestutil.CollectAndCount(llmdInterTokenLatency))
+	})
+
+	t.Run("record_non_finite_latency_creates_no_series", func(t *testing.T) {
+		Reset()
+		for _, itl := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", itl))
+		}
+		require.Zero(t, promtestutil.CollectAndCount(llmdInterTokenLatency))
+	})
+}
+
+func TestPluginProcessingLatencyObserver(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+
+	obs := PluginProcessingLatencyObserver(fwkrh.ResponseParsingExtensionPoint, "openai-parser", "openai-parser")
+	obs.Observe((5 * time.Millisecond).Seconds())
+	RecordPluginProcessingLatency(fwkrh.ResponseParsingExtensionPoint, "openai-parser", "openai-parser", 15*time.Millisecond)
+
+	h, err := getHistogramVecLabelValues(t, llmdPluginProcessingLatencies, fwkrh.ResponseParsingExtensionPoint, "openai-parser", "openai-parser")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), h.GetSampleCount())
+	require.InDelta(t, 0.02, h.GetSampleSum(), 0.0001)
 }
 
 func TestInferenceModelRewriteDecisionsTotalMetric(t *testing.T) {

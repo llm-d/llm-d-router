@@ -1084,6 +1084,51 @@ func usageFromFields(fields map[string]any) *request.Usage {
 	return &usage
 }
 
+var (
+	usageField = []byte(reqcommon.FieldUsage)
+	jsonNull   = []byte("null")
+)
+
+// hasUsageObject reports whether payload contains a JSON "usage" property whose
+// value starts with '{'. Scanning for the field name avoids hitting every quote
+// byte in the JSON payload, while the loop checks every occurrence so an earlier
+// "usage":null cannot hide a usage object later on the same line.
+func hasUsageObject(payload []byte) bool {
+	rest := payload
+	for {
+		idx := bytes.Index(rest, usageField)
+		if idx < 0 {
+			return false
+		}
+		after := idx + len(usageField)
+		if idx == 0 || rest[idx-1] != '"' || after >= len(rest) || rest[after] != '"' {
+			rest = rest[after:]
+			continue
+		}
+		rest = trimLeadingJSONSpace(rest[after+1:])
+		if len(rest) == 0 || rest[0] != ':' {
+			continue
+		}
+		rest = trimLeadingJSONSpace(rest[1:])
+		if len(rest) > 0 && rest[0] == '{' {
+			return true
+		}
+	}
+}
+
+func trimLeadingJSONSpace(b []byte) []byte {
+	i := 0
+	for i < len(b) {
+		switch b[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		default:
+			return b[i:]
+		}
+	}
+	return nil
+}
+
 // Example message if "stream_options": {"include_usage": "true"} is included in the request:
 // data: {"id":"...","object":"text_completion","created":1739400043,"model":"small-segment-lora-0","choices":[],
 // "usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}
@@ -1114,8 +1159,8 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 		if !ok {
 			continue
 		}
-		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if reqcommon.SSEIsDone(payload) || !bytes.Contains(payload, []byte("usage")) {
+		// Skip [DONE] and chunks that carry no usage object (such as "usage":null).
+		if reqcommon.SSEIsDone(payload) || !hasUsageObject(payload) {
 			continue
 		}
 		var streamResponse struct {
@@ -1132,17 +1177,22 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 		if len(streamResponse.Usage) > 0 {
 			if strings.HasPrefix(streamResponse.Type, "speech.audio.") {
 				if streamResponse.Type == "speech.audio.done" {
+					if bytes.Equal(streamResponse.Usage, jsonNull) {
+						return nil
+					}
 					return extractRawUsage(streamResponse.Usage)
 				}
 				continue
 			}
-			var usage *request.Usage
-			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
-				result = usage
+			if !bytes.Equal(streamResponse.Usage, jsonNull) {
+				var usage *request.Usage
+				if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
+					result = usage
+				}
 			}
 		}
 		// Responses API streaming format
-		if len(streamResponse.Response.Usage) > 0 && isResponsesTerminalEvent(streamResponse.Type) {
+		if len(streamResponse.Response.Usage) > 0 && !bytes.Equal(streamResponse.Response.Usage, jsonNull) && isResponsesTerminalEvent(streamResponse.Type) {
 			if usage := extractRawUsage(streamResponse.Response.Usage); usage != nil {
 				result = usage
 			}
@@ -1164,12 +1214,11 @@ func isResponsesTerminalEvent(eventType string) bool {
 }
 
 func extractRawUsage(raw json.RawMessage) *request.Usage {
-	jsonBytes, _ := json.Marshal(map[string]any{"usage": raw})
-	usage, err := extractUsage(jsonBytes)
-	if err != nil {
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil
 	}
-	return usage
+	return usageFromFields(fields)
 }
 
 // parseFormBool parses a boolean form field with the values the model servers'

@@ -31,6 +31,7 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
@@ -272,6 +273,11 @@ type RequestContext struct {
 	// during which the response is entirely in EPP's hands.
 	responseProcessingDuration time.Duration
 	responseHeadersReceivedAt  time.Time
+
+	// Per-request metric observers cached across streaming chunks; scoped to
+	// RequestContext so metrics.Reset does not leave stale series references.
+	itlObserver                   prometheus.Observer
+	responseParserLatencyObserver prometheus.Observer
 
 	// Envoy ext_proc protocol state.
 	requestState         streamRequestState

@@ -19,6 +19,7 @@ package metrics
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -390,17 +391,40 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName string, a
 	return true
 }
 
-// RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
-func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, itlSeconds float64) bool {
+// InterTokenLatencyObserver returns the histogram observer for a streaming
+// request's inter-token latency with bounded model and fairness labels.
+// Retain the returned observer only for a single request so Reset can clear
+// the collector between runs.
+func InterTokenLatencyObserver(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string) prometheus.Observer {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	if itlSeconds < 0 {
+	return llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String())
+}
+
+// ObserveInterTokenLatency records one inter-token latency sample on observer
+// with trace exemplar attachment when sampled.
+func ObserveInterTokenLatency(ctx context.Context, observer prometheus.Observer, itlSeconds float64) bool {
+	if !(itlSeconds >= 0) || math.IsInf(itlSeconds, 1) {
+		log.FromContext(ctx).Error(nil, "Inter-token latency value must be non-negative",
+			"itlSeconds", itlSeconds)
+		return false
+	}
+	if observer == nil {
+		return false
+	}
+	metricsutil.ObserveWithTraceExemplar(ctx, observer, itlSeconds)
+	return true
+}
+
+// RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
+func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, itlSeconds float64) bool {
+	if !(itlSeconds >= 0) || math.IsInf(itlSeconds, 1) {
+		modelName, targetModelName = boundModels(modelName, targetModelName)
 		log.FromContext(ctx).Error(nil, "Inter-token latency value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
 		return false
 	}
-	metricsutil.ObserveWithTraceExemplar(ctx, llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()), itlSeconds)
-	return true
+	return ObserveInterTokenLatency(ctx, InterTokenLatencyObserver(modelName, targetModelName, apiSurface, fairnessID, priority), itlSeconds)
 }
 
 // IncRunningRequests increases the current running requests.
@@ -515,9 +539,16 @@ func RecordSchedulerFailure(reason string) {
 	llmdSchedulerFailuresTotal.WithLabelValues(reason).Inc()
 }
 
+// PluginProcessingLatencyObserver returns the histogram observer for a plugin
+// at an extension point. Retain the returned observer only for a single
+// request so Reset can clear the collector between runs.
+func PluginProcessingLatencyObserver(extensionPoint, pluginType, pluginName string) prometheus.Observer {
+	return llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName)
+}
+
 // RecordPluginProcessingLatency records the processing latency for a plugin.
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {
-	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
+	PluginProcessingLatencyObserver(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
 }
 
 // Access kinds for RecordPluginDataScopeViolation.

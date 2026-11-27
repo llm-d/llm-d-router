@@ -54,6 +54,8 @@ func TestRegisterWithOptionsReachesTheScrape(t *testing.T) {
 	require.True(t, metrics.RecordRequestTPOT(ctx, "m", "tm", reqcommon.APITypeMessages.Surface(), "f", "p", true,
 		received, received.Add(10*time.Millisecond), received.Add(40*time.Millisecond), 3))
 	require.True(t, metrics.RecordInterTokenLatency(ctx, "m", "tm", reqcommon.APITypeMessages.Surface(), "f", "p", 0.0075))
+	itlObs := metrics.InterTokenLatencyObserver("m", "tm", reqcommon.APITypeMessages.Surface(), "f", "p")
+	require.True(t, metrics.ObserveInterTokenLatency(ctx, itlObs, 0.0025))
 
 	tpot := gatherHistogram(t, "llm_d_epp_request_streaming_tpot_seconds")
 	require.Equal(t, tpotEdges, upperBounds(tpot))
@@ -61,7 +63,7 @@ func TestRegisterWithOptionsReachesTheScrape(t *testing.T) {
 
 	itl := gatherHistogram(t, "llm_d_epp_request_streaming_itl_seconds")
 	require.Equal(t, itlEdges, upperBounds(itl))
-	require.Equal(t, []uint64{0, 1}, cumulativeCounts(itl))
+	require.Equal(t, []uint64{1, 2}, cumulativeCounts(itl))
 }
 
 func gatherHistogram(t *testing.T, name string) *dto.Histogram {
