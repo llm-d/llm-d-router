@@ -29,6 +29,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // pngHeaderBase64 returns a 33-byte PNG (signature and IHDR chunk, no image
@@ -112,6 +113,26 @@ func TestEstimateBackend_CapsClientDeclaredPlaceholders(t *testing.T) {
 			ctx:  withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: 1e12}}),
 			body: chatBody(fwkrequest.ContentBlock{Type: "audio_url", AudioURL: fwkrequest.AudioURLBlock{URL: "https://example.com/a.wav"}}),
 		},
+		{
+			name: "video_duration_overflows_int64",
+			ctx:  videoCtx(videoMetadata{duration: 1e20}),
+			body: chatBody(fwkrequest.ContentBlock{Type: "video_url", VideoURL: fwkrequest.VideoBlock{URL: "https://example.com/v.mp4"}}),
+		},
+		{
+			name: "video_resolution_overflows_int64",
+			ctx:  videoCtx(videoMetadata{width: 4000000000, height: 4000000000}),
+			body: chatBody(fwkrequest.ContentBlock{Type: "video_url", VideoURL: fwkrequest.VideoBlock{URL: "https://example.com/v.mp4"}}),
+		},
+		{
+			name: "video_frames_times_tpf_overflows_int64",
+			ctx:  videoCtx(videoMetadata{duration: 1e9, width: 1 << 30, height: 1 << 30}),
+			body: chatBody(fwkrequest.ContentBlock{Type: "video_url", VideoURL: fwkrequest.VideoBlock{URL: "https://example.com/v.mp4"}}),
+		},
+		{
+			name: "audio_duration_overflows_int64",
+			ctx:  withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: 1e20}}),
+			body: chatBody(fwkrequest.ContentBlock{Type: "audio_url", AudioURL: fwkrequest.AudioURLBlock{URL: "https://example.com/a.wav"}}),
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -166,4 +187,66 @@ func TestAppendMMAsset_ClampsCount(t *testing.T) {
 			assert.Len(t, out, (tc.prefix+tc.want)*fwkrequest.BytesPerToken)
 		})
 	}
+}
+
+func TestEstimateBackend_NonFiniteMMHeadersFallBack(t *testing.T) {
+	audioBody := chatBody(fwkrequest.ContentBlock{Type: "audio_url", AudioURL: fwkrequest.AudioURLBlock{URL: "https://example.com/a.wav"}})
+	videoBody := chatBody(fwkrequest.ContentBlock{Type: "video_url", VideoURL: fwkrequest.VideoBlock{URL: "https://example.com/v.mp4"}})
+
+	defaultAudio, err := estimateBackend{}.produce(t.Context(), audioBody)
+	require.NoError(t, err)
+	infAudioMeta := parseMMMetadataHeaders(map[string]string{metadata.AudioDurationHeaderKey: "Inf"})
+	infAudio, err := estimateBackend{}.produce(withMMMetadata(t.Context(), infAudioMeta), audioBody)
+	require.NoError(t, err)
+	assert.Equal(t, defaultAudio.Prompts[0].MultiModalFeatures[0].Length, infAudio.Prompts[0].MultiModalFeatures[0].Length)
+
+	defaultVideo, err := estimateBackend{}.produce(t.Context(), videoBody)
+	require.NoError(t, err)
+	infVideoMeta := parseMMMetadataHeaders(map[string]string{
+		metadata.VideoDurationHeaderKey: "Inf",
+		metadata.VideoFPSHeaderKey:      "+Inf",
+	})
+	infVideo, err := estimateBackend{}.produce(withMMMetadata(t.Context(), infVideoMeta), videoBody)
+	require.NoError(t, err)
+	assert.Equal(t, defaultVideo.Prompts[0].MultiModalFeatures[0].Length, infVideo.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+func TestEstimateBackend_ConfiguredCapsHoldOnOverflow(t *testing.T) {
+	videoBody := chatBody(fwkrequest.ContentBlock{Type: "video_url", VideoURL: fwkrequest.VideoBlock{URL: "https://example.com/v.mp4"}})
+	audioBody := chatBody(fwkrequest.ContentBlock{Type: "audio_url", AudioURL: fwkrequest.AudioURLBlock{URL: "https://example.com/a.wav"}})
+
+	backend := estimateBackend{
+		vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+			Frames:         &framesConfig{MinFrames: 4, MaxFrames: 32},
+			MaxVideoTokens: 5000,
+		}}),
+		aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+			MaxAudioTokens: 1000,
+		}}),
+	}
+
+	overflowVideo := parseMMMetadataHeaders(map[string]string{
+		metadata.VideoDurationHeaderKey:   "1e20",
+		metadata.VideoResolutionHeaderKey: "4000000000x4000000000",
+	})
+	tpVideo, err := backend.produce(withMMMetadata(t.Context(), overflowVideo), videoBody)
+	require.NoError(t, err)
+	require.Len(t, tpVideo.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, 5000, tpVideo.Prompts[0].MultiModalFeatures[0].Length)
+
+	stridedBackend := estimateBackend{
+		vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+			Frames:         &framesConfig{Mode: videoFramesModeStrided, MinFrames: 4, MaxFrames: 32},
+			TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 10}},
+		}}),
+	}
+	tpStrided, err := stridedBackend.produce(videoCtx(videoMetadata{duration: 1e20}), videoBody)
+	require.NoError(t, err)
+	assert.Equal(t, 32*10, tpStrided.Prompts[0].MultiModalFeatures[0].Length)
+
+	overflowAudio := parseMMMetadataHeaders(map[string]string{metadata.AudioDurationHeaderKey: "1e20"})
+	tpAudio, err := backend.produce(withMMMetadata(t.Context(), overflowAudio), audioBody)
+	require.NoError(t, err)
+	require.Len(t, tpAudio.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, 1000+defaultAudioOverheadTokens, tpAudio.Prompts[0].MultiModalFeatures[0].Length)
 }

@@ -849,6 +849,22 @@ func TestParseVideoMetadataHeaders(t *testing.T) {
 			headers: map[string]string{metadata.VideoResolutionHeaderKey: "1920x"},
 			want:    videoMetadata{},
 		},
+		{
+			name: "non_finite_ignored",
+			headers: map[string]string{
+				metadata.VideoFPSHeaderKey:      "Inf",
+				metadata.VideoDurationHeaderKey: "+Inf",
+			},
+			want: videoMetadata{},
+		},
+		{
+			name: "nan_and_neg_inf_ignored",
+			headers: map[string]string{
+				metadata.VideoFPSHeaderKey:      "NaN",
+				metadata.VideoDurationHeaderKey: "-Inf",
+			},
+			want: videoMetadata{},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, parseVideoMetadataHeaders(tc.headers))
@@ -1055,6 +1071,21 @@ func TestParseAudioMetadataHeaders(t *testing.T) {
 		{
 			name:    "non-positive ignored",
 			headers: map[string]string{metadata.AudioDurationHeaderKey: "-1"},
+			want:    audioMetadata{},
+		},
+		{
+			name:    "non_finite_ignored",
+			headers: map[string]string{metadata.AudioDurationHeaderKey: "Inf"},
+			want:    audioMetadata{},
+		},
+		{
+			name:    "plus_inf_ignored",
+			headers: map[string]string{metadata.AudioDurationHeaderKey: "+Inf"},
+			want:    audioMetadata{},
+		},
+		{
+			name:    "nan_ignored",
+			headers: map[string]string{metadata.AudioDurationHeaderKey: "NaN"},
 			want:    audioMetadata{},
 		},
 	} {

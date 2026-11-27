@@ -129,6 +129,10 @@ func mmMetadataFromContext(ctx context.Context) mmMetadata {
 	return meta
 }
 
+func isFinitePositive(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0
+}
+
 // parseVideoMetadataHeaders reads the x-llm-d-video- request headers into a
 // videoMetadata, using metadata.GetLowerCaseHeaderValue so aliases resolve the
 // same way as the SLO headers. Missing or malformed values leave their field zero
@@ -136,12 +140,12 @@ func mmMetadataFromContext(ctx context.Context) mmMetadata {
 func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 	var meta videoMetadata
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoFPSHeaderKey); ok {
-		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && isFinitePositive(v) {
 			meta.fps = v
 		}
 	}
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoDurationHeaderKey); ok {
-		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && isFinitePositive(v) {
 			meta.duration = v
 		}
 	}
@@ -162,7 +166,7 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
 	var meta audioMetadata
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioDurationHeaderKey); ok {
-		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && isFinitePositive(v) {
 			meta.duration = v
 		}
 	}
