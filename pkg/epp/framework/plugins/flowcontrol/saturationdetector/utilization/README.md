@@ -55,7 +55,7 @@ The credit starts when `PreRequest` publishes a request to its endpoint. From it
 
     PoolScore = (sum of endpoint scores + ReleasedRequests / QueueThreshold) / Endpoints
 
-With empty queues the pool therefore has at most `QueueThreshold x Endpoints` requests in that window at a time.
+With empty queues the pool therefore has at most `QueueThreshold x Endpoints` requests in that window at a time. That bounds the dispatch rate at `QueueThreshold x Endpoints / window`, where the window is the time a request spends between release and `PreRequest`. A pool whose endpoints each complete more than `QueueThreshold` requests within one window is held below its capacity. Set `queueDepthThreshold` above that count for such a pool.
 
 The correction rests on these assumptions:
 
