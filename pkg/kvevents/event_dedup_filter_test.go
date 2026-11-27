@@ -184,6 +184,24 @@ func TestEventDedupFilter_ClearIsolatesPods(t *testing.T) {
 		"pod-b count must survive pod-a clear (first of two removes suppressed)")
 }
 
+// TestEventDedupFilter_ReleasedScopesAreDropped verifies the filter holds no
+// state for a scope or pod once every reference in it is released.
+func TestEventDedupFilter_ReleasedScopesAreDropped(t *testing.T) {
+	f := newEventDedupFilter()
+	gpu := gpuScope("pod-a")
+	cpu := testScope("pod-a", "cpu", noGroupIdx, noDataParallelRank)
+
+	f.trackStore(gpu, []uint64{1, 2})
+	f.trackStore(cpu, []uint64{1})
+
+	f.filterRemove(gpu, []uint64{1, 2})
+	assert.NotContains(t, f.refs["pod-a"], gpu.podScope(), "released gpu scope must be dropped")
+	assert.Contains(t, f.refs["pod-a"], cpu.podScope(), "cpu scope still holds a reference")
+
+	f.filterRemove(cpu, []uint64{1})
+	assert.Empty(t, f.refs, "pod with no references left must be dropped")
+}
+
 // TestEventDedupFilter_NilSafe verifies the nil-receiver guards so a Pool
 // without a filter degrades to forwarding every event.
 func TestEventDedupFilter_NilSafe(t *testing.T) {
