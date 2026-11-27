@@ -246,6 +246,19 @@ func TestParseSLOHeaders(t *testing.T) {
 			wantTTFT: 102,
 			wantTPOT: 52,
 		},
+		{
+			name:     "only TTFT header",
+			headers:  map[string]string{metadata.TTFTSLOHeaderKey: "100"},
+			wantTTFT: 100,
+		},
+		{
+			name:     "only TPOT header",
+			headers:  map[string]string{metadata.TPOTSLOHeaderKey: "50"},
+			wantTPOT: 50,
+		},
+		{
+			name: "no SLO headers",
+		},
 	}
 
 	for _, tt := range tests {

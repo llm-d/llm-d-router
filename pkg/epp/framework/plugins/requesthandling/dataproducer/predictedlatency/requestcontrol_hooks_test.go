@@ -1180,52 +1180,6 @@ func TestPredictedLatency_MultipleRequests_DifferentPods(t *testing.T) {
 	assert.NotEqual(t, queue1, queue2)
 }
 
-func TestPredictedLatencyContext_SLOValidation(t *testing.T) {
-	tests := []struct {
-		name       string
-		ttftSLO    float64
-		tpotSLO    float64
-		expectSLOs bool
-	}{
-		{
-			name:       "Both SLOs set",
-			ttftSLO:    100,
-			tpotSLO:    50,
-			expectSLOs: true,
-		},
-		{
-			name:       "No SLOs",
-			ttftSLO:    0,
-			tpotSLO:    0,
-			expectSLOs: false,
-		},
-		{
-			name:       "Only TTFT SLO",
-			ttftSLO:    100,
-			tpotSLO:    0,
-			expectSLOs: false,
-		},
-		{
-			name:       "Only TPOT SLO",
-			ttftSLO:    0,
-			tpotSLO:    50,
-			expectSLOs: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			request := createTestInferenceRequest("test-id", tt.ttftSLO, tt.tpotSLO)
-			ctx := newPredictedLatencyContext(request)
-			ctx.ttftSLO = tt.ttftSLO
-			ctx.avgTPOTSLO = tt.tpotSLO
-
-			hasBothSLOs := ctx.ttftSLO > 0 && ctx.avgTPOTSLO > 0
-			assert.Equal(t, tt.expectSLOs, hasBothSLOs)
-		})
-	}
-}
-
 // Benchmark tests
 
 func BenchmarkPredictedLatency_PreRequest(b *testing.B) {
