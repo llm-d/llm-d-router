@@ -30,16 +30,11 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
-func TestInFlightLoadProducer_PrefillReleaseIndependentOfProfileName(t *testing.T) {
+func TestInFlightLoadProducer_LegacyPrefillRoleFallback(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, profileName, role, prefillProfile string }{
-		{"default_profile", fwksched.DefaultPrefillProfile, bylabel.RolePrefill, fwksched.DefaultPrefillProfile},
-		{"custom_profile", "prompt-stage", bylabel.RolePrefill, ""},
-		{"encode_prefill", "prompt-stage", bylabel.RoleEncodePrefill, ""},
-		{"unlabeled_default_profile", fwksched.DefaultPrefillProfile, "", fwksched.DefaultPrefillProfile},
-		{"explicit_custom_profile", "prompt-stage", bylabel.RolePrefill, "prompt-stage"},
-		{"explicit_combined_role", "prompt-stage", bylabel.RolePrefillDecode, "prompt-stage"},
-		{"explicit_unlabeled_profile", "prompt-stage", "", "prompt-stage"},
+	for _, tc := range []struct{ name, profileName, role string }{
+		{"custom_profile", "prompt-stage", bylabel.RolePrefill},
+		{"encode_prefill", "prompt-stage", bylabel.RoleEncodePrefill},
 	} {
 		for _, includeOutput := range []bool{false, true} {
 			for _, signal := range []string{signalFirstByte, signalKVEvent} {
@@ -61,7 +56,6 @@ func TestInFlightLoadProducer_PrefillReleaseIndependentOfProfileName(t *testing.
 					req := newStampedRequest(t.Name(), prompt)
 					res := &fwksched.SchedulingResult{
 						PrimaryProfileName: "decode",
-						PrefillProfileName: tc.prefillProfile,
 						ProfileResults: map[string]*fwksched.ProfileRunResult{
 							tc.profileName: {TargetEndpoints: []fwksched.Endpoint{prefill}},
 							"decode":       {TargetEndpoints: []fwksched.Endpoint{decode}},
@@ -71,9 +65,6 @@ func TestInFlightLoadProducer_PrefillReleaseIndependentOfProfileName(t *testing.
 					require.NoError(t, producer.PreRequest(ctx, req, res))
 					require.Equal(t, int64(1), producer.GetRequests(prefillID))
 					initialPrefillTokens := int64(len(prompt))
-					if includeOutput && !endpointHasPrefillOnlyRole(prefill) {
-						initialPrefillTokens += UnknownOutputTokens
-					}
 					require.Equal(t, initialPrefillTokens, producer.GetTokens(prefillID))
 					require.Equal(t, int64(1), producer.GetRequests(decodeID))
 					initialDecodeTokens := int64(len(prompt))
@@ -135,7 +126,6 @@ func TestInFlightLoadProducer_SingleTargetPrefillCompletion(t *testing.T) {
 		role        string
 		releaseAll  bool
 	}{
-		{"unlabeled_default_profile", fwksched.DefaultPrefillProfile, "", true},
 		{"custom_profile", "prompt-stage", bylabel.RolePrefill, true},
 		{"encode_prefill", "prompt-stage", bylabel.RoleEncodePrefill, true},
 		{"combined_role", "default", bylabel.RolePrefillDecode, false},
@@ -155,9 +145,6 @@ func TestInFlightLoadProducer_SingleTargetPrefillCompletion(t *testing.T) {
 					ProfileResults: map[string]*fwksched.ProfileRunResult{
 						tc.profileName: {TargetEndpoints: []fwksched.Endpoint{endpoint}},
 					},
-				}
-				if tc.profileName == fwksched.DefaultPrefillProfile {
-					res.PrefillProfileName = tc.profileName
 				}
 				req.SchedulingResult = res
 				require.NoError(t, producer.PreRequest(ctx, req, res))
