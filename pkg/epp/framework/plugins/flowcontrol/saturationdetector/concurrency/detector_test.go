@@ -814,7 +814,6 @@ func TestDetector_HybridFilter(t *testing.T) {
 	})
 }
 
-// TestDetector_ConcurrencyStress performs race condition check.
 // TestDetector_ConcurrencyStress races ReserveDispatch and ReleaseDispatch for
 // the same request IDs across goroutines while other goroutines read Saturation.
 // Each ID must be reserved and released exactly once, and pendingDispatches must
@@ -839,8 +838,10 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 		var wins atomic.Int64
 		var badRead atomic.Bool
 		var wg sync.WaitGroup
+		start := make(chan struct{})
 		for range contenders {
 			wg.Go(func() {
+				<-start
 				for i := range numIDs {
 					if ids(i) && op(id(i)) {
 						wins.Add(1)
@@ -850,6 +851,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 		}
 		for range readers {
 			wg.Go(func() {
+				<-start
 				for range readsPerRun {
 					if s := detector.Saturation(ctx, endpoints); s < 0 || s > 1 {
 						badRead.Store(true)
@@ -857,6 +859,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 				}
 			})
 		}
+		close(start)
 		wg.Wait()
 		return wins.Load(), badRead.Load()
 	}
