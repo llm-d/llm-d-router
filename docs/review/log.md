@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-27
+
+* **Update**: Settled [Sub-agent wire identity for concurrent KV session accounting](decisions/sub_agent_wire_identity.md) with Position B in `#4159`: moved it from `open_questions/` to `decisions/` and updated [open_questions/index.md](open_questions/index.md) and [decisions/index.md](decisions/index.md).
+
 ## 2026-11-21
 
 * **Update**: Added `Testing` guidelines and test review checks to [AGENTS.md](../../AGENTS.md#testing), clarified that `make presubmit` runs no Go tests, and updated [prepare_a_pull_request.md](playbooks/prepare_a_pull_request.md) to run targeted `-race` tests (including `make -f Makefile.coord.mk test-unit` for coordinator code) alongside `make presubmit`.
