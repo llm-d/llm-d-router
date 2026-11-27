@@ -16,7 +16,10 @@ limitations under the License.
 
 package request
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"maps"
+)
 
 // InjectIncludeUsage asks a streamed chat or completions request for the
 // trailing usage frame when the client did not. It reports whether it added the
@@ -51,9 +54,9 @@ func InjectIncludeUsage(body map[string]any, stream bool, apiType APIType) (inje
 	}
 	// A copy, since the client's stream_options object can be shared with
 	// another view of the same request.
-	merged := make(map[string]any, len(options)+1)
-	for k, v := range options {
-		merged[k] = v
+	merged := maps.Clone(options)
+	if merged == nil {
+		merged = make(map[string]any, 1)
 	}
 	merged[FieldIncludeUsage] = true
 	body[FieldStreamOptions] = merged

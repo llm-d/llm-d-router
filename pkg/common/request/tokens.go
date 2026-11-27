@@ -63,8 +63,10 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	limits := body
 	if apiType == APITypeVLLMGenerate {
 		sp, _ := body[FieldSamplingParams].(map[string]any)
-		limits = make(map[string]any, len(sp)+1)
-		maps.Copy(limits, sp)
+		limits = maps.Clone(sp)
+		if limits == nil {
+			limits = make(map[string]any, 1)
+		}
 		body[FieldSamplingParams] = limits
 	}
 	for _, field := range apiType.tokenLimitFields() {
