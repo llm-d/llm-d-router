@@ -212,35 +212,53 @@ func TestKVEventPrefillCompletion_ReleasesWhenDecodeStoresLastBlock(t *testing.T
 // of 1, stamped with the request's session id.
 func TestKVEventPrefillCompletion_SGLangDecodeStore(t *testing.T) {
 	t.Parallel()
-	const name = "kv-release-sglang"
-	producer := newKVEventsProducer(t, name)
-	ctx := context.Background()
-	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
-	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
-	prefillID := fullEndpointName("prefill-0")
+	for _, tc := range []struct {
+		name        string
+		repeatLast  bool
+		sharedStamp bool
+	}{
+		{name: "unique_tokens"},
+		{name: "repeated_last_token", repeatLast: true},
+		{name: "shared_session_repeated_last_token", repeatLast: true, sharedStamp: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "kv-release-sglang-" + tc.name
+			producer := newKVEventsProducer(t, name)
+			ctx := context.Background()
+			prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+			decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+			prefillID := fullEndpointName("prefill-0")
 
-	prompt := seq(0, 200)
-	req := newStampedRequest("req-sglang", prompt)
-	require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
-	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+			prompt := seq(0, 200)
+			if tc.repeatLast {
+				prompt[len(prompt)-1] = prompt[0]
+			}
+			req := newStampedRequest("req-sglang", prompt)
+			if tc.sharedStamp {
+				req.Headers[sessionIDHeader] = "client-session"
+			}
+			require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+			require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
 
-	payload, err := msgpack.Marshal([]any{1.0, []any{map[string]any{
-		"type":         "BlockStored",
-		"block_hashes": seq(1000, len(prompt)),
-		"token_ids":    prompt,
-		"block_size":   1,
-		"medium":       "GPU",
-		"session_id":   req.Headers[sessionIDHeader],
-	}}, nil})
-	require.NoError(t, err)
-	_, _, batch, err := engineadapter.NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{
-		Topic: "kv@" + decodeSource + "@model", Payload: payload,
-	})
-	require.NoError(t, err)
+			payload, err := msgpack.Marshal([]any{1.0, []any{map[string]any{
+				"type":         "BlockStored",
+				"block_hashes": seq(1000, len(prompt)),
+				"token_ids":    prompt,
+				"block_size":   1,
+				"medium":       "GPU",
+				"session_id":   req.Headers[sessionIDHeader],
+			}}, nil})
+			require.NoError(t, err)
+			_, _, batch, err := engineadapter.NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{
+				Topic: "kv@" + decodeSource + "@model", Payload: payload,
+			})
+			require.NoError(t, err)
 
-	require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource}, batch))
-	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
-	require.Equal(t, float64(1), completions(name, signalKVEvent))
+			require.NoError(t, producer.ProcessEvents(ctx, kvevents.EventSource{Endpoint: decodeSource}, batch))
+			require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+			require.Equal(t, float64(1), completions(name, signalKVEvent))
+		})
+	}
 }
 
 func TestKVEventPrefillCompletion_IgnoresOtherBlocks(t *testing.T) {
