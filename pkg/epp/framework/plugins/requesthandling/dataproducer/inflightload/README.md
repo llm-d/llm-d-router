@@ -11,7 +11,7 @@ Tracks real-time in-flight request and token counts per endpoint by hooking into
 ## Behavior
 
 - **Prefix Cache Discounting**: Automatically detects if an endpoint has a prefix cache hit (via `PrefixCacheMatchInfo`). Only the **uncached** portion of the prompt is added to the in-flight token counter, providing a more accurate estimate of the actual compute load. The discount uses the cached block count, so a block cached in CPU RAM counts the same as one in GPU memory.
-- **Prefill Targets**: Targets whose `llm-d.ai/role` label is `prefill` or `encode-prefill` are recognized independently of the scheduling profile name. A profile named `prefill` also identifies its target as prefill for compatibility. Custom profile names on unlabeled or combined-role endpoints do not identify a prefill target.
+- **Prefill Targets**: The scheduling result's `PrefillProfileName` identifies the prefill profile, including custom names and unlabeled or combined-role targets. When it is empty, targets whose `llm-d.ai/role` label is `prefill` or `encode-prefill` are recognized by role. The scheduler supplies the default name `prefill` when the handler names none and a result exists under that name.
 - **Load Release**: Prefill completion is signaled by the first response chunk (`StartOfStream`) or a matching KV event when configured. The contributions recorded for each target are released as follows:
 
   | Target | Request count | Tokens with `addEstimatedOutputTokens: false` | Tokens with `addEstimatedOutputTokens: true` |

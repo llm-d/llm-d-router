@@ -32,18 +32,21 @@ import (
 
 func TestInFlightLoadProducer_PrefillReleaseIndependentOfProfileName(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, profileName, role string }{
-		{"default_profile", fwksched.DefaultPrefillProfile, bylabel.RolePrefill},
-		{"custom_profile", "prompt-stage", bylabel.RolePrefill},
-		{"encode_prefill", "prompt-stage", bylabel.RoleEncodePrefill},
-		{"unlabeled_default_profile", fwksched.DefaultPrefillProfile, ""},
+	for _, tc := range []struct{ name, profileName, role, prefillProfile string }{
+		{"default_profile", fwksched.DefaultPrefillProfile, bylabel.RolePrefill, fwksched.DefaultPrefillProfile},
+		{"custom_profile", "prompt-stage", bylabel.RolePrefill, ""},
+		{"encode_prefill", "prompt-stage", bylabel.RoleEncodePrefill, ""},
+		{"unlabeled_default_profile", fwksched.DefaultPrefillProfile, "", fwksched.DefaultPrefillProfile},
+		{"explicit_custom_profile", "prompt-stage", bylabel.RolePrefill, "prompt-stage"},
+		{"explicit_combined_role", "prompt-stage", bylabel.RolePrefillDecode, "prompt-stage"},
+		{"explicit_unlabeled_profile", "prompt-stage", "", "prompt-stage"},
 	} {
 		for _, includeOutput := range []bool{false, true} {
 			for _, signal := range []string{signalFirstByte, signalKVEvent} {
 				t.Run(fmt.Sprintf("%s_output_%t_%s", tc.name, includeOutput, signal), func(t *testing.T) {
 					var producer *InFlightLoadProducer
 					if signal == signalKVEvent {
-						producer = newKVEventsProducer(t, fmt.Sprintf("profile-name-%s-%s-%t", tc.profileName, tc.role, includeOutput))
+						producer = newKVEventsProducer(t, fmt.Sprintf("profile-name-%s-%t", tc.name, includeOutput))
 					} else {
 						producer = newTestProducer(t)
 					}
@@ -58,20 +61,17 @@ func TestInFlightLoadProducer_PrefillReleaseIndependentOfProfileName(t *testing.
 					req := newStampedRequest(t.Name(), prompt)
 					res := &fwksched.SchedulingResult{
 						PrimaryProfileName: "decode",
-						PrefillProfileName: "",
+						PrefillProfileName: tc.prefillProfile,
 						ProfileResults: map[string]*fwksched.ProfileRunResult{
 							tc.profileName: {TargetEndpoints: []fwksched.Endpoint{prefill}},
 							"decode":       {TargetEndpoints: []fwksched.Endpoint{decode}},
 						},
 					}
-					if tc.profileName == fwksched.DefaultPrefillProfile {
-						res.PrefillProfileName = tc.profileName
-					}
 					req.SchedulingResult = res
 					require.NoError(t, producer.PreRequest(ctx, req, res))
 					require.Equal(t, int64(1), producer.GetRequests(prefillID))
 					initialPrefillTokens := int64(len(prompt))
-					if includeOutput && tc.role == "" {
+					if includeOutput && !endpointHasPrefillOnlyRole(prefill) {
 						initialPrefillTokens += UnknownOutputTokens
 					}
 					require.Equal(t, initialPrefillTokens, producer.GetTokens(prefillID))
@@ -152,7 +152,6 @@ func TestInFlightLoadProducer_SingleTargetPrefillCompletion(t *testing.T) {
 				req := newStampedRequest(t.Name(), prompt)
 				res := &fwksched.SchedulingResult{
 					PrimaryProfileName: tc.profileName,
-					PrefillProfileName: "",
 					ProfileResults: map[string]*fwksched.ProfileRunResult{
 						tc.profileName: {TargetEndpoints: []fwksched.Endpoint{endpoint}},
 					},
@@ -256,4 +255,34 @@ func TestInFlightLoadProducer_PrefillEventTargets(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInFlightLoadProducer_ExplicitPrefillProfileOverridesRole(t *testing.T) {
+	t.Parallel()
+	producer := newKVEventsProducer(t, "explicit-prefill-overrides-role")
+	prefill := newEventEndpoint("explicit-prefill", bylabel.RolePrefill, prefillAddress)
+	primary := newEventEndpoint("primary", bylabel.RolePrefill, decodeAddress)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "primary",
+		PrefillProfileName: "prompt-stage",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prompt-stage": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+			"primary":      {TargetEndpoints: []fwksched.Endpoint{primary}},
+		},
+	}
+	prompt := seq(0, blockSize)
+	req := newStampedRequest(t.Name(), prompt)
+	req.SchedulingResult = res
+	require.NoError(t, producer.PreRequest(t.Context(), req, res))
+	require.NoError(t, producer.ProcessEvents(t.Context(),
+		kvevents.EventSource{Endpoint: prefillSource}, storeBatch(req.RequestID, prompt)))
+	require.Equal(t, int64(1), producer.GetRequests(prefill.GetMetadata().ID.String()))
+	require.Equal(t, float64(1), pendingWatch(producer.typedName.Name))
+	require.NoError(t, producer.ProcessEvents(t.Context(),
+		kvevents.EventSource{Endpoint: decodeSource}, storeBatch(req.RequestID, prompt)))
+	require.Zero(t, producer.GetRequests(prefill.GetMetadata().ID.String()))
+	require.Equal(t, int64(1), producer.GetRequests(primary.GetMetadata().ID.String()))
+	require.Zero(t, pendingWatch(producer.typedName.Name))
+	producer.ResponseBody(t.Context(), req, &fwkrh.Response{EndOfStream: true}, nil)
+	require.Zero(t, producer.GetRequests(primary.GetMetadata().ID.String()))
 }
