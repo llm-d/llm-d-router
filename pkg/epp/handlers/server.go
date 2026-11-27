@@ -1025,6 +1025,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					setGRPCStatusError(reqCtx, grpcStatus)
 				}
 			}
+			wasComplete := reqCtx.responseComplete
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
 			// Trailers end a stream whose last body chunk had no end of stream, so
 			// the line dropRequestedUsageFrame still holds is forwarded here.
@@ -1038,6 +1039,11 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},
 				},
+			}
+			// Streaming responses ended by trailers with no held body bytes emit no
+			// body response here, so carry end-of-stream dynamic metadata on trailers.
+			if !wasComplete && len(reqCtx.respBodyResp) == 0 && reqCtx.Response.DynamicMetadata != nil {
+				reqCtx.respTrailerResp.DynamicMetadata = reqCtx.Response.DynamicMetadata
 			}
 		}
 
