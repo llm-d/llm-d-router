@@ -203,6 +203,10 @@ func TestCachedTokens(t *testing.T) {
 			block: map[string]any{"prompt_tokens": float64(64)},
 		},
 		{
+			name:  "null prompt token details",
+			block: map[string]any{"prompt_tokens": float64(64), "prompt_tokens_details": nil},
+		},
+		{
 			name:   "explicit zero",
 			block:  map[string]any{"prompt_tokens_details": map[string]any{"cached_tokens": float64(0)}},
 			wantOK: true,
@@ -538,6 +542,372 @@ func BenchmarkResponseWriterChunkedJSON(b *testing.B) {
 					_, _ = writer.Write(chunk)
 				}
 				if err := finalize(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+type discardResponseWriter struct {
+	header http.Header
+}
+
+func (w *discardResponseWriter) Header() http.Header         { return w.header }
+func (w *discardResponseWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *discardResponseWriter) WriteHeader(int)             {}
+
+type sliceCaptureResponseWriter struct {
+	header http.Header
+	writes [][]byte
+}
+
+func (w *sliceCaptureResponseWriter) Header() http.Header { return w.header }
+func (w *sliceCaptureResponseWriter) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, p)
+	return len(p), nil
+}
+func (w *sliceCaptureResponseWriter) WriteHeader(int) {}
+
+func TestResponseWriter_SSEContentChunkAllocs(t *testing.T) {
+	nonDataUsageChunk := []byte("event: \"usage\"\n: \"usage\"\nid: \"usage\"\n" + string(benchSSEChunk))
+	tests := []struct {
+		name        string
+		chunk       []byte
+		passthrough bool
+		splitFirst  bool
+	}{
+		{name: "single_event", chunk: benchSSEChunk},
+		{name: "multi_event", chunk: benchSSEMultiChunk},
+		{name: "passthrough_single_event", chunk: benchSSEChunk, passthrough: true},
+		{name: "after_split_frame_recovery", chunk: benchSSEChunk, splitFirst: true},
+		{name: "passthrough_after_split_frame_recovery", chunk: benchSSEChunk, passthrough: true, splitFirst: true},
+		{name: "usage_on_non_data_lines", chunk: nonDataUsageChunk},
+		{name: "passthrough_usage_on_non_data_lines", chunk: nonDataUsageChunk, passthrough: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &discardResponseWriter{header: http.Header{}}
+			var writer http.ResponseWriter
+			if tc.passthrough {
+				writer, _ = NewResponseWriter(sink, Options{OnUsage: func(map[string]any) {}}, true)
+			} else {
+				writer, _ = NewCachedTokensResponseWriter(sink, 48, true)
+			}
+			if tc.splitFirst {
+				writeChunk(t, writer, `data: {"choices":[{"delta":{"content":"a"}}`)
+				writeChunk(t, writer, "]}\n\n")
+			}
+
+			allocs := testing.AllocsPerRun(100, func() {
+				if _, err := writer.Write(tc.chunk); err != nil {
+					t.Errorf("Write failed: %v", err)
+				}
+			})
+			if allocs != 0 {
+				t.Errorf("allocs = %v, want 0", allocs)
+			}
+		})
+	}
+}
+
+func TestResponseWriter_SSEContentChunkZeroCopyRecorder(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rec.Body.Grow(len(benchSSEChunk))
+	writer, _ := NewCachedTokensResponseWriter(rec, 48, true)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		rec.Body.Reset()
+		if _, err := writer.Write(benchSSEChunk); err != nil {
+			t.Errorf("Write failed: %v", err)
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("allocs = %v, want 0", allocs)
+	}
+	if rec.Body.String() != string(benchSSEChunk) {
+		t.Errorf("body = %q, want %q", rec.Body.String(), string(benchSSEChunk))
+	}
+}
+
+func TestResponseWriter_SSEFastPathForwardsOriginalSlice(t *testing.T) {
+	capture := &sliceCaptureResponseWriter{header: http.Header{}}
+	writer, finalize := NewCachedTokensResponseWriter(capture, 48, true)
+
+	chunk1 := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n")
+	if _, err := writer.Write(chunk1); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.writes) != 1 || &capture.writes[0][0] != &chunk1[0] {
+		t.Fatal("fast path copied content chunk instead of forwarding original slice")
+	}
+
+	nonDataUsage := []byte("event: \"usage\"\n: \"usage\"\nid: \"usage\"\ndata: {\"choices\":[{\"delta\":{\"content\":\"u\"}}]}\n\n")
+	capture.writes = nil
+	if _, err := writer.Write(nonDataUsage); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.writes) != 1 || &capture.writes[0][0] != &nonDataUsage[0] {
+		t.Fatal("fast path copied chunk with non-data usage lines instead of forwarding original slice")
+	}
+
+	// Split a frame across two writes, then confirm the next complete chunk
+	// re-enters the fast path and forwards its backing slice directly.
+	capture.writes = nil
+	part1 := []byte(`data: {"choices":[{"delta":{"content":"split"}}`)
+	part2 := []byte("]}\n\n")
+	if _, err := writer.Write(part1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(part2); err != nil {
+		t.Fatal(err)
+	}
+	afterSplit := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n")
+	capture.writes = nil
+	if _, err := writer.Write(afterSplit); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.writes) != 1 || &capture.writes[0][0] != &afterSplit[0] {
+		t.Fatal("writer did not recover to zero-copy fast path after split frame drained")
+	}
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResponseWriter_SSEFastPathEdgeCases(t *testing.T) {
+	contentLine := `data: {"choices":[{"delta":{"content":"hi"}}]}`
+	usageIn := `{"choices":[],"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`
+	usageOut := `{"choices":[],"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`
+
+	tests := []struct {
+		name          string
+		chunks        [][]byte
+		dropUsageOnly bool
+		wantBody      string
+		wantObserved  int
+	}{
+		{
+			name:         "empty_nil_and_empty_slice_writes",
+			chunks:       [][]byte{nil, {}, []byte(contentLine + "\n\n"), []byte("data: " + usageIn + "\n\n")},
+			wantBody:     contentLine + "\n\ndata: " + usageOut + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "crlf_content_and_usage",
+			chunks:       [][]byte{[]byte(contentLine + "\r\n\r\n"), []byte("data: " + usageIn + "\r\n\r\n")},
+			wantBody:     contentLine + "\r\n\r\ndata: " + usageOut + "\r\n\r\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "multi_event_content_only",
+			chunks:       [][]byte{[]byte(contentLine + "\n\n" + contentLine + "\n\n")},
+			wantBody:     contentLine + "\n\n" + contentLine + "\n\n",
+			wantObserved: 0,
+		},
+		{
+			name:         "multi_event_content_then_usage",
+			chunks:       [][]byte{[]byte(contentLine + "\n\ndata: " + usageIn + "\n\n")},
+			wantBody:     contentLine + "\n\ndata: " + usageOut + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "multi_event_usage_then_content",
+			chunks:       [][]byte{[]byte("data: " + usageIn + "\n\n" + contentLine + "\n\n")},
+			wantBody:     "data: " + usageOut + "\n\n" + contentLine + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "spaceless_data_prefix_usage",
+			chunks:       [][]byte{[]byte("data:" + usageIn + "\n\n")},
+			wantBody:     "data: " + usageOut + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "extra_spaces_data_prefix_usage",
+			chunks:       [][]byte{[]byte("data:   " + usageIn + "\n\n")},
+			wantBody:     "data: " + usageOut + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "usage_on_non_data_lines",
+			chunks:       [][]byte{[]byte("event: \"usage\"\n: \"usage\"\nid: \"usage\"\n" + contentLine + "\n\n")},
+			wantBody:     "event: \"usage\"\n: \"usage\"\nid: \"usage\"\n" + contentLine + "\n\n",
+			wantObserved: 0,
+		},
+		{
+			name:          "drop_usage_only_in_mixed_chunk_then_pass_through",
+			chunks:        [][]byte{[]byte(contentLine + "\n\ndata: " + usageIn + "\n\ndata: [DONE]\n\n"), []byte(contentLine + "\n\n")},
+			dropUsageOnly: true,
+			wantBody:      contentLine + "\n\n\ndata: [DONE]\n\n" + contentLine + "\n\n",
+			wantObserved:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			cached := 7
+			observed := 0
+			writer, finalize := NewResponseWriter(rec, Options{
+				CachedTokens:       &cached,
+				DropUsageOnlyFrame: tc.dropUsageOnly,
+				OnUsage: func(map[string]any) {
+					observed++
+				},
+			}, true)
+
+			for _, chunk := range tc.chunks {
+				n, err := writer.Write(chunk)
+				if err != nil {
+					t.Fatalf("Write(%q) failed: %v", chunk, err)
+				}
+				if n != len(chunk) {
+					t.Fatalf("Write(%q) = %d, want %d", chunk, n, len(chunk))
+				}
+			}
+			if err := finalize(); err != nil {
+				t.Fatalf("finalize failed: %v", err)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body =\n%q\nwant\n%q", got, tc.wantBody)
+			}
+			if observed != tc.wantObserved {
+				t.Errorf("observed = %d, want %d", observed, tc.wantObserved)
+			}
+		})
+	}
+}
+
+func TestResponseWriter_SSEPassthroughFastPathEdgeCases(t *testing.T) {
+	contentLine := `data: {"choices":[{"delta":{"content":"hi"}}]}`
+	usageIn := `{"choices":[],"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`
+
+	tests := []struct {
+		name         string
+		chunks       [][]byte
+		wantBody     string
+		wantObserved int
+	}{
+		{
+			name:         "empty_nil_and_empty_slice_writes",
+			chunks:       [][]byte{nil, {}, []byte(contentLine + "\n\n"), []byte("data: " + usageIn + "\n\n")},
+			wantBody:     contentLine + "\n\ndata: " + usageIn + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "crlf_content_and_usage",
+			chunks:       [][]byte{[]byte(contentLine + "\r\n\r\n"), []byte("data: " + usageIn + "\r\n\r\n")},
+			wantBody:     contentLine + "\r\n\r\ndata: " + usageIn + "\r\n\r\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "multi_event_content_only",
+			chunks:       [][]byte{[]byte(contentLine + "\n\n" + contentLine + "\n\n")},
+			wantBody:     contentLine + "\n\n" + contentLine + "\n\n",
+			wantObserved: 0,
+		},
+		{
+			name:         "multi_event_content_then_usage",
+			chunks:       [][]byte{[]byte(contentLine + "\n\ndata: " + usageIn + "\n\n")},
+			wantBody:     contentLine + "\n\ndata: " + usageIn + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "multi_event_usage_then_content",
+			chunks:       [][]byte{[]byte("data: " + usageIn + "\n\n" + contentLine + "\n\n")},
+			wantBody:     "data: " + usageIn + "\n\n" + contentLine + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "spaceless_data_prefix_usage",
+			chunks:       [][]byte{[]byte("data:" + usageIn + "\n\n")},
+			wantBody:     "data:" + usageIn + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "extra_spaces_data_prefix_usage",
+			chunks:       [][]byte{[]byte("data:   " + usageIn + "\n\n")},
+			wantBody:     "data:   " + usageIn + "\n\n",
+			wantObserved: 1,
+		},
+		{
+			name:         "usage_on_non_data_lines",
+			chunks:       [][]byte{[]byte("event: \"usage\"\n: \"usage\"\nid: \"usage\"\n" + contentLine + "\n\n")},
+			wantBody:     "event: \"usage\"\n: \"usage\"\nid: \"usage\"\n" + contentLine + "\n\n",
+			wantObserved: 0,
+		},
+		{
+			name:         "split_frame_recovery_then_usage",
+			chunks:       [][]byte{[]byte(`data: {"choices":[{"delta":{"content":"a"}}`), []byte("]}\n\n"), []byte(contentLine + "\n\n"), []byte("data: " + usageIn + "\n\n")},
+			wantBody:     `data: {"choices":[{"delta":{"content":"a"}}]}` + "\n\n" + contentLine + "\n\ndata: " + usageIn + "\n\n",
+			wantObserved: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			observed := 0
+			writer, finalize := NewResponseWriter(rec, Options{
+				OnUsage: func(map[string]any) {
+					observed++
+				},
+			}, true)
+
+			for _, chunk := range tc.chunks {
+				n, err := writer.Write(chunk)
+				if err != nil {
+					t.Fatalf("Write(%q) failed: %v", chunk, err)
+				}
+				if n != len(chunk) {
+					t.Fatalf("Write(%q) = %d, want %d", chunk, n, len(chunk))
+				}
+			}
+			if err := finalize(); err != nil {
+				t.Fatalf("finalize failed: %v", err)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body =\n%q\nwant\n%q", got, tc.wantBody)
+			}
+			if observed != tc.wantObserved {
+				t.Errorf("observed = %d, want %d", observed, tc.wantObserved)
+			}
+		})
+	}
+}
+
+// benchSSEChunk is a realistic ~160-byte SSE content event from vLLM.
+var (
+	benchSSEChunk      = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"llama-3.1-8b","choices":[{"index":0,"delta":{"content":" the"}}]}` + "\n\n")
+	benchSSEMultiChunk = append(slices.Clone(benchSSEChunk), benchSSEChunk...)
+)
+
+func BenchmarkResponseWriterSSEContentChunk(b *testing.B) {
+	cases := []struct {
+		name        string
+		chunk       []byte
+		passthrough bool
+	}{
+		{name: "single_event", chunk: benchSSEChunk},
+		{name: "multi_event", chunk: benchSSEMultiChunk},
+		{name: "passthrough_single_event", chunk: benchSSEChunk, passthrough: true},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			sink := &discardResponseWriter{header: http.Header{}}
+			var writer http.ResponseWriter
+			if tc.passthrough {
+				writer, _ = NewResponseWriter(sink, Options{OnUsage: func(map[string]any) {}}, true)
+			} else {
+				writer, _ = NewCachedTokensResponseWriter(sink, 48, true)
+			}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tc.chunk)))
+			for b.Loop() {
+				if _, err := writer.Write(tc.chunk); err != nil {
 					b.Fatal(err)
 				}
 			}

@@ -42,6 +42,7 @@ import (
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
@@ -408,6 +409,73 @@ dataLayer:
 	}
 }
 
+// TestRunWithFileDiscovery_LogsDataLayerError is a regression test for
+// https://github.com/llm-d/llm-d-router/issues/4395: a data layer that fails
+// to configure made the EPP exit with status 1 and no log line naming the
+// error, because the file-discovery path returned the error without logging it.
+func TestRunWithFileDiscovery_LogsDataLayerError(t *testing.T) {
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	// injectDefaults: false with no sources makes dlRuntime.Configure fail
+	// with "data layer enabled but no data sources configured".
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    endpoints:
+      pluginRef: file-discovery
+`, endpointsPath)
+
+	var mu sync.Mutex
+	var logged strings.Builder
+	previous := setupLog
+	setupLog = funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged.WriteString(prefix + " " + args + "\n")
+	}, funcr.Options{})
+	t.Cleanup(func() { setupLog = previous })
+
+	opts := runserver.NewOptions()
+	opts.MetricsPort = 0
+	opts.SecureServing = false
+	opts.PoolName = testPoolName
+	opts.PoolNamespace = "test-ns"
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	err = r.runFileDiscovery(ctx, opts, rawConfig)
+	require.ErrorContains(t, err, "data layer enabled but no data sources configured")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, logged.String(), "File discovery mode failed")
+	assert.Contains(t, logged.String(), "data layer enabled but no data sources configured")
+}
+
 // TestRunWithFileDiscovery_LogsRunnableError is a regression test for
 // https://github.com/llm-d/llm-d-router/issues/4045: a server that failed to
 // start made the EPP exit with status 1 and no log line naming the error,
@@ -491,18 +559,18 @@ dataLayer:
 	require.NoError(t, err)
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+	go func() { runErr <- r.runFileDiscovery(ctx, opts, rawConfig) }()
 
 	select {
 	case err := <-runErr:
 		require.ErrorContains(t, err, "metrics server")
 	case <-time.After(10 * time.Second):
-		t.Fatal("runWithFileDiscovery did not return after the metrics server failed to bind")
+		t.Fatal("runFileDiscovery did not return after the metrics server failed to bind")
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Contains(t, logged.String(), "EPP stopped")
+	assert.Contains(t, logged.String(), "File discovery mode failed")
 	assert.Contains(t, logged.String(), "address already in use")
 }
 
@@ -537,7 +605,7 @@ func TestServeMetrics_ServesPluginState(t *testing.T) {
 	port, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveMetrics(ctx, uint16(port), false, handle) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+	go func() { errCh <- serveMetrics(ctx, uint16(port), false, handle, nil) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, runserver.PluginStateDebugPath)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -563,6 +631,51 @@ func TestServeMetrics_ServesPluginState(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-errCh)
+}
+
+// TestServeMetrics_EndpointsAPIOptIn checks the endpoints API is only served
+// on the metrics server when a handler is passed (--enable-endpoints-api).
+func TestServeMetrics_EndpointsAPIOptIn(t *testing.T) {
+	tests := []struct {
+		name       string
+		enabled    bool
+		wantStatus int
+	}{
+		{name: "disabled by default", enabled: false, wantStatus: http.StatusNotFound},
+		{name: "enabled", enabled: true, wantStatus: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var endpointsAPI http.Handler
+			if tc.enabled {
+				endpointsAPI = runserver.NewEndpointsAPIHandler(datastore.NewDatastore(ctx, nil), func() bool { return true })
+			}
+			port, err := fwknet.GetFreePort()
+			require.NoError(t, err)
+			errCh := make(chan error, 1)
+			go func() { errCh <- serveMetrics(ctx, uint16(port), false, testutils.NewTestHandle(ctx), endpointsAPI) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+
+			url := fmt.Sprintf("http://127.0.0.1:%d%s", port, runserver.EndpointsAPIPath)
+			client := &http.Client{Timeout: 2 * time.Second}
+			var status int
+			require.Eventually(t, func() bool {
+				resp, err := client.Get(url)
+				if err != nil {
+					return false
+				}
+				defer resp.Body.Close()
+				status = resp.StatusCode
+				return true
+			}, 2*time.Second, 20*time.Millisecond, "metrics server should accept connections")
+			assert.Equal(t, tc.wantStatus, status)
+
+			cancel()
+			require.NoError(t, <-errCh)
+		})
+	}
 }
 
 // TestRunWithFileDiscovery_InvalidObjectivesFile checks that --objectives-file is

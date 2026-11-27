@@ -55,7 +55,7 @@ func perFlowProcessor(t *testing.T, opts ...registry.ConfigOption) (*testHarness
 
 func enqueuePerFlow(t *testing.T, h *testHarness, reg *registry.FlowRegistry, id string, key flowcontrol.FlowKey, size uint64) *FlowItem {
 	t.Helper()
-	item := NewItem(t.Context(), fwkfcmocks.NewMockFlowControlRequest(size, id, key), testTTL, h.clock.Now(), logr.Discard())
+	item := NewItem(t.Context(), fwkfcmocks.NewMockFlowControlRequest(size, id, key), testTTL, h.clock.Now(), h.clock, logr.Discard())
 	require.NoError(t, reg.WithConnection(key, func(contracts.ActiveFlowConnection) error {
 		h.processor.enqueue(item)
 		return nil
@@ -198,7 +198,9 @@ func TestPerFlowCapacityReleased(t *testing.T) {
 			switch action {
 			case "dispatch":
 				require.Zero(t, reservations)
-				require.NoError(t, h.processor.dispatchItem(first))
+				dispatched, err := h.processor.dispatchItem(first)
+				require.NoError(t, err)
+				require.True(t, dispatched)
 				require.Equal(t, types.QueueOutcomeDispatched, first.FinalState().Outcome)
 				require.Equal(t, 1, reservations)
 			case "cancel":
@@ -273,7 +275,7 @@ func TestPerFlowCapacityReasonMatchesDecision(t *testing.T) {
 	h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
 		return contracts.CapacitySnapshot{MaxRequestsPerFlow: 3}, nil
 	}
-	item := NewItem(t.Context(), fwkfcmocks.NewMockFlowControlRequest(1, "overflow", testFlow), testTTL, h.clock.Now(), logr.Discard())
+	item := NewItem(t.Context(), fwkfcmocks.NewMockFlowControlRequest(1, "overflow", testFlow), testTTL, h.clock.Now(), h.clock, logr.Discard())
 	h.processor.enqueue(item)
 	// The per-flow limit refused the request, so the reason must say so even though the flow shrank afterwards.
 	requireCapacityRejection(t, item, true)

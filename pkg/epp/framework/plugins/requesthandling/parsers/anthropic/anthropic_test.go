@@ -713,6 +713,18 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "message_start with a spaceless data line",
+			chunk: []byte("data:{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25}}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens: 25,
+					TotalTokens:  25,
+				},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 25},
+				StreamedEvents:      1,
+			},
+		},
+		{
 			name: "full stream with both events",
 			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25}}}\n\n" +
 				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n" +

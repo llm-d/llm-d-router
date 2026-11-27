@@ -94,7 +94,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req",
 				Model:            "m",
-				TokenIDs:         []int{1, 2},
+				TokenIDs:         []uint32{1, 2},
 				KVTransferParams: make(map[string]any),
 			}
 			if err := step.Execute(context.Background(), reqCtx); err != nil {

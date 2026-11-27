@@ -390,9 +390,10 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	}
 	require.NoError(t, p.PreRequest(ctx, request, &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":                   {TargetEndpoints: []scheduling.Endpoint{endpoints[1]}},
-			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{endpoints[2]}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{endpoints[1]}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoints[2]}},
 		},
 	}))
 	cached := p.speculativeCache.Get(request.RequestID)
@@ -1280,6 +1281,22 @@ func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 // lookups. Level-2 attribute validation in datalayer.BuildRegistry and
 // Registry.ValidateConsumer rejects an estimate-backed or missing token-producer
 // at startup, independent of factory instantiation order.
+type stubTokenProducer struct {
+	typedName plugin.TypedName
+	attrs     map[string]string
+}
+
+func (s *stubTokenProducer) TypedName() plugin.TypedName { return s.typedName }
+
+func (s *stubTokenProducer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		tokenproducer.TokenizedPromptDataKey: plugin.ProducedData{
+			Type:       fwkrequest.TokenizedRequest{},
+			Attributes: s.attrs,
+		},
+	}
+}
+
 func TestTokenProducerDependencyValidation(t *testing.T) {
 	newHandle := func(t *testing.T) plugin.Handle {
 		return plugin.NewEppHandle(utils.NewTestContext(t), nil)
@@ -1288,7 +1305,7 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		p, err := PluginFactory("precise", nil, handle)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			p.(*Producer).subscribersManager.Shutdown(utils.NewTestContext(t))
+			p.(*Producer).subscribersManager.Shutdown(context.WithoutCancel(handle.Context()))
 		})
 		handle.AddPlugin(p.TypedName().Name, p)
 	}
@@ -1325,6 +1342,40 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		require.NoError(t, validateHandle(handle))
 	})
 
+	t.Run("precise with passthrough token-producer: ok", func(t *testing.T) {
+		handle := newHandle(t)
+		addTokenProducer(t, handle, `{"backend":"passthrough"}`)
+		addPrecise(t, handle)
+		require.NoError(t, validateHandle(handle))
+	})
+
+	t.Run("precise with non-vllm exact_tokens producer (e.g. sglang renderer): ok", func(t *testing.T) {
+		handle := newHandle(t)
+		handle.AddPlugin("token-producer", &stubTokenProducer{
+			typedName: plugin.TypedName{Type: tokenproducer.PluginType, Name: "token-producer"},
+			attrs: map[string]string{
+				tokenproducer.AttrBackend:     "sglang",
+				tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+			},
+		})
+		addPrecise(t, handle)
+		require.NoError(t, validateHandle(handle))
+	})
+
+	t.Run("precise with producer missing exact_tokens attribute: rejected", func(t *testing.T) {
+		handle := newHandle(t)
+		handle.AddPlugin("token-producer", &stubTokenProducer{
+			typedName: plugin.TypedName{Type: tokenproducer.PluginType, Name: "token-producer"},
+			attrs: map[string]string{
+				tokenproducer.AttrBackend: "sglang",
+			},
+		})
+		addPrecise(t, handle)
+		err := validateHandle(handle)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `producer does not declare required attribute "exact_tokens"="true"`)
+	})
+
 	t.Run("precise with estimate-backed token-producer: rejected", func(t *testing.T) {
 		handle := newHandle(t)
 		// Empty config selects the zero-config estimate default.
@@ -1332,7 +1383,7 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		addPrecise(t, handle)
 		err := validateHandle(handle)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), `producer attribute "backend"="estimate" does not match required "vllm"`)
+		require.Contains(t, err.Error(), `producer attribute "exact_tokens"="false" does not match required "true"`)
 	})
 
 	t.Run("precise with no token-producer at all: rejected", func(t *testing.T) {
@@ -1352,7 +1403,7 @@ func TestTokenProducerDependencyValidation(t *testing.T) {
 		addPrecise(t, handle)
 		err = validateHandle(handle)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), `producer attribute "backend"="estimate" does not match required "vllm"`)
+		require.Contains(t, err.Error(), `producer attribute "exact_tokens"="false" does not match required "true"`)
 	})
 }
 
@@ -1529,14 +1580,16 @@ type fakeSubscriberManager struct {
 	ids             []string
 	sourceEndpoints []string
 	endpoints       []string
+	replayEndpoints []string
 }
 
 func (f *fakeSubscriberManager) EnsureSubscriber(
 	_ context.Context,
-	id, sourceEndpoint, endpoint, _, _, _ string,
+	id, sourceEndpoint, endpoint, replayEndpoint, _, _ string,
 	_ bool,
 ) error {
 	f.ids = append(f.ids, id)
+	f.replayEndpoints = append(f.replayEndpoints, replayEndpoint)
 	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
 	f.endpoints = append(f.endpoints, endpoint)
 	return nil
@@ -1627,4 +1680,100 @@ func TestDumpStateCaps(t *testing.T) {
 	assert.Equal(t, maxDumpSubscribers+5, state.TotalSubscribers)
 	assert.Len(t, state.SpeculativeEntries, maxDumpSpeculativeEntries)
 	assert.Equal(t, maxDumpSpeculativeEntries+7, state.TotalSpeculativeEntries)
+}
+
+func rankEndpoints() []scheduling.Endpoint {
+	endpoints := make([]scheduling.Endpoint, 0, 2)
+	for rank := range 2 {
+		endpoints = append(endpoints, scheduling.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				ID:           k8stypes.NamespacedName{Name: fmt.Sprintf("pod-a-rank-%d", rank)},
+				Address:      "10.0.0.1",
+				Port:         "8000",
+				RankIndex:    rank,
+				RankByHeader: true,
+			}, nil, nil))
+	}
+	return endpoints
+}
+
+// With pod discovery each rank publishes on its own subscriber, so rank
+// endpoints sharing a pod's address and port read their own rank's matches.
+func TestProduce_RankEndpointsMatchTheirOwnRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := rankEndpoints()
+	var gotFilter sets.Set[string]
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return []kvblock.BlockHash{0xCAFE}, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, podFilter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			gotFilter = podFilter
+			return map[string]kvcache.PodMatch{
+				"10.0.0.1:8000/rank-1": {WeightedScore: 1, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+			}, nil
+		},
+	}
+	p := newProducerWithIndexer(ctx, idx)
+	p.kvEventsConfig = &kvevents.Config{DiscoverPods: true, PodDiscoveryConfig: kvevents.DefaultPodReconcilerConfig()}
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-rank",
+		TargetModel: "test-model",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, testBlockSize)}}},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	assert.Equal(t, sets.New("10.0.0.1:8000/rank-0", "10.0.0.1:8000/rank-1"), gotFilter)
+
+	matchBlocks := func(ep scheduling.Endpoint) int {
+		raw, ok := ep.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+		require.True(t, ok)
+		info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+		require.True(t, ok)
+		return info.MatchBlocks()
+	}
+	assert.Equal(t, 0, matchBlocks(endpoints[0]))
+	assert.Equal(t, 1, matchBlocks(endpoints[1]))
+}
+
+// Without pod discovery the index identifies a pod by the event topic, which
+// carries no rank, so rank endpoints keep the plain address and port.
+func TestProduce_RankEndpointsWithoutPodDiscoveryUseAddressAndPort(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	var gotFilter sets.Set[string]
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return []kvblock.BlockHash{0xCAFE}, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, podFilter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			gotFilter = podFilter
+			return map[string]kvcache.PodMatch{}, nil
+		},
+	}
+	p := newProducerWithIndexer(ctx, idx)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-rank-no-discovery",
+		TargetModel: "test-model",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, testBlockSize)}}},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
+	assert.Equal(t, sets.New("10.0.0.1:8000"), gotFilter)
+
+	// Global bound zmqEndpoint leaves DiscoverPods=true in DefaultConfig, yet still
+	// identifies pods from the event topic (plain address:port).
+	p.kvEventsConfig = &kvevents.Config{DiscoverPods: true, ZMQEndpoint: "tcp://127.0.0.1:5557"}
+	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
+	assert.Equal(t, sets.New("10.0.0.1:8000"), gotFilter)
+
+	// A bound kv-events-source (sharedEvents != nil) subscribes per rank endpoint,
+	// whatever the plugin's own kvEventsConfig says.
+	p.kvEventsConfig = &kvevents.Config{DiscoverPods: false}
+	p.sharedEvents = &kvevents.Pool{}
+	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
+	assert.Equal(t, sets.New("10.0.0.1:8000/rank-0", "10.0.0.1:8000/rank-1"), gotFilter)
 }

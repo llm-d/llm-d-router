@@ -29,6 +29,8 @@ If an Alpha plugin is configured while `--allow-experimental-plugins` is not set
 
 A few plugins ship a multi-cluster variant beside the stock plugin, for a cluster-scoped EPP whose candidate endpoints are clusters. The scheduling variants are `multicluster-kv-cache-utilization-scorer`, `multicluster-queue-scorer`, `multicluster-session-affinity-filter`, and `multicluster-prefix-cache-scorer`. The `multicluster-approx-prefix-cache-producer` is the matching request-control data producer. They rely on three datalayer variants: `multicluster-file-discovery` discovers peer clusters as endpoints, and `multicluster-metrics-data-source` with `multicluster-metrics-extractor` scrape each cluster and write its pool-aggregate metrics into the attributes the scorers read.
 
+`multicluster-rendezvous-filter` keeps each session on one cluster. It picks the cluster by hashing the session ID (or, without one, the conversation's first user message), weighting clusters by their ready pods, unless the tenant is pinned to a cluster. When that cluster is full or down, the session moves to a cluster with room and stays there. See its [README](scheduling/filter/rendezvous/README.md).
+
 The pure-delegation variants (`multicluster-session-affinity-filter`, `multicluster-prefix-cache-scorer`, `multicluster-approx-prefix-cache-producer`) reuse the stock plugin's behavior and only rename the type, so their per-plugin Prometheus metrics report under the stock type label rather than the multicluster one.
 
 ### Dependencies

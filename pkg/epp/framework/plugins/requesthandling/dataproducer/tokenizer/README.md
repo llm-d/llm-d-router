@@ -32,15 +32,21 @@ list shape, sorted by placeholder offset.
 
 Backend selection:
 
-- **`backend`**: names the backend explicitly, `estimate` or `vllm`. It has to
-  agree with the configuration: `backend: vllm` requires `modelName` and
-  rejects `estimate`, and `backend: estimate` rejects `vllm` and `modelName`.
+- **`backend`**: names the backend explicitly (`estimate`, `passthrough`, or `vllm`).
+  It must agree with the configuration. `backend: vllm` requires `modelName` and
+  rejects `estimate`. `backend: estimate` rejects `vllm` and `modelName`.
+  `backend: passthrough` rejects `vllm`, `modelName`, and `estimate`.
   Set it in deployments that want the backend visible in the configuration
   rather than inferred.
-- **`estimate`** (default): tokenizer-free byte-packing — no model, no service.
-  Selected when no backend is set, and auto-created by the framework for any
-  config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
-  P/D routing) without declaring a `token-producer`.
+- **`estimate`** (default): tokenizer-free byte-packing, with no model and no service.
+  EPP selects `estimate` when no backend is set, and creates it automatically when
+  plugins consume `TokenizedPrompt` without declaring a `token-producer`.
+- **`passthrough`**: passes through exact token IDs already carried by the request
+  (pre-tokenized Generate, Embeddings, token-array Completions, and
+  `kv_transfer_params.prompt_token_ids`). It requires no model name and no render
+  service. Text prompts without token IDs produce no `TokenizedRequest`, so
+  pseudo-tokens never reach exact-token consumers. Use `passthrough` for
+  token-only pools paired with `precise-prefix-cache-producer`.
 - **`vllm`** (or `modelName`): forwards requests to vLLM's native
   `/v1/completions/render`, `/v1/chat/completions/render`,
   `/v1/messages/render`, and `/v1/responses/render` endpoints over HTTP or
@@ -165,24 +171,24 @@ prefill/decode mutations and coordinator rendering are separate paths; this
 EPP contract does not establish parity for them.
 
 > [!WARNING]
-> The `estimate` backend approximates token boundaries (≈4 bytes/token); its
-> token IDs do not correspond to engine tokens. The precise prefix-cache scorer
-> requires real tokens — configure a `vllm` `token-producer` explicitly for it.
-> If omitted, the auto-created `estimate` producer satisfies the dependency but
-> silently degrades precise cache correlation.
+> The `estimate` backend approximates token boundaries (about 4 bytes per token).
+> Its token IDs do not match engine tokens. `precise-prefix-cache-producer` requires
+> exact tokens and rejects `estimate` at startup. Configure `backend: vllm` for text
+> pools or `backend: passthrough` for pre-tokenized pools.
 
 ## Config
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `backend`                  | - (inferred)            | Selects the backend explicitly: `estimate` or `vllm`. `vllm` requires `modelName` and rejects `estimate`; `estimate` rejects `vllm` and `modelName`. Without it, the backend is inferred from `modelName`, `vllm`, and `estimate`. |
+| `backend`                  | - (inferred)            | Selects the backend explicitly: `estimate`, `passthrough`, or `vllm`. `vllm` requires `modelName` and rejects `estimate`. `estimate` rejects `vllm` and `modelName`. `passthrough` rejects `vllm`, `modelName`, and `estimate`. Without `backend`, EPP infers `vllm` or `estimate` from `modelName`, `vllm`, and `estimate`. |
 | `modelName`                | - (required for `vllm`) | Model for startup probes, model-limit discovery, native gRPC text, and legacy Messages/Responses conversion. Native HTTP rendering retains the effective request model. |
 | `vllm.messagesRenderMode`  | `auto`                 | Discover Messages rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
 | `vllm.responsesRenderMode` | `auto`                 | Discover Responses rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
 | `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
 | `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
-| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm; `round-robin` is the only built-in algorithm. |
+| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm: `round-robin` or `session-affinity`. |
+| `vllm.endpointDiscovery.loadBalancer.sources` | `[{header: x-session-id}]` | Ordered session ID sources for `session-affinity`. Each entry sets either `header` or `attribute`. Set `producer` for an attribute published under a plugin instance name. |
 | `vllm.endpointDiscovery.attemptTimeout` | unset         | Optional positive duration limiting each render attempt, e.g. `1s`. |
 | `vllm.endpointDiscovery.discoverModelLimits` | `false` | Probe model context capacity; see [Context limits](#context-limits). |
 | `vllm.endpointDiscovery.minModelLen` | `0` | Minimum eligible renderer context capacity. |
@@ -404,12 +410,50 @@ ports with round-robin balancing. Omitted or empty `portRules` keeps each
 endpoint's inference port. Use this when `/v1/*/render` is served on the same
 listener as inference.
 
+Set `vllm.endpointDiscovery.loadBalancer.type: session-affinity` to keep
+requests with the same target model and session ID on the same render
+endpoint. Renderers with a tokenizer segment cache can reuse entries across turns.
+The picker uses rendezvous hashing over eligible render URLs, so EPP replicas
+with the same endpoints agree without sharing session state. A retry selects
+the next highest-ranked eligible URL. The first source with a nonblank value
+supplies the session ID. If all sources are missing or blank, the picker uses
+round-robin. A hot session can concentrate work on one renderer.
+
+To use the same session ID for rendering and scheduling, configure the same
+sources on the token producer and the [session affinity scorer](../../../scheduling/scorer/sessionaffinity/README.md).
+This example prefers the `x-conversation-id` header and falls back to the
+`llm-d-session` cookie extracted by the [session ID producer](../sessionid/README.md).
+
+```yaml
+plugins:
+  - type: session-id-producer
+    parameters:
+      cookieName: llm-d-session
+  - type: token-producer
+    parameters:
+      modelName: "${MODEL_NAME}"
+      vllm:
+        endpointDiscovery:
+          loadBalancer:
+            type: session-affinity
+            sources: &sessionSources
+              - header: x-conversation-id
+              - attribute: SessionIDDataKey
+                producer: session-id-producer
+  - type: session-affinity-scorer
+    parameters:
+      strategy: session_id
+      sessionIdConfig:
+        sources: *sessionSources
+```
+
 When render uses a different listener, configure ordered `portRules`. The
 first matching Kubernetes label selector resolves the port as
-`basePort + RankIndex`. `RankIndex` is the endpoint's zero-based position in
-the `InferencePool`'s `targetPorts`, not a port-number difference. For example,
-a decode endpoint at index 3 uses render port `8203` with `basePort: 8200`,
-even when its inference port is `8003`.
+`basePort` plus the endpoint's zero-based position in the `InferencePool`'s
+`targetPorts`, not a port-number difference. For example, a decode endpoint at
+index 3 uses render port `8203` with `basePort: 8200`, even when its inference
+port is `8003`. When a pod serves several data-parallel ranks behind its port, every rank of a
+pod uses the render port of the pod's single target port.
 
 This configuration maps prefill and decode endpoints to separate render port
 ranges:

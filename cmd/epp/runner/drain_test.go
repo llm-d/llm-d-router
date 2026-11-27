@@ -113,6 +113,7 @@ func waitErr(t *testing.T, done <-chan error) error {
 // arriving before the proxy sees the new leader, for the drain window. Its
 // health server keeps answering liveness until ext_proc has finished its streams.
 func TestServeWithDrainAfterLeaseLoss(t *testing.T) {
+	t.Parallel()
 	const drain = 300 * time.Millisecond
 	errLost := errors.New("leader election lost")
 	lose := make(chan struct{})
@@ -159,6 +160,7 @@ func TestServeWithDrainAfterLeaseLoss(t *testing.T) {
 // A manager that fails before this instance was ever elected has no traffic to
 // drain: both servers stop at once and the error is returned.
 func TestServeWithDrainManagerFailsBeforeElection(t *testing.T) {
+	t.Parallel()
 	errStart := errors.New("cache sync failed")
 	extProc, health := newFakeServer(), newFakeServer()
 	close(extProc.release)
@@ -183,6 +185,7 @@ func TestServeWithDrainManagerFailsBeforeElection(t *testing.T) {
 // With leader election disabled there is no lease to lose, so a manager failure
 // stops both servers at once and the error is returned.
 func TestServeWithDrainManagerFailsWithoutLeaderElection(t *testing.T) {
+	t.Parallel()
 	errMgr := errors.New("controller failed")
 	extProc, health := newFakeServer(), newFakeServer()
 	close(extProc.release)
@@ -206,6 +209,7 @@ func TestServeWithDrainManagerFailsWithoutLeaderElection(t *testing.T) {
 
 // On SIGTERM the manager returns nil; the servers drain the same way.
 func TestServeWithDrainOnSIGTERM(t *testing.T) {
+	t.Parallel()
 	const drain = 300 * time.Millisecond
 	ctx, sigterm := context.WithCancel(context.Background())
 	startManager := func(c context.Context) error {
@@ -413,7 +417,7 @@ schedulingProfiles:
 	listener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
-	stopping, done := startDrainTestServer(ctx, t, r, listener, 3*time.Second)
+	stopping, done := startDrainTestServer(ctx, t, r, listener, 800*time.Millisecond)
 	queuedStream, queued := sendDrainTestRequest(t, listener, "queued-before-sigterm")
 	if flowControl {
 		select {

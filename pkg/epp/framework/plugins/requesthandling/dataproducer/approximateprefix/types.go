@@ -99,6 +99,8 @@ type SchedulingContextState struct {
 	// endpoints. Taken during Produce, the only stage that sees the candidates
 	// as they were before the scheduler's filters narrowed them.
 	BestAvailableCachedTokens int
+	// BlockSize is the block size in tokens the hashes were derived at.
+	BlockSize int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -156,15 +158,6 @@ func (r *indexUpdateRecord) Clone() plugin.StateData {
 }
 
 const (
-	// experimentalDefaultPrefillProfile is a hardcoded profile name for prefill nodes.
-	// In P/D disaggregation mode, the prefill and decode are usually represented as two different
-	// scheduling profiles to pick the prefill and decode endpoints. This constant defines the
-	// prefill profile name to ensure that the index is updated for the prefill endpoint and not
-	// only for the primary endpoint that will initially handle the request.
-	// This is hardcoded for now until we land on a canonical approach for plugins to identify
-	// prefill and decode endpoints (See https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2080)
-	experimentalDefaultPrefillProfile = "prefill"
-
 	// podActiveCheckInterval is the interval at which we check if pods are still active.
 	podActiveCheckInterval = 2 * time.Minute
 
@@ -248,6 +241,10 @@ type config struct {
 	// for hybrid Mamba/GDN models whose decode endpoints cannot reuse KV received over the P/D
 	// transfer. It also removes decode-side prefix affinity for disaggregated requests.
 	ExcludeDecodeWhenDisaggregated bool `json:"excludeDecodeWhenDisaggregated,omitempty"`
+	// IndexCompletions records the prompt followed by the generated text of a
+	// non-streamed /v1/completions request on the decode endpoint that served it.
+	// It applies only with the estimate token-producer backend.
+	IndexCompletions bool `json:"indexCompletions,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.

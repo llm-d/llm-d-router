@@ -141,13 +141,13 @@ A complete sample is shipped at [`test/e2e/artifacts/config/sim-program-aware-co
 
 ## Observability
 
-The plugin exports two shared collectors under the `llm_d_epp` Prometheus subsystem, plus one owned by the `las` strategy. Under `turn-priority` the strategy registers no collectors, so `program_aware_attained_service_tokens` is absent:
+Each plugin instance owns two collectors under the `llm_d_epp` Prometheus subsystem, plus one owned by its `las` strategy. The `policy` label identifies the configured plugin instance name. Under `turn-priority` the strategy registers no collectors, so `program_aware_attained_service_tokens` is absent:
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `program_aware_jains_fairness_index` | Gauge | none | Jain's Fairness Index over the average wait time per program. `1.0` indicates perfectly equal waits. |
-| `program_aware_avg_wait_time_milliseconds` | GaugeVec | `program_id` | Cumulative running mean of flow-control queue wait time per program. |
-| `program_aware_attained_service_tokens` | GaugeVec | `program_id` | Time-decayed attained service per program, in weighted tokens. Written by the LAS strategy. |
+| `program_aware_jains_fairness_index` | Gauge | `policy` | Jain's Fairness Index over the average wait time per program. `1.0` indicates perfectly equal waits. |
+| `program_aware_avg_wait_time_milliseconds` | GaugeVec | `policy`, `program_id` | Cumulative running mean of flow-control queue wait time per program. |
+| `program_aware_attained_service_tokens` | GaugeVec | `policy`, `program_id` | Time-decayed attained service per program, in weighted tokens. Written by the LAS strategy. |
 
 `program_aware_attained_service_tokens` is written at request completion. Decay is folded in
 lazily, so an idle program's gauge holds the value from its last completion until the program

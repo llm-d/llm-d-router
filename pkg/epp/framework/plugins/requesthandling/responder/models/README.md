@@ -83,3 +83,31 @@ plugins:
 The model data source polls each endpoint at its configured interval. Requests that arrive after
 the next collection use the updated model or LoRA adapter data. A hot-loaded adapter may remain
 absent from inference candidates until the next successful collection from that endpoint.
+
+## Metrics
+
+`llm_d_epp_models_responder_screen_decisions_total{plugin_name, model_name, outcome}` counts one
+outcome per screened inference request. `model_name` is the target model, or `unknown` if empty,
+and shares the EPP model label cap.
+
+| `outcome` | Candidates kept |
+|---|---|
+| `adapter` | Endpoints that list the requested LoRA adapter |
+| `base` | Endpoints that list the requested base model, and endpoints without collected model data |
+| `unreported` | Endpoints without collected model data, since no endpoint lists the model |
+| `not_found` | All endpoints, since every endpoint has collected model data and none lists the model |
+| `not_applicable` | All endpoints, since the request has no target model |
+
+The count is this plugin's result. Other screeners, admitters and the scheduler can still drop the
+request, so it is not a count of requests served.
+
+An endpoint has no collected model data until its first successful poll, and a failed poll keeps
+the previous list. `unreported` appears briefly after a cold start or a scale-up, and persists only
+for endpoints whose polls never succeed, for example with the wrong scheme or an API key on
+`/v1/models`. Check `llm_d_epp_datalayer_polls_total{source_type="models-data-source", outcome!="success"}`.
+
+`not_found` counts requests for a model that no endpoint lists: a client typo, an adapter loaded
+nowhere, or an adapter loaded after the endpoint's last collection (see
+[Model data refresh](#model-data-refresh)). These requests go to any endpoint. One without the
+model answers 404, counted as `llm_d_epp_request_error_total{error_code="ModelServerClientError"}`.
+One with a runtime LoRA resolver loads the adapter wherever the request lands.

@@ -19,6 +19,8 @@ package vllmwire
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 
 	"google.golang.org/protobuf/encoding/protowire"
 
@@ -144,6 +146,30 @@ func (m MediaItem) ContentDigest() string {
 		return nil
 	})
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// SliceEncoderSpan returns an encoder sub-request prompt consisting of bos
+// followed by prompt[offset : offset+length], checking bounds without overflow.
+// When allowEmpty is false, a zero-length span is rejected.
+func SliceEncoderSpan[T ~int | ~uint32](prompt []T, bos T, offset, length uint64, allowEmpty bool) ([]T, error) {
+	if (!allowEmpty && length == 0) || offset > uint64(len(prompt)) || length > uint64(len(prompt))-offset {
+		return nil, fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids", offset, length, len(prompt))
+	}
+	n := int(length) //#nosec G115 -- length <= len(prompt), which fits in int
+	ids := make([]T, 1+n)
+	ids[0] = bos
+	copy(ids[1:], prompt[int(offset):int(offset)+n]) //#nosec G115 -- offset <= len(prompt)
+	return ids, nil
+}
+
+// EncoderTokenIDs returns the encoder sub-request prompt (promptTokenIDs[0]
+// followed by m's placeholder span in promptTokenIDs), rejecting empty
+// prompts and zero-length spans.
+func (m MediaItem) EncoderTokenIDs(promptTokenIDs []uint32) ([]uint32, error) {
+	if len(promptTokenIDs) == 0 {
+		return nil, errors.New("empty prompt token_ids")
+	}
+	return SliceEncoderSpan(promptTokenIDs, promptTokenIDs[0], m.Offset, m.Length, false)
 }
 
 // RewrittenBody returns the item body with uuid replaced by uuidOverride

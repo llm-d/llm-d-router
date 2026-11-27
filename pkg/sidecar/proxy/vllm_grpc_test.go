@@ -41,6 +41,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/utils/set"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
@@ -479,12 +480,12 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				pkv := prefillCall.Request.GetKv().GetKvTransferParams().AsMap()
 				assert.Equal(t, "10.9.0.2", pkv["remote_host"])
 				assert.Equal(t, float64(17001), pkv["remote_notify_port"])
-				assert.NotEmpty(t, prefillCall.Header.Get(requestHeaderDataParallelRank))
+				assert.NotEmpty(t, prefillCall.Header.Get(routing.DataParallelRankHeader))
 
 				dkv := decodeCall.Request.GetKv().GetKvTransferParams().AsMap()
 				assert.True(t, strings.HasPrefix(dkv[requestFieldTransferID].(string), "tx"))
 				assert.Equal(t, float64(17001), dkv["remote_notify_port"])
-				assert.NotEmpty(t, decodeCall.Header.Get(requestHeaderDataParallelRank))
+				assert.NotEmpty(t, decodeCall.Header.Get(routing.DataParallelRankHeader))
 			},
 		},
 		{
@@ -502,7 +503,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				require.Equal(t, dkv["remote_request_id"], prefillCall.Request.GetRequestId())
 				assert.Equal(t, prefillCall.Request.GetRequestId(), decodeCall.Request.GetRequestId())
 				assert.Equal(t, pkv[requestFieldTransferID], dkv[requestFieldTransferID])
-				assert.Equal(t, extractHost(prefillAddr), dkv["remote_host"])
+				assert.Equal(t, routing.ExtractHost(prefillAddr), dkv["remote_host"])
 				assert.Equal(t, true, dkv["do_remote_prefill"])
 			},
 		},
@@ -514,7 +515,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 			verifyLegs: func(t *testing.T, prefillCall, decodeCall grpctest.VLLMCall, _ string) {
 				pkv := prefillCall.Request.GetKv().GetKvTransferParams().AsMap()
 				dkv := decodeCall.Request.GetKv().GetKvTransferParams().AsMap()
-				assert.Equal(t, "2", prefillCall.Header.Get(requestHeaderDataParallelRank))
+				assert.Equal(t, "2", prefillCall.Header.Get(routing.DataParallelRankHeader))
 				assert.Equal(t, true, pkv["do_remote_decode"])
 				assert.Equal(t, false, pkv["do_remote_prefill"])
 				assert.Equal(t, pkv["transfer_id"], dkv["transfer_id"])
@@ -529,7 +530,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 			wantCachedCount:    40,
 			extraHeaders: func(prefillAddr string) map[string]string {
 				return map[string]string{
-					routing.KVCachePrefillHeader: net.JoinHostPort(extractHost(prefillAddr), strconv.Itoa(p2pTierPort)),
+					routing.KVCachePrefillHeader: net.JoinHostPort(routing.ExtractHost(prefillAddr), strconv.Itoa(p2pTierPort)),
 				}
 			},
 			verifyLegs: func(t *testing.T, prefillCall, decodeCall grpctest.VLLMCall, prefillAddr string) {
@@ -540,7 +541,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				rp, ok := dkv["remote_prefiller"].(map[string]any)
 				require.True(t, ok)
 				assert.Equal(t, rd["kv_request_id"], rp["kv_request_id"])
-				assert.Equal(t, extractHost(prefillAddr), rp["remote_host"])
+				assert.Equal(t, routing.ExtractHost(prefillAddr), rp["remote_host"])
 				assert.Equal(t, float64(p2pTierPort), rp["remote_port"])
 			},
 		},
@@ -642,7 +643,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 					MoRIIOTPSize:               2,
 					MoRIIODPSize:               4,
 					MoRIIODPSizeLocal:          2,
-					MoRIIORemoteHosts:          []string{extractHost(prefillAddr), "10.9.0.99"},
+					MoRIIORemoteHosts:          []string{routing.ExtractHost(prefillAddr), "10.9.0.99"},
 				}
 				sidecarAddr := startCustomSidecar(t, cfg, nil)
 				client := newVLLMGRPCClient(t, sidecarAddr)
@@ -1182,6 +1183,92 @@ func TestVLLMGRPCPrefillRetryOnlyWhenUncommitted(t *testing.T) {
 		assert.Contains(t, status.Convert(err).Message(), "engine lost mid-prefill")
 		assert.Len(t, prefillSrv.Calls(), 1, "prefill must not retry after streaming any body frame")
 		assert.Empty(t, decodeSrv.Calls())
+	})
+}
+
+// A hung gRPC prefill attempt is answered by the prefill proxy with a gRPC
+// Unavailable status, which is retried; the client gets DeadlineExceeded once
+// attempts are exhausted.
+func TestVLLMGRPCPrefillTimeout(t *testing.T) {
+	const timeout = 100 * time.Millisecond
+	generate := func(t *testing.T, client vllmpb.InferenceClient, prefillHost string) error {
+		t.Helper()
+		callCtx := metadata.AppendToOutgoingContext(t.Context(), routing.PrefillEndpointHeader, prefillHost)
+		_, err := client.Generate(callCtx, &vllmpb.GenerateRequest{
+			Model:  "m",
+			Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2, 3}}},
+		})
+		return err
+	}
+
+	for _, maxRetries := range []int{0, 2} {
+		t.Run(fmt.Sprintf("hung_prefill_with_%d_retries", maxRetries), func(t *testing.T) {
+			var attempts atomic.Int32
+			prefillH2C := grpctest.NewH2CServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				<-r.Context().Done()
+			}))
+			prefillURL, err := url.Parse(prefillH2C.URL)
+			require.NoError(t, err)
+			decodeSrv := grpctest.NewVLLMUpstream(t, grpctest.VLLMUpstreamOptions{})
+			decodeURL, err := url.Parse(decodeSrv.URL())
+			require.NoError(t, err)
+
+			sidecarAddr := startCustomSidecar(t, Config{
+				Port:                "0",
+				DecoderURL:          decodeURL,
+				KVConnector:         constants.KVConnectorNIXLV2,
+				PrefillMaxRetries:   maxRetries,
+				PrefillRetryBackoff: time.Millisecond,
+				PrefillTimeout:      timeout,
+			}, nil)
+
+			before := snapshotStageMetrics(t)
+			err = generate(t, newVLLMGRPCClient(t, sidecarAddr), prefillURL.Host)
+			require.Error(t, err)
+			assert.Equal(t, codes.DeadlineExceeded, status.Code(err))
+			assert.Contains(t, status.Convert(err).Message(), "prefill request timed out after 100ms")
+			assert.Equal(t, int32(maxRetries+1), attempts.Load())
+			assert.Empty(t, decodeSrv.Calls())
+			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+		})
+	}
+
+	t.Run("retry_after_timeout_succeeds", func(t *testing.T) {
+		release := make(chan struct{})
+		var attempts atomic.Int32
+		prefillSrv := grpctest.NewVLLMUpstream(t, grpctest.VLLMUpstreamOptions{
+			Respond: func(_ grpctest.VLLMCall) ([]*vllmpb.GenerateResponse, error) {
+				if attempts.Add(1) == 1 {
+					<-release
+				}
+				return []*vllmpb.GenerateResponse{
+					makePrefillFinishResponse(t, map[string]any{
+						"do_remote_prefill": true,
+						"remote_engine_id":  "nixl-timeout-retry",
+					}, nil, 9),
+				}, nil
+			},
+		})
+		// Registered after the upstream, so it runs before the upstream closes.
+		t.Cleanup(func() { close(release) })
+		decodeSrv := grpctest.NewVLLMUpstream(t, grpctest.VLLMUpstreamOptions{})
+		decodeURL, err := url.Parse(decodeSrv.URL())
+		require.NoError(t, err)
+
+		sidecarAddr := startCustomSidecar(t, Config{
+			Port:                "0",
+			DecoderURL:          decodeURL,
+			KVConnector:         constants.KVConnectorNIXLV2,
+			PrefillMaxRetries:   1,
+			PrefillRetryBackoff: time.Millisecond,
+			PrefillTimeout:      timeout,
+		}, nil)
+
+		require.NoError(t, generate(t, newVLLMGRPCClient(t, sidecarAddr), prefillSrv.Addr()))
+		assert.Equal(t, int32(2), attempts.Load())
+		assert.Len(t, decodeSrv.Calls(), 1)
 	})
 }
 
@@ -1934,6 +2021,64 @@ func TestVLLMGRPCClientCancellationPropagatesToWorkers(t *testing.T) {
 			t.Fatal("timed out waiting for decode stream cancellation")
 		}
 	})
+}
+
+// A gRPC client that disconnects during prefill makes the prefill proxy answer
+// gRPC Unavailable itself; that status is not a prefill failure and is not
+// retried.
+func TestVLLMGRPCClientCancelDuringPrefillIsNotAPrefillFailure(t *testing.T) {
+	var attempts atomic.Int32
+	received := make(chan struct{}, 1)
+	prefillH2C := grpctest.NewH2CServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case received <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	prefillURL, err := url.Parse(prefillH2C.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Millisecond})
+	s.logger = log.Log
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("decode must not run after the client disconnected")
+	})
+	handled := make(chan struct{})
+	sidecar := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handled)
+		s.handleNIXLV2VLLMGRPC(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{})
+	}))
+	client := newVLLMGRPCClient(t, strings.TrimPrefix(sidecar.URL, "http://"))
+
+	before := snapshotStageMetrics(t)
+	callCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, rpcErr := client.Generate(callCtx, &vllmpb.GenerateRequest{
+			Model:  "m",
+			Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+		})
+		errCh <- rpcErr
+	}()
+
+	select {
+	case <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prefill did not receive the request")
+	}
+	cancel()
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sidecar handler did not return after the client disconnected")
+	}
+	require.Error(t, <-errCh)
+	assert.Equal(t, int32(1), attempts.Load())
+	assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
 }
 
 func TestVLLMGRPCEncodedPathRedirectOverH2C(t *testing.T) {

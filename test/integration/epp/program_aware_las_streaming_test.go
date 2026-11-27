@@ -117,8 +117,8 @@ flowControl:
 				"llm_d_epp_program_aware_attained_service_tokens": fmt.Sprintf(`
 # HELP llm_d_epp_program_aware_attained_service_tokens [ALPHA] Time-decayed attained service (weighted tokens consumed) per program.
 # TYPE llm_d_epp_program_aware_attained_service_tokens gauge
-llm_d_epp_program_aware_attained_service_tokens{program_id="alpha"} %g
-`, tc.wantService),
+llm_d_epp_program_aware_attained_service_tokens{policy=%q,program_id="alpha"} %g
+`, programaware.ProgramAwarePluginType, tc.wantService),
 			})
 		})
 	}

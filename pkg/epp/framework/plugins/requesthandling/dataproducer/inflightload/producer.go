@@ -31,6 +31,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -49,21 +50,22 @@ import (
 
 const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
-	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
-	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
-	// the in-flight token counter. Defaults to false. The per-request output
-	// estimate comes from the output-length bucket published by the outlen-bucket plugin; enable
-	// that plugin (ordered before this producer) so requests are classified rather
-	// than all estimated as UNKNOWN.
+	// AddEstimatedOutputTokens controls whether estimated output work is added to
+	// the in-flight token counter. Defaults to false. For text requests the
+	// per-request estimate comes from the output-length bucket published by the
+	// outlen-bucket plugin; enable that plugin (ordered before this producer) so
+	// requests are classified rather than all estimated as UNKNOWN. Image requests
+	// use diffusion work instead.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
-	// MaxEstimatedOutputTokens optionally caps the estimated output tokens added per
+	// MaxEstimatedOutputTokens optionally caps the text output estimate added per
 	// request when AddEstimatedOutputTokens is true, regardless of input length or
-	// the client-requested output cap. Must be non-negative. Unset means no cap.
+	// the client-requested output cap. Image diffusion work is not capped. Must be
+	// non-negative. Unset means no cap.
 	MaxEstimatedOutputTokens *int64 `json:"maxEstimatedOutputTokens,omitempty"`
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's
 	// PrefixCacheMatchInfo to read for the cached-prefix discount. Empty defaults
@@ -648,9 +650,9 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
-		// TTS completion tokens are codec frames, not text output-length
-		// samples; they must not train the text UNKNOWN average.
-		if request.Body != nil && request.Body.TextToSpeech == nil &&
+		// TTS and image completion counts are not text output-length samples;
+		// they must not train the text UNKNOWN average.
+		if request.Body != nil && !isTextToSpeech(request) && !isImageGeneration(request) &&
 			resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
 			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))
@@ -664,8 +666,34 @@ func (p *InFlightLoadProducer) ResponseBody(
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
+		// Refresh access time before unbinding so a concurrent janitor sweep cannot
+		// reap the first chunk when prefill exceeded stalenessThreshold.
 		p.PluginState.Touch(request.RequestID)
+		if resp.StartOfStream {
+			p.PluginState.UnbindLiveness(request.RequestID)
+		}
 	}
+}
+
+// isTextToSpeech reports whether request is a text-to-speech request. Once the
+// request is forwarded the handler keeps only the response-phase view of the
+// body, which drops TextToSpeech, so the path decides from then on.
+func isTextToSpeech(request *fwksched.InferenceRequest) bool {
+	if request.Body != nil && request.Body.TextToSpeech != nil {
+		return true
+	}
+	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(request.Headers)) == reqcommon.APITypeAudioSpeech
+}
+
+// isImageGeneration reports whether request generates images. The response-phase
+// body drops Images, so the path decides from then on.
+func isImageGeneration(request *fwksched.InferenceRequest) bool {
+	if request.Body != nil && request.Body.Images != nil {
+		return true
+	}
+	path := fwkrequest.GetRequestPath(request.Headers)
+	return fwkrequest.MatchPathSuffix(path, reqcommon.PathImagesGenerations) ||
+		fwkrequest.MatchPathSuffix(path, reqcommon.PathImagesEdits)
 }
 
 // release surgically deletes a single profile's entry from PluginState,
@@ -793,8 +821,10 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 		// The event match compares the request's token ids with the engine's,
 		// so estimated ids would never complete a request.
 		tokenized = fwkplugin.ConsumedData{
-			Type:    fwkrequest.TokenizedRequest{},
-			Matches: fwkplugin.MatchKeyValues(map[string]string{"backend": tokenproducer.BackendVLLM}),
+			Type: fwkrequest.TokenizedRequest{},
+			Matches: fwkplugin.MatchKeyValues(map[string]string{
+				tokenproducer.AttrExactTokens: tokenproducer.ExactTokensTrue,
+			}),
 		}
 	}
 	return fwkplugin.DataDependencies{

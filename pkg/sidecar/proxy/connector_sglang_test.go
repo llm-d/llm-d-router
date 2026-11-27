@@ -117,7 +117,7 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(prq1).To(HaveKey(reqcommon.FieldBootstrapPort))
 		Expect(prq1).To(HaveKey(reqcommon.FieldBootstrapRoom))
 
-		expectedHost := extractHost(prefillHostPort)
+		expectedHost := routing.ExtractHost(prefillHostPort)
 		Expect(prq1[reqcommon.FieldBootstrapHost]).To(Equal(expectedHost))
 		Expect(prq1[reqcommon.FieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
 		Expect(prq1[reqcommon.FieldBootstrapRoom]).ToNot(BeNil())
@@ -264,7 +264,7 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(prefillReq.GetText().GetOne()).To(Equal("Hello from gRPC"))
 		Expect(decodeReq.GetText().GetOne()).To(Equal("Hello from gRPC"))
 
-		expectedHost := extractHost(prefillBackend.addr)
+		expectedHost := routing.ExtractHost(prefillBackend.addr)
 		Expect(prefillReq.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))
 		Expect(decodeReq.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))
 		Expect(prefillReq.GetBootstrapPort().GetOne().GetValue()).To(Equal(int64(sglangBootstrapPort)))
@@ -323,7 +323,7 @@ var _ = Describe("SGLang Connector", func() {
 		}, routing.PrefillEndpointHeader, prefillBackend.addr)).To(Equal([]string{"ok"}))
 
 		Eventually(prefillBackend.RequestCount).Should(Equal(1))
-		expectedHost := extractHost(prefillBackend.addr)
+		expectedHost := routing.ExtractHost(prefillBackend.addr)
 		for _, got := range []*sglangapiv1.GenerateRequest{prefillBackend.LastRequest(), decodeBackend.LastRequest()} {
 			Expect(got.GetBootstrapHost().GetMany()).To(BeNil())
 			Expect(got.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))

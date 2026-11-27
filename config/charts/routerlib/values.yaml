@@ -90,6 +90,9 @@ epp:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker
     tag: main
+    # Pins the image by digest (sha256:<64 hex characters>). When set, the image renders as
+    # registry/repository@digest and the tag is ignored.
+    digest: ""
     pullPolicy: Always
   extProcPort: 9002
   # gRPC port serving EPP liveness and readiness checks, 9003 if unset.
@@ -241,6 +244,8 @@ tokenizer:
     registry: docker.io
     repository: vllm/vllm-openai-cpu
     tag: v0.31.0
+    # Pins the image by digest; when set, the tag is ignored. See router.epp.image.digest.
+    digest: ""
     pullPolicy: IfNotPresent
   port: 8000
   command: []
@@ -292,7 +297,8 @@ monitoring:
       # When true, the chart creates cluster-scoped RBAC for the EPP. See docs/metrics.md.
       enabled: true
       # Service account token Secret the ServiceMonitor authenticates with.
-      # Empty means <release>-metrics-reader-secret. Set a name to override it.
+      # Empty means <base>-metrics-reader-secret, where <base> is router.fullnameOverride
+      # in the standalone chart when set, else the release name. Set a name to override it.
       secretName: ""
     # additional labels for the ServiceMonitor
     extraLabels: {}
@@ -319,10 +325,10 @@ modelServers:
   protocol: http # http, grpc
   targetPorts:
     - number: 8000
-  # Service name for GKE gRPC HealthCheckPolicy when type=vllm and protocol=grpc.
-  # Set to "" to query overall server health, or "vllm.grpc.engine.VllmEngine"
-  # for legacy VllmEngine servers.
-  grpcServiceName: vllm.Inference
+  # Optional service name for GKE gRPC HealthCheckPolicy when protocol=grpc.
+  # Empty omits grpcServiceName so grpc.health.v1.Health/Check queries overall
+  # server health.
+  grpcServiceName: ""
   # matchLabels: # REQUIRED in parent charts if creating inference pool
   #   app: vllm-qwen3-32b
 
@@ -350,6 +356,8 @@ latencyPredictor:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-training-server
       tag: "0.9.0"
+      # Pins the image by digest; when set, the tag is ignored. See router.epp.image.digest.
+      digest: ""
       pullPolicy: Always
     command: []
     args: []
@@ -398,6 +406,8 @@ latencyPredictor:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-prediction-server
       tag: "0.9.0"
+      # Pins the image by digest; when set, the tag is ignored. See router.epp.image.digest.
+      digest: ""
       pullPolicy: Always
     command: ["uvicorn"]
     args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]

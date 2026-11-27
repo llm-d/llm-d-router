@@ -26,11 +26,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -86,6 +89,17 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetTraceBaggageKeys sets the W3C Baggage keys whose entries are recorded as
+// attributes on the request span. Empty by default, which records none.
+func (s *StreamingServer) SetTraceBaggageKeys(keys []string) {
+	s.traceBaggageKeys = nil
+	for _, key := range keys {
+		if key = strings.TrimSpace(key); key != "" {
+			s.traceBaggageKeys = append(s.traceBaggageKeys, key)
+		}
+	}
+}
+
 // SetEmitEndpointScores controls whether the per-endpoint scheduler scores are emitted in the
 // request-path dynamic metadata under metadata.DestinationEndpointScoresKey. Off by default.
 func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
@@ -135,10 +149,24 @@ type StreamingServer struct {
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores          bool
 	toolCallingTelemetryEnabled bool
+	// traceBaggageKeys allowlists the W3C Baggage entries recorded on the request
+	// span. Empty unless set via SetTraceBaggageKeys.
+	traceBaggageKeys []string
 	// maxRequestBodySize caps the buffered request body in bytes; 0 disables the cap.
 	maxRequestBodySize int
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
 	responders []fwkrh.Responder
+	// forwardInputControlHeaders passes the client's input-control headers
+	// (objective, fairness ID, ...) to the chosen endpoint instead of stripping
+	// them. Set on a multi-cluster hub, whose endpoints are other EPPs that read
+	// them. Off by default: a model server has no use for them.
+	forwardInputControlHeaders bool
+}
+
+// SetForwardInputControlHeaders makes the server forward the client's
+// input-control headers to the chosen endpoint.
+func (s *StreamingServer) SetForwardInputControlHeaders(forward bool) {
+	s.forwardInputControlHeaders = forward
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -160,6 +188,12 @@ type RequestContext struct {
 	RequestSize              int
 	Usage                    fwkrequest.Usage
 	StreamedEvents           int
+	// Completion is set at end of stream from a response with a 200 status.
+	Completion *fwkrh.Completion
+	// StreamUsageRequested is set when the director asked the model server for
+	// usage the client did not ask for; the usage-only frame is then removed
+	// from the streamed response before it reaches the client.
+	StreamUsageRequested bool
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
 	Request             *Request
@@ -187,7 +221,13 @@ type RequestContext struct {
 	responseSize               int
 	responseComplete           bool
 	responseStatusCode         string
-	requestRunning             bool
+	// ResponseGRPCStatus is the grpc-status the response carried, in its
+	// headers for a trailers-only response or in its trailers otherwise. The
+	// director writes it onto the end-of-stream response headers, after the
+	// streaming plugins' async queue drains, so response plugins can classify
+	// a gRPC stream by its final status.
+	ResponseGRPCStatus string
+	requestRunning     bool
 	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
 	bodyReceived bool
 
@@ -198,6 +238,17 @@ type RequestContext struct {
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool
+	// sseSalvage scans the bytes of the oversized SSE line being dropped for
+	// its usage object, which is merged when the line ends.
+	sseSalvage *usageSalvager
+	// salvagedUsage accumulates usage folded out of dropped oversized SSE lines
+	// this chunk. It is merged into Usage after the parser runs so a dropped
+	// line that follows a parsed usage line still wins (last usage event in a
+	// chunk wins), rather than being clobbered by the earlier parser merge.
+	salvagedUsage *fwkrequest.Usage
+
+	// usageFrames removes the usage-only frame when StreamUsageRequested is set.
+	usageFrames usageFrameFilter
 
 	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
 	grpcFrameCarry         []byte
@@ -384,6 +435,37 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 	return tracing.BeginRequestAttribution(ctx, id)
 }
 
+// maxBaggageAttributeValueLen caps a recorded baggage value in bytes. Baggage is
+// client-controlled, and the W3C limit applies to the whole header, not one entry.
+const maxBaggageAttributeValueLen = 256
+
+// baggageAttributes returns the baggage entries in ctx whose key is in keys as
+// span attributes named after the key.
+func baggageAttributes(ctx context.Context, keys []string) []attribute.KeyValue {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	bag := baggage.FromContext(ctx)
+	var attrs []attribute.KeyValue
+	for _, key := range keys {
+		member := bag.Member(key)
+		if member.Key() == "" {
+			continue
+		}
+		value := member.Value()
+		if len(value) > maxBaggageAttributeValueLen {
+			end := maxBaggageAttributeValueLen
+			for end > 0 && !utf8.RuneStart(value[end]) {
+				end--
+			}
+			value = value[:end]
+		}
+		attrs = append(attrs, attribute.String(key, value))
+	}
+	return attrs
+}
+
 // terminationCause classifies a stream that ended without completing. ctxErr is the request
 // context's error, which is non-nil once Envoy has torn the stream down under the EPP.
 func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCause {
@@ -399,20 +481,47 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCau
 	}
 }
 
-func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.TerminationCause {
+// grpcStatusFromTrailers returns the grpc-status value the response trailers
+// carry, or "" when they carry none.
+func grpcStatusFromTrailers(trailers *extProcPb.HttpTrailers) string {
 	if trailers == nil || trailers.GetTrailers() == nil {
 		return ""
 	}
 
 	for _, header := range trailers.GetTrailers().GetHeaders() {
 		if header.Key == grpcframe.HeaderStatus {
-			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != grpcframe.StatusOK {
-				return fwkrh.TerminationCauseError
-			}
-			return ""
+			return envoy.GetHeaderValue(header)
 		}
 	}
 	return ""
+}
+
+// grpcStatusFromHeaders returns the grpc-status value the response headers
+// carry, or "" when they carry none. A response that fails before streaming
+// any frame carries its status in the only HEADERS frame it has, so the value
+// arrives here rather than in trailers.
+func grpcStatusFromHeaders(headers *extProcPb.HttpHeaders) string {
+	if headers == nil || headers.GetHeaders() == nil {
+		return ""
+	}
+
+	for _, header := range headers.GetHeaders().GetHeaders() {
+		if header.Key == grpcframe.HeaderStatus {
+			return envoy.GetHeaderValue(header)
+		}
+	}
+	return ""
+}
+
+// setGRPCStatusError records a non-OK grpc-status the way an HTTP error status
+// is recorded: the mapped HTTP status classifies the request's error code, and
+// the stream's termination is an error rather than a natural end.
+func setGRPCStatusError(reqCtx *RequestContext, grpcStatus string) {
+	if reqCtx.responseStatusCode == "" {
+		reqCtx.responseStatusCode = errcommon.ModelServerStatusCode(
+			strconv.Itoa(grpcframe.HTTPStatus(grpcStatus)))
+	}
+	reqCtx.TerminationCause = fwkrh.TerminationCauseError
 }
 
 // Values of the outcome label on llm_d_epp_request_outcome_total.
@@ -681,8 +790,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			ctx = extractTraceContext(ctx, v)
 			ctx, span = tracer.Start(ctx, "request",
 				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String())),
 			)
+			if span.IsRecording() {
+				// Baggage attributes go first: a later duplicate key wins, so a client
+				// cannot replace an attribute the EPP sets.
+				if attrs := baggageAttributes(ctx, s.traceBaggageKeys); len(attrs) > 0 {
+					span.SetAttributes(attrs...)
+				}
+				span.SetAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String()))
+				tracing.AttributeRequest(ctx, span)
+			}
 
 			// Tag every log line of this request with the trace it belongs to.
 			ctx = tracing.LoggerWithSpanContext(ctx, span)
@@ -874,6 +991,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					}
 				}
 			}
+			// A gRPC response that fails before streaming a frame is
+			// trailers-only: its grpc-status arrives in the headers, and no
+			// trailers message follows. Classify it here so the request is
+			// counted like the HTTP status the code maps to.
+			if grpcStatus := grpcStatusFromHeaders(v.ResponseHeaders); grpcStatus != "" {
+				reqCtx.ResponseGRPCStatus = grpcStatus
+				if grpcStatus != grpcframe.StatusOK {
+					setGRPCStatusError(reqCtx, grpcStatus)
+				}
+			}
 			reqCtx.requestState = responseReceived
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
 			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
@@ -893,8 +1020,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				reqCtx.observeToolCallingResponse(upstreamChunk, endOfStream, false, span)
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
+				chunk = reqCtx.dropRequestedUsageFrame(upstreamChunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(upstreamChunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -905,14 +1033,26 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
-			// A non-zero grpc-status indicates a gRPC error. Record the error cause before
-			// finishResponse marks the response complete so the end-of-stream record is not
-			// reported as a natural termination.
+			// A non-zero grpc-status indicates a gRPC error. Record the error cause and
+			// the mapped HTTP status before finishResponse marks the response complete,
+			// so the end-of-stream record is not reported as a natural termination and
+			// the request is counted like the HTTP status the code maps to.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
-			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
-				reqCtx.TerminationCause = cause
+			if grpcStatus := grpcStatusFromTrailers(v.ResponseTrailers); grpcStatus != "" {
+				reqCtx.ResponseGRPCStatus = grpcStatus
+				if grpcStatus != grpcframe.StatusOK {
+					setGRPCStatusError(reqCtx, grpcStatus)
+				}
 			}
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
+			// Trailers end a stream whose last body chunk had no end of stream, so
+			// the line dropRequestedUsageFrame still holds is forwarded here.
+			if reqCtx.modelServerStreaming {
+				if held := reqCtx.dropRequestedUsageFrame(nil, true); len(held) > 0 {
+					held, _ = rewriteModelName(held, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+					reqCtx.respBodyResp = generateResponseBodyResponses(held, false, reqCtx.Response.DynamicMetadata)
+				}
+			}
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},

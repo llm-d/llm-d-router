@@ -23,8 +23,11 @@ Pipeline per request:
 - (`PreRequest`) Speculative-index the selected endpoint(s) with TTL eviction.
 - (`EndpointExtractor`) Per-pod ZMQ subscriber lifecycle on add/delete.
 
-Requires `TokenizedPrompt` on the request — set by a `token-producer`
-upstream. No-op otherwise.
+Requires `TokenizedPrompt` on the request from a `token-producer` that emits exact
+engine tokens (`exact_tokens: "true"`). Configure `backend: vllm` for text pools or
+`backend: passthrough` for pre-tokenized pools. EPP rejects `backend: estimate` at
+startup so byte-packed pseudo-tokens never enter the KV-block index. A request with
+no `TokenizedPrompt` is a no-op.
 
 ## Parameters
 
@@ -34,7 +37,7 @@ upstream. No-op otherwise.
 | `indexerConfig` | object | `kvcache.NewDefaultConfig()` | `kvcache.Indexer` config. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
 | `kvEventsSourceRef` | string | _(none)_ | Name of a `kv-events-source` whose decoded batches this producer indexes. The producer then opens no subscribers of its own, and `kvEventsConfig` is rejected. |
-| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
+| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions, covering only whole engine blocks of the block size the endpoint reports in its metrics. An endpoint that reports none gets every router block. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
 | `seedDecodeWhenDisaggregated` | bool | `false` | Also seed a disaggregated request's speculative entries on its decode endpoint. By default only the prefill endpoint is seeded: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
 
@@ -73,6 +76,17 @@ requires a vLLM build with
 [vllm-project/vllm#57789](https://github.com/vllm-project/vllm/pull/57789),
 whose wire format can still change.
 
+When a pod serves several data-parallel ranks behind its port (see
+[Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md)), each rank of the pod
+is its own endpoint on the pod's address and port. With pod discovery, each
+rank's events reach the index under `<address>:<port>/rank-<RankIndex>`, so the
+ranks of one pod are scored separately. Without pod discovery, the index learns
+a pod's identity from the event topic, and all ranks of a pod share one score.
+
+A rank endpoint's subscriber dials `socketPort` plus the endpoint's
+data-parallel rank, as vLLM offsets each engine's publisher, replay and snapshot
+ports.
+
 A subscriber that joins mid-stream, or sees the engine restart, loads the
 snapshot instead of replaying buffered events, then follows live events after
 the snapshot's sequence number. A restart shows as a sequence that moves
@@ -82,6 +96,10 @@ the snapshot as well. While the snapshot fails, is unavailable or comes from
 another publisher identity, the pod is indexed from live events alone, as it
 is with neither port set, and the load is retried after the replay cooldown.
 A snapshot that loads replaces that state.
+
+`kvEventsConfig.podDiscoveryConfig.maxConcurrentReplays` (default 8) bounds
+the snapshot loads and replays in flight across all pods. Pods beyond it wait
+for a slot, and a snapshot's timeout starts once it holds one.
 
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.
@@ -107,6 +125,26 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+### Cache tiers
+
+Each KV event names the medium that holds its blocks. The index stores the
+medium lowercased as the block's device tier, and
+`indexerConfig.kvCacheBackendConfigs` sets each tier's scoring weight. A tier
+with no configured weight scores 0. A configured list replaces the defaults in
+`kvcache.DefaultKVCacheBackendConfig()`.
+
+SGLang publishes these media:
+
+| SGLang medium | Device tier | Blocks |
+|---------------|-------------|--------|
+| `GPU` | `gpu` | device memory |
+| `CPU_PINNED` | `cpu_pinned` | HiCache host memory |
+| `EXTERNAL` | `external` | HiCache storage, for every `--hicache-storage-backend`; requires an SGLang build with [sgl-project/sglang#50154](https://github.com/sgl-project/sglang/pull/50154) |
+| `DISK` | `disk` | defined by SGLang but not published |
+
+A `kvCacheBackendConfigs` for SGLang pods lists `cpu_pinned` to score
+host-memory blocks; a `cpu` entry does not match them.
 
 ### Shared event input
 

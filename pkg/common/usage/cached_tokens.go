@@ -222,10 +222,19 @@ func (r *cachedTokensUsageRewriter) writePassthrough(next httpsnoop.WriteFunc, b
 // observeSSEChunk runs the observer over the complete SSE lines in body,
 // holding an unterminated tail for the next write. Nothing is rewritten.
 func (r *cachedTokensUsageRewriter) observeSSEChunk(body []byte) {
+	if len(body) == 0 {
+		return
+	}
+	if len(r.streamBuffer) == 0 && sseChunkPassThrough(body) {
+		return
+	}
 	r.streamBuffer = append(r.streamBuffer, body...)
 	for {
 		lineEnd := bytes.IndexByte(r.streamBuffer, '\n')
 		if lineEnd < 0 {
+			if len(r.streamBuffer) == 0 {
+				r.streamBuffer = nil
+			}
 			return
 		}
 		r.processSSELine(r.streamBuffer[:lineEnd+1])
@@ -234,6 +243,12 @@ func (r *cachedTokensUsageRewriter) observeSSEChunk(body []byte) {
 }
 
 func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if len(r.streamBuffer) == 0 && sseChunkPassThrough(body) {
+		return body
+	}
 	r.streamBuffer = append(r.streamBuffer, body...)
 	updated := make([]byte, 0, len(r.streamBuffer))
 	for {
@@ -249,7 +264,30 @@ func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
 		}
 		r.streamBuffer = r.streamBuffer[lineEnd+1:]
 	}
+	if len(r.streamBuffer) == 0 {
+		r.streamBuffer = nil
+	}
 	return updated
+}
+
+// sseChunkPassThrough reports whether every newline-terminated line in body
+// passes processSSELine unchanged, undropped, and without invoking onUsage.
+func sseChunkPassThrough(body []byte) bool {
+	if len(body) == 0 || body[len(body)-1] != '\n' {
+		return false
+	}
+	if !bytes.Contains(body, usageKey) {
+		return true
+	}
+	for len(body) > 0 {
+		lineEnd := bytes.IndexByte(body, '\n')
+		line := bytes.TrimRight(body[:lineEnd], "\r")
+		if data, ok := reqcommon.SSEDataPayload(line); ok && bytes.Contains(data, usageKey) {
+			return false
+		}
+		body = body[lineEnd+1:]
+	}
+	return true
 }
 
 func (r *cachedTokensUsageRewriter) flushSSEBuffer(next httpsnoop.WriteFunc) error {
@@ -296,9 +334,11 @@ func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) er
 
 // CachedTokens reads the cached-token count out of a response's usage block,
 // which callers pass as the decoded value of the response's "usage" field. It
-// reports false when the block is absent or carries no count; vLLM sends the
-// details object as null when the count is zero, so callers that need a number
-// treat that as zero.
+// reports false when the block is absent or its details object carries no
+// number. A false result means no measurement applies: vLLM without
+// --enable-prompt-tokens-details sends no details object however many tokens
+// were cached, so a P/D response whose prefill leg reported none must relay
+// the decode worker's usage unchanged rather than substitute zero.
 func CachedTokens(block any) (int, bool) {
 	fields, ok := block.(map[string]any)
 	if !ok {
@@ -423,11 +463,11 @@ func (r *cachedTokensUsageRewriter) processSSE(body []byte) ([]byte, bool) {
 func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isData bool, drop bool) {
 	trimmedLine := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmedLine):]
-	data, ok := bytes.CutPrefix(trimmedLine, []byte(reqcommon.SSEDataPrefix))
+	data, ok := reqcommon.SSEDataPayload(trimmedLine)
 	if !ok {
 		return line, false, false
 	}
-	if bytes.Equal(bytes.TrimSpace(data), []byte(reqcommon.SSEDoneMarker)) {
+	if reqcommon.SSEIsDone(data) {
 		return line, true, false
 	}
 	if !bytes.Contains(data, usageKey) {
@@ -534,6 +574,25 @@ func hasEmptyChoices(response map[string]json.RawMessage) bool {
 	}
 	var choices []json.RawMessage
 	return json.Unmarshal(raw, &choices) == nil && len(choices) == 0
+}
+
+// UsageOnlyFrame reports whether an SSE line is the trailing usage frame of a
+// chat or completions stream: a data line with a top-level usage block beside
+// an empty choices list. A trailing line ending is ignored.
+func UsageOnlyFrame(line []byte) bool {
+	data, ok := bytes.CutPrefix(bytes.TrimRight(line, "\r\n"), []byte(reqcommon.SSEDataPrefix))
+	if !ok || !bytes.Contains(data, usageKey) {
+		return false
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false
+	}
+	var block map[string]any
+	if err := json.Unmarshal(response[reqcommon.FieldUsage], &block); err != nil || block == nil {
+		return false
+	}
+	return hasEmptyChoices(response)
 }
 
 func setCachedTokens(block map[string]any, cachedTokens int) bool {

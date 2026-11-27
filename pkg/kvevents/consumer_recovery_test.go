@@ -189,7 +189,10 @@ func TestResyncRequestReloadsSnapshotOnce(t *testing.T) {
 	require.Equal(t, int32(1), consumer.resyncResets.Load())
 	require.Equal(t, int32(2), consumer.resets.Load())
 	through := consumer.resyncThrough.Load()
-	require.True(t, through > requested && through <= seq, "the rebuild covers the snapshot cut, got %d", through)
+	// The cut can equal requested: the frame at requested may still be queued
+	// when the resync runs on it, before the next send moves the server on.
+	require.True(t, through >= requested && through <= seq,
+		"the rebuild covers the snapshot cut, got %d, requested %d, seq %d", through, requested, seq)
 
 	// A request inside the cooldown waits.
 	manager.RequestResync("10.0.0.1:8000")

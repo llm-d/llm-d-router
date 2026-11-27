@@ -164,6 +164,34 @@ func TestResponseWriter_DropsInjectedUsageFrame(t *testing.T) {
 	}
 }
 
+func TestUsageOnlyFrame(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"usage-only frame", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n", true},
+		{"usage-only frame with CRLF", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5}}\r\n", true},
+		{"unterminated usage-only frame", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5}}", true},
+		{"usage beside choices", "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":5}}\n", false},
+		{"null usage", "data: {\"choices\":[],\"usage\":null}\n", false},
+		{"no choices field", "data: {\"usage\":{\"prompt_tokens\":5}}\n", false},
+		{"responses event with nested usage", "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5}}}\n", false},
+		{"content frame", "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n", false},
+		{"done marker", "data: [DONE]\n", false},
+		{"blank line", "\n", false},
+		{"not a data line", "event: usage\n", false},
+		{"malformed JSON", "data: {\"usage\":\n", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UsageOnlyFrame([]byte(tc.line)); got != tc.want {
+				t.Fatalf("UsageOnlyFrame(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResponseWriter_ObserverAndCachedTokensTogether(t *testing.T) {
 	cached := 3
 	var seen []int

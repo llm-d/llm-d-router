@@ -141,13 +141,14 @@ type PodCache struct {
 	mu sync.Mutex
 	// entries is ordered least recently added first.
 	entries []EntryRef
-	// capacity bounds len(entries); adding beyond it evicts the least
-	// recent entry.
+	// capacity bounds len(entries); see overflowVictim for the entry an
+	// add beyond it evicts.
 	capacity int
 }
 
 // addAll inserts records with LRU semantics: an existing entry refreshes its
-// recency, a new entry appends, and overflow evicts the least recent entry.
+// recency, a new entry appends, and overflow evicts the entry overflowVictim
+// selects.
 func (pc *PodCache) addAll(recs []EntryRef) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -165,12 +166,34 @@ func (pc *PodCache) addAll(recs []EntryRef) {
 			continue
 		}
 		if pc.capacity > 0 && len(pc.entries) >= pc.capacity {
-			copy(pc.entries, pc.entries[1:])
+			victim := pc.overflowVictim(rec.Speculative)
+			if victim < 0 {
+				continue
+			}
+			copy(pc.entries[victim:], pc.entries[victim+1:])
 			pc.entries[len(pc.entries)-1] = rec
 			continue
 		}
 		pc.entries = append(pc.entries, rec)
 	}
+}
+
+// overflowVictim returns the position of the entry a new record replaces in a
+// full cache, or -1 when the record is dropped. The least recent speculative
+// entry goes first. With none left, a confirmed record replaces the least
+// recent entry and a speculative record is dropped: a speculative entry
+// expires with its lease, while an engine announces a cached block once, so
+// an evicted confirmed entry stays out of the index. pc.mu must be held.
+func (pc *PodCache) overflowVictim(speculative bool) int {
+	for i := range pc.entries {
+		if pc.entries[i].Speculative {
+			return i
+		}
+	}
+	if speculative {
+		return -1
+	}
+	return 0
 }
 
 // removeAll deletes the given entries and reports whether the cache is empty

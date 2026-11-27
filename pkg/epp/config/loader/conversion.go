@@ -202,6 +202,9 @@ func convertRequestHandler(in *configapiv1alpha1.RequestHandlerConfig) *configap
 	out := &configapiv1.RequestHandlerConfig{
 		PropagatePriority:  in.PropagatePriority,
 		ComposeFairnessIDs: in.ComposeFairnessIDs,
+		RequestStreamUsage: in.RequestStreamUsage,
+
+		ForwardInputControlHeaders: in.ForwardInputControlHeaders,
 	}
 	if in.Parsers != nil {
 		out.Parsers = make([]configapiv1.ParserConfig, len(in.Parsers))

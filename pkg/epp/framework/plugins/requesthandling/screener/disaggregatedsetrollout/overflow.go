@@ -18,29 +18,22 @@ package disaggregatedsetrollout
 
 import (
 	"context"
-	"fmt"
 	"sort"
 
 	"k8s.io/apimachinery/pkg/labels"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/rendezvous"
 )
 
 func (c *Screener) resolveOverflowGuard() error {
 	if c.config.RevisionGating == nil || c.config.RevisionGating.Overflow == nil {
 		return nil
 	}
-	name := c.config.RevisionGating.Overflow.GuardPluginName
-	plugin := c.handle.Plugin(name)
-	if plugin == nil {
-		return fmt.Errorf("revisionGating.overflow.guardPluginName: plugin %q not found", name)
-	}
-	guard, ok := plugin.(fwksched.Filter)
-	if !ok {
-		return fmt.Errorf("revisionGating.overflow.guardPluginName: plugin %q is not a scheduling filter", name)
-	}
-	if failOpen, ok := plugin.(interface{ FailsOpen() bool }); ok && failOpen.FailsOpen() {
-		return fmt.Errorf("revisionGating.overflow.guardPluginName: plugin %q fails open; set failOpen: false", name)
+	guard, err := rendezvous.ResolveGuard(c.handle, c.config.RevisionGating.Overflow.GuardPluginName,
+		"revisionGating.overflow.guardPluginName")
+	if err != nil {
+		return err
 	}
 	c.overflowGuard = guard
 	return nil
@@ -57,31 +50,17 @@ func (c *Screener) overflowRevision(ctx context.Context, request *fwksched.Infer
 	}
 	// A revision with no endpoint of the role in the pool has no room, for
 	// example while its Pods are still counted Ready but gone from the pool.
-	var chosenCandidates []fwksched.Endpoint
-	for _, endpoint := range endpoints {
-		if c.overflowRevisionOf(endpoint) == chosen {
-			chosenCandidates = append(chosenCandidates, endpoint)
-		}
-	}
-	if len(chosenCandidates) > 0 && c.hasRoom(ctx, request, chosenCandidates) {
-		return chosen
-	}
 	byRevision := map[string][]fwksched.Endpoint{}
 	for _, endpoint := range endpoints {
-		if revision := c.overflowRevisionOf(endpoint); revision != "" && revision != chosen {
+		if revision := c.overflowRevisionOf(endpoint); revision != "" {
 			byRevision[revision] = append(byRevision[revision], endpoint)
 		}
 	}
-	withRoom := make(map[string]float64, len(shares))
-	for revision, candidates := range byRevision {
-		if share, ok := shares[revision]; ok && c.hasRoom(ctx, request, candidates) {
-			withRoom[revision] = share
-		}
+	hasRoom := func(revision string) bool {
+		candidates := byRevision[revision]
+		return len(candidates) > 0 && c.hasRoom(ctx, request, candidates)
 	}
-	if next := pick(withRoom); next != "" {
-		return next
-	}
-	return chosen
+	return rendezvous.Overflow(chosen, shares, hasRoom, pick)
 }
 
 // overflowRevisionOf skips out-of-scope endpoints: they are not counted in the

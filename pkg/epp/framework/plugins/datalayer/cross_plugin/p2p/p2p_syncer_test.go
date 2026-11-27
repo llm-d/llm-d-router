@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -149,8 +150,8 @@ func newReplica(t testing.TB, name string, stateTTL, refreshInterval time.Durati
 func newReplicaAt(t testing.TB, name, listenAddress string, stateTTL, refreshInterval time.Duration) *replica {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	syncer, err := newP2PSyncer(ctx, "p2p", name, listenAddress, "", stateTTL, refreshInterval)
-	require.NoError(t, err)
+	syncer := newP2PSyncer(ctx, "p2p", name, listenAddress, "", stateTTL, refreshInterval)
+	require.NoError(t, syncer.Start(ctx))
 	r := &replica{name: name, syncer: syncer, loads: newLoads(), peers: &staticPeers{}, cancel: cancel}
 	syncer.SetPeerSource(r.peers)
 	t.Cleanup(cancel)
@@ -210,11 +211,39 @@ func TestFactoryConfiguration(t *testing.T) {
 			require.NoError(t, err)
 			syncer := plugin.(*P2PSyncer)
 			t.Cleanup(syncer.close)
+			assert.Nil(t, syncer.listener, "the factory opens no port")
 			assert.Equal(t, 3*time.Second, syncer.stateTTL)
 			assert.Equal(t, 50*time.Millisecond, syncer.refreshInterval)
 			assert.Equal(t, P2PSyncerType, syncer.TypedName().Type)
 		})
 	}
+}
+
+func TestStartFailsWhenPortInUse(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	syncer := newP2PSyncer(ctx, "p2p", "a", held.Addr().String(), "", time.Second, 100*time.Millisecond)
+	require.ErrorIs(t, syncer.Start(ctx), syscall.EADDRINUSE)
+}
+
+func TestStartOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	syncer := newP2PSyncer(ctx, "p2p", "a", "127.0.0.1:0", "", time.Second, 100*time.Millisecond)
+	require.NoError(t, syncer.Start(ctx))
+	require.ErrorContains(t, syncer.Start(ctx), "already started")
+}
+
+func TestStartAfterClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	syncer := newP2PSyncer(ctx, "p2p", "a", "127.0.0.1:0", "", time.Second, 100*time.Millisecond)
+	cancel()
+	require.ErrorIs(t, syncer.Start(context.Background()), context.Canceled)
+	assert.Nil(t, syncer.listener, "a closed syncer opens no port")
 }
 
 func TestGetReturnsLiveLocalWithoutPeers(t *testing.T) {
@@ -927,6 +956,32 @@ func TestPeerSetChurnLeaksNoGoroutines(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= baseline+2 }, eventually, 10*time.Millisecond,
 		"goroutines after 20 link closes: %d, baseline %d", runtime.NumGoroutine(), baseline)
+}
+
+func TestDownSinceRecordedWhenStreamEnds(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	b := newReplica(t, "peer", 30*time.Second, 10*time.Second)
+	mesh(a, b)
+	require.Eventually(t, func() bool {
+		l := a.link("peer")
+		return l != nil && l.downSince.Load() == 0
+	}, eventually, tick)
+
+	time.Sleep(25 * time.Millisecond)
+	beforeDrop := time.Now().UnixNano()
+	b.syncer.close()
+
+	var downSince int64
+	require.Eventually(t, func() bool {
+		l := a.link("peer")
+		if l == nil {
+			return false
+		}
+		downSince = l.downSince.Load()
+		return downSince != 0
+	}, eventually, tick)
+	assert.GreaterOrEqual(t, downSince, beforeDrop,
+		"downSince must be recorded when the stream ends, not when it opened")
 }
 
 // BenchmarkSetToPeerGet measures the time from a changed value's SetBatch on

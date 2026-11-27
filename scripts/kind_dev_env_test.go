@@ -143,7 +143,8 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 		quoted bool
 		want   []string
 	}{
-		{name: "empty keeps a null item", value: "", want: []string{"--port=8000", "<null>"}},
+		{name: "empty drops the item", value: "", want: []string{"--port=8000"}},
+		{name: "whitespace only drops the item", value: " \t ", want: []string{"--port=8000"}},
 		{name: "one flag", value: "--kv-cache-size=256", want: []string{"--port=8000", "--kv-cache-size=256"}},
 		{name: "two flags", value: "--max-model-len=131072 --kv-cache-size=8192",
 			want: []string{"--port=8000", "--max-model-len=131072", "--kv-cache-size=8192"}},
@@ -164,6 +165,7 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 		{name: "multi-line continuation folds into one argument", value: "--model=foo\n          --literal",
 			want: []string{"--port=8000", "--model=foo --literal"}},
 		{name: "quoted empty drops the item", value: "", quoted: true, want: []string{"--port=8000"}},
+		{name: "quoted whitespace only is unchanged", value: " ", quoted: true, want: []string{"--port=8000", " "}},
 		{name: "quoted one flag", value: "--kv-cache-size=256", quoted: true,
 			want: []string{"--port=8000", "--kv-cache-size=256"}},
 		{name: "quoted two flags", value: "--max-model-len=131072 --kv-cache-size=8192", quoted: true,

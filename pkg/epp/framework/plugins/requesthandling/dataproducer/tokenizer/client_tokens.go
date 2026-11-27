@@ -18,7 +18,6 @@ package tokenizer
 
 import (
 	"encoding/json"
-	"math"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -26,11 +25,12 @@ import (
 )
 
 // clientPromptTokenIDs returns the prompt token IDs a request already carries:
-// a token-array completions prompt, or kv_transfer_params.prompt_token_ids on a
-// text-only chat-path request (see chatPathTextOnly). Returns nil otherwise, and
-// when echo is set, since vLLM then renders the messages instead of using the
-// field. When the request carries IDs that are not used, ignored names the
-// reason.
+// a token-array completions prompt, a token-array embeddings input, or
+// kv_transfer_params.prompt_token_ids on a text-only chat-path request (see
+// chatPathTextOnly). Returns nil otherwise, when truncate_prompt_tokens is set
+// on completions or embeddings, or when echo is set, since vLLM then transforms
+// or renders the input instead of using the raw IDs. When the request carries
+// IDs that are not used, ignored names the reason.
 func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) (ids [][]uint32, ignored string) {
 	if body.Completions != nil {
 		// The completions path reads the prompt; it does not read
@@ -40,10 +40,19 @@ func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) (ids [][]uint32
 		}
 		// vLLM truncates the prompt when truncate_prompt_tokens is set, so only a
 		// render yields the tokens the engine serves.
-		if payload, ok := body.Payload.(fwkrequest.PayloadMap); ok && payload[reqcommon.FieldTruncatePromptTokens] != nil {
+		if hasTruncatePromptTokens(body) {
 			return nil, "truncate_prompt_tokens is set"
 		}
 		return body.Completions.Prompt.TokenIDs, ""
+	}
+	if body.Embeddings != nil {
+		if len(body.Embeddings.Input.TokenIDs) == 0 {
+			return nil, ""
+		}
+		if hasTruncatePromptTokens(body) {
+			return nil, "truncate_prompt_tokens is set"
+		}
+		return body.Embeddings.Input.TokenIDs, ""
 	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)
 	if !ok {
@@ -63,6 +72,13 @@ func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) (ids [][]uint32
 		return [][]uint32{parsed}, ""
 	}
 	return nil, "malformed or empty"
+}
+
+// hasTruncatePromptTokens reports whether the request payload carries a
+// non-null truncate_prompt_tokens parameter.
+func hasTruncatePromptTokens(body *fwkrequest.InferenceRequestBody) bool {
+	payload, ok := body.Payload.(fwkrequest.PayloadMap)
+	return ok && payload[reqcommon.FieldTruncatePromptTokens] != nil
 }
 
 // kvPromptTokenIDs returns the undecoded kv_transfer_params.prompt_token_ids
@@ -174,38 +190,13 @@ func parseTokenIDList(value any) []uint32 {
 		}
 		return parseTokenIDList(decoded)
 	case []any:
-		ids := make([]uint32, 0, len(v))
-		for _, item := range v {
-			id, ok := tokenID(item)
-			if !ok {
-				return nil
-			}
-			ids = append(ids, id)
+		ids, err := reqcommon.ParseTokenIDs(v)
+		if err != nil {
+			return nil
 		}
 		if len(ids) > 0 {
 			return ids
 		}
 	}
 	return nil
-}
-
-// tokenID converts one decoded JSON number to a token ID.
-func tokenID(v any) (uint32, bool) {
-	var f float64
-	switch n := v.(type) {
-	case json.Number:
-		parsed, err := n.Float64()
-		if err != nil {
-			return 0, false
-		}
-		f = parsed
-	case float64:
-		f = n
-	default:
-		return 0, false
-	}
-	if f < 0 || f != math.Trunc(f) || f > math.MaxUint32 {
-		return 0, false
-	}
-	return uint32(f), true
 }

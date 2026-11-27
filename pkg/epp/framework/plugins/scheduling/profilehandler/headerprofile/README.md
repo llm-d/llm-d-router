@@ -65,6 +65,7 @@ and makes one separate scheduling call per profile.
 | `headerName` | string | `x-llm-d-epp-profile` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
 | `defaultProfile` | string | `decode` | Scheduling profile to run when the header is missing or blank and more than one profile is configured. Matched case-sensitively against `schedulingProfiles` names, like the header value itself. Ignored when only one profile is configured, since that profile always runs. |
 | `prefillProfile` | string | empty | Scheduling profile whose endpoint `ResponseHeader` reports on the response as `x-llm-d-prefiller-host-port`. Matched case-sensitively. Empty reports nothing. Set it only on an EPP that serves the coordinator, since the header names a pod address and reaches whoever receives the response. |
+| `prefillProfileName` | string | empty | Scheduling profile that runs the prefill stage. The handler reports it in the `SchedulingResult` so prefill-aware plugins honor a prefill profile that is not named `prefill`. Empty follows `prefillProfile`; with both empty the scheduler reports `prefill` when that profile ran. |
 
 ### Example
 
@@ -95,6 +96,27 @@ To use a different fallback than `decode`:
 - type: header-profile-handler
   parameters:
     defaultProfile: prefill
+```
+
+### Naming the prefill profile
+
+Prefill-aware plugins (`p2p-source-producer`, the prefix-cache producers, the
+`no-hit-lru` scorer, `predicted-latency-producer`) need to know which profile ran the
+prefill stage, and they take it from `SchedulingResult.PrefillProfileName`. With
+`prefillProfileName` set, this handler fills that field, so a deployment whose prefill
+profile is named e.g. `prefill-h200` keeps its prefill handling.
+
+The parameter is separate from `prefillProfile` because the two configure different
+things. `prefillProfile` turns on a response header that carries a pod address to
+whoever receives the response, which only a coordinator EPP can use;
+`prefillProfileName` only names the prefill stage to the scheduling plugins and is safe
+on any EPP. A coordinator EPP that already sets `prefillProfile` needs no second
+parameter, since the handler falls back to it.
+
+```yaml
+- type: header-profile-handler
+  parameters:
+    prefillProfileName: prefill-h200
 ```
 
 ### Reporting the prefill pod to the coordinator

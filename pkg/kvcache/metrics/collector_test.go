@@ -19,12 +19,19 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 func TestCollectorsIncludesAllMetrics(t *testing.T) {
@@ -54,6 +61,7 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"DedupRemovedHashesForwarded", DedupRemovedHashesForwarded},
 		{"KVEventStoresSkipped", KVEventStoresSkipped},
 		{"KVEventRemovalsSkipped", KVEventRemovalsSkipped},
+		{"KVEventUnknownTagsSkipped", KVEventUnknownTagsSkipped},
 		{"SubscriberActive", SubscriberActive},
 		{"SubscriberReconnections", SubscriberReconnections},
 		{"MessagesReceived", MessagesReceived},
@@ -62,6 +70,10 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"SnapshotLoadDuration", SnapshotLoadDuration},
 		{"PoolQueueDepth", PoolQueueDepth},
 		{"PoolCapacity", PoolCapacity},
+		{"EventsSequenceGaps", EventsSequenceGaps},
+		{"EventsMissed", EventsMissed},
+		{"EventsDropped", EventsDropped},
+		{"EventsProcessingLag", EventsProcessingLag},
 	}
 
 	for _, e := range expected {
@@ -76,9 +88,10 @@ func TestKVEventsMetricNames(t *testing.T) {
 	// subsystem with the kv_cache_events prefix.
 	reg := prometheus.NewRegistry()
 	kvevents := []prometheus.Collector{
-		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived,
 		ZMQErrors, LiveOnlySubscribers, SnapshotLoadDuration, PoolQueueDepth, PoolCapacity,
+		EventsSequenceGaps, EventsMissed, EventsDropped, EventsProcessingLag,
 	}
 	for _, c := range kvevents {
 		reg.MustRegister(c)
@@ -93,8 +106,13 @@ func TestKVEventsMetricNames(t *testing.T) {
 	SnapshotLoadDuration.Observe(1)
 	KVEventStoresSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
 	KVEventRemovalsSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
+	KVEventUnknownTagsSkipped.WithLabelValues("BlockInactive").Inc()
 	PoolQueueDepth.Set(3)
 	PoolCapacity.Set(4)
+	EventsSequenceGaps.WithLabelValues("pod-a").Inc()
+	EventsMissed.WithLabelValues("pod-a").Add(2)
+	EventsDropped.WithLabelValues("pod-a", "decode_error").Inc()
+	EventsProcessingLag.Observe(0.05)
 
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -115,8 +133,13 @@ func TestKVEventsMetricNames(t *testing.T) {
 		"llm_d_epp_kv_cache_events_snapshot_load_duration_seconds",
 		"llm_d_epp_kv_cache_events_stores_skipped_total",
 		"llm_d_epp_kv_cache_events_removals_skipped_total",
+		"llm_d_epp_kv_cache_events_unknown_tags_skipped_total",
 		"llm_d_epp_kv_cache_events_pool_queue_depth",
 		"llm_d_epp_kv_cache_events_pool_capacity",
+		"llm_d_epp_kv_cache_events_sequence_gaps_total",
+		"llm_d_epp_kv_cache_events_missed_total",
+		"llm_d_epp_kv_cache_events_dropped_total",
+		"llm_d_epp_kv_cache_events_processing_lag_seconds",
 	} {
 		if !got[name] {
 			t.Errorf("expected metric %q to be registered, got names: %v", name, got)
@@ -131,14 +154,21 @@ func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
 	MessagesReceived.WithLabelValues("pod-a").Inc()
 	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
 	ZMQErrors.WithLabelValues("pod-a", "connect").Inc()
+	EventsSequenceGaps.WithLabelValues("pod-a").Inc()
+	EventsMissed.WithLabelValues("pod-a").Add(3)
+	EventsDropped.WithLabelValues("pod-a", "malformed_frame").Inc()
+	EventsDropped.WithLabelValues("pod-a", "decode_error").Inc()
 	SubscriberReconnections.WithLabelValues("pod-b").Inc()
 	MessagesReceived.WithLabelValues("pod-b").Inc()
 	ZMQErrors.WithLabelValues("pod-b", "recv").Inc()
+	EventsSequenceGaps.WithLabelValues("pod-b").Inc()
+	EventsMissed.WithLabelValues("pod-b").Inc()
+	EventsDropped.WithLabelValues("pod-b", "replay_cooldown").Inc()
 
 	CleanupSubscriber("pod-a")
 
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(SubscriberReconnections, MessagesReceived, ZMQErrors)
+	reg.MustRegister(SubscriberReconnections, MessagesReceived, ZMQErrors, EventsSequenceGaps, EventsMissed, EventsDropped)
 	mfs, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather() failed: %v", err)
@@ -154,16 +184,59 @@ func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
 		}
 	}
 
-	// pod-b must be untouched: three series across the three metrics.
+	// pod-b must be untouched: six series across the six per-pod metrics.
 	remaining := 0
 	for _, mf := range mfs {
 		remaining += len(mf.GetMetric())
 	}
-	if remaining != 3 {
-		t.Errorf("expected 3 remaining pod-b series, got %d", remaining)
+	if remaining != 6 {
+		t.Errorf("expected 6 remaining pod-b series, got %d", remaining)
 	}
 
 	CleanupSubscriber("pod-b")
+}
+
+func TestRecordUnknownTagSkipped(t *testing.T) {
+	skipped := func(label string) float64 {
+		return testutil.ToFloat64(KVEventUnknownTagsSkipped.WithLabelValues(label))
+	}
+
+	const tag = "BlockInactive"
+	before := skipped(tag)
+	for range 2 {
+		if got := RecordUnknownTagSkipped(tag); got != tag {
+			t.Fatalf("RecordUnknownTagSkipped(%q) = %q, want the tag", tag, got)
+		}
+	}
+	if got := skipped(tag) - before; got != 2 {
+		t.Errorf("counter for %q rose by %v, want 2", tag, got)
+	}
+
+	// The cap is filled before the empty tag is recorded: an empty tag keeps
+	// its own label when the limiter folds every other new tag.
+	for i := range maxUnknownTagLabelValues {
+		RecordUnknownTagSkipped("Tag" + strconv.Itoa(i))
+	}
+	if got := RecordUnknownTagSkipped("PastTheCap"); got != metricsutil.OverflowValue {
+		t.Errorf("RecordUnknownTagSkipped() past the cap = %q, want %q", got, metricsutil.OverflowValue)
+	}
+
+	emptyBefore := skipped(emptyTagLabel)
+	if got := RecordUnknownTagSkipped(""); got != emptyTagLabel {
+		t.Errorf("RecordUnknownTagSkipped(\"\") = %q, want %q", got, emptyTagLabel)
+	}
+	if got := skipped(emptyTagLabel) - emptyBefore; got != 1 {
+		t.Errorf("counter for %q rose by %v, want 1", emptyTagLabel, got)
+	}
+
+	// Prometheus rejects label values that are not valid UTF-8.
+	overflowBefore := skipped(metricsutil.OverflowValue)
+	if got := RecordUnknownTagSkipped("\xff\xfe"); got != metricsutil.OverflowValue {
+		t.Errorf("RecordUnknownTagSkipped() for invalid UTF-8 = %q, want %q", got, metricsutil.OverflowValue)
+	}
+	if got := skipped(metricsutil.OverflowValue) - overflowBefore; got != 1 {
+		t.Errorf("counter for %q rose by %v, want 1", metricsutil.OverflowValue, got)
+	}
 }
 
 func TestLogMetrics(t *testing.T) {
@@ -247,4 +320,32 @@ func TestLogMetrics(t *testing.T) {
 			t.Errorf("Expected 'max_pod_hit_count=42' in log output, but it was not found. Full output: %s", output)
 		}
 	})
+}
+
+func TestStartMetricsLoggingStopsWhenContextEnds(t *testing.T) {
+	var beats atomic.Int64
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "metrics beat") {
+			beats.Add(1)
+		}
+	}, funcr.Options{})
+	ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+
+	StartMetricsLogging(ctx, time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for beats.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no metrics beat logged")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	// A beat already in progress when the context ends may still finish.
+	time.Sleep(20 * time.Millisecond)
+	stopped := beats.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := beats.Load(); got != stopped {
+		t.Fatalf("metrics beats kept coming after the context ended: %d, then %d", stopped, got)
+	}
 }

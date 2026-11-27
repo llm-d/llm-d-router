@@ -83,7 +83,7 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 	predictedLatencyCtx.targetMetadata = targetMetadata
 	decodeEndpoint := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName].TargetEndpoints[0]
 	var prefillEndpoint fwksched.Endpoint
-	if prefillResult, exists := schedulingResult.ProfileResults[ExperimentalDefaultPrefillProfile]; exists && prefillResult != nil && len(prefillResult.TargetEndpoints) > 0 {
+	if prefillResult := schedulingResult.PrefillProfile(); prefillResult != nil && len(prefillResult.TargetEndpoints) > 0 {
 		prefillEndpoint = prefillResult.TargetEndpoints[0]
 		prefillMetadata := prefillEndpoint.GetMetadata()
 		predictedLatencyCtx.prefillTargetMetadata = prefillMetadata
@@ -168,7 +168,10 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 			recordRequestTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft/1000)
 			recordRequestPredictedTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.predictedTTFT/1000)
 			if predictedLatencyCtx.ttftSLO > 0 {
-				recordRequestTTFTWithSLO(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft, predictedLatencyCtx.ttftSLO)
+				// requestReceivedTimestamp is the PreRequest time, where ttft starts. The SLO
+				// counts from the request's arrival at the EPP.
+				ttftSinceReceived := predictedLatencyCtx.ttft + msSinceReceived(request, predictedLatencyCtx.requestReceivedTimestamp)
+				recordRequestTTFTWithSLO(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, ttftSinceReceived, predictedLatencyCtx.ttftSLO)
 			}
 		}
 
@@ -261,7 +264,11 @@ func processFirstTokenForLatencyPrediction(
 	predictedLatencyCtx.generatedTokenCount = 1
 
 	if prefillTargetMetadata := predictedLatencyCtx.prefillTargetMetadata; prefillTargetMetadata != nil {
-		prefillMetrics, err := getLatestMetricsForProfile(predictedLatencyCtx, ExperimentalDefaultPrefillProfile)
+		prefillProfile := ""
+		if predictedLatencyCtx.schedulingResult != nil {
+			prefillProfile = predictedLatencyCtx.schedulingResult.PrefillProfileName
+		}
+		prefillMetrics, err := getLatestMetricsForProfile(predictedLatencyCtx, prefillProfile)
 		if err == nil {
 			prefillPrefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[prefillTargetMetadata.ID.Name]
 			prefillEncoderMatchedSize := predictedLatencyCtx.encoderMatchedSizeForEndpoints[prefillTargetMetadata.ID.Name]

@@ -72,6 +72,10 @@ func TestProduce_UsesClientPromptTokenIDs(t *testing.T) {
 			params: map[string]any{"prompt_token_ids": []any{float64(9), float64(8)}},
 			want:   []uint32{9, 8},
 		},
+		"decoded map with in-process integers": {
+			params: map[string]any{"prompt_token_ids": []any{int(3), int64(6)}},
+			want:   []uint32{3, 6},
+		},
 		"ids written by a mutation": {
 			params: map[string]any{"prompt_token_ids": []uint32{4, 2}},
 			want:   []uint32{4, 2},

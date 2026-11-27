@@ -5,6 +5,7 @@
       {{- $proxySidecar := and $proxy.enabled (eq $proxyMode "sidecar") }}
       {{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . }}
       {{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml }}
+      {{- $extProcPort := include "llm-d-router.epp.extProcPort" . }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
@@ -96,7 +97,7 @@
         {{- end }}
         {{- end }}
         - name: epp
-          image: {{ .Values.router.epp.image.registry }}/{{ .Values.router.epp.image.repository }}:{{ .Values.router.epp.image.tag }}
+          image: {{ include "llm-d-router.image" (dict "image" .Values.router.epp.image "path" "router.epp.image") }}
           imagePullPolicy: {{ .Values.router.epp.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
@@ -137,6 +138,9 @@
           {{- if include "llm-d-router.epp.healthCheckingRequired" . }}
               - --health-checking=true
           {{- end }}
+          {{- if and (ne $extProcPort "9002") (not (hasKey $eppFlags "grpc-port")) }}
+              - --grpc-port={{ $extProcPort }}
+          {{- end }}
               # Pass additional flags via the router.epp.flags field in values.yaml.
               # Render them as --flag=value so boolean values are parsed correctly.
           {{- range $key, $value := $eppFlags }}
@@ -160,7 +164,7 @@
           {{- end }}
           ports:
             - name: grpc
-              containerPort: 9002
+              containerPort: {{ $extProcPort }}
             - name: grpc-health
               containerPort: {{ $grpcHealthPort }}
             - name: metrics
@@ -269,7 +273,7 @@
         {{- $renderPort := $tokenizer.port | default 8000 | int }}
         {{- $flavor := $tokenizer.flavor | default "python" | lower }}
         - name: vllm-render
-          image: {{ $tokenizer.image.registry }}/{{ $tokenizer.image.repository }}:{{ $tokenizer.image.tag }}
+          image: {{ include "llm-d-router.image" (dict "image" $tokenizer.image "path" "router.tokenizer.image") }}
           imagePullPolicy: {{ $tokenizer.image.pullPolicy | default "IfNotPresent" }}
           command:
           {{- if $tokenizer.command }}

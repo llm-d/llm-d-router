@@ -146,6 +146,7 @@ import (
 	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointhealth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	rendezvousfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/rendezvous"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	topologyaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/topologyaffinity"
@@ -257,7 +258,9 @@ func (r *Runner) WithCustomCollectors(collectors ...prometheus.Collector) *Runne
 
 func (r *Runner) Run(ctx context.Context) error {
 	// Setup a very basic logger in case command line argument parsing fails
-	logutil.InitSetupLogging("llm-d-epp")
+	// Request handlers log, so a stdout nobody reads must not stall them.
+	logutil.InitSetupLogging("llm-d-epp", logutil.NonBlockingStdout("llm-d-epp"))
+	defer logutil.Flush()
 
 	setupLog.Info(r.eppExecutableName+" build", "commit-sha", version.CommitSHA, "build-ref", version.BuildRef)
 
@@ -266,6 +269,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	pflag.Parse()
 
 	if err := opts.Complete(); err != nil {
+		setupLog.Error(err, "Failed to complete flags")
 		return err
 	}
 	if err := opts.Validate(); err != nil {
@@ -319,7 +323,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	dlCfg := rawConfig.DataLayer
 	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
-		return r.runWithFileDiscovery(ctx, opts, rawConfig)
+		return r.runFileDiscovery(ctx, opts, rawConfig)
 	}
 	if err := validateKubernetesDiscoveryFlags(opts); err != nil {
 		setupLog.Error(err, "Failed to validate flags")
@@ -482,6 +486,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
+	ds.WithDataParallelStartRankLabel(opts.DataParallelStartRankLabel)
 	eppConfig, err := r.parseConfigurationPhaseTwo(servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
@@ -491,6 +496,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	setupLog.Info("fairness_id metric label cap", "limit", opts.FairnessIDMetricLabelLimit, "pinnedFairnessIDs", metricsutil.PinnedFairnessIDCount())
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.InitFairnessIDResolutionMetrics(gknn.Name)
@@ -544,6 +550,13 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		return nil, nil, err
 	}
 
+	if opts.EnableEndpointsAPI {
+		if err = mgr.AddMetricsServerExtraHandler(runserver.EndpointsAPIPath, runserver.NewEndpointsAPIHandler(ds, ds.PoolHasSynced)); err != nil {
+			setupLog.Error(err, "Failed to setup endpoints API handler")
+			return nil, nil, err
+		}
+	}
+
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
 		err := errSchedulerConfigMissing
@@ -577,6 +590,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	serverRunner := runserver.NewExtProcServerRunner(opts, *gknn, controllerCfg, ds, director,
 		r.parserRegistry, eppConfig.SaturationDetector, priorityBandControlPlane)
 	serverRunner.Responders = r.requestControlConfig.Responders()
+	serverRunner.ForwardInputControlHeaders = eppConfig.ForwardInputControlHeaders
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
@@ -782,6 +796,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(forwardtokens.PluginType, fwkplugin.StabilityAlpha, forwardtokens.PluginFactory)
 	// multicluster variants
 	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
+	fwkplugin.RegisterWithPluginDependencies(rendezvousfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha,
+		rendezvousfilter.MultiClusterFactory, rendezvousfilter.ConfigParser)
 	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
 	fwkplugin.Register(kvcacheutilization.MultiClusterScorerType, fwkplugin.StabilityAlpha, kvcacheutilization.MultiClusterScorerFactory)
 	fwkplugin.Register(prefix.MultiClusterScorerType, fwkplugin.StabilityAlpha, prefix.MultiClusterScorerFactory)
@@ -1005,6 +1021,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	r.parserRegistry = cfg.ParserRegistry
 	r.requestControlConfig.WithPropagatePriority(cfg.PropagatePriority)
 	r.requestControlConfig.WithComposeFairnessIDs(cfg.ComposeFairnessIDs)
+	r.requestControlConfig.WithRequestStreamUsage(cfg.RequestStreamUsage)
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
@@ -1370,8 +1387,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	ds := datastore.NewDatastore(r.servingCtx, epf).WithEndpointPool(pool)
 	objectivePriorities, err := loadObjectivesFile(opts.ObjectivesFile, ds)
 	if err != nil {
-		setupLog.Error(err, "Failed to load objectives file", "path", opts.ObjectivesFile)
-		return err
+		return fmt.Errorf("failed to load objectives file %q: %w", opts.ObjectivesFile, err)
 	}
 
 	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
@@ -1405,19 +1421,16 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	eppConfig, err := r.parseConfigurationPhaseTwo(r.servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
-		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
 
 	disc, err := r.resolveDiscovery(rawConfig)
 	if err != nil {
-		setupLog.Error(err, "Failed to resolve discovery plugin")
-		return err
+		return fmt.Errorf("failed to resolve discovery plugin: %w", err)
 	}
 
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
-		setupLog.Error(err, "Plugin stability validation failed")
-		return err
+		return fmt.Errorf("plugin stability validation failed: %w", err)
 	}
 
 	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
@@ -1451,6 +1464,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	serverRunner := runserver.NewExtProcServerRunner(opts, gknn, runserver.NewControllerConfig(false),
 		ds, director, r.parserRegistry, eppConfig.SaturationDetector, nil)
 	serverRunner.Responders = r.requestControlConfig.Responders()
+	serverRunner.ForwardInputControlHeaders = eppConfig.ForwardInputControlHeaders
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
@@ -1459,6 +1473,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	setupLog.Info("fairness_id metric label cap", "limit", opts.FairnessIDMetricLabelLimit, "pinnedFairnessIDs", metricsutil.PinnedFairnessIDCount())
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.InitFairnessIDResolutionMetrics(poolName)
@@ -1493,7 +1508,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
 	g.Add("cross-replica-sync", func(ctx context.Context) error {
-		r.dlRuntime.StartCrossReplicaSync(r.servingCtx)
+		if err := r.dlRuntime.StartCrossReplicaSync(r.servingCtx); err != nil {
+			return err
+		}
 		<-ctx.Done()
 		return nil
 	})
@@ -1520,13 +1537,32 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle)
+		var endpointsAPI http.Handler
+		if opts.EnableEndpointsAPI {
+			endpointsAPI = runserver.NewEndpointsAPIHandler(ds, func() bool {
+				select {
+				case <-disc.Ready():
+					return true
+				default:
+					return false
+				}
+			})
+		}
+		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle, endpointsAPI)
 	})
 	// A canceled context is the normal shutdown. Any other error ends the
-	// process with exit status 1, and no other line names it.
-	err = g.Run(ctx)
+	// process with exit status 1 and is logged by runFileDiscovery. The error is
+	// returned unwrapped so errors.Is still matches context.Canceled.
+	return g.Run(ctx)
+}
+
+// runFileDiscovery runs the file-discovery path and logs the error it returns,
+// so every failure of the mode is named in one place. A canceled context is
+// the normal shutdown and stays unlogged.
+func (r *Runner) runFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	err := r.runWithFileDiscovery(ctx, opts, rawConfig)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		setupLog.Error(err, "EPP stopped")
+		setupLog.Error(err, "File discovery mode failed")
 	}
 	return err
 }
@@ -1541,7 +1577,8 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins) error {
+// endpointsAPI is served at runserver.EndpointsAPIPath when non-nil.
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins, endpointsAPI http.Handler) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
@@ -1550,6 +1587,9 @@ func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fw
 		}
 	}
 	mux.Handle(runserver.PluginStateDebugPath, runserver.NewPluginStateDebugHandler(plugins))
+	if endpointsAPI != nil {
+		mux.Handle(runserver.EndpointsAPIPath, endpointsAPI)
+	}
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

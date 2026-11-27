@@ -46,9 +46,15 @@ endpoints:
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
     rankIndex: <int>            # optional -- defaults to 0, must be >= 0
+    rankByHeader: <bool>        # optional -- defaults to false
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
+
+Set `rankByHeader: true` on each entry of a model server that serves several
+data-parallel ranks behind one port. List one entry for each rank, with the
+rank in `rankIndex`. See
+[Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md).
 
 ## Configuration
 
@@ -118,7 +124,11 @@ endpoints:
 
 `multicluster-file-discovery` is the cluster-scoped variant: it discovers peer clusters as endpoints, differing from the pod file discovery only in address validation. A cluster is reached by its gateway host, so an address may be an RFC-1123 hostname or an IP, not only an IPv4 pod address.
 
+When the peers are cluster EPPs (a multi-cluster hub), set `requestHandler.forwardInputControlHeaders: true` so the hub passes the client's objective, fairness ID and other input-control headers to them unchanged; otherwise every request reaches the cluster as priority 0 with no tenant. Leave it off when the peers are model servers.
+
 A peer may serve its pool metrics on a different host or port than its routable address. Set a `metricsAddress` label (and an optional `metricsPort` label, defaulting to the endpoint port) on the entry, and the metrics source scrapes there instead of the endpoint address.
+
+A `pins` label (comma-separated tenants, matched against `x-llm-d-inference-fairness-id`) sends those tenants to that cluster; see the [rendezvous filter](../../../scheduling/filter/rendezvous/README.md).
 
 ## Endpoint attributes
 

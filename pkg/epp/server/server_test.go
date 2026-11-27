@@ -129,7 +129,7 @@ func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	headers := testutils.BuildEnvoyGRPCHeaders(map[string]string{
@@ -198,7 +198,7 @@ func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
 	require.Equal(t, 1, director.handleResponseBodyEndStreamCount)
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }
 
@@ -234,7 +234,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	// Send request headers - no response expected
@@ -392,7 +392,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	}
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }
 
@@ -542,7 +542,7 @@ func TestServer_Skip(t *testing.T) {
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{mockPar}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	// Send request headers
@@ -601,7 +601,7 @@ func TestServer_Skip(t *testing.T) {
 	require.Equal(t, []byte(`{"model":"test"}`), []byte(rawPayload), "Payload should match raw body")
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }
 
@@ -619,7 +619,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	// 1. Send request headers - no response expected yet
@@ -671,6 +671,6 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	t.Logf("Successfully reproduced gRPC stream limit error: %v", err)
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }

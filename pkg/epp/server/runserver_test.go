@@ -89,7 +89,7 @@ type stubBands struct {
 // a new Options flag reach only one of the two hand-written composite literals.
 func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	// Fields the caller sets after construction, not the factory.
-	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true}
+	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true, "ForwardInputControlHeaders": true}
 
 	opts := server.NewOptions()
 	// AddFlags registers the logging flag set that Complete() dereferences.
@@ -98,6 +98,7 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	opts.SecureServing, opts.HealthChecking, opts.EnableCertReload = true, true, true
 	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores, opts.EnableToolCallingTelemetry = true, true, true
 	opts.TLSMinVersion, opts.TLSCipherSuites = "VersionTLS13", []string{"TLS_AES_128_GCM_SHA256"}
+	opts.TraceBaggageKeys = []string{"workload.id"}
 	opts.ClientCAFile = writeCAFile(t)
 	opts.RefreshPrometheusMetricsInterval, opts.MetricsStalenessThreshold = 7*time.Second, 11*time.Second
 	require.NoError(t, opts.Complete()) // parses the TLS strings and the client CA into the unexported fields

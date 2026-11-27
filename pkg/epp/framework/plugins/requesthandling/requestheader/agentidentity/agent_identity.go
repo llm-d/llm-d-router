@@ -22,9 +22,14 @@ package agentidentity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -39,6 +44,17 @@ import (
 // identity is an acceptable source.
 var AgentIdentityKey = plugin.NewDataKey("agent-identity", "")
 
+// ThreadIDKey is the request-attribute key under which this plugin publishes
+// the thread that sent the request: the main conversation or one sub-agent.
+// It equals the agent-identity value when no thread header is present, so a
+// client that sends none yields one thread per session.
+var ThreadIDKey = plugin.NewDataKey("thread-id", "")
+
+// ParentThreadIDKey is the request-attribute key under which this plugin
+// publishes the thread that spawned the sending thread. It is not published
+// on a root thread; an absent or empty read means root.
+var ParentThreadIDKey = plugin.NewDataKey("parent-thread-id", "")
+
 const (
 	PluginType              = "agent-identity"
 	ClaudeCodeSessionHeader = "x-claude-code-session-id"
@@ -48,6 +64,29 @@ const (
 	// CodexSessionHeaderLegacy is the underscored form used by Codex 0.130.x;
 	// kept as a fallback for the brief window before users upgrade.
 	CodexSessionHeaderLegacy = "session_id"
+	// ParentSessionHeader is the shared wire-convention header carrying the
+	// parent session ID one hop up.
+	ParentSessionHeader = "x-parent-session-id"
+	// OpenCodeOwnSessionHeader carries the request's own opencode session ID,
+	// one conversation per value. It is not interchangeable with
+	// OpenCodeSessionHeader (x-session-affinity), which opencode uses for
+	// cache affinity and which carries the parent one hop up on opencode 2.x.
+	OpenCodeOwnSessionHeader = "x-opencode-session-id"
+	// StandardThreadHeader and StandardParentThreadHeader are the canonical
+	// llm-d headers: any client can send the thread and parent directly,
+	// without harness-specific detection. They are checked before the
+	// harness headers.
+	StandardThreadHeader       = "x-llm-d-thread-id"
+	StandardParentThreadHeader = "x-llm-d-parent-thread-id"
+	// Claude Code: a sub-agent sends its agent id; a nested one also sends
+	// the parent's. The main thread sends neither.
+	ClaudeCodeAgentHeader       = "x-claude-code-agent-id"
+	ClaudeCodeParentAgentHeader = "x-claude-code-parent-agent-id"
+	// Codex: every thread sends thread-id, and a sub-agent adds the parent
+	// thread's id. thread_id is the 0.130.x legacy form.
+	CodexThreadHeader       = "thread-id"
+	CodexThreadHeaderLegacy = "thread_id"
+	CodexParentThreadHeader = "x-codex-parent-thread-id"
 )
 
 // defaultPriorityHeaders is the built-in ordered list, always checked. User-
@@ -61,6 +100,28 @@ var defaultPriorityHeaders = []string{
 	CodexSessionHeaderLegacy,
 }
 
+// defaultThreadHeaders is the built-in ordered list of thread-ID headers:
+// the standard pair first, then the harness forms. User-supplied headers
+// from Parameters.AdditionalThreadHeaders are inserted before it.
+var defaultThreadHeaders = []string{
+	StandardThreadHeader,
+	ClaudeCodeAgentHeader,
+	CodexThreadHeader,
+	CodexThreadHeaderLegacy,
+	OpenCodeOwnSessionHeader,
+}
+
+// defaultParentThreadHeaders is the built-in ordered list of parent-ID
+// headers: the standard pair first, then the harness forms. User-supplied
+// headers from Parameters.AdditionalParentThreadHeaders are inserted before
+// it.
+var defaultParentThreadHeaders = []string{
+	StandardParentThreadHeader,
+	ClaudeCodeParentAgentHeader,
+	CodexParentThreadHeader,
+	ParentSessionHeader,
+}
+
 // Parameters is the user-facing plugin configuration block. See the package
 // README for a configmap example showing how additionalSessionHeaders extends
 // the built-in default list.
@@ -68,21 +129,64 @@ type Parameters struct {
 	// AdditionalSessionHeaders is prepended to the built-in default list.
 	// Order is preserved; the request-time loop short-circuits on first match.
 	AdditionalSessionHeaders []string `json:"additionalSessionHeaders,omitempty"`
+	// AdditionalThreadHeaders is prepended to the built-in thread list,
+	// the same way AdditionalSessionHeaders works for the session list.
+	AdditionalThreadHeaders []string `json:"additionalThreadHeaders,omitempty"`
+	// AdditionalParentThreadHeaders is prepended to the built-in parent
+	// list, the same way AdditionalSessionHeaders works for the session list.
+	AdditionalParentThreadHeaders []string `json:"additionalParentThreadHeaders,omitempty"`
+	// PublishIdentity stores the resolved identities (agent-identity,
+	// thread-id, parent-thread-id) as request attributes. Defaults to true.
+	// When false the plugin still resolves the session (for Metrics) but
+	// stores no attribute, so no consumer can act on it.
+	PublishIdentity *bool `json:"publishIdentity,omitempty"`
+	// Metrics exports llm_d_epp_agent_identity_requests_total,
+	// llm_d_epp_agent_identity_active_sessions and
+	// llm_d_epp_agent_identity_active_sessions_untracked_total. Defaults to
+	// false. Only one
+	// agent-identity instance per EPP may enable it.
+	Metrics bool `json:"metrics,omitempty"`
 }
 
 // PluginFactory is the factory function for the agent identity plugin.
-func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	var params Parameters
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
 			return nil, fmt.Errorf("agent-identity: failed to decode parameters: %w", err)
 		}
 	}
+	silent := params.PublishIdentity != nil && !*params.PublishIdentity
+	if silent && !params.Metrics {
+		return nil, errors.New("agent-identity: publishIdentity: false without metrics: true does nothing; remove the plugin or enable metrics")
+	}
 
-	return &Plugin{
-		typedName:       plugin.TypedName{Type: PluginType, Name: name},
-		priorityHeaders: mergeHeaders(params.AdditionalSessionHeaders, defaultPriorityHeaders),
-	}, nil
+	p := &Plugin{
+		typedName:           plugin.TypedName{Type: PluginType, Name: name},
+		priorityHeaders:     mergeHeaders(params.AdditionalSessionHeaders, defaultPriorityHeaders),
+		threadHeaders:       mergeHeaders(params.AdditionalThreadHeaders, defaultThreadHeaders),
+		parentThreadHeaders: mergeHeaders(params.AdditionalParentThreadHeaders, defaultParentThreadHeaders),
+		silent:              silent,
+	}
+	if params.Metrics {
+		var reg prometheus.Registerer
+		if handle != nil {
+			reg = handle.Metrics()
+		}
+		c, err := registerMetrics(reg)
+		if err != nil {
+			return nil, fmt.Errorf("agent-identity: %w", err)
+		}
+		p.requests = c.requests
+		p.activeGauge = c.active
+		p.untracked = c.untracked
+		p.harnessLabels = newHarnessLabels(maxHarnessLabelValues)
+		p.active = newActiveSessions(maxActiveSessions)
+		if handle != nil {
+			go p.runActiveSessions(handle.Context())
+		}
+	}
+	return p, nil
 }
 
 // mergeHeaders returns extras followed by defaults, lowercased. Request headers
@@ -109,26 +213,109 @@ var (
 // Plugin resolves agent identity from provider-specific headers and stores it
 // as a request attribute for use by other subsystems.
 type Plugin struct {
-	typedName       plugin.TypedName
-	priorityHeaders []string
+	typedName           plugin.TypedName
+	priorityHeaders     []string
+	threadHeaders       []string
+	parentThreadHeaders []string
+	// silent is publishIdentity: false. The zero value publishes, as before.
+	silent bool
+
+	// The fields below are nil unless metrics is enabled.
+	requests        *prometheus.CounterVec
+	activeGauge     *prometheus.GaugeVec
+	untracked       prometheus.Counter
+	harnessLabels   *metrics.BoundedLabel
+	active          *activeSessions
+	activeHarnesses map[string]int // owned by the refresh goroutine
 }
 
 func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// Produces declares the agent identity request attribute written by this
-// request-header processor.
+// Produces declares the agent identity request attributes written by this
+// request-header processor. With publishIdentity: false it declares nothing:
+// a plugin that requires one of the attributes fails configuration loading
+// instead of silently reading nothing, and a plugin that reads one as an
+// optional source (session affinity with an attribute source, rendezvous)
+// falls back to its next source, as it would without agent-identity.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{AgentIdentityKey: ""}
+	if p.silent {
+		return nil
+	}
+	return map[plugin.DataKey]any{
+		AgentIdentityKey:  "",
+		ThreadIDKey:       "",
+		ParentThreadIDKey: "",
+	}
 }
 
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
-	for _, header := range p.priorityHeaders {
+	sessionHeader, session := p.resolveSession(request.Headers)
+	if p.requests != nil {
+		p.observe(request.Headers, sessionHeader, session)
+	}
+	if p.silent {
+		return nil
+	}
+	if session != "" {
+		request.PutAttribute(AgentIdentityKey, session)
+	}
+
+	thread, threadHeader := "", ""
+	for _, header := range p.threadHeaders {
 		if id := strings.TrimSpace(request.Headers[header]); id != "" {
-			request.PutAttribute(AgentIdentityKey, id)
-			return nil
+			thread, threadHeader = id, header
+			break
 		}
 	}
+	if thread == "" {
+		// No thread header: the session is the only thread.
+		thread = session
+	}
+	if thread == "" {
+		return nil
+	}
+	request.PutAttribute(ThreadIDKey, thread)
+
+	parent := ""
+	for _, header := range p.parentThreadHeaders {
+		if id := strings.TrimSpace(request.Headers[header]); id != "" {
+			parent = id
+			break
+		}
+	}
+	if parent == "" && threadHeader == ClaudeCodeAgentHeader {
+		// A Claude Code sub-agent with no parent header is a depth-1 child
+		// of the main thread, whose thread id is the session id.
+		parent = session
+	}
+	if parent != "" && parent != thread {
+		request.PutAttribute(ParentThreadIDKey, parent)
+	}
 	return nil
+}
+
+// resolveSession returns the first priority header with a non-empty trimmed
+// value and that value, or two empty strings when none matches.
+func (p *Plugin) resolveSession(headers map[string]string) (header, id string) {
+	for _, h := range p.priorityHeaders {
+		if v := strings.TrimSpace(headers[h]); v != "" {
+			return h, v
+		}
+	}
+	return "", ""
+}
+
+// observe records the request in the metrics.
+func (p *Plugin) observe(headers map[string]string, sessionHeader, session string) {
+	harness := p.harness(headers)
+	if sessionHeader == "" {
+		p.requests.WithLabelValues(harness, sessionHeaderNone).Inc()
+		return
+	}
+	p.requests.WithLabelValues(harness, sessionHeader).Inc()
+	if !p.active.observe(session, harness, time.Now()) {
+		p.untracked.Inc()
+	}
 }

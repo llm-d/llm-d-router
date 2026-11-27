@@ -20,6 +20,10 @@ package random
 import (
 	"context"
 	"math"
+	"math/rand/v2"
+	"slices"
+	"strconv"
+	"sync"
 	"testing"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -118,4 +122,84 @@ func TestPickRandomPicker(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRandomPickerWithRand(t *testing.T) {
+	t.Parallel()
+
+	makeInput := func() []*fwksched.ScoredEndpoint {
+		input := make([]*fwksched.ScoredEndpoint, 10)
+		for i := range input {
+			ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod" + strconv.Itoa(i)}}, nil, nil)
+			input[i] = &fwksched.ScoredEndpoint{Endpoint: ep, Score: float64(i + 1)}
+		}
+		return input
+	}
+
+	collectPicks := func(ctx context.Context, p *RandomPicker, n int) []string {
+		picks := make([]string, 0, n*5)
+		for range n {
+			res := p.Pick(ctx, makeInput())
+			for _, ep := range res.TargetEndpoints {
+				picks = append(picks, ep.GetMetadata().ID.Name)
+			}
+		}
+		return picks
+	}
+
+	t.Run("reproducible_picks", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p1 := NewRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		p2 := NewRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		p3 := NewRandomPicker(5).WithRand(rand.NewPCG(100, 200))
+
+		got1 := collectPicks(ctx, p1, 20)
+		got2 := collectPicks(ctx, p2, 20)
+		got3 := collectPicks(ctx, p3, 20)
+
+		if !slices.Equal(got1, got2) {
+			t.Fatalf("identical seeds produced different picks: %v vs %v", got1, got2)
+		}
+		if slices.Equal(got1, got3) {
+			t.Fatalf("distinct seeds produced identical picks: %v", got1)
+		}
+	})
+
+	t.Run("nil_restores_default", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		seeded := NewRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		reset := NewRandomPicker(5).WithRand(rand.NewPCG(42, 99)).WithRand(nil)
+
+		wantSeeded := collectPicks(ctx, seeded, 20)
+		gotReset := collectPicks(ctx, reset, 20)
+
+		if len(gotReset) != 20*5 {
+			t.Fatalf("expected %d picked endpoints, got %d", 20*5, len(gotReset))
+		}
+		if slices.Equal(wantSeeded, gotReset) {
+			t.Fatalf("WithRand(nil) still followed the seeded sequence")
+		}
+	})
+
+	t.Run("concurrent_pick", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p := NewRandomPicker(3).WithRand(rand.NewPCG(7, 13))
+
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				for range 200 {
+					res := p.Pick(ctx, makeInput())
+					if len(res.TargetEndpoints) != 3 {
+						t.Errorf("expected 3 endpoints, got %d", len(res.TargetEndpoints))
+						return
+					}
+				}
+			})
+		}
+		wg.Wait()
+	})
 }

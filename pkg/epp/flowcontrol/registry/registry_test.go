@@ -1142,6 +1142,51 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		assert.Equal(t, 0, leaseCount, "Band lease should be released after JIT failure")
 	})
 
+	t.Run("ShouldKeepBandLeaseCount_WhenBandAppearsDuringFailedProvisioning", func(t *testing.T) {
+		t.Parallel()
+		key := flowcontrol.FlowKey{ID: "racing-flow", Priority: dynamicPrio}
+
+		// Connections that saw the band missing race one that provisions the flow after the band
+		// appears. A failed connection must remove only its own flow state: removing the newer one
+		// orphans the band lease it holds.
+		for trial := range 500 {
+			h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for range 8 {
+				wg.Go(func() {
+					<-start
+					for range 20 {
+						if h.fr.WithConnection(key, func(contracts.ActiveFlowConnection) error { return nil }) == nil {
+							return
+						}
+					}
+				})
+			}
+			wg.Go(func() {
+				<-start
+				require.NoError(t, h.fr.ensurePriorityBand(dynamicPrio))
+			})
+			close(start)
+			wg.Wait()
+
+			flows := 0
+			h.fr.flowStates.Range(func(k, _ any) bool {
+				if k.(flowcontrol.FlowKey).Priority == dynamicPrio {
+					flows++
+				}
+				return true
+			})
+			val, ok := h.fr.priorityBandStates.Load(dynamicPrio)
+			require.True(t, ok, "Band lease state should exist")
+			state := val.(*priorityBandState)
+			state.mu.Lock()
+			leaseCount := state.leaseCount
+			state.mu.Unlock()
+			require.Equal(t, flows, leaseCount, "trial %d: band lease count must equal the flows in the registry", trial)
+		}
+	})
+
 	t.Run("ShouldMaintainBandLeaseCount_MatchingActiveFlowCount", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})

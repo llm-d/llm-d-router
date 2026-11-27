@@ -275,6 +275,37 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 	}
 }
 
+// A path may carry a query string, as for SGLang's /v1/loads?format=prometheus.
+func TestGetEndpoint_PathWithQuery(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	ep := &fwkdl.EndpointMetadata{Address: "10.0.0.1", MetricsHost: "10.0.0.1:8000"}
+	s, err := NewHTTPDataSource("http", "/v1/loads?format=prometheus&include=core", TLSOptions{}, "test", "test", parser)
+	require.NoError(t, err)
+	got := s.getEndpoint(ep)
+	assert.Equal(t, "http://10.0.0.1:8000/v1/loads?format=prometheus&include=core", got.String())
+}
+
+func TestNewHTTPDataSource_RejectsMalformedPath(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "invalid query escape", path: "/v1/loads?%zz"},
+		{name: "full URL with scheme and host", path: "http://10.0.0.1:8000/v1/loads?format=prometheus"},
+		{name: "scheme-relative host", path: "//10.0.0.1:8000/metrics"},
+		{name: "userinfo and host", path: "//user@10.0.0.1/metrics"},
+		{name: "opaque URI", path: "http:metrics"},
+		{name: "fragment", path: "/v1/loads?format=prometheus#frag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewHTTPDataSource("http", tc.path, TLSOptions{}, "test", "test", parser)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestNewHTTPDataSource_UseNodeAddressWithoutPortOverride(t *testing.T) {
 	parser := func(r io.Reader) (int, error) { return 0, nil }
 	_, err := NewHTTPDataSource("http", "/metrics", TLSOptions{SkipVerify: true}, "test", "test", parser,

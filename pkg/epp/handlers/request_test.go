@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -55,6 +56,7 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
@@ -428,6 +430,65 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 	assert.Equal(t, "1.2.3.4:8080", gotHeaders[metadata.DestinationEndpointKey])
 	assert.Equal(t, "123", gotHeaders["Content-Length"])
 	assert.NotContains(t, gotHeaders, "traceparent")
+}
+
+// A multi-cluster hub forwards the client's input-control headers: its endpoint
+// is a cluster EPP that applies the objective and fairness ID. Every other
+// EPP-owned header is still set or stripped by EPP.
+func TestGenerateRequestHeaderResponse_HubForwardsInputControlHeaders(t *testing.T) {
+	client := map[string]string{
+		"x-user-data":                         "important",
+		metadata.ObjectiveKey:                 "premium",
+		metadata.FlowFairnessIDKey:            "tenant-a",
+		metadata.InferenceTTLHeaderKey:        "30s",
+		reqcommon.RevisionDecisionIDHeaderKey: "rev-7",
+		metadata.DestinationEndpointKey:       "1.1.1.1:666",
+	}
+	inputControl := []string{metadata.ObjectiveKey, metadata.FlowFairnessIDKey,
+		metadata.InferenceTTLHeaderKey, reqcommon.RevisionDecisionIDHeaderKey}
+	mutate := func(forward bool, resolvedTenant string) (map[string]string, []string) {
+		server := &StreamingServer{}
+		server.SetForwardInputControlHeaders(forward)
+		reqCtx := &RequestContext{
+			TargetEndpoint:    "1.2.3.4:8080",
+			Request:           &Request{Headers: maps.Clone(client)},
+			Response:          &Response{},
+			SchedulingRequest: &fwksched.InferenceRequest{FairnessID: resolvedTenant},
+		}
+		mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
+			GetRequestHeaders().GetResponse().GetHeaderMutation()
+		set := map[string]string{}
+		for _, h := range mutation.GetSetHeaders() {
+			key := strings.ToLower(h.Header.Key)
+			_, dup := set[key]
+			assert.False(t, dup, "%s set twice", key)
+			set[key] = string(h.Header.RawValue)
+		}
+		return set, mutation.GetRemoveHeaders()
+	}
+
+	t.Run("model-server EPP strips input-control headers", func(t *testing.T) {
+		set, removed := mutate(false, "tenant-a")
+		assert.Equal(t, "important", set["x-user-data"])
+		assert.Equal(t, "1.2.3.4:8080", set[metadata.DestinationEndpointKey])
+		for _, key := range inputControl {
+			assert.NotContains(t, set, key)
+			assert.Contains(t, removed, key)
+		}
+	})
+	t.Run("hub forwards every input-control header", func(t *testing.T) {
+		set, removed := mutate(true, "tenant-a")
+		assert.Equal(t, "important", set["x-user-data"])
+		assert.Equal(t, "1.2.3.4:8080", set[metadata.DestinationEndpointKey], "EPP still owns the destination")
+		for _, key := range inputControl {
+			assert.Equal(t, client[key], set[key], "hub forwards %s", key)
+			assert.NotContains(t, removed, key)
+		}
+	})
+	t.Run("hub forwards the client's tenant, not the one it resolved", func(t *testing.T) {
+		set, _ := mutate(true, "tenant-a/agent-42")
+		assert.Equal(t, "tenant-a", set[metadata.FlowFairnessIDKey])
+	})
 }
 
 // EPP hands the sidecar the fairness identity it resolved, replacing any client
@@ -924,6 +985,68 @@ func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
 	require.ErrorAs(t, err, &epErr)
 	assert.Equal(t, errcommon.ServiceUnavailable, epErr.Code)
 	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), epErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+}
+
+func TestFallbackToEndpoint_DataParallelRankHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		endpoint *datalayer.EndpointMetadata
+		wantRank string
+		wantSet  bool
+	}{
+		{
+			name: "rank endpoint sets x-data-parallel-rank",
+			endpoint: &datalayer.EndpointMetadata{
+				Address:      "10.0.0.1",
+				Port:         "8000",
+				RankIndex:    3,
+				RankByHeader: true,
+			},
+			wantRank: "3",
+			wantSet:  true,
+		},
+		{
+			// A port of a multi-port pod has a RankIndex and no marker.
+			name: "endpoint without the marker leaves x-data-parallel-rank unset",
+			endpoint: &datalayer.EndpointMetadata{
+				Address:   "10.0.0.1",
+				Port:      "8001",
+				RankIndex: 1,
+			},
+			wantSet: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{
+				director: &mockDirectorRequest{endpoint: tc.endpoint},
+			}
+			reqCtx := &RequestContext{
+				Request:  &Request{Headers: make(map[string]string)},
+				Response: &Response{Headers: make(map[string]string)},
+			}
+
+			require.NoError(t, server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0))
+			mutation := reqCtx.reqHeaderResp.GetRequestHeaders().GetResponse().GetHeaderMutation()
+			require.NotNil(t, mutation)
+
+			var gotRank string
+			var found bool
+			for _, h := range mutation.GetSetHeaders() {
+				if h.GetHeader().GetKey() == routing.DataParallelRankHeader {
+					gotRank = string(h.GetHeader().GetRawValue())
+					found = true
+				}
+			}
+			assert.Equal(t, tc.wantSet, found)
+			if tc.wantSet {
+				assert.Equal(t, tc.wantRank, gotRank)
+			}
+		})
+	}
 }
 
 type emptyPoolDirector struct {

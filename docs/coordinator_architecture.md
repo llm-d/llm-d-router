@@ -78,6 +78,7 @@ absorb further processing modes as they are added.
   - [Connector selection](#connector-selection)
   - [Should the coordinator use the tokens-in format?](#should-the-coordinator-use-the-tokens-in-format)
   - [Worker protocol for `/inference/v1/generate`](#worker-protocol-for-inferencev1generate)
+  - [Step re-runs](#step-re-runs)
   - [The built-in steps](#the-built-in-steps)
   - [Adding a step to the pipeline](#adding-a-step-to-the-pipeline)
 - [References](#references)
@@ -401,11 +402,13 @@ The coordinator's `conditional-decode` step is the implemented mechanism for the
 decode serve this directly" question. The step sends the decode request with the HTTP
 `Prefer: if-available` header:
 
-- The decode worker serves the request directly when it can (cache available). The
-  response (SSE or JSON) is streamed back to the client and the pipeline stops.
-- When it cannot, the worker returns `412 Precondition Failed`. The coordinator treats
-  the 412 as a cache miss, swallows it, and continues the pipeline to encode, prefill,
-  and decode.
+- The decode worker serves the request directly when the router's gate allows it, for
+  example because the prompt is cached or too short to disaggregate; the worker computes
+  any missing prefill itself. The response (SSE or JSON) is streamed back to the client
+  and the pipeline stops.
+- Otherwise the router returns `412 Precondition Failed`. The coordinator treats the
+  412 as a deferral, swallows it, and continues the pipeline to encode, prefill, and
+  decode.
 
 The coordinator captures the 412 response headers listed in `forward_response_headers`
 and sends them on the later phases, as it does for encode and prefill responses. Hints in
@@ -413,8 +416,8 @@ the 412 body are not consumed.
 
 The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode
 gate when configured. When no gate plugin is configured, the router still returns 412 by
-default for any `Prefer: if-available` request so a missing gate surfaces as the coordinator's
-cache-miss fallback rather than a silent forward. See
+default for any `Prefer: if-available` request so a missing gate surfaces as a deferral
+rather than a silent forward. See
 [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
 
 `conditional-decode` is not supported with `kv-sglang`. The step sends the decode
@@ -433,8 +436,8 @@ requests therefore runs `prefill` and `decode` on every gRPC Generate request. T
 On `POST /vllm.Inference/Generate` and `POST /vllm.Inference/GenerateStream`, the
 coordinator runs `conditional-decode`, `encode`, `prefill`, and `decode` in sequence
 over HTTP/2 gRPC. On `conditional-decode`, the coordinator sends `Prefer: if-available`
-to decode and treats HTTP `412` or gRPC `FAILED_PRECONDITION` as a cache miss. On a
-miss, the pipeline continues through `encode`, `prefill`, and `decode`. The `encode`
+to decode and treats HTTP `412` or gRPC `FAILED_PRECONDITION` as a deferral. On a
+deferral, the pipeline continues through `encode`, `prefill`, and `decode`. The `encode`
 step runs only when the request carries `media` items. The `render`,
 `replace-media-urls`, and `async-broker` steps do nothing on native `vllm.Inference`
 gRPC paths.
@@ -497,8 +500,9 @@ and the decode request names the prefill pod with it. A prefill response without
 header, or with a value that is not a `host:port` with a TCP port, fails the request
 before decode is sent.
 
-`p2p-source-producer` writes the prefill pod's P2P address only when its
-`prefillProfileName` parameter (default `prefill`) names the profile the prefill EPP ran,
+`p2p-source-producer` writes the prefill pod's P2P address only when the prefill profile
+name it resolves (its `prefillProfileName` parameter, else the name in the scheduling
+result, else `prefill`) names the profile the prefill EPP ran,
 which `header-profile-handler` picks from `x-llm-d-epp-profile: prefill`. See
 [Prefill profile name](../pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/README.md#prefill-profile-name).
 
@@ -647,13 +651,17 @@ type Step interface {
   `reqCtx.ResponseWriter`, or the client is gone). A step that has written an error
   response itself returns a `pipeline.ResponseWrittenError` instead, so the request still
   counts as failed.
+- A step that gets a retryable upstream failure can ask the pipeline to run it again.
+  While `reqCtx.CanRerunStep()` is true, and before the step writes to
+  `reqCtx.ResponseWriter`, it returns a `pipeline.StepRerunError`. See
+  [Step re-runs](#step-re-runs).
 - A response-producing step writes the client response to `reqCtx.ResponseWriter`,
   typically by proxying the upstream response with `httputil.ReverseProxy` set to
   `FlushInterval: -1`, which forwards each write immediately (SSE chunks stream through; a
   non-streaming JSON response passes through as one body). A terminal step like `decode`
   returns `nil`, since it is the last step; a non-terminal step that has fully served the
-  response returns `ErrPipelineDone` to skip the remaining steps (the `conditional-decode`
-  cache hit). `decode` and `conditional-decode` are the reference implementations.
+  response returns `ErrPipelineDone` to skip the remaining steps (a served
+  `conditional-decode` probe). `decode` and `conditional-decode` are the reference implementations.
 
 A step is constructed by a `StepFactory`:
 
@@ -802,11 +810,14 @@ gateway:              # outbound client to the Inference Gateway
   idle_conn_timeout: 90s
   timeout: 60s
 
-pipeline:             # connector defaults + ordered steps
+pipeline:             # connector defaults, force-stream settings + ordered steps
   kv_connector: kv-shared-storage
   ec_connector: ec-shared-storage
   use_openai_format: true
   worker_protocol: http
+  force_stream: false                   # decode and conditional-decode; see coordinator.yaml
+  force_stream_buffer_size: 1GiB
+  force_stream_max_request_size: 256KiB
   steps:
     - type: <step-type>
       params: { ... }
@@ -913,6 +924,44 @@ coordinator still requires a `render` step when `use_openai_format` is `false`, 
 OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
 upstream gRPC methods regardless of `worker_protocol`.
 
+### Step re-runs
+
+`pipeline.max_step_reruns` sets how many times one request can run a failed step again.
+The default value `0` disables re-runs.
+
+The pipeline runs a step again when no response byte reached the client and one of these
+conditions is true:
+
+- A `vllm.Inference` gRPC `prefill` or `decode` leg returns the gRPC status `UNAVAILABLE`.
+- An `sglang.api.v1` gRPC `prefill` or `decode` leg sends a `GenerateStreamItem.error`
+  with `retryable: true`.
+
+vLLM returns `UNAVAILABLE` for an error that the engine marks as retryable.
+[vllm-project/vllm#67430](https://github.com/vllm-project/vllm/issues/67430) proposes to
+add a failed load of the KV blocks or of the encoder cache to these errors. SGLang
+reports retryable KV transfer and internal stream failures in `GenerateStreamItem.error`
+with `retryable: true` while the gRPC status stays `OK`. On SGLang, the coordinator
+cancels the peer leg and starts both `prefill` and `decode` again with a new
+`bootstrap_room`.
+
+The failed step cannot use the output of the step before it, so the re-run starts at
+that earlier step:
+
+| Engine | Failed step | Steps that run again |
+| :---- | :---- | :---- |
+| `vllm.Inference` | `decode` | `prefill`, `decode` |
+| `vllm.Inference` | `decode`, when `prefill` did not run | `encode`, `decode` |
+| `vllm.Inference` | `prefill` | `encode`, `prefill` |
+| `sglang.api.v1` | `prefill` or `decode` | `prefill`, `decode` |
+
+When the earlier step did not run for the request, only the failed step runs again. The
+gateway schedules each leg of a re-run, so a leg can reach a different worker. After the
+last re-run, the client gets the error of the worker. The `step_reruns_total` metric counts
+the re-runs.
+
+A gateway that sheds load can also return `UNAVAILABLE` on vLLM routes. Each re-run then
+adds load, so use a small value.
+
 ### The built-in steps
 
 | `type` | Purpose | Key params |
@@ -920,10 +969,10 @@ upstream gRPC methods regardless of `worker_protocol`.
 | `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
 | `replace-media-urls` | Download `image_url`, `audio_url`, and `video_url` references (chat completions) or `input_image` references (Responses) and accept inline `input_audio`, inline each as a base64 `data:` URI, seed one `MultimodalEntries` item per part tagged with its modality. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries`, `max_download_size`, `max_image_download_size`, `max_audio_download_size`, `max_video_download_size`, `allowed_image_content_types`, `allowed_audio_content_types`, `allowed_video_content_types`, `allow_private_networks`, `allowed_domains` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens`, `mm_payload` |
-| `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. A served hit runs the same prompt-token parity check as `decode`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `prompt_token_parity`, `forward_prompt_token_ids` |
+| `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. With `pipeline.force_stream`, a non-streaming request's served probe is reassembled into one reply, as on `decode`. A served probe runs the same prompt-token parity check as `decode`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `prompt_token_parity`, `forward_prompt_token_ids` |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
-| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). Optionally sends the rendered token IDs in `kv_transfer_params.prompt_token_ids` so the worker skips tokenization (`forward_prompt_token_ids`). | `kv_connector`, `prompt_token_parity`, `forward_prompt_token_ids` |
+| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `use_openai_format`, `kv_connector`, `ec_connector`, `forward_prompt_token_ids` |
+| `decode` | Stream the final completion to the client. With `pipeline.force_stream`, a non-streaming request is streamed upstream and reassembled into one reply. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). Optionally sends the rendered token IDs in `kv_transfer_params.prompt_token_ids` so the worker skips tokenization (`forward_prompt_token_ids`). | `kv_connector`, `prompt_token_parity`, `forward_prompt_token_ids` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step

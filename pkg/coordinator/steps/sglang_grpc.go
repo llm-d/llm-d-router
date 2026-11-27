@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -120,7 +119,7 @@ func (s *PrefillStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Re
 		return internalUpstreamError(PrefillStepName, reqCtx, cause)
 	}
 
-	reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = extractHost(prefillEndpoint)
+	reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = routing.ExtractHost(prefillEndpoint)
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapPort] = port
 	reqCtx.KVTransferParams[reqcommon.FieldBootstrapRoom] = room
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
@@ -224,9 +223,16 @@ func failPrefillStreamError(logger logr.Logger, payload []byte, ps *pipeline.SGL
 	errBody := item.GetError().GetError()
 	msg := errBody.GetMessage()
 	code := sglangErrorBodyGRPCCode(errBody.GetCode())
+	retryable := errBody.GetRetryable()
 	cause := fmt.Errorf("prefill stream error (code %d): %s", errBody.GetCode(), msg)
-	logger.Error(cause, "prefill stream reported error", "code", errBody.GetCode())
-	ps.Fail(cause, strconv.FormatUint(uint64(code), 10), grpcframe.EncodeStatusMessage(msg), "")
+	logger.Error(cause, "prefill stream reported error", "code", errBody.GetCode(), "retryable", retryable)
+	statusStr := strconv.FormatUint(uint64(code), 10)
+	encodedMsg := grpcframe.EncodeStatusMessage(msg)
+	if retryable {
+		ps.FailRetryable(cause, statusStr, encodedMsg, "")
+		return
+	}
+	ps.Fail(cause, statusStr, encodedMsg, "")
 }
 
 func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.RequestContext, sglangReq *pipeline.SGLangGRPCRequest) error {
@@ -287,7 +293,14 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 	resp, err := streamGRPCToGateway(decodeCtx, s.gwClient, coordmetrics.UpstreamDecode, path, headers, head, payload, tail)
 	if err != nil {
 		if ps != nil && ctx.Err() == nil {
-			if pStatus, pMsg, pDetails, prefillErr := ps.Failure(); prefillErr != nil {
+			if pStatus, pMsg, pDetails, retryable, prefillErr := ps.Failure(); prefillErr != nil {
+				if retryable && reqCtx.CanRerunStep() {
+					return &pipeline.StepRerunError{
+						Step:  PrefillStepName,
+						From:  PrefillStepName,
+						Cause: &pipeline.UpstreamError{Step: PrefillStepName, StatusCode: grpcStatusToHTTPStatus(pStatus)},
+					}
+				}
 				writeRawGRPCError(reqCtx.ResponseWriter, grpcStatusWire{status: pStatus, message: pMsg, detailsBin: pDetails})
 				httpStatus := grpcStatusToHTTPStatus(pStatus)
 				return &pipeline.ResponseWrittenError{
@@ -309,13 +322,14 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 		rewrite   frameRewriter
 		checkPeer peerFailureCheck
 	)
-	if ps != nil {
+	if ps != nil || reqCtx.CanRerunStep() {
 		var (
+			committed       bool
 			parityReported0 bool
 			parityReported  map[uint32]bool
 			onTerminal      func(index, promptTokens uint32)
 		)
-		if s.promptTokenParity != promptTokenParityOff {
+		if ps != nil && s.promptTokenParity != promptTokenParityOff {
 			onTerminal = func(index, promptTokens uint32) {
 				if index == 0 {
 					if parityReported0 {
@@ -348,18 +362,38 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 				)
 			}
 		}
-		rewrite = func(frame []byte) ([]byte, error) {
-			return rewriteSGLangDecodeFrame(decodeCtx, logger, frame, ps, onTerminal)
+		rerunFrom := DecodeStepName
+		if ps != nil {
+			rerunFrom = PrefillStepName
 		}
-		checkPeer = func(wait bool) (string, grpcStatusWire, error, bool) {
+		rewrite = func(frame []byte) ([]byte, error) {
+			if ps == nil && committed {
+				return frame, nil
+			}
+			allowRerun := !committed && reqCtx.CanRerunStep()
+			rewritten, err := rewriteSGLangDecodeFrame(decodeCtx, logger, frame, ps, onTerminal, allowRerun, rerunFrom)
+			var rerun *pipeline.StepRerunError
+			if !errors.As(err, &rerun) {
+				committed = true
+			}
+			return rewritten, err
+		}
+	}
+	if ps != nil {
+		checkPeer = func(wait bool) (peerFailure, bool) {
 			if wait && !ps.Wait(decodeCtx, sglangPrefillWaitOnTerminal) {
 				logger.V(logutil.DEBUG).Info("prefill stream still open after decode ended", "waited", sglangPrefillWaitOnTerminal)
 			}
-			pStatus, pMsg, pDetails, prefillErr := ps.Failure()
+			pStatus, pMsg, pDetails, retryable, prefillErr := ps.Failure()
 			if prefillErr == nil {
-				return "", grpcStatusWire{}, nil, false
+				return peerFailure{}, false
 			}
-			return PrefillStepName, grpcStatusWire{status: pStatus, message: pMsg, detailsBin: pDetails}, prefillErr, true
+			return peerFailure{
+				step:      PrefillStepName,
+				status:    grpcStatusWire{status: pStatus, message: pMsg, detailsBin: pDetails},
+				cause:     prefillErr,
+				retryable: retryable,
+			}, true
 		}
 	}
 
@@ -380,7 +414,7 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 // whose cached_tokens changes is decoded and re-encoded. On a scan error,
 // rewriteDecodeFrameCachedTokens returns frame unchanged with the error.
 func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, frame []byte, ps *pipeline.SGLangPrefillStream) ([]byte, error) {
-	return rewriteSGLangDecodeFrame(ctx, logger, frame, ps, nil)
+	return rewriteSGLangDecodeFrame(ctx, logger, frame, ps, nil, false, "")
 }
 
 func rewriteSGLangDecodeFrame(
@@ -389,8 +423,10 @@ func rewriteSGLangDecodeFrame(
 	frame []byte,
 	ps *pipeline.SGLangPrefillStream,
 	onTerminal func(index, promptTokens uint32),
+	allowRerun bool,
+	rerunFrom string,
 ) ([]byte, error) {
-	if ps == nil {
+	if ps == nil && !allowRerun {
 		return frame, nil
 	}
 	payload := frame[grpcframe.HeaderLen:]
@@ -398,7 +434,15 @@ func rewriteSGLangDecodeFrame(
 	if err != nil {
 		return frame, err
 	}
-	if scanned.IsError || !scanned.Finished {
+	if scanned.IsError {
+		if allowRerun {
+			if rerunErr := sglangRetryableDecodeError(payload, rerunFrom); rerunErr != nil {
+				return nil, rerunErr
+			}
+		}
+		return frame, nil
+	}
+	if ps == nil || !scanned.Finished {
 		return frame, nil
 	}
 	index := scanned.Index
@@ -430,6 +474,28 @@ func rewriteSGLangDecodeFrame(
 	return rewritten, nil
 }
 
+// sglangRetryableDecodeError inspects a GenerateStreamItem error payload and
+// returns a StepRerunError when ErrorBody.retryable is true.
+func sglangRetryableDecodeError(payload []byte, from string) error {
+	var item sglangapiv1.GenerateStreamItem
+	if err := proto.Unmarshal(payload, &item); err != nil {
+		return nil
+	}
+	errBody := item.GetError().GetError()
+	if !errBody.GetRetryable() {
+		return nil
+	}
+	httpStatus := int(errBody.GetCode())
+	if httpStatus == 0 {
+		httpStatus = http.StatusBadGateway
+	}
+	return &pipeline.StepRerunError{
+		Step:  DecodeStepName,
+		From:  from,
+		Cause: &pipeline.UpstreamError{Step: DecodeStepName, StatusCode: httpStatus},
+	}
+}
+
 func sglangPayloadHasInputIDs(payload []byte) bool {
 	found := false
 	_ = protoscan.ForEachField(payload, func(num protowire.Number, _ protowire.Type, _, _ []byte) error {
@@ -439,16 +505,6 @@ func sglangPayloadHasInputIDs(payload []byte) bool {
 		return nil
 	})
 	return found
-}
-
-func extractHost(hostWithPort string) string {
-	hostWithPort, _ = strings.CutPrefix(hostWithPort, "http://")
-	hostWithPort, _ = strings.CutPrefix(hostWithPort, "https://")
-	host, _, err := net.SplitHostPort(hostWithPort)
-	if err != nil {
-		return hostWithPort
-	}
-	return host
 }
 
 func int64FromParam(v any) (int64, bool) {
@@ -471,6 +527,6 @@ func sglangErrorBodyGRPCCode(httpCode uint32) codes.Code {
 	case http.StatusNotFound:
 		return codes.NotFound
 	default:
-		return pipeline.HTTPStatusToGRPCCode(int(httpCode))
+		return grpcframe.UpstreamHTTPStatusToCode(int(httpCode))
 	}
 }

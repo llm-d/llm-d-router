@@ -396,6 +396,24 @@ type RequestHandlerConfig struct {
 	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
 
 	// +optional
+	// RequestStreamUsage, when true, lets the EPP add
+	// stream_options.include_usage to a streamed OpenAI chat completions or
+	// completions request that does not ask for usage, so the model server
+	// reports the token usage that the EPP's token metrics and usage-reading
+	// plugins depend on. The EPP removes the usage-only frame this adds from the
+	// response before it reaches the client. It is off by default: when disabled
+	// the request body is forwarded unchanged.
+	RequestStreamUsage bool `json:"requestStreamUsage,omitempty"`
+
+	// +optional
+	// ForwardInputControlHeaders, when true, lets the EPP pass the client's
+	// input-control headers (objective, fairness ID, TTL, ...) to the chosen
+	// endpoint unchanged instead of stripping them. Set it only on a multi-cluster
+	// hub, whose endpoints are cluster EPPs that apply those headers themselves.
+	// It is off by default: a model server has no use for them.
+	ForwardInputControlHeaders bool `json:"forwardInputControlHeaders,omitempty"`
+
+	// +optional
 	// DataProducers lists DataProducer plugins that run during request
 	// handling, on the located endpoints before screeners. A DataProducer not
 	// listed runs on the screened endpoints before admission and scheduling,
@@ -433,6 +451,12 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.ComposeFairnessIDs {
 		parts = append(parts, "ComposeFairnessIDs: true")
+	}
+	if rhc.RequestStreamUsage {
+		parts = append(parts, "RequestStreamUsage: true")
+	}
+	if rhc.ForwardInputControlHeaders {
+		parts = append(parts, "ForwardInputControlHeaders: true")
 	}
 	if len(rhc.DataProducers) > 0 {
 		producerStrs := make([]string, len(rhc.DataProducers))

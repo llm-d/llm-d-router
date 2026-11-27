@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr/funcr"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -71,6 +73,7 @@ func decodeOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 func prefillOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 	return &scheduling.SchedulingResult{
 		PrimaryProfileName: "prefill",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{ep}},
 		},
@@ -584,6 +587,70 @@ func TestPreRequest_P2PPortAddsRankIndex(t *testing.T) {
 	assertPrefillHeader(t, req, "10.0.0.2", 8002)
 }
 
+func TestPreRequest_SamePodDifferentRankEndpointPullsFromPeerRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 8000})
+
+	source := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-1-rank-0"}, Address: "10.0.0.2", Port: "8080",
+		RankIndex: 2, RankByHeader: true,
+	}, nil, nil)
+	source.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(4, 4, testBlockSize).WithCachedBlockCount(4))
+	computing := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-1-rank-1"}, Address: "10.0.0.2", Port: "8080",
+		RankIndex: 3, RankByHeader: true,
+	}, nil, nil)
+	computing.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(0, 4, testBlockSize).WithCachedBlockCount(0))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-same-pod-rank", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source, computing}))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
+
+	assertSource(t, req, "10.0.0.2", 8002)
+}
+
+func TestPreRequest_RankEndpointGlobalPortOverflowReportsGlobalRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 65530})
+	prefill := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-p-rank-1"}, Address: "10.0.0.2", Port: "8080",
+		RankIndex: 9, RankByHeader: true,
+	}, nil, nil)
+	req := &scheduling.InferenceRequest{RequestID: "req-global-overflow", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+
+	err := p.PreRequest(ctx, req, prefillOnly(prefill))
+	require.ErrorContains(t, err, "plus rank 9 is outside 1-65535")
+}
+
+// A rank endpoint of a data-parallel group spanning pods binds its P2P tier at
+// the rank-0 port plus its global rank.
+func TestPreRequest_RankEndpointP2PPortAddsGlobalRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 8000})
+
+	source := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-src-rank-1"}, Address: "10.0.0.3", Port: "8081",
+		RankIndex: 5, RankByHeader: true,
+	}, nil, nil)
+	source.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(4, 4, testBlockSize).WithCachedBlockCount(4))
+	prefill := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-p-rank-2"}, Address: "10.0.0.2", Port: "8082",
+		RankIndex: 6, RankByHeader: true,
+	}, nil, nil)
+	prefill.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(0, 4, testBlockSize).WithCachedBlockCount(0))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-global-rank", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source, prefill}))
+	require.NoError(t, p.PreRequest(ctx, req, prefillOnly(prefill)))
+
+	assertSource(t, req, "10.0.0.3", 8005)
+	assertPrefillHeader(t, req, "10.0.0.2", 8006)
+}
+
 // p2pConnectorPort plus the rank must stay a TCP port. A prefill endpoint
 // beyond it fails the request at the EPP with the misconfiguration named,
 // instead of a sidecar 500 on a malformed header.
@@ -852,6 +919,71 @@ func TestPreRequest_ConfiguredPrefillProfileName(t *testing.T) {
 	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
+// An unset prefillProfileName follows the profile the scheduling result names.
+func TestPreRequest_PrefillProfileNameFromResult(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-result-profile", peer("10.0.0.2", 48))
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill-h200",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":       {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
+			"prefill-h200": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
+		},
+	}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+// The scheduling result here comes from the real disagg profile handler, so a renamed
+// prefill profile reaches the request through the handler that runs it rather than
+// through a hand-built result.
+func TestPreRequest_PrefillProfileNameFromDisaggHandler(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	handle := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
+	decider, err := disagg.AlwaysDisaggPDDeciderPluginFactory("pd-decider", nil, handle)
+	require.NoError(t, err)
+	handle.AddPlugin("pd-decider", decider)
+	raw, err := disagg.HandlerFactory("disagg", plugin.StrictDecoder(json.RawMessage(
+		`{"deciders":{"prefill":"pd-decider"},"profiles":{"prefill":"prefill-h200"}}`)), handle)
+	require.NoError(t, err)
+	handler := raw.(scheduling.ProfileHandler)
+
+	decode := endpoint(p, "pod-a", "10.0.0.1", 0)
+	prefill := endpoint(p, "pod-b", "10.0.0.2", 3)
+	request := &scheduling.InferenceRequest{RequestID: "req-disagg-profile"}
+	profiles := map[string]scheduling.SchedulerProfile{"decode": stubProfile{}, "prefill-h200": stubProfile{}}
+	results := map[string]*scheduling.ProfileRunResult{}
+	for picked := handler.Pick(ctx, request, profiles, results); len(picked) > 0; picked = handler.Pick(ctx, request, profiles, results) {
+		for name := range picked {
+			ep := decode
+			if name == "prefill-h200" {
+				ep = prefill
+			}
+			results[name] = &scheduling.ProfileRunResult{TargetEndpoints: []scheduling.Endpoint{ep}}
+		}
+	}
+	result, err := handler.ProcessResults(ctx, request, results)
+	require.NoError(t, err)
+	require.Equal(t, "prefill-h200", result.PrefillProfileName)
+
+	req := preRequest(p, request.RequestID, peer("10.0.0.2", 48))
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+type stubProfile struct{}
+
+func (stubProfile) Run(context.Context, *scheduling.InferenceRequest, []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+	return &scheduling.ProfileRunResult{}, nil
+}
+
 // A prefillProfileName that matches no profile result sets no prefill header,
 // and the decision log names the configured profile so the mismatch is
 // visible from the EPP side.
@@ -877,11 +1009,12 @@ func TestPreRequest_DecisionLogNamesUnmatchedPrefillProfile(t *testing.T) {
 	assert.Contains(t, lines[0], `"prefillEndpoint"=false`)
 }
 
-// Factory wires a custom prefillProfileName; default is "prefill".
+// Factory wires a custom prefillProfileName; the default follows the scheduling
+// result.
 func TestPluginFactory_PrefillProfileName(t *testing.T) {
 	def, err := PluginFactory("d", nil, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "prefill", def.(*Producer).prefillProfile)
+	assert.Equal(t, "", def.(*Producer).prefillProfile)
 
 	dec := json.NewDecoder(strings.NewReader(`{"prefillProfileName": "P"}`))
 	custom, err := PluginFactory("c", dec, nil)

@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -302,16 +301,9 @@ type arrayInputResult struct {
 }
 
 func parseTokenIDs(v []any, errorPrefix string) ([]uint32, error) {
-	ids := make([]uint32, len(v))
-	for i, val := range v {
-		flt, ok := val.(float64)
-		if !ok {
-			return nil, fmt.Errorf("%s: mixed types in array", errorPrefix)
-		}
-		if flt != float64(uint32(flt)) {
-			return nil, fmt.Errorf("%s: floating-point number %f is not a valid token ID", errorPrefix, flt)
-		}
-		ids[i] = uint32(flt)
+	ids, err := reqcommon.ParseTokenIDs(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
 	return ids, nil
 }
@@ -434,6 +426,14 @@ type CompletionsRequest struct {
 	Prompt Prompt `json:"prompt"`
 	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	CacheSalt string `json:"cache_salt,omitempty"`
+	// Echo is kept raw so a malformed value does not fail request parsing.
+	Echo json.RawMessage `json:"echo,omitempty"`
+}
+
+// EchoDisabled reports whether the request leaves echo unset or sets it to false.
+func (r *CompletionsRequest) EchoDisabled() bool {
+	e := bytes.TrimSpace(r.Echo)
+	return len(e) == 0 || bytes.Equal(e, []byte("false")) || bytes.Equal(e, []byte("null"))
 }
 
 func (r *CompletionsRequest) String() string {
@@ -671,6 +671,12 @@ type ImagesGenerationsRequest struct {
 	Size string `json:"size,omitempty"`
 	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
 	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// Layers is the number of output layers for layered image models. Nil means
+	// the server default.
+	Layers *int64 `json:"layers,omitempty"`
+	// Resolution is the requested resolution for layered image models, in pixels.
+	// Nil means the server default.
+	Resolution *int64 `json:"resolution,omitempty"`
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`
@@ -680,12 +686,65 @@ type ImagesGenerationsRequest struct {
 	InputImages []UploadedMedia `json:"-"`
 }
 
+// UnmarshalJSON accepts integer resolution and layer values and ignores other
+// representations, so requests for backends that use those fields differently
+// remain forwardable.
+func (i *ImagesGenerationsRequest) UnmarshalJSON(data []byte) error {
+	type imageRequest ImagesGenerationsRequest
+	aux := struct {
+		*imageRequest
+		Resolution json.RawMessage `json:"resolution"`
+		Layers     json.RawMessage `json:"layers"`
+	}{imageRequest: (*imageRequest)(i)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	i.Resolution = optionalInt64(aux.Resolution)
+	i.Layers = optionalInt64(aux.Layers)
+	return nil
+}
+
+func optionalInt64(raw json.RawMessage) *int64 {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return &n
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+			return &v
+		}
+	}
+	return nil
+}
+
 func (i *ImagesGenerationsRequest) String() string {
 	if i == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, NegativePromptLength: %d}",
-		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, len(i.NegativePrompt))
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, Layers: %v, Resolution: %v, NegativePromptLength: %d}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, derefInt(i.Layers), derefInt(i.Resolution), len(i.NegativePrompt))
+}
+
+// ParseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
+// zeros when the value is empty or malformed.
+func ParseResolution(s string) (width, height int64) {
+	i := strings.IndexAny(s, "xX")
+	if i <= 0 {
+		return 0, 0
+	}
+	w, err := strconv.ParseInt(strings.TrimSpace(s[:i]), 10, 64)
+	if err != nil || w <= 0 {
+		return 0, 0
+	}
+	h, err := strconv.ParseInt(strings.TrimSpace(s[i+1:]), 10, 64)
+	if err != nil || h <= 0 {
+		return 0, 0
+	}
+	return w, h
 }
 
 // derefInt formats an optional integer pointer for logging without
@@ -869,7 +928,7 @@ func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
 
 func (r *GenerateRequest) unmarshalJSONFallback(data []byte) error {
 	var raw struct {
-		TokenIDs  []float64     `json:"token_ids"`
+		TokenIDs  []any         `json:"token_ids"`
 		CacheSalt string        `json:"cache_salt,omitempty"`
 		Features  *wireFeatures `json:"features,omitempty"`
 	}
@@ -877,13 +936,11 @@ func (r *GenerateRequest) unmarshalJSONFallback(data []byte) error {
 		return err
 	}
 	r.CacheSalt = raw.CacheSalt
-	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
-	for i, v := range raw.TokenIDs {
-		if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
-			return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
-		}
-		r.TokenIDs[i] = uint32(v)
+	ids, err := parseTokenIDs(raw.TokenIDs, "token_ids")
+	if err != nil {
+		return err
 	}
+	r.TokenIDs = ids
 	r.setGenerateRequestFeatures(raw.Features)
 	return nil
 }

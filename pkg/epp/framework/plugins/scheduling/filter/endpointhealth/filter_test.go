@@ -29,6 +29,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -460,13 +461,14 @@ func TestFactory(t *testing.T) {
 				responseFailureCodes:     map[int]struct{}{502: {}, 503: {}},
 				ejectionDuration:         30 * time.Second,
 				maxEjectionDuration:      5 * time.Minute,
+				maxEjectionPercent:       100,
 			},
 		},
 		{
 			name: "all parameters",
 			params: `{"pollSource": "vllm-metrics", "pollFailureThreshold": 5, "pollFailureDuration": "30s",
 				"responseFailureThreshold": 2, "responseFailureCodes": [500, 502],
-				"ejectionDuration": "1m", "maxEjectionDuration": "10m"}`,
+				"ejectionDuration": "1m", "maxEjectionDuration": "10m", "maxEjectionPercent": 34}`,
 			want: config{
 				pollSource:               "vllm-metrics",
 				pollFailureThreshold:     5,
@@ -475,6 +477,7 @@ func TestFactory(t *testing.T) {
 				responseFailureCodes:     map[int]struct{}{500: {}, 502: {}},
 				ejectionDuration:         time.Minute,
 				maxEjectionDuration:      10 * time.Minute,
+				maxEjectionPercent:       34,
 			},
 		},
 		{
@@ -486,6 +489,7 @@ func TestFactory(t *testing.T) {
 				pollFailureDuration:  10 * time.Second,
 				responseFailureCodes: map[int]struct{}{502: {}, 503: {}},
 				maxEjectionDuration:  5 * time.Minute,
+				maxEjectionPercent:   100,
 			},
 		},
 		{name: "malformed", params: `{"pollFailureThreshold": "three"}`, wantErr: "failed to parse"},
@@ -498,6 +502,8 @@ func TestFactory(t *testing.T) {
 		{name: "empty codes", params: `{"responseFailureCodes": []}`, wantErr: "responseFailureCodes must not be empty"},
 		{name: "zero ejection", params: `{"ejectionDuration": "0s"}`, wantErr: "ejectionDuration must be positive"},
 		{name: "max below base", params: `{"ejectionDuration": "1m", "maxEjectionDuration": "30s"}`, wantErr: "must be at least ejectionDuration"},
+		{name: "zero max ejection percent", params: `{"maxEjectionPercent": 0}`, wantErr: "maxEjectionPercent must be between 1 and 100, got 0"},
+		{name: "max ejection percent above 100", params: `{"maxEjectionPercent": 101}`, wantErr: "maxEjectionPercent must be between 1 and 100, got 101"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -655,6 +661,161 @@ func TestResponseEjectionCountsOnlyConsecutiveFailures(t *testing.T) {
 		respond(f, "b", status)
 	}
 	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// grpcRespond delivers the end of a gRPC response stream whose grpc-status
+// the director wrote onto the response headers, mapped to no HTTP status:
+// the filter classifies it by the HTTP status the code corresponds to.
+func grpcRespond(f *EndpointHealthFilter, name, grpcStatus string) {
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{
+			Headers: map[string]string{
+				reqcommon.HeaderContentType: grpcframe.MediaType,
+				grpcframe.HeaderStatus:      grpcStatus,
+			},
+			EndOfStream: true,
+		},
+		&fwkdl.EndpointMetadata{ID: id(name)})
+}
+
+// grpcHeaders delivers a gRPC response's headers. The stream's status is not
+// final yet, so the headers alone must charge nothing.
+func grpcHeaders(f *EndpointHealthFilter, name, grpcStatus string) {
+	headers := map[string]string{
+		reqcommon.PseudoHeaderStatus: "200",
+		reqcommon.HeaderContentType:  grpcframe.MediaType,
+	}
+	if grpcStatus != "" {
+		headers[grpcframe.HeaderStatus] = grpcStatus
+	}
+	f.ResponseHeader(context.Background(), nil,
+		&fwkrh.Response{Headers: headers},
+		&fwkdl.EndpointMetadata{ID: id(name)})
+}
+
+// A gRPC failure ejected at the end of the stream: UNAVAILABLE maps to 503,
+// which the default responseFailureCodes count.
+func TestGRPCFailureEjectsAtEndOfStream(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+	filter := func() []string { return names(f.Filter(context.Background(), nil, candidates)) }
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	require.Equal(t, []string{"a", "b"}, filter(), "four failures are below the threshold")
+
+	grpcRespond(f, "b", "14")
+	require.Equal(t, []string{"a"}, filter(), "the fifth consecutive failure ejects")
+
+	clock.advance(30 * time.Second)
+	require.Equal(t, []string{"a", "b"}, filter(), "the ejection ends after ejectionDuration")
+}
+
+// A gRPC response's headers carry :status 200 whatever the stream's outcome,
+// and the grpc-status of a trailers-only response is final only once the
+// stream ends, so header delivery charges neither a failure nor a reset.
+func TestGRPCResponseHeadersChargeNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	for range 10 {
+		grpcHeaders(f, "a", "")
+		grpcHeaders(f, "b", "")
+		grpcHeaders(f, "b", "14")
+	}
+	grpcRespond(f, "b", "14")
+	assert.Equal(t, []string{"a"}, names(f.Filter(context.Background(), nil, candidates)),
+		"header deliveries neither eject nor reset the failure run")
+}
+
+// A gRPC stream that ends OK resets the failure run, like an HTTP 200.
+func TestGRPCSuccessResetsFailureRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	grpcRespond(f, "a", grpcframe.StatusOK)
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// A gRPC status outside responseFailureCodes behaves like the HTTP status it
+// maps to: INVALID_ARGUMENT maps to 400, which resets the failure run.
+func TestGRPCStatusOutsideFailureCodesResetsRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	grpcRespond(f, "a", "3")
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// A gRPC stream that ends without a status the EPP could see, such as a
+// disconnect before the trailers arrived, and a stream still in progress
+// both count nothing.
+// A gRPC response Envoy served from a fallback endpoint says nothing about the
+// endpoint the EPP picked, so its status neither charges nor resets the target.
+func TestGRPCResponsesServedByAnotherEndpointAreIgnored(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpointAt("a", "10.0.0.1"), endpointAt("b", "10.0.0.2")}
+	respondFrom := func(served, grpcStatus string) {
+		f.ResponseBody(context.Background(), nil,
+			&fwkrh.Response{
+				Headers: map[string]string{
+					reqcommon.HeaderContentType: grpcframe.MediaType,
+					grpcframe.HeaderStatus:      grpcStatus,
+				},
+				EndOfStream: true,
+				ReqMetadata: map[string]any{metadata.DestinationEndpointNamespace: map[string]any{
+					metadata.DestinationEndpointServedKey: served,
+				}},
+			},
+			&fwkdl.EndpointMetadata{ID: id("a"), Address: "10.0.0.1", Port: "8000"})
+	}
+
+	for range 5 {
+		respondFrom("10.0.0.2:8000", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)),
+		"failures served by a fallback endpoint do not count toward the target")
+
+	for range 5 {
+		respondFrom("10.0.0.1:8000", "14")
+	}
+	assert.Equal(t, []string{"b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+func TestGRPCStreamWithoutStatusCountsNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	// An intermediate chunk of a gRPC stream.
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+		&fwkdl.EndpointMetadata{ID: id("b")})
+	// The stream ends with no grpc-status the EPP saw.
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}, EndOfStream: true},
+		&fwkdl.EndpointMetadata{ID: id("b")})
+	grpcRespond(f, "b", "14")
+	assert.Equal(t, []string{"a"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the status-less end neither ejects nor resets the failure run")
 }
 
 func TestResponseEjectionBackoff(t *testing.T) {
@@ -938,4 +1099,61 @@ func TestIncidentReplay(t *testing.T) {
 			assert.Len(t, f.Filter(context.Background(), nil, candidates()), 4)
 		})
 	}
+}
+
+// TestOneCallerCannotEjectMostOfThePool replays issue 4427: three working
+// endpoints, with 500 counted as a failure, and one caller whose requests
+// every engine answers with 500. Without a cap the caller ejects two of the
+// three endpoints, and every other request goes to the one left.
+func TestOneCallerCannotEjectMostOfThePool(t *testing.T) {
+	codes := []int{500, 502, 503}
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil), endpoint("c", nil)}
+	failAAndB := func(f *EndpointHealthFilter) []string {
+		f.Filter(context.Background(), nil, candidates)
+		for _, name := range []string{"a", "b"} {
+			for range 5 {
+				respond(f, name, "500")
+			}
+		}
+		return names(f.Filter(context.Background(), nil, candidates))
+	}
+
+	f, _ := newTestFilter(t, parameters{ResponseFailureCodes: codes})
+	require.Equal(t, []string{"c"}, failAAndB(f), "without a cap two of three endpoints are ejected")
+
+	f, clock := newTestFilter(t, parameters{ResponseFailureCodes: codes, MaxEjectionPercent: intPtr(50)})
+	require.Equal(t, []string{"b", "c"}, failAAndB(f), "50% of three endpoints caps the ejections at one")
+	assert.InDelta(t, 1, counterValue(t, ejections, "health", reasonResponse), 0)
+
+	clock.advance(30 * time.Second)
+	require.Equal(t, []string{"a", "b", "c"}, names(f.Filter(context.Background(), nil, candidates)))
+	respond(f, "b", "500")
+	assert.Equal(t, []string{"a", "c"}, names(f.Filter(context.Background(), nil, candidates)),
+		"a failure run held back by the cap ejects on its next failure once the cap allows")
+}
+
+func TestMaxEjectionPercentAlwaysAllowsOne(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{MaxEjectionPercent: intPtr(1)})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil), endpoint("c", nil)}
+	f.Filter(context.Background(), nil, candidates)
+	for _, name := range []string{"a", "b"} {
+		for range 5 {
+			respond(f, name, "502")
+		}
+	}
+	assert.Equal(t, []string{"b", "c"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+func TestMaxEjectionPercentIgnoresPollHealth(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{MaxEjectionPercent: intPtr(50)})
+	since := clock.now().Add(-time.Minute)
+	candidates := []fwksched.Endpoint{endpoint("a", failing(5, since)), endpoint("b", nil), endpoint("c", nil), endpoint("d", nil)}
+	f.Filter(context.Background(), nil, candidates)
+	for _, name := range []string{"b", "c"} {
+		for range 5 {
+			respond(f, name, "502")
+		}
+	}
+	assert.Equal(t, []string{"d"}, names(f.Filter(context.Background(), nil, candidates)),
+		"an endpoint marked unhealthy by poll health does not count toward the cap")
 }

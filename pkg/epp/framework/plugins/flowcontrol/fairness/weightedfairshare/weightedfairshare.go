@@ -150,6 +150,10 @@ func WeightedFairShareFairnessPolicyFactory(
 			}
 		}
 	}
+	// A fairness ID the operator gave a weight keeps its own metric label after the label cap fills.
+	for id := range cfg.FlowWeights {
+		metricsutil.PinFairnessID(id)
+	}
 	return &weightedFairShare{name: name, cfg: cfg, vserviceGauge: vservice, weightGauge: weight}, nil
 }
 

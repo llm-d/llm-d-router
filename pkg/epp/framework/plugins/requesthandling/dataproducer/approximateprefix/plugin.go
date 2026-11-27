@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -96,6 +97,9 @@ type dataProducer struct {
 	// the map stays bounded and prompts that leave and return can be re-indexed.
 	// Values are *mergedKeySet.
 	peerMerged sync.Map
+	// estimateTokens is set during startup dependency validation when the
+	// token-producer this plugin consumes is the estimate backend.
+	estimateTokens atomic.Bool
 }
 
 // mergedKeySet is the per-endpoint set stored in peerMerged. keys holds only
@@ -178,7 +182,10 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 // Produce reads the syncer-backed attribute to merge peer recent windows.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	deps := plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: plugin.ConsumedData{
+			Type:    fwkrequest.TokenizedRequest{},
+			Matches: p.recordTokenBackend,
+		}},
 	}
 	if p.syncCrossReplicaState {
 		deps.Optional = map[plugin.DataKey]any{p.syncHashDK: attrprefix.PrefixHashSet{}}
@@ -257,12 +264,15 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 }
 
 // syncedHashBudget converts MaxSyncedTokens into a hash-count cap for the
-// recent window. Unset MaxSyncedTokens uses defaultMaxSyncedTokens.
+// recent window. Unset MaxSyncedTokens uses defaultMaxSyncedTokens. The block
+// size is raised to minBlockSizeTokens, as GetBlockSize does when prompts are
+// hashed, so each hash in the budget covers the tokens it is hashed over.
 func syncedHashBudget(cfg config) int {
 	blockSize := cfg.BlockSizeTokens
 	if blockSize <= 0 {
 		blockSize = defaultBlockSizeTokens
 	}
+	blockSize = max(blockSize, minBlockSizeTokens)
 	tokens := cfg.MaxSyncedTokens
 	if tokens <= 0 {
 		tokens = defaultMaxSyncedTokens
@@ -365,6 +375,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		PrefixCacheServers:        prefixCacheServers,
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: bestAvailable,
+		BlockSize:                 blockSize,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -530,20 +541,24 @@ func (p *dataProducer) forgetPeerMerged(endpointID string) {
 // reports the request never ran, so a retry is not routed as cached.
 // See https://github.com/llm-d/llm-d-router/issues/3919.
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
-	// Release the scheduling state; the index-update record written below is
-	// kept until the response arrives.
+	// Release the scheduling state; the index-update record and continuation
+	// state written below are kept until the response arrives.
 	defer p.pluginState.DeleteKey(request.RequestID, plugin.StateKey(p.typedName.Name))
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
+		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
-	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
-	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
+	pr := schedulingResult.PrefillProfile()
+	disaggregated := pr != nil && len(pr.TargetEndpoints) > 0
 	servers := make([]server, 0, 2)
+	var decode *server
 	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
-		servers = append(servers, p.makeserver(targetEndpoint))
+		d := p.makeserver(targetEndpoint)
+		servers = append(servers, d)
+		decode = &d
 	}
 	// Also record for prefill node if present in P/D disaggregated mode.
 	if disaggregated {
@@ -554,8 +569,10 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
+		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
+	promptIndexed := p.trackContinuation(ctx, request, decode, state.BlockSize)
 
 	record := &indexUpdateRecord{
 		servers:         servers,
@@ -568,16 +585,23 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// Update indexer asynchronously to avoid blocking the request path. The
 	// cell guards against a rollback that lands before this goroutine runs.
 	p.wg.Go(func() {
+		var decodeEntry []blockHash
+		if promptIndexed != nil {
+			defer func() { promptIndexed <- decodeEntry }()
+		}
 		record.cell.mu.Lock()
 		defer record.cell.mu.Unlock()
 		if record.cell.rolledBack {
 			return
 		}
-		for _, s := range servers {
+		for i, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				record.inserted[s.ServerID] = append(record.inserted[s.ServerID], p.indexerInst.Add(hashes, s))
 				if p.syncerActive() {
-					p.recent.record(s.String(), hashes)
+					entry := p.recent.record(s.String(), hashes)
+					if i == 0 && decode != nil {
+						decodeEntry = entry
+					}
 				}
 			}
 		}
@@ -592,7 +616,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*fwkrequest.BytesPerToken, total*blockSize*fwkrequest.BytesPerToken)
 	if request.Body != nil {
-		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
+		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult)
 		selected := state.PredictedCachedTokens[ServerID(predictionProfile.TargetEndpoints[0].GetMetadata().ID)]
 		// A profile that reports no scored candidates leaves only the chosen
 		// endpoint to go on, so selected stands in for both maxima. That keeps
@@ -618,7 +642,8 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 // removing the entries PreRequest added when the response reports the request
 // never ran on the model server. A prompt whose request failed must not look
 // cached: neither endpoint computed it, and a retry routed on the stale
-// entries would skip prefill.
+// entries would skip prefill. Otherwise it indexes the generated text of a
+// request tracked for continuation.
 func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
@@ -628,8 +653,10 @@ func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.Infer
 		// PreRequest never ran, or the staleness janitor already reaped the record.
 		return
 	}
+	continuation, _ := plugin.ReadPluginStateKey[*continuationState](p.pluginState, request.RequestID, continuationStateKey)
 	p.pluginState.Delete(request.RequestID)
 	if !responseFailed(response) {
+		p.indexContinuation(request, response, continuation)
 		return
 	}
 
@@ -757,6 +784,11 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 			return nil
 		}
 		p.registeredEndpoints.Delete(endpointID)
+		// An endpoint that returns under the same name may have restarted with an
+		// empty KV cache, so its entries must not survive until the next cleanup tick.
+		if p.indexerInst != nil {
+			p.indexerInst.RemovePod(ServerID(event.Endpoint.GetMetadata().ID))
+		}
 		if p.recent != nil {
 			p.recent.forget(endpointID)
 		}

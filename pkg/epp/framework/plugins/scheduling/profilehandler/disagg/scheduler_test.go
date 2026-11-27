@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -114,6 +115,7 @@ func TestPDSchedule(t *testing.T) {
 		},
 
 		PrimaryProfileName: decode,
+		PrefillProfileName: prefill,
 	}
 
 	decodeResult := &fwksched.SchedulingResult{
@@ -127,6 +129,7 @@ func TestPDSchedule(t *testing.T) {
 			},
 		},
 		PrimaryProfileName: decode,
+		PrefillProfileName: prefill,
 	}
 
 	tests := []struct {
@@ -159,6 +162,30 @@ func TestPDSchedule(t *testing.T) {
 			// than silently complete decode-only.
 			input: []fwksched.Endpoint{endpoint2},
 			err:   true,
+		},
+		{
+			name: "one decode endpoint, long prompt, embeddings path, no prefill endpoint available",
+			req: &fwksched.InferenceRequest{
+				RequestID:   uuid.NewString(),
+				TargetModel: "critical",
+				Body:        completionsBody("12345678901"),
+				Headers:     map[string]string{":path": reqcommon.PathEmbeddings},
+			},
+			// The sidecar has no P/D route for embeddings, so the request
+			// completes decode-only instead of failing for a missing prefill pod.
+			input:   []fwksched.Endpoint{endpoint2},
+			wantRes: decodeResult,
+		},
+		{
+			name: "1P1D - long prompt, embeddings path",
+			req: &fwksched.InferenceRequest{
+				RequestID:   uuid.NewString(),
+				TargetModel: "critical",
+				Body:        completionsBody("12345678906"),
+				Headers:     map[string]string{":path": reqcommon.PathEmbeddings},
+			},
+			input:   []fwksched.Endpoint{endpoint1, endpoint2},
+			wantRes: decodeResult,
 		},
 		{
 			name: "one prefill endpoint, long prompt",
@@ -222,6 +249,7 @@ func TestPDSchedule(t *testing.T) {
 					},
 				},
 				PrimaryProfileName: decode,
+				PrefillProfileName: prefill,
 			},
 		},
 		{
@@ -367,6 +395,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 			},
 		},
 		PrimaryProfileName: decode,
+		PrefillProfileName: prefill,
 	}
 
 	prefillSchedulerProfile := scheduling.NewSchedulerProfile().

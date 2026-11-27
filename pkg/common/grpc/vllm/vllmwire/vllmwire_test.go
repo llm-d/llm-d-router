@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -96,11 +97,11 @@ func sampleGenerateRequest(t testing.TB) *vllmpb.GenerateRequest {
 			Seed:         proto.Int64(42),
 		},
 		Decoding: &vllmpb.DecodingParameters{
-			PresencePenalty:   0.1,
-			FrequencyPenalty:  0.2,
-			RepetitionPenalty: 1.05,
-			AllowedTokenIds:   []uint32{1, 2, 3},
-			StructuredOutput:  &vllmpb.DecodingParameters_JsonObject{JsonObject: true},
+			PresencePenalty:        0.1,
+			FrequencyPenalty:       0.2,
+			RepetitionPenalty:      1.05,
+			AllowedTokenIds:        []uint32{1, 2, 3},
+			LegacyStructuredOutput: &vllmpb.DecodingParameters_JsonObject{JsonObject: true},
 		},
 		Stopping: &vllmpb.StoppingCriteria{
 			MaxNewTokens:        128,
@@ -1386,5 +1387,31 @@ func BenchmarkRewritePriority(b *testing.B) {
 		if _, err := RewritePriority(frame, -2); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestSliceEncoderSpanAndEncoderTokenIDs(t *testing.T) {
+	got, err := SliceEncoderSpan([]int{1, 10, 20, 30}, 1, 1, 2, true)
+	if err != nil || !slices.Equal(got, []int{1, 10, 20}) {
+		t.Fatalf("SliceEncoderSpan valid = %v, %v", got, err)
+	}
+	emptyAllowed, err := SliceEncoderSpan([]int{1, 10}, 1, 2, 0, true)
+	if err != nil || !slices.Equal(emptyAllowed, []int{1}) {
+		t.Fatalf("SliceEncoderSpan allowEmpty = %v, %v", emptyAllowed, err)
+	}
+	if _, err := SliceEncoderSpan([]uint32{1, 10}, 1, 1, 0, false); err == nil {
+		t.Fatal("expected error for zero-length span when allowEmpty=false")
+	}
+	if _, err := SliceEncoderSpan([]uint32{1, 10}, 1, 1, math.MaxUint64, true); err == nil {
+		t.Fatal("expected overflow-safe bounds error")
+	}
+
+	item := MediaItem{HasFeatures: true, Offset: 1, Length: 2}
+	u32, err := item.EncoderTokenIDs([]uint32{9, 100, 101, 102})
+	if err != nil || !slices.Equal(u32, []uint32{9, 100, 101}) {
+		t.Fatalf("EncoderTokenIDs = %v, %v", u32, err)
+	}
+	if _, err := item.EncoderTokenIDs(nil); err == nil {
+		t.Fatal("expected error on empty prompt")
 	}
 }

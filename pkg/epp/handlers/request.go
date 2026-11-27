@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
@@ -133,6 +134,12 @@ func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *Reques
 			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
+	if endpoint.RankByHeader {
+		if reqCtx.Request.Headers == nil {
+			reqCtx.Request.Headers = map[string]string{}
+		}
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(endpoint.RankIndex)
+	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
 	reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
@@ -220,7 +227,13 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Request.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		// A hub forwards the client's input-control headers, raw, to the cluster EPP
+		// that reads them: all of them, not only objective and fairness ID. The
+		// cluster EPP resolves the tenant itself. The TTL is forwarded unchanged; a
+		// hub normally runs without flow control, so the request has not waited at
+		// the hub.
+		forwarded := s.forwardInputControlHeaders && request.InputControlHeaders.Has(key)
+		if request.IsSystemOwnedHeader(key) && !forwarded {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{

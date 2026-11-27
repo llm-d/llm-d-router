@@ -100,7 +100,7 @@ func (p *LatencyAdmission) Consumes() fwkplugin.DataDependencies {
 //
 // Reject only when ALL of:
 //   - No endpoint has a valid prediction (all violate SLO)
-//   - No endpoint is idle (all have running requests)
+//   - No endpoint is idle (all have dispatched or running requests)
 //   - No cold pod exists (predictions are reliable)
 func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx)
@@ -141,17 +141,16 @@ func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.Inferenc
 			hasCold = true
 		}
 
-		// Idle pod: no running requests — likely can serve the request.
-		if metrics.RunningRequestsSize == 0 {
-			hasIdle = true
-		}
-
 		// Valid prediction: both TTFT and TPOT within SLO.
 		if latencyInfoRaw, ok := endpoint.Get(p.latencyPredictionInfoDataKey); ok {
 			hasPredictions = true
 			latencyInfo := latencyInfoRaw.(*attrlatency.LatencyPredictionInfo)
 			if latencyInfo.IsValid() {
 				hasValid = true
+			}
+			// Idle pod: neither dispatched nor running requests — likely can serve the request.
+			if latencyInfo.DispatchedRequestCount() == 0 && metrics.RunningRequestsSize == 0 {
+				hasIdle = true
 			}
 		}
 	}

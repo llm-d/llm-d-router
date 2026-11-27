@@ -10,7 +10,7 @@ The Metrics Data Source is a data layer plugin that polls a Prometheus-compatibl
 ## What it does
 
 1.  Periodically (or when triggered) performs an HTTP GET request to a configured metrics endpoint (e.g., `http://<endpoint-ip>:8080/metrics`).
-2.  Parses the Prometheus text format response into a `PrometheusMetricMap`. The parser reads at most 8 MiB of a response. This applies to the pod source and the multi-cluster source.
+2.  Parses the Prometheus text format response into a `PrometheusMetricMap`. The parser reads at most 8 MiB of a response. This applies to the pod source and the multi-cluster source. A family with a sample of 16 or more labels, such as `vllm:cache_config_info`, is parsed once and reused while its lines in the response stay the same.
 3.  Provides the parsed metrics to any registered extractors (like the `core-metrics-extractor`).
 
 ## Outputs produced
@@ -22,10 +22,13 @@ The Metrics Data Source is a data layer plugin that polls a Prometheus-compatibl
 The plugin config supports:
 
 -   `scheme` (default "http"): The protocol scheme to use for metrics retrieval.
--   `path` (default "/metrics"): The URL path to use for metrics retrieval.
+-   `path` (default "/metrics"): The URL path to use for metrics retrieval. The path can have a
+    query string, for example `/v1/loads?format=prometheus` (see
+    [SGLang load for each rank](#sglang-load-for-each-rank)).
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert. Setting it enables verification regardless of `insecureSkipVerify`.
--   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+-   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together. A rotated
+    certificate is picked up without a restart; the CA bundle is read once at startup.
 -   `proxyURL` (string, optional): HTTP proxy (`http://` or `https://`) that every scrape is
     sent to instead of dialing the endpoint, for model servers reachable only through a proxy,
     such as a local sidecar that adds mTLS. The request still names the endpoint, so the proxy
@@ -64,6 +67,36 @@ parameters:
   families:
   - vllm:prompt_tokens_total
 ```
+
+### SGLang load for each rank
+
+SGLang reports the load of each data-parallel rank as Prometheus text at
+`/v1/loads?format=prometheus`. Use this path when `/metrics` of the scraped port does not have
+every rank:
+
+-   One SGLang HTTP server for a data-parallel group on several nodes. Its `/metrics` has only
+    the ranks of its own node.
+-   The SGLang Rust server (`SGLANG_RUST_SERVER`). Each rank has its own port, and only the port
+    of the first rank serves `/metrics`.
+
+`/v1/loads` uses other metric names than `/metrics`, so the built-in `sglang` engine config of
+`core-metrics-extractor` finds no metric in the response. Set the names in `engineConfigs`:
+
+```yaml
+- type: metrics-data-source
+  parameters:
+    path: "/v1/loads?format=prometheus&include=core"
+- type: core-metrics-extractor
+  parameters:
+    engineConfigs:
+    - name: "sglang"
+      queuedRequestsSpec: "sglang_num_waiting_reqs"
+      runningRequestsSpec: "sglang_num_running_reqs"
+      kvUsageSpec: "sglang_token_usage"
+```
+
+`/v1/loads` has no page size and no page count. With this config, the extractor does not set
+`CacheBlockSize` and `CacheNumBlocks`.
 
 ## Multi-cluster support
 

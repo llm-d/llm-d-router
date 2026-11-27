@@ -38,7 +38,18 @@ const podIdentifierLabel = "pod_identifier"
 const (
 	cacheKindLabel = "cache_kind"
 	reasonLabel    = "reason"
+	tagLabel       = "tag"
 )
+
+// maxUnknownTagLabelValues caps the distinct tag label values. Tags are read
+// from the engine's wire payload, so their number is not bounded by the router.
+const maxUnknownTagLabelValues = 32
+
+var unknownTagLimiter = metricsutil.NewBoundedLabel(maxUnknownTagLabelValues)
+
+// emptyTagLabel is the tag label value for an event whose tag is the empty
+// string. Prometheus treats an empty label value as a missing label.
+const emptyTagLabel = "empty"
 
 var (
 	Admissions = prometheus.NewCounter(prometheus.CounterOpts{
@@ -120,6 +131,14 @@ var (
 			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
 			compbasemetrics.ALPHA),
 	}, []string{cacheKindLabel, reasonLabel})
+	// KVEventUnknownTagsSkipped counts events skipped because the engine
+	// adapter does not know their tag.
+	KVEventUnknownTagsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_unknown_tags_skipped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-cache events skipped because the engine adapter does not know their tag",
+			compbasemetrics.ALPHA),
+	}, []string{tagLabel})
 
 	// SubscriberActive tracks the number of ZMQ subscribers currently managed by
 	// the SubscriberManager. A subscriber is counted from creation until it is
@@ -185,6 +204,33 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Number of worker shards (capacity) in the event processing pool", compbasemetrics.ALPHA),
 	})
+	// EventsSequenceGaps counts detected ZMQ sequence number gaps per pod.
+	EventsSequenceGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_sequence_gaps_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-event sequence gaps detected by ZMQ subscribers", compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel})
+	// EventsMissed counts missed KV-event sequence numbers inferred from gaps.
+	EventsMissed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_missed_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of missed KV-event messages inferred from sequence gaps", compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel})
+	// EventsDropped counts KV-event messages dropped before indexing, labeled by
+	// pod identifier and drop reason (e.g. "malformed_frame", "replay_cooldown", "decode_error").
+	EventsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_dropped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-event messages dropped before indexing", compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel, reasonLabel})
+	// EventsProcessingLag observes the elapsed time between the engine-emitted
+	// batch timestamp and worker-pool processing.
+	EventsProcessingLag = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_processing_lag_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Elapsed time between KV-event batch timestamp and worker-pool processing in seconds", compbasemetrics.ALPHA),
+		Buckets: prometheus.DefBuckets,
+	})
 )
 
 // Collectors returns a slice of all registered Prometheus collectors.
@@ -193,11 +239,25 @@ func Collectors() []prometheus.Collector {
 		Admissions, Evictions,
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
-		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		LiveOnlySubscribers, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
+		EventsSequenceGaps, EventsMissed, EventsDropped, EventsProcessingLag,
 	}
+}
+
+// RecordUnknownTagSkipped counts one event skipped for an unknown tag and
+// returns the tag label value it was counted under, which differs from tag
+// when the tag is empty or the limiter folds it.
+func RecordUnknownTagSkipped(tag string) string {
+	// An empty tag is not passed to the limiter, so a full cap cannot fold it.
+	label := emptyTagLabel
+	if tag != "" {
+		label = unknownTagLimiter.Bound(tag)
+	}
+	KVEventUnknownTagsSkipped.WithLabelValues(label).Inc()
+	return label
 }
 
 // CleanupSubscriber drops every per-pod kvevents series for podIdentifier so
@@ -208,6 +268,9 @@ func CleanupSubscriber(podIdentifier string) {
 	SubscriberReconnections.DeleteLabelValues(podIdentifier)
 	MessagesReceived.DeleteLabelValues(podIdentifier)
 	ZMQErrors.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
+	EventsSequenceGaps.DeleteLabelValues(podIdentifier)
+	EventsMissed.DeleteLabelValues(podIdentifier)
+	EventsDropped.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
 }
 
 var registerMetricsOnce = sync.Once{}
@@ -220,13 +283,18 @@ func Register() {
 }
 
 // StartMetricsLogging spawns a goroutine that logs current metric values every
-// interval.
+// interval until ctx ends.
 func StartMetricsLogging(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			logMetrics(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				logMetrics(ctx)
+			}
 		}
 	}()
 }

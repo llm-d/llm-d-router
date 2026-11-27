@@ -30,6 +30,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 )
 
@@ -129,22 +130,24 @@ func BenchmarkHandleResponseBody(b *testing.B) {
 //	benchstat bench.out
 func BenchmarkToSchedulerEndpoints(b *testing.B) {
 	for _, n := range []int{5, 25, 100} {
-		endpoints := makeBenchmarkDatastoreEndpoints(n)
-		director := &Director{}
-		b.Run(fmt.Sprintf("endpoints=%d", n), func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				_ = director.toSchedulerEndpoints(endpoints)
-			}
-		})
+		for _, attrs := range []int{0, 8, 16} {
+			endpoints := makeBenchmarkDatastoreEndpoints(n, attrs)
+			director := &Director{}
+			b.Run(fmt.Sprintf("endpoints=%d/attrs=%d", n, attrs), func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_ = director.toSchedulerEndpoints(endpoints)
+				}
+			})
+		}
 	}
 }
 
 // makeBenchmarkDatastoreEndpoints builds datastore endpoints with the metadata
-// and metrics shapes the request path copies: labels, two model maps, and a
-// populated metrics snapshot.
-func makeBenchmarkDatastoreEndpoints(n int) []fwkdl.Endpoint {
+// and metrics shapes the request path copies: labels, two model maps, a
+// populated metrics snapshot, and attrs scalar metric attributes.
+func makeBenchmarkDatastoreEndpoints(n, attrs int) []fwkdl.Endpoint {
 	endpoints := make([]fwkdl.Endpoint, n)
 	for i := 0; i < n; i++ {
 		endpoints[i] = fwkdl.NewEndpoint(
@@ -162,6 +165,11 @@ func makeBenchmarkDatastoreEndpoints(n int) []fwkdl.Endpoint {
 				RunningRequestsSize: i % 4,
 			},
 		)
+		for j := 0; j < attrs; j++ {
+			endpoints[i].GetAttributes().Put(
+				attrmetrics.ScalarMetricDataKey(fmt.Sprintf("metric_%d", j)),
+				attrmetrics.ScalarMetricValue(float64(j)))
+		}
 	}
 	return endpoints
 }

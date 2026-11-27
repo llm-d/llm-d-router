@@ -30,6 +30,8 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -47,6 +49,10 @@ import (
 
 const (
 	testPodPort = "8000"
+
+	// DefaultPrefillProfile is the scheduling default these tests configure
+	// handlers with.
+	DefaultPrefillProfile = scheduling.DefaultPrefillProfile
 
 	// Custom profile names for testing user-defined configurations.
 	customDecodeProfile  = "my-decode"
@@ -773,6 +779,106 @@ func TestHandler_PrefillFirst_PrefillUnavailableNotCounted(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// The sidecar runs P/D only on the generation API paths and forwards every
+// other request to its decoder, so a request on another path must complete
+// decode-only, without a prefill pod, in both stage orders.
+func TestHandler_PD_PathWithoutPDRoute(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		DefaultPrefillProfile: &mockProfile{},
+	}
+	newRequest := func(path string) *scheduling.InferenceRequest {
+		req := completionsRequest(testLongPrompt)
+		req.Headers = map[string]string{}
+		if path != "" {
+			req.Headers[":path"] = path
+		}
+		return req
+	}
+	decodeOnlyCount := func() float64 {
+		return testutil.ToFloat64(LlmdDisaggDecisionCount.WithLabelValues(
+			"", DisaggProfileHandlerType, "unknown", metricsutil.DisaggPathDecodeOnly))
+	}
+
+	tests := []struct {
+		path        string
+		wantPrefill bool
+	}{
+		{path: reqcommon.PathEmbeddings},
+		{path: reqcommon.PathImagesGenerations},
+		{path: reqcommon.PathImagesEdits},
+		{path: reqcommon.PathAudioSpeech},
+		{path: reqcommon.PathAudioGenerate},
+		{path: reqcommon.PathVideos},
+		{path: reqcommon.PathConversations},
+		{path: reqcommon.PathMessages + "/count_tokens"},
+		{path: reqcommon.PathChatCompletions + "/render"},
+		{path: reqcommon.PathChatCompletions, wantPrefill: true},
+		{path: reqcommon.PathChatCompletions + "/", wantPrefill: true},
+		{path: reqcommon.PathCompletions, wantPrefill: true},
+		{path: reqcommon.PathResponses, wantPrefill: true},
+		{path: reqcommon.PathMessages, wantPrefill: true},
+		{path: reqcommon.PathVLLMGenerate, wantPrefill: true},
+		{path: reqcommon.PathSGLangGenerate, wantPrefill: true},
+		{path: vllmpb.Inference_Generate_FullMethodName, wantPrefill: true},
+		{path: vllmpb.Inference_GenerateStream_FullMethodName, wantPrefill: true},
+		{path: sglangapiv1.SglangService_Generate_FullMethodName, wantPrefill: true},
+		{path: sglangapiv1.SglangService_HealthCheck_FullMethodName},
+		// GetRequestPath reads a request without a path as /v1/completions.
+		{path: "", wantPrefill: true},
+	}
+
+	for _, tt := range tests {
+		t.Run("decode-first "+tt.path, func(t *testing.T) {
+			req := newRequest(tt.path)
+			h := NewDisaggProfileHandler(defaultDecodeProfile, DefaultPrefillProfile, "",
+				newAlwaysDisaggPDDecider(), nil)
+			results := map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: makeProfileRunResult("pod1"),
+			}
+
+			LlmdDisaggDecisionCount.Reset()
+			got := h.Pick(ctx, req, profiles, results)
+			if tt.wantPrefill {
+				assert.ElementsMatch(t, []string{DefaultPrefillProfile}, profileNames(got))
+				return
+			}
+			assert.ElementsMatch(t, []string{}, profileNames(got), "prefill must not run")
+			assert.InDelta(t, 1, decodeOnlyCount(), 0)
+
+			res, err := h.ProcessResults(ctx, req, results)
+			require.NoError(t, err, "a request without a P/D route must not need a prefill pod")
+			assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+			assert.NotContains(t, res.ProfileResults, DefaultPrefillProfile)
+		})
+
+		t.Run("prefill-first "+tt.path, func(t *testing.T) {
+			req := newRequest(tt.path)
+			h := NewDisaggProfileHandler(defaultDecodeProfile, DefaultPrefillProfile, "", nil, nil).
+				WithStageOrder(StageOrderPrefillFirst)
+			results := map[string]*scheduling.ProfileRunResult{}
+
+			got := h.Pick(ctx, req, profiles, results)
+			if tt.wantPrefill {
+				assert.ElementsMatch(t, []string{DefaultPrefillProfile}, profileNames(got))
+				return
+			}
+			assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "prefill must not run")
+
+			results[defaultDecodeProfile] = makeProfileRunResult("pod1")
+			LlmdDisaggDecisionCount.Reset()
+			got = h.Pick(ctx, req, profiles, results)
+			assert.ElementsMatch(t, []string{}, profileNames(got))
+			assert.InDelta(t, 1, decodeOnlyCount(), 0)
+
+			res, err := h.ProcessResults(ctx, req, results)
+			require.NoError(t, err, "a request without a P/D route must not need a prefill pod")
+			assert.NotContains(t, res.ProfileResults, DefaultPrefillProfile)
+		})
+	}
+}
+
 func TestHandler_ProcessResults_NilRequest(t *testing.T) {
 	h := NewDisaggProfileHandler(defaultDecodeProfile, DefaultPrefillProfile, "",
 		nil, nil)
@@ -1471,7 +1577,7 @@ func TestHandler_Factory_NilDeciders(t *testing.T) {
 		description string
 	}{
 		{
-			name: "prefillProfile set, no pdDecider → valid (decider optional)",
+			name: "DefaultPrefillProfile set, no pdDecider → valid (decider optional)",
 			params: map[string]any{
 				"profiles": map[string]any{"prefill": "prefill"},
 			},

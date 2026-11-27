@@ -35,6 +35,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -107,6 +108,16 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
 		}
 	}
+	// Usage salvaged from dropped oversized SSE lines is merged after the parser
+	// so a dropped line that follows a parsed usage line in the same chunk still
+	// wins, matching the parsers' "last usage event in a chunk wins" rule.
+	if reqCtx.salvagedUsage != nil {
+		mergeUsage(&reqCtx.Usage, *reqCtx.salvagedUsage)
+		reqCtx.salvagedUsage = nil
+	}
+	if endOfStream && parsedResp != nil && reqCtx.responseStatusCode == "" {
+		reqCtx.Completion = parsedResp.Completion
+	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
 		// usage on more than one chunk would otherwise be observed once per chunk.
@@ -137,19 +148,26 @@ func isEventStream(contentType string) bool {
 }
 
 // completeSSELines returns only whole lines, carrying a partial last line to the next chunk.
-// A line longer than maxSSELineBytes is dropped up to its newline.
+// A line longer than maxSSELineBytes is dropped up to its newline, its usage salvaged.
 func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte, endOfStream bool) []byte {
 	if reqCtx.sseLineDiscarding {
 		lineEnd := bytes.IndexByte(chunk, '\n')
 		if lineEnd < 0 {
+			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			return nil
 		}
 		reqCtx.sseLineDiscarding = false
+		salvageDroppedSSELine(ctx, reqCtx, chunk[:lineEnd], true)
 		chunk = chunk[lineEnd+1:]
 	}
 	lineEnd := bytes.LastIndexByte(chunk, '\n')
 	if lineEnd < 0 {
 		if len(reqCtx.sseLineCarry)+len(chunk) > maxSSELineBytes {
+			// This chunk has no newline, so every byte still belongs to the
+			// dropped line. The newline that ends it arrives in a later chunk
+			// and finishes the salvage there.
+			salvageDroppedSSELine(ctx, reqCtx, reqCtx.sseLineCarry, false)
+			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			dropSSELine(ctx, reqCtx, endOfStream)
 			return nil
 		}
@@ -168,19 +186,27 @@ func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte,
 	}
 	reqCtx.sseLineCarry = nil
 	tail := chunk[lineEnd+1:]
+	// Drop oversized lines in data before salvaging the tail. The tail and the
+	// oversized lines inside data share one salvager, and the tail is fed first;
+	// running dropOversizedLines first lets each salvager see exactly one line
+	// instead of flushing a following oversized line into the still-open tail
+	// scan and losing both usages.
+	kept := dropOversizedLines(ctx, reqCtx, data)
 	switch {
 	case len(tail) > maxSSELineBytes:
+		salvageDroppedSSELine(ctx, reqCtx, tail, endOfStream)
 		dropSSELine(ctx, reqCtx, endOfStream)
 	case endOfStream:
-		data = append(data, tail...)
+		kept = append(kept, tail...)
 	case len(tail) > 0:
 		reqCtx.sseLineCarry = bytes.Clone(tail)
 	}
-	return dropOversizedLines(ctx, data)
+	return kept
 }
 
 // dropOversizedLines removes the lines of data longer than maxSSELineBytes, copying only when one is dropped.
-func dropOversizedLines(ctx context.Context, data []byte) []byte {
+// Each dropped line's usage is salvaged first.
+func dropOversizedLines(ctx context.Context, reqCtx *RequestContext, data []byte) []byte {
 	if len(data) <= maxSSELineBytes {
 		return data
 	}
@@ -193,6 +219,7 @@ func dropOversizedLines(ctx context.Context, data []byte) []byte {
 		}
 		line := data[start:end]
 		if len(bytes.TrimSuffix(line, []byte("\n"))) > maxSSELineBytes {
+			salvageDroppedSSELine(ctx, reqCtx, line, true)
 			if !dropped {
 				logSSELineDrop(ctx)
 				kept = append(kept, data[:start]...)
@@ -218,6 +245,109 @@ func dropSSELine(ctx context.Context, reqCtx *RequestContext, endOfStream bool) 
 
 func logSSELineDrop(ctx context.Context) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
+}
+
+// maxUsageFrameBytes caps the partial line held back while a requested usage
+// frame is removed. A usage-only frame is a few hundred bytes, so a longer line
+// is forwarded as it arrives rather than when its end does.
+const maxUsageFrameBytes = 64 << 10
+
+// dropRequestedUsageFrame returns the part of a streamed response chunk the
+// client receives. When the director requested usage the client did not ask
+// for, the usage-only frame the model server adds is removed.
+func (r *RequestContext) dropRequestedUsageFrame(chunk []byte, endOfStream bool) []byte {
+	if !r.StreamUsageRequested || !isEventStream(r.Response.Headers[reqcommon.HeaderContentType]) {
+		return chunk
+	}
+	return r.usageFrames.filter(chunk, endOfStream)
+}
+
+// usageFrameFilter removes the usage-only frame from a chat or completions
+// event stream, together with the blank line that ends its event. ext_proc
+// chunks split SSE lines at any byte, so a partial last line is held until the
+// rest of it arrives.
+type usageFrameFilter struct {
+	// carry is the partial last line of the previous chunk, not yet forwarded.
+	carry []byte
+	// passing is set while the rest of a line forwarded without a check arrives.
+	passing bool
+	// dropBlank is set after a dropped frame until the next line.
+	dropBlank bool
+}
+
+// filter returns the bytes of chunk to forward, copying only to drop a line or
+// to hold a partial one.
+func (f *usageFrameFilter) filter(chunk []byte, endOfStream bool) []byte {
+	data := chunk
+	hadCarry := len(f.carry) > 0
+	if hadCarry {
+		data = append(f.carry, data...)
+		f.carry = nil
+	}
+	var kept []byte
+	dropped := false
+	pos := 0
+	for pos < len(data) {
+		rest := data[pos:]
+		n := bytes.IndexByte(rest, '\n') + 1
+		whole := n > 0
+		if !whole {
+			if !endOfStream && !f.passing && len(rest) <= maxUsageFrameBytes {
+				if pos == 0 && hadCarry {
+					// data grew from the hold, so retaining it keeps the spare
+					// capacity and the next chunk appends in place.
+					f.carry = data
+				} else {
+					f.carry = bytes.Clone(rest)
+				}
+				break
+			}
+			n = len(rest)
+		}
+		line := rest[:n]
+		// An oversized partial line is forwarded before its end arrives, so it
+		// cannot be dropped; checking it would scan and parse truncated JSON.
+		var drop bool
+		if !whole && !endOfStream {
+			f.dropBlank = false
+		} else {
+			drop = f.drop(line)
+		}
+		if !whole {
+			f.passing = !endOfStream
+		}
+		if drop && !dropped {
+			kept = append(make([]byte, 0, len(data)), data[:pos]...)
+			dropped = true
+		} else if !drop && dropped {
+			kept = append(kept, line...)
+		}
+		pos += n
+	}
+	if dropped {
+		return kept
+	}
+	return data[:pos]
+}
+
+// drop reports whether line is removed: the usage-only frame, or the blank
+// line right after one.
+func (f *usageFrameFilter) drop(line []byte) bool {
+	if f.passing {
+		f.passing = false
+		return false
+	}
+	if f.dropBlank {
+		f.dropBlank = false
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			return true
+		}
+	}
+	if usage.UsageOnlyFrame(line) {
+		f.dropBlank = true
+		return true
+	}
+	return false
 }
 
 // maxGRPCFrameBytes caps one buffered gRPC message payload during response parsing.

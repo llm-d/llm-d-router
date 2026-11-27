@@ -15,16 +15,20 @@ The detector implements the `SaturationDetector` interface to provide a utilizat
 
 In token mode, both numerator and denominator are evaluated in tokens: the aggregate inflight token count divided by the sum of all endpoints' MaxTokenConcurrency.
 
-Hybrid mode is the exception: rather than one aggregate fraction, it evaluates each endpoint's saturation as the larger of its request and token ratios and reports the unweighted average across endpoints. This prevents distinct endpoints saturating on different dimensions from being masked by aggregate ratios that each remain low.
+Hybrid mode is the exception: rather than one aggregate fraction, it evaluates each endpoint's saturation as the larger of its request and token ratios and takes the unweighted average across endpoints. This prevents distinct endpoints saturating on different dimensions from being masked by aggregate ratios that each remain low. The reported saturation is the largest of three terms: that per-endpoint average, the aggregate request ratio and the aggregate token ratio. The two aggregate ratios cover endpoints whose capacity exceeds the average; with one capacity for every endpoint the aggregate token ratio never exceeds the per-endpoint average.
 
-**Dispatch reservations:** The detector implements `DispatchReservationTracker`. Flow control reserves a slot when it dispatches a request and the director releases it after the `PreRequest` hooks have published the request's in-flight load, so a burst of dispatches cannot all read the same headroom. Pending reservations are added to the aggregate in-flight request count in `requests` mode. In `hybrid` mode the reported saturation is the larger of the per-endpoint average and the aggregate request ratio including reservations. `tokens` mode does not count reservations. Reservations are pool-wide and local to the EPP replica: a reservation counts against this detector whichever endpoint the request is later scheduled to, and it is not shared with other replicas.
+**Dispatch reservations:** The detector implements `DispatchReservationTracker`. Flow control reserves a slot when it dispatches a request and the director releases it after the `PreRequest` hooks have published the request's in-flight load, so a burst of dispatches cannot all read the same headroom. Pending reservations are added to the aggregate in-flight request count in `requests` mode. In `hybrid` mode they are added to the aggregate request ratio, one of the three terms above; the per-endpoint average and the aggregate token ratio do not count them. `tokens` mode does not count reservations. Reservations are pool-wide and local to the EPP replica: a reservation counts against this detector whichever endpoint the request is later scheduled to, and it is not shared with other replicas.
 
-**Heterogeneous Deployments:** Because this detector calculates saturation globally as a single aggregate fraction (in requests and tokens mode), it utilizes an aggregate queueing model. In deployments with heterogeneous compute (e.g., mixing H100 and L4 nodes), this heavily biases the pool saturation metric toward the state of the larger nodes. Contrast this with the Utilization Detector, which evaluates saturation as an unweighted average of individual endpoint scores.
+**Heterogeneous Deployments:** In requests and tokens mode the detector calculates saturation globally as a single aggregate fraction, an aggregate queueing model. Aggregate Pool Capacity is the sum of each endpoint's capacity, so a pool that mixes hardware classes (e.g., H100 and L4 nodes) can give each class its own `maxConcurrency` and `maxTokenConcurrency` through `endpointOverrides`, matched on pod labels. With one capacity for every endpoint, the aggregate fraction is biased toward the state of the larger nodes. Contrast this with the Utilization Detector, which evaluates saturation as an unweighted average of individual endpoint scores.
+
+Each evaluation records the aggregate capacity in the `flow_control_detector_capacity` gauge, labeled by the detector name, the pipeline stage and the unit, so consumers of `flow_control_pool_saturation` can read the denominator instead of mirroring the configuration. Only the unit(s) the mode evaluates are exported: `requests` in requests mode, `tokens` in tokens mode, both in hybrid mode. In hybrid mode the gauge is the denominator of the two aggregate terms only: when the per-endpoint average is the largest term, in-flight load over the gauge does not reproduce the saturation (with capacities 10, full, and 30, idle, saturation is 0.5 and in-flight over capacity is 0.25). The gauge is defined only when flow control is enabled; without it the detector is evaluated once per sheddable request against that request's candidate endpoints and the series holds the capacity of whichever subset was evaluated last.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their local inflight count exceeds the safety limit:
 
     EndpointLimit = Capacity * (1 + Headroom)
+
+Capacity is the endpoint's `maxConcurrency` or `maxTokenConcurrency`, from the first matching entry of `endpointOverrides` or the pool-level value.
 
 In tokens and hybrid modes the token check also counts the uncached tokens the incoming request would add to each endpoint (the `UncachedRequestTokens` attribute from the in-flight load producer), so an endpoint is removed when admitting the request would take it over the limit:
 
@@ -48,12 +52,24 @@ The plugin reads the per-endpoint load that an [in-flight load producer](../../.
 
 The plugin accepts JSON parameters decoding to the following fields:
 
-- `concurrencyMode` (`string`): Evaluation mode. Valid values are `"requests"`, `"tokens"`, or `"hybrid"`. In `"hybrid"` mode both request and token accounting are evaluated. Pool saturation is computed per endpoint as the larger of that endpoint's request and token ratios, then averaged across endpoints, so an endpoint saturated on either dimension is reflected even when distinct endpoints saturate on different dimensions. An endpoint is filtered out when either its request load reaches the limit or its token load plus the request's uncached tokens exceeds the limit. (Default: `"requests"`)
+- `concurrencyMode` (`string`): Evaluation mode. Valid values are `"requests"`, `"tokens"`, or `"hybrid"`. In `"hybrid"` mode both request and token accounting are evaluated. Pool saturation is the largest of three terms: the per-endpoint larger of request and token ratios averaged across endpoints, the aggregate request ratio and the aggregate token ratio, so an endpoint saturated on either dimension is reflected even when distinct endpoints saturate on different dimensions. An endpoint is filtered out when either its request load reaches the limit or its token load plus the request's uncached tokens exceeds the limit. (Default: `"requests"`)
 - `maxConcurrency` (`int64`): Maximum requests in flight. Serves as the "ideal" request capacity for a single endpoint. Must be > 0. (Default: `100`)
 - `maxTokenConcurrency` (`int64`): Maximum tokens in flight. The "tokens" mode equivalent of `maxConcurrency`. Must be > 0. (Default: `1000000`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal threshold, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
 - `failOpen` (`bool`): Whether the filter returns all candidates when every candidate is over its limit. When `false` it returns none. (Default: `true`)
 - `inFlightLoadProducerName` (`string`): Name of the `inflight-load-producer` instance to read. Unset selects the instance named `inflight-load-producer`, the name an unnamed instance gets. (Default: unset)
+- `endpointOverrides` (`[]object`): Per-endpoint capacities for pools that mix hardware classes. Each entry is a Kubernetes label selector (`matchLabels` and/or `matchExpressions`, at least one required) matched against the endpoint's pod labels, plus `maxConcurrency` and/or `maxTokenConcurrency` (at least one required, each > 0). An entry that sets only the limit the mode does not read (`maxTokenConcurrency` in `requests` mode, `maxConcurrency` in `tokens` mode) is rejected. Entries are evaluated in order and the first match applies; a limit left unset in the entry keeps the pool-level value; endpoints matching no entry use the pool-level values. (Default: none)
+
+  ```yaml
+  - type: concurrency-detector
+    parameters:
+      maxConcurrency: 32
+      maxTokenConcurrency: 400000
+      endpointOverrides:
+      - matchLabels: {gpu-class: gb200}
+        maxConcurrency: 96
+        maxTokenConcurrency: 1200000
+  ```
 
 ## Trade-offs
 
