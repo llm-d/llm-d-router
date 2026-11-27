@@ -698,6 +698,26 @@ func TestPredictedLatency_ResponseBody_TTFTSLOViolationCountsTimeSinceReceived(t
 	}
 }
 
+func TestPredictedLatency_ResponseBody_TPOTSLOViolationWithoutTTFTSLO(t *testing.T) {
+	router := createTestRouter()
+	router.latencypredictor = new(mockPredictor)
+	endpoint := createTestEndpoint("test-pod", 1, 1, 1)
+	request := createTestInferenceRequest("test", 0, 50)
+
+	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx.ttft = 700
+	predictedLatencyCtx.avgTPOT = 60
+	predictedLatencyCtx.avgTPOTSLO = 50
+	predictedLatencyCtx.incomingModelName = testModelName
+	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
+
+	violations := llmdSloViolationCounter.WithLabelValues("", "", testModelName, "", typeTPOT)
+	before := testutil.ToFloat64(violations)
+	router.ResponseBody(context.Background(), request, &fwkrh.Response{EndOfStream: true}, endpoint.GetMetadata())
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(violations)-before)
+}
+
 func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NoSLOs(t *testing.T) {
 	router := createTestRouter()
 	mockPredictor := new(mockPredictor)
