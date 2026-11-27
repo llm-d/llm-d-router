@@ -1,5 +1,8 @@
-# Applies or removes the `hold` label from a `/hold` or `/hold cancel` PR
-# comment, gated on the commenter being the PR author or having write access.
+# Applies or removes the `hold` label when a `/hold` or `/hold cancel`
+# command appears on its own line of a PR comment or review body, gated on
+# the commenter being the PR author or having write access. Reacts with a
+# thumbs up once the label action completes. Reactions are unsupported on
+# review bodies, so a review submission is confirmed by the label change.
 # pr-hold-gate.yml blocks merge while the label is present.
 
 name: Hold comment
@@ -7,31 +10,45 @@ name: Hold comment
 on:
   issue_comment:
     types: [created]
+  pull_request_review:
+    types: [submitted]
 
 permissions: {}
 
 jobs:
   hold:
     name: Apply or cancel hold label
-    if: >-
-      github.event.issue.pull_request &&
-      (github.event.comment.body == '/hold' || github.event.comment.body == '/hold cancel')
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      group: ${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: true
     env:
       GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.issue.number }}
+      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Check commenter is PR author or has write access
-        id: check-access
+      - name: Parse hold command
+        id: cmd
         env:
-          COMMENTER: ${{ github.event.comment.user.login }}
-          PR_AUTHOR: ${{ github.event.issue.user.login }}
+          BODY: ${{ github.event.comment.body || github.event.review.body }}
+        run: |
+          cmd=""
+          while IFS= read -r line; do
+            case "$line" in
+              /hold) cmd=hold ;;
+              "/hold cancel") cmd=cancel ;;
+            esac
+          done < <(printf '%s\n' "$BODY" | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo "cmd=$cmd" >> "$GITHUB_OUTPUT"
+
+      - name: Check commenter is PR author or has write access
+        if: steps.cmd.outputs.cmd != ''
+        env:
+          COMMENTER: ${{ github.event.comment.user.login || github.event.review.user.login }}
+          PR_AUTHOR: ${{ github.event.issue.user.login || github.event.pull_request.user.login }}
         run: |
           if [[ "$COMMENTER" == "$PR_AUTHOR" ]]; then
             exit 0
@@ -42,16 +59,16 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: React to comment
-        if: steps.check-access.outputs.skip != 'true'
-        run: |
-          gh api "repos/$REPO/issues/comments/${{ github.event.comment.id }}/reactions" \
-            -f content='+1' --silent
-
       - name: Add hold label
-        if: steps.check-access.outputs.skip != 'true' && github.event.comment.body == '/hold'
+        if: steps.cmd.outputs.cmd == 'hold' && steps.check-access.outputs.skip != 'true'
         run: gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label hold
 
       - name: Remove hold label
-        if: steps.check-access.outputs.skip != 'true' && github.event.comment.body == '/hold cancel'
+        if: steps.cmd.outputs.cmd == 'cancel' && steps.check-access.outputs.skip != 'true'
         run: gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label hold || true
+
+      - name: React to comment
+        if: steps.check-access.outputs.skip != 'true' && github.event.comment.id
+        run: |
+          gh api "repos/$REPO/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='+1' --silent
