@@ -34,7 +34,6 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	rendezvousutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/rendezvous"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
@@ -44,36 +43,41 @@ import (
 const (
 	// MultiClusterFilterType keys each request to one cluster-endpoint.
 	MultiClusterFilterType = "multicluster-rendezvous-filter"
-	// PinLabel is the cluster label listing pinned tenants (fairness IDs), comma separated.
-	PinLabel = "pins"
-	// DefaultStickTTLSeconds is the default Config.StickTTLSeconds.
-	DefaultStickTTLSeconds = 1800
-	// DefaultMaxQueue is the default Config.MaxQueue.
-	DefaultMaxQueue = 4
-	// DefaultMaxWaitSeconds is the default Config.MaxWaitSeconds.
-	DefaultMaxWaitSeconds = 10
+	// pinLabel is the cluster label listing pinned tenants (fairness IDs), comma separated.
+	pinLabel = "pins"
+	// defaultStickTTLSeconds is the default Config.StickTTLSeconds.
+	defaultStickTTLSeconds = 1800
+	// defaultMaxQueue is the default Config.MaxQueue.
+	defaultMaxQueue = 4
+	// defaultMaxWaitSeconds is the default Config.MaxWaitSeconds.
+	defaultMaxWaitSeconds = 10
 
 	defaultGuardName = "multicluster-rendezvous-default-guard"
 
 	// maxStickTTL bounds stickTtlSeconds well below time.Duration overflow.
 	maxStickTTL = 365 * 24 * time.Hour
+	// maxMetricsAge bounds maxMetricsAgeSeconds: older metrics say nothing about a cluster's room.
+	maxMetricsAge = time.Hour
 
-	// pendingTTL bounds how long a spill waits for its PreRequest.
-	pendingTTL = time.Minute
+	// spillStateKey keys a spill's Filter-to-PreRequest handoff in PluginState.
+	spillStateKey plugin.StateKey = MultiClusterFilterType + "-spill"
 
 	// defaultWeight weighs a cluster whose pool does not report its ready pods.
 	defaultWeight = 1.0
 	// maxMovedKeys bounds the moved table, whose keys are client-supplied; the least recently used is dropped.
 	maxMovedKeys = 100_000
-	// DefaultMaxMetricsAgeSeconds is the default Config.MaxMetricsAgeSeconds.
-	DefaultMaxMetricsAgeSeconds = 30
+	// defaultMaxMetricsAgeSeconds is the default Config.MaxMetricsAgeSeconds.
+	defaultMaxMetricsAgeSeconds = 30
 )
 
-// sessionSources identify a conversation; without one, its text up to the first user message keys it.
+// sessionSources identify a conversation: the agent-identity plugin's attribute (its session headers,
+// e.g. Claude Code, OpenCode, Codex), then x-session-id. Without one, its text up to the first user message keys it.
 var sessionSources = []sessionaffinity.SessionIDSource{
-	{Header: agentidentity.ClaudeCodeSessionHeader}, {Header: agentidentity.OpenCodeSessionHeader},
-	{Header: sessionaffinity.DefaultSessionIDHeader},
+	{Attribute: agentIdentityAttribute}, {Header: sessionaffinity.DefaultSessionIDHeader},
 }
+
+// agentIdentityAttribute is the request attribute the agent-identity plugin publishes.
+const agentIdentityAttribute = "agent-identity"
 
 var (
 	_ scheduling.Filter     = &Filter{}
@@ -122,12 +126,16 @@ func MultiClusterFactory(name string, raw *json.Decoder, handle plugin.Handle) (
 		}
 		guard, err = rendezvousutil.ResolveGuard(handle, config.GuardPluginName, "guardPluginName")
 	} else {
-		guard, err = newRoomCheck(limit(config.MaxQueue, DefaultMaxQueue), limit(config.MaxWaitSeconds, DefaultMaxWaitSeconds))
+		guard, err = newRoomCheck(limit(config.MaxQueue, defaultMaxQueue), limit(config.MaxWaitSeconds, defaultMaxWaitSeconds))
 	}
 	if err != nil {
 		return nil, err
 	}
-	f, err := New(name, config, guard)
+	ctx := context.Background()
+	if handle != nil {
+		ctx = handle.Context()
+	}
+	f, err := New(ctx, name, config, guard)
 	if err != nil {
 		return nil, err
 	}
@@ -139,10 +147,6 @@ func MultiClusterFactory(name string, raw *json.Decoder, handle plugin.Handle) (
 	if handle != nil && f.moved != nil {
 		go f.moved.Start() // expires unused entries
 		go func() { <-handle.Context().Done(); f.moved.Stop() }()
-	}
-	if handle != nil && f.pending != nil {
-		go f.pending.Start()
-		go func() { <-handle.Context().Done(); f.pending.Stop() }()
 	}
 	return f, nil
 }
@@ -229,21 +233,22 @@ func limit(value *float64, fallback float64) float64 {
 }
 
 // New validates config and returns the filter. A nil guard turns off spill and failover.
-func New(name string, config Config, guard scheduling.Filter) (*Filter, error) {
-	ttl := float64(DefaultStickTTLSeconds)
+// ctx bounds the per-request state's cleanup.
+func New(ctx context.Context, name string, config Config, guard scheduling.Filter) (*Filter, error) {
+	ttl := float64(defaultStickTTLSeconds)
 	if config.StickTTLSeconds != nil {
 		ttl = *config.StickTTLSeconds
 		if !finiteNonNegative(ttl) || ttl > maxStickTTL.Seconds() {
-			return nil, fmt.Errorf("invalid parameters of the '%s' filter - stickTtlSeconds must be a finite number >= 0, got %v",
-				MultiClusterFilterType, ttl)
+			return nil, fmt.Errorf("invalid parameters of the '%s' filter - stickTtlSeconds must be between 0 and %v, got %v",
+				MultiClusterFilterType, maxStickTTL.Seconds(), ttl)
 		}
 	}
-	maxAge := float64(DefaultMaxMetricsAgeSeconds)
+	maxAge := float64(defaultMaxMetricsAgeSeconds)
 	if config.MaxMetricsAgeSeconds != nil {
 		maxAge = *config.MaxMetricsAgeSeconds
-		if !finiteNonNegative(maxAge) || maxAge == 0 || maxAge > maxStickTTL.Seconds() {
-			return nil, fmt.Errorf("invalid parameters of the '%s' filter - maxMetricsAgeSeconds must be a finite number > 0, got %v",
-				MultiClusterFilterType, maxAge)
+		if !finiteNonNegative(maxAge) || maxAge == 0 || maxAge > maxMetricsAge.Seconds() {
+			return nil, fmt.Errorf("invalid parameters of the '%s' filter - maxMetricsAgeSeconds must be > 0 and <= %v, got %v",
+				MultiClusterFilterType, maxMetricsAge.Seconds(), maxAge)
 		}
 	}
 	f := &Filter{
@@ -251,6 +256,7 @@ func New(name string, config Config, guard scheduling.Filter) (*Filter, error) {
 		guard:     guard,
 		now:       time.Now,
 	}
+
 	// Room, staleness and spill memory all need the guard's pool metrics.
 	if guard != nil {
 		f.maxAge = maxAge
@@ -258,8 +264,7 @@ func New(name string, config Config, guard scheduling.Filter) (*Filter, error) {
 			// A Get refreshes an entry's TTL, so a spilled conversation stays as long as it is used.
 			f.moved = ttlcache.New(ttlcache.WithTTL[uint64, string](time.Duration(ttl*float64(time.Second))),
 				ttlcache.WithCapacity[uint64, string](maxMovedKeys))
-			f.pending = ttlcache.New(ttlcache.WithTTL[string, spill](pendingTTL),
-				ttlcache.WithCapacity[string, spill](maxMovedKeys))
+			f.pending = plugin.NewPluginState(ctx)
 		}
 	}
 	return f, nil
@@ -273,8 +278,8 @@ type Filter struct {
 	now       func() time.Time
 	// moved maps a spilled key to its cluster; nil when not remembered.
 	moved *ttlcache.Cache[uint64, string]
-	// pending maps a spilled request to its key and home until PreRequest records the pick.
-	pending *ttlcache.Cache[string, spill]
+	// pending hands a spilled request's key and home to PreRequest, which records the pick.
+	pending *plugin.PluginState
 }
 
 // spill is a request handed to the scorers because its cluster was full.
@@ -283,14 +288,19 @@ type spill struct {
 	home string
 }
 
+func (s *spill) Clone() plugin.StateData { return &spill{key: s.key, home: s.home} }
+
 // TypedName returns the type and name of this plugin instance.
 func (f *Filter) TypedName() plugin.TypedName { return f.typedName }
 
-// Consumes declares the metrics timestamp, ready pods and what the guard reads.
+// Consumes declares the metrics timestamp, ready pods, session attributes and what the guard reads.
 func (f *Filter) Consumes() plugin.DataDependencies {
 	deps := plugin.DataDependencies{Optional: map[plugin.DataKey]any{
 		attrmetrics.MultiClusterReadyEndpointsDataKey: attrmetrics.ScalarMetricValue(0),
 	}}
+	for k, v := range sessionaffinity.SourcesConsumes(sessionSources).Optional {
+		deps.Optional[k] = v
+	}
 	// Without the extractor every cluster would look down, so require it at startup.
 	if f.maxAge > 0 {
 		deps.Required = map[plugin.DataKey]any{attrmetrics.MultiClusterMetricsUpdatedAtDataKey: attrmetrics.ScalarMetricValue(0)}
@@ -356,7 +366,7 @@ func (f *Filter) Filter(ctx context.Context, request *scheduling.InferenceReques
 	if !hasRoom(chosen) {
 		if candidates := keep(endpoints, hasRoom); len(candidates) > 0 {
 			if f.pending != nil && request != nil && request.RequestID != "" {
-				f.pending.Set(request.RequestID, spill{key: key, home: chosen}, ttlcache.DefaultTTL)
+				f.pending.Write(request.RequestID, spillStateKey, &spill{key: key, home: chosen})
 			}
 			logger.Info("Rendezvous - spilling", "plugin", f.typedName.Name, "chosen", chosen,
 				"by", why, "candidates", len(candidates))
@@ -440,18 +450,23 @@ func (f *Filter) roomOf(ctx context.Context, request *scheduling.InferenceReques
 
 // PreRequest records the cluster the scorers picked for a spill, so the conversation stays there.
 func (f *Filter) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, result *scheduling.SchedulingResult) error {
-	if f.pending == nil || request == nil {
+	if f.pending == nil || request == nil || request.RequestID == "" {
 		return nil
 	}
-	item, ok := f.pending.GetAndDelete(request.RequestID)
-	if !ok {
-		return nil
+	// No pick (a later filter emptied the candidates): leave the moved table as it is.
+	var target scheduling.Endpoint
+	if result != nil {
+		target = result.PrimaryEndpoint()
 	}
-	target := result.PrimaryEndpoint()
 	if target == nil {
 		return nil
 	}
-	s, final := item.Value(), target.GetMetadata().ID.String()
+	s, err := plugin.ReadPluginStateKey[*spill](f.pending, request.RequestID, spillStateKey)
+	if err != nil {
+		return nil
+	}
+	f.pending.Delete(request.RequestID)
+	final := target.GetMetadata().ID.String()
 	if final != s.home {
 		f.moved.Set(s.key, final, ttlcache.DefaultTTL)
 	} else {
@@ -499,7 +514,7 @@ func pinned(request *scheduling.InferenceRequest, endpoints []scheduling.Endpoin
 	best := ""
 	for _, endpoint := range endpoints {
 		meta := endpoint.GetMetadata()
-		for _, value := range strings.Split(meta.Labels[PinLabel], ",") {
+		for _, value := range strings.Split(meta.Labels[pinLabel], ",") {
 			if name := meta.ID.String(); strings.TrimSpace(value) == tenant && (best == "" || name < best) {
 				best = name
 			}

@@ -37,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	rendezvousutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/rendezvous"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -129,7 +130,7 @@ func noStick() Config {
 
 func newFilter(t *testing.T, config Config, guard scheduling.Filter) *Filter {
 	t.Helper()
-	f, err := New("test", config, guard)
+	f, err := New(t.Context(), "test", config, guard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +158,12 @@ func pick(t *testing.T, f *Filter, request *scheduling.InferenceRequest, endpoin
 }
 
 var pickSeq int
+
+// hasPending reports whether a spill of requestID waits for its PreRequest.
+func hasPending(f *Filter, requestID string) bool {
+	_, err := plugin.ReadPluginStateKey[*spill](f.pending, requestID, spillStateKey)
+	return err == nil
+}
 
 // sessionOnA returns a session id whose hash picks endpoint "a".
 func sessionOnA(t *testing.T, f *Filter, endpoints []scheduling.Endpoint) string {
@@ -386,7 +393,7 @@ func TestFactory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if f.TypedName().Type != MultiClusterFilterType || f.TypedName().Name != "hub" || f.guard == nil ||
-		f.maxAge != DefaultMaxMetricsAgeSeconds || stickTTL(f) != DefaultStickTTLSeconds*time.Second {
+		f.maxAge != defaultMaxMetricsAgeSeconds || stickTTL(f) != defaultStickTTLSeconds*time.Second {
 		t.Fatalf("defaults with a guard: %+v", f)
 	}
 	if _, ok := f.Consumes().Required[attrmetrics.MultiClusterMetricsUpdatedAtDataKey]; !ok {
@@ -403,7 +410,7 @@ func TestFactory(t *testing.T) {
 	}
 	// No parameters: the built-in queue guard, staleness and spill memory are on.
 	if f, err = build(`{}`); err != nil || f.guard == nil || f.guard.TypedName().Name != defaultGuardName ||
-		f.maxAge != DefaultMaxMetricsAgeSeconds || stickTTL(f) != DefaultStickTTLSeconds*time.Second {
+		f.maxAge != defaultMaxMetricsAgeSeconds || stickTTL(f) != defaultStickTTLSeconds*time.Second {
 		t.Fatalf("empty config: %+v %v", f, err)
 	}
 	if _, ok := f.Consumes().Optional[attrmetrics.MultiClusterQueueSizeDataKey]; !ok {
@@ -507,8 +514,8 @@ func TestRoomCheckLimits(t *testing.T) {
 		want     string
 	}{
 		"no flow control, idle":                {`{}`, 60, 0, nil, "a"},
-		"no flow control, below limit":         {`{}`, 60, DefaultMaxQueue - 1, nil, "a"},
-		"no flow control, queue at limit":      {`{}`, 60, DefaultMaxQueue, nil, "b"},
+		"no flow control, below limit":         {`{}`, 60, defaultMaxQueue - 1, nil, "a"},
+		"no flow control, queue at limit":      {`{}`, 60, defaultMaxQueue, nil, "b"},
 		"no flow control, no queue metric":     {`{}`, 60, -1, nil, "b"},
 		"maxQueue raised":                      {`{"maxQueue":6}`, 60, 5, nil, "a"},
 		"maxQueue lowered":                     {`{"maxQueue":2}`, 60, 2, nil, "b"},
@@ -567,7 +574,7 @@ func TestSpillPickedByScorers(t *testing.T) {
 	if got := pick(t, f, turn("r0"), endpoints); got != "a" {
 		t.Fatalf("home with room went to %s", got)
 	}
-	if f.pending.Len() != 0 {
+	if hasPending(f, "r0") {
 		t.Fatal("a request kept home left a pending spill")
 	}
 
@@ -579,8 +586,8 @@ func TestSpillPickedByScorers(t *testing.T) {
 	if err := f.PreRequest(t.Context(), turn("r1"), picked("c")); err != nil {
 		t.Fatal(err)
 	}
-	if f.pending.Len() != 0 || countMoved(f) != 1 {
-		t.Fatalf("after PreRequest: %d pending, %d moved", f.pending.Len(), countMoved(f))
+	if hasPending(f, "r1") || countMoved(f) != 1 {
+		t.Fatalf("after PreRequest: pending %v, %d moved", hasPending(f, "r1"), countMoved(f))
 	}
 	// Later turns stay on c, also after a recovers.
 	for i, full := range []map[string]bool{{"a": true}, {}} {
@@ -625,12 +632,13 @@ func TestNoKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFilter(t, baseConfig(), newGuard(tc.full...))
 			endpoints := []scheduling.Endpoint{cluster("a", map[string]string{"pins": "tenant-a"}, fresh), shared("b", "1"), shared("c", "1")}
+			tc.request.RequestID = "no-key"
 			got := names(f.Filter(t.Context(), tc.request, endpoints))
 			sort.Strings(got)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("kept %v, want %v", got, tc.want)
 			}
-			if f.pending.Len() != 0 {
+			if hasPending(f, "no-key") {
 				t.Fatal("keyless request left a pending spill")
 			}
 		})
@@ -698,5 +706,105 @@ func TestSpillLifecycle(t *testing.T) {
 	}
 	if got := pick(t, f, withSession(s), endpoints); got != "a" {
 		t.Fatalf("expired entry still applied: went to %s", got)
+	}
+}
+
+// TestReadyNotReportedWeighsDefault: a pool that stopped reporting ready pods
+// (the extractor writes -1) weighs defaultWeight and still takes its share.
+func TestReadyNotReportedWeighsDefault(t *testing.T) {
+	f := newFilter(t, baseConfig(), nil)
+	endpoints := []scheduling.Endpoint{shared("unreported", "-1"), shared("one", "1")}
+	const n = 4000
+	got := 0
+	for i := range n {
+		if pick(t, f, withSession(fmt.Sprintf("s-%d", i)), endpoints) == "unreported" {
+			got++
+		}
+	}
+	if share := float64(got) / n; share < 0.45 || share > 0.55 {
+		t.Fatalf("unreported share = %.3f, want ~0.5", share)
+	}
+}
+
+// TestSessionKeySources: agent-identity's attribute keys the conversation before
+// x-session-id; without either, its prefix does. The attribute name matches the
+// plugin's.
+func TestSessionKeySources(t *testing.T) {
+	if plugin.NewDataKey(agentIdentityAttribute, "") != agentidentity.AgentIdentityKey {
+		t.Fatalf("attribute %q is not the key agent-identity publishes", agentIdentityAttribute)
+	}
+	key := func(r *scheduling.InferenceRequest) (uint64, rendezvousutil.Source) {
+		return rendezvousutil.Key(t.Context(), r, sessionSources)
+	}
+	withAgent := func(id string, kv ...string) *scheduling.InferenceRequest {
+		r := withHeaders(kv...)
+		r.PutAttribute(agentidentity.AgentIdentityKey, id)
+		return r
+	}
+	both, src := key(withAgent("A", "x-session-id", "D"))
+	if src != rendezvousutil.SourceSession {
+		t.Fatalf("source %q, want session", src)
+	}
+	if agentOnly, _ := key(withAgent("A")); both != agentOnly {
+		t.Fatal("x-session-id keyed the conversation over agent-identity")
+	}
+	if headerOnly, _ := key(withSession("D")); both == headerOnly {
+		t.Fatal("agent-identity did not key the conversation")
+	}
+	if _, src := key(withHeaders("x-claude-code-session-id", "A")); src == rendezvousutil.SourceSession {
+		t.Fatal("a raw agent header keyed the conversation without the agent-identity plugin")
+	}
+}
+
+// TestSpillStaysWhileUsed: each turn refreshes the moved entry, so a
+// conversation used more often than stickTtlSeconds stays on its spill
+// cluster well past that TTL, also after home has room again.
+func TestSpillStaysWhileUsed(t *testing.T) {
+	guard := newGuard()
+	ttl := 0.5
+	f := newFilter(t, Config{StickTTLSeconds: &ttl}, guard)
+	endpoints := []scheduling.Endpoint{shared("a", "1"), shared("b", "1")}
+	s := sessionOnA(t, f, endpoints)
+	guard.full = map[string]bool{"a": true}
+	if got := pick(t, f, withSession(s), endpoints); got != "b" {
+		t.Fatalf("spill went to %s", got)
+	}
+	guard.full = map[string]bool{}
+	for deadline := time.Now().Add(4 * time.Duration(ttl*float64(time.Second))); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if got := pick(t, f, withSession(s), endpoints); got != "b" {
+			t.Fatalf("a used conversation left its spill cluster for %s", got)
+		}
+	}
+}
+
+// TestPreRequestWithoutPick: when no endpoint was picked (a later filter
+// emptied the candidates), PreRequest leaves the moved table and the pending
+// spill as they are.
+func TestPreRequestWithoutPick(t *testing.T) {
+	guard := newGuard()
+	f := newFilter(t, baseConfig(), guard)
+	endpoints := []scheduling.Endpoint{shared("a", "1"), shared("b", "1"), shared("c", "1")}
+	s := sessionOnA(t, f, endpoints)
+	guard.full = map[string]bool{"a": true, "b": true}
+	if got := pick(t, f, withSession(s), endpoints); got != "c" {
+		t.Fatalf("spill went to %s", got)
+	}
+	guard.full = map[string]bool{"a": true, "c": true}
+	r := withSession(s)
+	r.RequestID = "no-pick"
+	if got := names(f.Filter(t.Context(), r, endpoints)); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("spill candidates %v, want [b]", got)
+	}
+	for _, result := range []*scheduling.SchedulingResult{nil, {}} {
+		if err := f.PreRequest(t.Context(), r, result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !hasPending(f, "no-pick") || countMoved(f) != 1 {
+		t.Fatalf("pending %v, %d moved; want the spill kept", hasPending(f, "no-pick"), countMoved(f))
+	}
+	guard.full = map[string]bool{}
+	if got := pick(t, f, withSession(s), endpoints); got != "c" {
+		t.Fatalf("conversation lost its spill cluster: went to %s", got)
 	}
 }

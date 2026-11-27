@@ -11,7 +11,7 @@ hub replica.
 
 | Step | Rule |
 | --- | --- |
-| 1. Key | `x-claude-code-session-id`, `x-session-affinity` (an agent's parent session) or `x-session-id`, else the conversation up to its first user message ([rendezvous.Key](../../util/rendezvous/rendezvous.go)). No key: the pinned cluster if it has room, else all clusters with room (the scorers pick). |
+| 1. Key | The `agent-identity` attribute (set by the [agent-identity](../../../requesthandling/requestheader/agentidentity/README.md) plugin from agent session headers: Claude Code, OpenCode, Codex), then `x-session-id`, else the conversation up to its first user message ([rendezvous.Key](../../util/rendezvous/rendezvous.go)). No key: the pinned cluster if it has room, else all clusters with room (the scorers pick). |
 | 2. Moved | A key that spilled earlier goes to its spill cluster while it has room. |
 | 3. Pin | A tenant (`x-llm-d-inference-fairness-id`) in a cluster's `pins` label goes there. |
 | 4. Hash | Weighted rendezvous hash; weight = ready pods (`llm_d_epp_ready_endpoints`; unreported: 1; 0: excluded). A cluster added, removed or reweighted moves only its own keys. |
@@ -29,11 +29,12 @@ A cluster has room when it has ready pods, its metrics are at most `maxMetricsAg
 
 Also:
 
-- Ready-pod changes apply after 5 min (from 0: 30 s; to 0: at once), timed per hub replica.
+- Ready-pod changes are held before they apply, per hub replica; see the
+  [extractor README](../../../datalayer/extractor/metrics/README.md#multi-cluster-support).
 - The scrape interval (default 50 ms) must stay well below `maxWaitSeconds`.
 - `multicluster-metrics-extractor` is required, or the config fails at startup.
 - Give the hub the clusters' objectives with `--objectives-file`; otherwise every request is priority 0.
-- The moved table is per hub replica, so with active-active replicas a spilled conversation can return home on
+- The moved table is per hub replica (not shared through a `CrossReplicaSyncer`), so with active-active replicas a spilled conversation can return home on
   another replica (measured: 30-60% of spilled sessions). Run one replica, or active-passive (chart
   `router.proxy.mode: service` with `router.proxy.priorityRouting.enabled: true`; measured: 0%).
 
@@ -43,8 +44,8 @@ Also:
 | --- | --- | --- |
 | `maxWaitSeconds` | `10` | Flow-control wait limit. Must be > 0. |
 | `maxQueue` | `4` | vLLM queue-per-pod limit, for clusters without flow control. Must be > 0. |
-| `stickTtlSeconds` | `1800` | Time a spilled conversation stays after its last turn; `0`: returns once home has room. |
-| `maxMetricsAgeSeconds` | `30` | A cluster whose metrics are older is down. Lower fails over faster when a cluster router stops; too low marks a slow scrape as down. |
+| `stickTtlSeconds` | `1800` | Time a spilled conversation stays after its last turn; `0`: returns once home has room. At most one year. |
+| `maxMetricsAgeSeconds` | `30` | A cluster whose metrics are older is down. Lower fails over faster when a cluster router stops; too low marks a slow scrape as down. Must be > 0 and at most 3600. |
 | `guardPluginName` | none | A fail-closed filter replacing the built-in room check; excludes `maxQueue` and `maxWaitSeconds`. |
 
 Cluster label `pins` (in `clusters.yaml`): comma-separated tenants for that cluster.
@@ -71,6 +72,7 @@ plugins:
   parameters: {scheme: http}   # the cluster routers' metrics port
 - type: multicluster-metrics-extractor
   name: metrics-extractor
+- type: agent-identity               # keys agent sessions by their session header
 - type: multicluster-rendezvous-filter
   name: rendezvous
 - type: latency-observer-producer-hub

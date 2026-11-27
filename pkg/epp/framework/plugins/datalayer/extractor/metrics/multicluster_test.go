@@ -309,6 +309,20 @@ func TestFlowControlPartialScrapeKeepsBaseline(t *testing.T) {
 	require.InDelta(t, 1.0, b[40].RecentWait, 1e-9, "the window still reads 1 s, not the lifetime 100 s")
 }
 
+// TestFlowControlBothFamiliesMissingKeepsBaseline: a scrape without either
+// flow-control family clears the bands but keeps the per-series baseline, so a
+// series that comes back with its counters intact is not read as recent.
+func TestFlowControlBothFamiliesMissingKeepsBaseline(t *testing.T) {
+	s := newFlowScraper(t)
+	s.scrape(0, nil, []*dto.Metric{waitSeries("40", "x", 10000, 100)}) // lifetime mean 100 s
+	b, _ := s.scrape(10*time.Second, nil, []*dto.Metric{waitSeries("40", "x", 10001, 101)})
+	require.InDelta(t, 1.0, b[40].RecentWait, 1e-9)
+	b, _ = s.scrape(5*time.Second, nil, nil)
+	require.Empty(t, b, "no families: no bands")
+	b, _ = s.scrape(5*time.Second, nil, []*dto.Metric{waitSeries("40", "x", 10002, 102)})
+	require.InDelta(t, 1.0, b[40].RecentWait, 1e-9, "the returning series reads 1 s, not the lifetime 100 s")
+}
+
 // TestEndpointStatePruned: the state of an endpoint not scraped for
 // endpointStateTTL (a removed cluster) is dropped.
 func TestEndpointStatePruned(t *testing.T) {
@@ -379,10 +393,10 @@ func TestMultiClusterFlowControlBands(t *testing.T) {
 	require.InDelta(t, start+20, b[60].LastProgress, 1e-6)
 }
 
-// TestFlowControlWaitBetweenDepartures reproduces the rig failure: scrapes are
-// seconds apart and a backed-up band lets a request go only every few scrapes.
-// A per-scrape mean read 0 between departures, so the hub saw room and sent a
-// request into a backlog it then waited 900 s in.
+// TestFlowControlWaitBetweenDepartures: scrapes are seconds apart and a
+// backed-up band lets a request go only every few scrapes, so a per-scrape
+// mean would read 0 between departures and show room. The 30 s window keeps
+// the wait visible.
 func TestFlowControlWaitBetweenDepartures(t *testing.T) {
 	s := newFlowScraper(t)
 	start := float64(s.clock.Unix())

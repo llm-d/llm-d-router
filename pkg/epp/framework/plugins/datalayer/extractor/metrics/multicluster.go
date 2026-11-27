@@ -30,6 +30,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
@@ -59,10 +60,6 @@ const (
 	readyEndpointsHold = 5 * time.Minute
 	readyFromZeroHold  = 30 * time.Second
 
-	// dispatchedOutcome is the flow-control outcome counted toward a band's
-	// wait and progress: fast rejections would otherwise hide a saturated band.
-	dispatchedOutcome = "Dispatched"
-
 	// endpointStateTTL drops the history of an endpoint not scraped this long.
 	endpointStateTTL = 10 * time.Minute
 
@@ -70,6 +67,10 @@ const (
 	// stale count does not keep weighting it; the hub then weighs it as one.
 	readyNotReported = -1.0
 )
+
+// dispatchedOutcome is the flow-control outcome counted toward a band's wait
+// and progress: fast rejections would otherwise hide a saturated band.
+var dispatchedOutcome = types.QueueOutcomeDispatched.String()
 
 type multiClusterMetricsExtractorParams struct {
 	KVCacheUtilizationMetric string `json:"kvCacheUtilizationMetric"`
@@ -289,7 +290,10 @@ func (e *MultiClusterMetricsExtractor) flowControl(ep fwkdl.Endpoint, payload so
 	case nowSec-pool.partialSince > flowControlWaitWindow.Seconds():
 		partial = false
 	}
-	if !partial {
+	// The baseline is replaced only when the wait family is reported. Without
+	// it (alone or with the held family), a series that comes back with its
+	// counters intact is diffed against its last totals, not read as new.
+	if waitFamily != nil {
 		pool.series = series
 	}
 
