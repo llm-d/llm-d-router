@@ -26,6 +26,8 @@ import (
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -208,5 +210,42 @@ func TestExtProcServerRunnerClosesDeadConnections(t *testing.T) {
 	case <-proxy.serverClosed:
 	case <-time.After(keepaliveTestWait):
 		t.Fatal("server kept the connection open after the network was cut")
+	}
+}
+
+func TestExtProcServerRunnerServing(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewDefaultExtProcServerRunner()
+	r.SecureServing = false
+	r.GrpcListener = lis
+	r.Datastore = datastore.NewDatastore(t.Context(), nil)
+	if r.Serving() {
+		t.Fatal("Serving() = true before Start")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- r.AsRunnable(logutil.NewTestLogger()).Start(ctx) }()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.True(c, r.Serving())
+	}, keepaliveTestWait, 10*time.Millisecond, "Serving() stayed false after Start")
+	conn, err := net.DialTimeout("tcp", lis.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("server does not accept connections while Serving() is true: %v", err)
+	}
+	_ = conn.Close()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(keepaliveTestWait):
+		t.Fatal("server did not return after cancel")
+	}
+	if r.Serving() {
+		t.Fatal("Serving() = true after the server returned")
 	}
 }

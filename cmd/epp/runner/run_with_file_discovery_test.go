@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -397,6 +398,111 @@ dataLayer:
 		_, err = process.Recv()
 	}
 	require.NoError(t, err, "ext_proc should be serving on the injected listener, not the decoy port")
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("runWithFileDiscovery returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runWithFileDiscovery did not return after context cancel")
+	}
+}
+
+// gatedDiscovery is an EndpointDiscovery whose Ready channel stays open until
+// the test closes it, so the epp-server and health runnables stay parked.
+type gatedDiscovery struct {
+	ready chan struct{}
+}
+
+func (d *gatedDiscovery) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "gated-discovery", Name: "gated-discovery"}
+}
+
+func (d *gatedDiscovery) Start(ctx context.Context, _ fwkdl.DiscoveryNotifier) error {
+	<-ctx.Done()
+	return nil
+}
+
+func (d *gatedDiscovery) Ready() <-chan struct{} { return d.ready }
+
+// TestRunWithFileDiscovery_ExtProcPortBoundBeforeServing is a regression test for
+// https://github.com/llm-d/llm-d-router/issues/4645: the ext_proc port was bound
+// only after TLS setup inside the runnable, so readiness could report SERVING
+// while the port refused connections. The port must accept TCP connections as
+// soon as the runner starts the group, even while discovery is not ready yet.
+func TestRunWithFileDiscovery_ExtProcPortBoundBeforeServing(t *testing.T) {
+	disc := &gatedDiscovery{ready: make(chan struct{})}
+	fwkplugin.Register("gated-discovery", fwkplugin.StabilityBeta, func(_ string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return disc, nil
+	})
+
+	const configText = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: gated-discovery
+    type: gated-discovery
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+  - name: metrics-source
+    type: metrics-data-source
+  - name: metrics-extractor
+    type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    pluginRef: gated-discovery
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+`
+
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	defer healthListener.Close()
+
+	// The runner binds by port number, so reserve a free number and release it.
+	probe, err := net.Listen("tcp", ":0") //#nosec -- wildcard address, the one the runner binds
+	require.NoError(t, err)
+	grpcPort := uint16(probe.Addr().(*net.TCPAddr).Port) //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+	require.NoError(t, probe.Close())
+
+	opts := runserver.NewOptions()
+	opts.GRPCPort = grpcPort
+	opts.MetricsPort = 0
+	opts.SecureServing = false
+	opts.HealthChecking = true
+	opts.PoolName = testPoolName
+	opts.PoolNamespace = "test-ns"
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	r.healthListener = healthListener
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(grpcPort)))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if !assert.NoError(c, err) {
+			return
+		}
+		_ = conn.Close()
+	}, 10*time.Second, 20*time.Millisecond, "ext_proc port should accept connections before discovery is ready")
 
 	cancel()
 	select {

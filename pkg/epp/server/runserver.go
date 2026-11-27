@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -101,6 +102,8 @@ type ExtProcServerRunner struct {
 	// keepaliveTime and keepaliveTimeout are overridden only by tests.
 	keepaliveTime    time.Duration
 	keepaliveTimeout time.Duration
+
+	serving atomic.Bool
 }
 
 // NewExtProcServerRunner builds a runner from the runtime options plus the dependencies the
@@ -248,6 +251,10 @@ func KeepaliveEnforcementPolicy() grpc.ServerOption {
 	})
 }
 
+// Serving reports whether the ext-proc gRPC server has finished its setup (TLS
+// credentials, gRPC server) and is serving on its listener.
+func (r *ExtProcServerRunner) Serving() bool { return r.serving.Load() }
+
 // AsRunnable returns a Runnable that can be used to start the ext-proc gRPC server.
 // The runnable implements LeaderElectionRunnable with leader election disabled.
 func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
@@ -341,6 +348,10 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			logger.Info("Setting ExternalProcessor service status to SERVING", "serviceName", svcName)
 			healthcheck.SetServingStatus(svcName, healthgrpc.HealthCheckResponse_SERVING)
 		}
+
+		// Readiness depends on this flag; TLS and server setup are complete here.
+		r.serving.Store(true)
+		defer r.serving.Store(false)
 
 		// Forward to the gRPC runnable.
 		if r.GrpcListener != nil {

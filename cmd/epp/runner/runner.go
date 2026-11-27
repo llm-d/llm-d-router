@@ -362,7 +362,49 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	if leaderElection {
 		elected = r.isLeader
 	}
+	closeListener, err := bindExtProcListener(r.serverRunner)
+	if err != nil {
+		return err
+	}
+	defer closeListener()
 	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, elected, drainTimeout)
+}
+
+// bindExtProcListener binds the ext_proc port before the serving runnables
+// start, unless sr already has a listener, so the port accepts connections
+// while the runnable builds its TLS credentials. The returned func closes the
+// listener. grpc.Server.Serve also closes it on return, so the deferred close
+// only matters when the runnable fails before it serves.
+func bindExtProcListener(sr *runserver.ExtProcServerRunner) (func(), error) {
+	if sr.GrpcListener != nil {
+		return func() {}, nil
+	}
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", sr.GrpcPort))
+	if err != nil {
+		return nil, fmt.Errorf("ext-proc gRPC server failed to listen - %w", err)
+	}
+	sr.GrpcListener = lis
+	return func() {
+		_ = lis.Close()
+		sr.GrpcListener = nil
+	}, nil
+}
+
+// extProcReadiness keeps readiness NOT_SERVING until the ext_proc server is
+// serving. Connections to the bound port wait until then.
+type extProcReadiness struct {
+	sr *runserver.ExtProcServerRunner
+}
+
+func (extProcReadiness) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "ext-proc", Name: "server"}
+}
+
+func (c extProcReadiness) CheckReady() error {
+	if !c.sr.Serving() {
+		return errors.New("ext-proc server is not serving yet")
+	}
+	return nil
 }
 
 func (r *Runner) stopServing() {
@@ -621,7 +663,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	r.serverRunner = serverRunner
 	r.healthGRPCPort = opts.GRPCHealthPort
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
-	readinessCheckers = append(readinessCheckers, r.dlRuntime)
+	readinessCheckers = append(readinessCheckers, r.dlRuntime, extProcReadiness{serverRunner})
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
 }
@@ -1498,8 +1540,15 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
 		supporters:            ps,
-		readinessCheckers:     pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()),
+		readinessCheckers: append(pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()),
+			extProcReadiness{serverRunner}),
 	})
+
+	closeListener, err := bindExtProcListener(serverRunner)
+	if err != nil {
+		return err
+	}
+	defer closeListener()
 
 	g := newRunnableGroup()
 	g.Add("discovery", func(ctx context.Context) error {

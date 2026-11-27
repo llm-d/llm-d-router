@@ -30,6 +30,8 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -44,6 +46,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
 
 // Mock Datastore
@@ -416,7 +419,7 @@ func TestHealthServer_Check(t *testing.T) {
 				draining:              &draining,
 			}
 
-			resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: tt.service})
+			resp, err := s.Check(t.Context(), &healthPb.HealthCheckRequest{Service: tt.service})
 			if err != nil {
 				t.Fatalf("Check failed: %v", err)
 			}
@@ -547,4 +550,59 @@ func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
 				time.Since(start).Round(time.Second), conn.GetState())
 		}
 	})
+}
+
+// TestExtProcReadiness_FollowsServing checks that readiness is NOT_SERVING until
+// the ext_proc server is serving, and drops again once it returns.
+func TestExtProcReadiness_FollowsServing(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+	sr := runserver.NewDefaultExtProcServerRunner()
+	sr.SecureServing = false
+	sr.GrpcListener = lis
+	sr.Datastore = datastore.NewDatastore(t.Context(), nil)
+
+	var isLeader atomic.Bool
+	isLeader.Store(true)
+	s := &healthServer{
+		logger:            testr.New(t),
+		datastore:         &mockDatastore{hasSynced: true, pool: &datalayer.EndpointPool{}},
+		isLeader:          &isLeader,
+		readinessCheckers: []fwkplugin.ReadinessChecker{extProcReadiness{sr}},
+	}
+	check := func(service string) healthPb.HealthCheckResponse_ServingStatus {
+		resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: service})
+		if err != nil {
+			t.Fatalf("Check failed: %v", err)
+		}
+		return resp.Status
+	}
+
+	if got := check(ReadinessCheckService); got != healthPb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("readiness before the server starts = %v, want NOT_SERVING", got)
+	}
+	if got := check(LivenessCheckService); got != healthPb.HealthCheckResponse_SERVING {
+		t.Fatalf("liveness before the server starts = %v, want SERVING", got)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- sr.AsRunnable(logutil.NewTestLogger()).Start(ctx) }()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, healthPb.HealthCheckResponse_SERVING, check(ReadinessCheckService))
+	}, 10*time.Second, 10*time.Millisecond, "readiness never became SERVING while the server is serving")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not return after cancel")
+	}
+	if got := check(ReadinessCheckService); got != healthPb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("readiness after the server returned = %v, want NOT_SERVING", got)
+	}
 }
