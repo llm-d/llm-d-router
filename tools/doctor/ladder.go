@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling/capture"
 )
@@ -53,7 +54,7 @@ type ladder struct {
 	perfect  rung // per-endpoint LRU caches, each request on the candidate holding its longest prefix
 	routed   rung // per-endpoint LRU caches, each request on the router's pick
 
-	predicted        rung // the router's predicted hit on its pick
+	predicted        rung // the router's predicted cached tokens on its pick
 	predictedRecords int
 	engine           rung // the engine's reported cached tokens
 	engineRecords    int
@@ -67,13 +68,18 @@ func computeLadder(records []capture.Record, fleetBlocks int) (ladder, error) {
 	if err := checkComparable(records); err != nil {
 		return l, err
 	}
+	// Endpoints come from the records the replay keeps, so the fleet's blocks
+	// are split over the endpoints that served or could have served them.
 	endpoints := map[string]bool{}
 	for _, r := range records {
-		for _, e := range r.Candidates {
-			endpoints[e] = true
+		if r.Endpoint == "" || len(r.BlockHashes) == 0 {
+			continue
 		}
-		if r.Endpoint != "" {
-			endpoints[r.Endpoint] = true
+		endpoints[r.Endpoint] = true
+		for _, e := range r.Candidates {
+			if e != "" {
+				endpoints[e] = true
+			}
 		}
 	}
 	l.endpoints = len(endpoints)
@@ -114,7 +120,7 @@ func computeLadder(records []capture.Record, fleetBlocks int) (ladder, error) {
 		l.capacity.add(shared.prefix(blocks), n)
 		shared.store(blocks)
 
-		candidates := r.Candidates
+		candidates := slices.DeleteFunc(slices.Clone(r.Candidates), func(e string) bool { return e == "" })
 		if len(candidates) == 0 {
 			candidates = []string{r.Endpoint}
 		}
@@ -125,8 +131,8 @@ func computeLadder(records []capture.Record, fleetBlocks int) (ladder, error) {
 		l.routed.add(routed[r.Endpoint].prefix(blocks), n)
 		routed[r.Endpoint].store(blocks)
 
-		if p := r.PredictedCachedBlocks; p != nil {
-			l.predicted.add(min(max(*p, 0), n), n)
+		if t := r.PredictedCachedTokens; t != nil {
+			l.predicted.add(min(max(*t, 0)/r.BlockSize, n), n)
 			l.predictedRecords++
 		}
 		if t := r.EngineCachedTokens; t != nil {
@@ -197,7 +203,7 @@ func (l ladder) write(w io.Writer) error {
 		{"Capacity bound", "fleet KV capacity, one shared cache", l.capacity.String()},
 		{"Perfect routing", "same capacity split per endpoint", l.perfect.String()},
 		{"Routed", "the router's picks, same caches", l.routed.String()},
-		{"Observed (router)", "router-predicted cached blocks", l.predicted.String() + coverage(l.predictedRecords)},
+		{"Observed (router)", "router-predicted cached tokens", l.predicted.String() + coverage(l.predictedRecords)},
 		{"Observed (engine)", "engine-reported cached tokens", l.engine.String() + coverage(l.engineRecords)},
 	}
 	if _, err := fmt.Fprintln(w, "LADDER (prefix-cache hit rate, in blocks)"); err != nil {

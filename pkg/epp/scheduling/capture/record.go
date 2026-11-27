@@ -30,6 +30,10 @@ type Record struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	Time          time.Time `json:"time"`
 	RequestID     string    `json:"requestID"`
+	// Profile is the scheduling profile that picked Endpoint. A request that
+	// several profiles schedule, such as prefill and decode in disaggregated
+	// serving, has one record per profile.
+	Profile string `json:"profile"`
 	// Candidates are the endpoints the picker chose from.
 	Candidates []string `json:"candidates"`
 	// Endpoint is the endpoint the request was routed to, empty when
@@ -42,9 +46,10 @@ type Record struct {
 	// BlockHashes are the prompt's chained block hashes in prompt order: a
 	// hash names its block and every block before it.
 	BlockHashes []uint64 `json:"blockHashes"`
-	// PredictedCachedBlocks is the router's predicted prefix hit on Endpoint,
-	// in blocks. Nil when no prefix producer ran.
-	PredictedCachedBlocks *int `json:"predictedCachedBlocks,omitempty"`
+	// PredictedCachedTokens is the router's predicted prefix hit on Endpoint,
+	// in tokens, as EngineCachedTokens counts them. Nil when no prefix
+	// producer ran.
+	PredictedCachedTokens *int `json:"predictedCachedTokens,omitempty"`
 	// EngineCachedTokens is the usage.prompt_tokens_details.cached_tokens the
 	// engine returned. Nil when the response did not carry it.
 	EngineCachedTokens *int `json:"engineCachedTokens,omitempty"`

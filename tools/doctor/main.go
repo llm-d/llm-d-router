@@ -16,17 +16,20 @@ limitations under the License.
 
 // Command doctor analyzes router profiler captures offline.
 //
-//	doctor analyze --fleet-kv-blocks N CAPTURE.ndjson [CAPTURE.ndjson ...]
+//	doctor analyze --fleet-kv-blocks N [--profile NAME] CAPTURE.ndjson [CAPTURE.ndjson ...]
 //
 // analyze merges the captures of all router replicas in time order and prints
 // the prefix-cache hit-rate ladder: the reuse the workload allows, what the
 // fleet's KV capacity keeps of it, what perfect routing over per-endpoint
 // caches keeps, and what the router's own picks keep, followed by the hit
-// rates the router predicted and the engines reported.
+// rates the router predicted and the engines reported. It replays one
+// scheduling profile, since each profile picks from its own endpoints; a
+// capture with several profiles, such as prefill and decode, needs --profile.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -39,7 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling/capture"
 )
 
-const usage = "usage: doctor analyze --fleet-kv-blocks N CAPTURE.ndjson [CAPTURE.ndjson ...]"
+const usage = "usage: doctor analyze --fleet-kv-blocks N [--profile NAME] CAPTURE.ndjson [CAPTURE.ndjson ...]"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -54,7 +57,8 @@ func run(args []string, out io.Writer) error {
 	}
 	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fleetBlocks := fs.Int("fleet-kv-blocks", 0, "KV-cache blocks across all endpoints, in the capture's block size")
+	fleetBlocks := fs.Int("fleet-kv-blocks", 0, "KV-cache blocks across the profile's endpoints, in the capture's block size")
+	profile := fs.String("profile", "", "scheduling profile to replay; required when the captures hold more than one")
 	if err := fs.Parse(args[1:]); err != nil {
 		return fmt.Errorf("%w\n%s", err, usage)
 	}
@@ -62,6 +66,10 @@ func run(args []string, out io.Writer) error {
 		return errors.New(usage)
 	}
 	records, err := readRecords(fs.Args())
+	if err != nil {
+		return err
+	}
+	records, err = profileRecords(records, *profile)
 	if err != nil {
 		return err
 	}
@@ -86,7 +94,30 @@ func readRecords(paths []string) ([]capture.Record, error) {
 	return records, nil
 }
 
-// readCapture reads one NDJSON capture.
+// profileRecords keeps the records of one scheduling profile: profile, or the
+// only profile the records hold when profile is empty.
+func profileRecords(records []capture.Record, profile string) ([]capture.Record, error) {
+	if profile == "" {
+		var profiles []string
+		for _, r := range records {
+			if !slices.Contains(profiles, r.Profile) {
+				profiles = append(profiles, r.Profile)
+			}
+		}
+		if len(profiles) > 1 {
+			slices.Sort(profiles)
+			return nil, fmt.Errorf("the captures hold the scheduling profiles %q: pick one with --profile", profiles)
+		}
+		return records, nil
+	}
+	records = slices.DeleteFunc(records, func(r capture.Record) bool { return r.Profile != profile })
+	if len(records) == 0 {
+		return nil, fmt.Errorf("no record of scheduling profile %q", profile)
+	}
+	return records, nil
+}
+
+// readCapture reads one NDJSON capture. Blank lines are skipped.
 func readCapture(path string) ([]capture.Record, error) {
 	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
@@ -97,8 +128,12 @@ func readCapture(path string) ([]capture.Record, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(nil, 64<<20)
 	for line := 1; scanner.Scan(); line++ {
+		b := bytes.TrimSpace(scanner.Bytes())
+		if len(b) == 0 {
+			continue
+		}
 		var r capture.Record
-		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+		if err := json.Unmarshal(b, &r); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, line, err)
 		}
 		records = append(records, r)

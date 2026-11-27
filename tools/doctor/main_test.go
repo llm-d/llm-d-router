@@ -67,10 +67,23 @@ func TestReadRecordsReportsBadLine(t *testing.T) {
 	require.ErrorContains(t, err, path+":2")
 }
 
+func TestReadRecordsSkipsBlankLines(t *testing.T) {
+	path := writeCapture(t, record(0, "e1", both, 1))
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("\n  \n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	records, err := readRecords([]string{path})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+}
+
 func TestRunAnalyzePrintsLadder(t *testing.T) {
 	r0 := record(0, "e1", both, 10, 11, 1)
 	r1 := record(1, "e2", both, 10, 11, 2)
-	r1.PredictedCachedBlocks = ptr(2)
+	r1.PredictedCachedTokens = ptr(8)
 	path := writeCapture(t, r0, r1)
 
 	var out bytes.Buffer
@@ -78,9 +91,27 @@ func TestRunAnalyzePrintsLadder(t *testing.T) {
 	lines := strings.Split(out.String(), "\n")
 	require.Contains(t, lines, "  Ideal              unbounded shared cache                33.3%")
 	require.Contains(t, lines, "  Routed             the router's picks, same caches        0.0%")
-	require.Contains(t, lines, "  Observed (router)  router-predicted cached blocks       66.7% (1 of 2 records)")
+	require.Contains(t, lines, "  Observed (router)  router-predicted cached tokens       66.7% (1 of 2 records)")
 	require.Contains(t, lines, "  Observed (engine)  engine-reported cached tokens           n/a")
 	require.Contains(t, lines, "records: 2 (0 failed, 0 without block hashes), endpoints: 2, blocks: 6")
+}
+
+func TestRunAnalyzeReplaysOneProfile(t *testing.T) {
+	prefill := record(0, "p1", []string{"p1"}, 1, 2)
+	prefill.Profile = "prefill"
+	decode := record(1, "d1", []string{"d1", "d2"}, 1, 2)
+	decode.Profile = "decode"
+	path := writeCapture(t, prefill, decode)
+
+	err := run([]string{"analyze", "--fleet-kv-blocks", "100", path}, &bytes.Buffer{})
+	require.ErrorContains(t, err, "--profile")
+
+	var out bytes.Buffer
+	require.NoError(t, run([]string{"analyze", "--fleet-kv-blocks", "100", "--profile", "decode", path}, &out))
+	require.Contains(t, strings.Split(out.String(), "\n"), "records: 1 (0 failed, 0 without block hashes), endpoints: 2, blocks: 2")
+
+	err = run([]string{"analyze", "--fleet-kv-blocks", "100", "--profile", "encode", path}, &bytes.Buffer{})
+	require.ErrorContains(t, err, `no record of scheduling profile "encode"`)
 }
 
 func TestRunUsageErrors(t *testing.T) {

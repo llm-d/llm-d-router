@@ -141,12 +141,12 @@ func TestLadderPerfectRoutingPicksLongestPrefix(t *testing.T) {
 
 func TestLadderObservedRungs(t *testing.T) {
 	r0 := record(0, "e1", both, 1, 2)
-	r0.PredictedCachedBlocks = ptr(5) // more than the prompt holds
-	r0.EngineCachedTokens = ptr(8)    // two blocks of four tokens
+	r0.PredictedCachedTokens = ptr(20) // more than the prompt holds
+	r0.EngineCachedTokens = ptr(8)     // two blocks of four tokens
 	r1 := record(1, "e1", both, 1, 2)
 	r1.EngineCachedTokens = ptr(3) // less than one block
 	r2 := record(2, "e1", both, 1, 2)
-	r2.PredictedCachedBlocks = ptr(1)
+	r2.PredictedCachedTokens = ptr(6)
 
 	l, err := computeLadder([]capture.Record{r0, r1, r2}, 100)
 	require.NoError(t, err)
@@ -173,6 +173,19 @@ func TestLadderSkipsFailedAndEmptyRecords(t *testing.T) {
 	require.Equal(t, 1, l.records)
 	require.Equal(t, 1, l.failed)
 	require.Equal(t, 1, l.noHashes)
+}
+
+func TestLadderEndpointsComeFromReplayedRecords(t *testing.T) {
+	// Endpoints named only by skipped records, and empty names, get no share
+	// of the fleet's blocks: four blocks give e1 and e2 two each.
+	l, err := computeLadder([]capture.Record{
+		record(0, "", []string{"e1", "e3"}, 1, 2),
+		record(1, "e4", []string{"e4", "e5"}),
+		record(2, "e1", []string{"e1", "e2", ""}, 1, 2),
+	}, 4)
+	require.NoError(t, err)
+	require.Equal(t, 2, l.endpoints)
+	require.Equal(t, rung{hits: 0, blocks: 2}, l.perfect)
 }
 
 func TestLadderSkippedRecordsNeedNoHashMetadata(t *testing.T) {
