@@ -329,7 +329,6 @@ func TestSubCanonicalStores_BlockHeldByDeviceTierUpdate(t *testing.T) {
 	assert.Equal(t, total, indexed)
 }
 
-// A remove on a device tier that never announced the block releases nothing.
 // A token-less device-tier update holds the anchors of its blocks even when
 // none of them names a request key, such as the trailing pages of a node.
 func TestSubCanonicalStores_UnresolvedDeviceTierUpdateHoldsAnchor(t *testing.T) {
@@ -367,6 +366,7 @@ func TestSubCanonicalStores_ParentResolvedFromIndex(t *testing.T) {
 	assert.Equal(t, total, indexed)
 }
 
+// A remove on a device tier that never announced the block releases nothing.
 func TestSubCanonicalStores_RemoveWithoutStoreKeepsAnchor(t *testing.T) {
 	pool, idx, tp := newTestPool(t, 16)
 	conversation := makeTokens(180)
@@ -379,6 +379,26 @@ func TestSubCanonicalStores_RemoveWithoutStoreKeepsAnchor(t *testing.T) {
 	)
 	indexed, total := indexedPrefixBlocks(t, idx, tp, conversation, nil)
 	assert.Equal(t, total, indexed)
+}
+
+// An engine that stores one block per event while it decodes, with blocks
+// smaller than the canonical block, completes a canonical block every few
+// events. Each store chains from the block before it, which ends mid canonical
+// block for all but the last of them.
+func TestSubCanonicalStores_OneBlockPerStore(t *testing.T) {
+	const (
+		canonical = 64
+		blockSize = 16
+		prompt    = 80
+	)
+	pool, idx, tp := newTestPool(t, canonical)
+	conversation := makeTokens(256)
+	processStores(t, pool, radixNodeStore(conversation, 0, prompt, blockSize, trunkHashBase))
+	for end := prompt + blockSize; end <= len(conversation); end += blockSize {
+		processStores(t, pool, radixNodeStore(conversation, end-blockSize, end, blockSize, trunkHashBase))
+		indexed, _ := indexedPrefixBlocks(t, idx, tp, conversation[:end], nil)
+		assert.Equal(t, end/canonical, indexed, "after %d tokens", end)
+	}
 }
 
 // A block held on two device tiers is removed from each in turn. The canonical
