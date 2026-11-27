@@ -1021,7 +1021,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 
 	req := makeTokenRequest("req-multi-cache", 8)
 	res := &fwksched.SchedulingResult{
-		PrimaryProfileName: "prefill",
+		PrimaryProfileName: "decode",
 		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{epA}},
@@ -1030,8 +1030,8 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	}
 
 	_ = producer.PreRequest(ctx, req, res)
-	require.Equal(t, int64(0)+UnknownOutputTokens, producer.tokenTracker.get(idA), "fully cached: only output tokens")
-	require.Equal(t, int64(8)+UnknownOutputTokens, producer.tokenTracker.get(idB), "uncached: input + output")
+	require.Zero(t, producer.tokenTracker.get(idA), "fully cached prefill has no input work")
+	require.Equal(t, UnknownOutputTokens, producer.tokenTracker.get(idB), "decode receives the input from prefill")
 
 	// Drive the response lifecycle: StartOfStream releases prefill, EndOfStream releases decode.
 	req.SchedulingResult = res
@@ -1055,12 +1055,10 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	endpointName := "shared-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// 4 input + UnknownOutputTokens output (UNKNOWN) per profile.
-	// Two profiles both targeting the same endpoint => 2 requests, 2x that.
-	perProfile := int64(4) + UnknownOutputTokens
+	// Each profile contributes one request, with input on P and output on D.
 	req := makeTokenRequest("req-shared", 4)
 	res := &fwksched.SchedulingResult{
-		PrimaryProfileName: "prefill",
+		PrimaryProfileName: "decode",
 		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
@@ -1070,13 +1068,13 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 
 	_ = producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(2), producer.requestTracker.get(endpointID))
-	require.Equal(t, 2*perProfile, producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4)+UnknownOutputTokens, producer.tokenTracker.get(endpointID))
 
 	// StartOfStream releases the prefill profile only (1 request, one profile's tokens).
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, perProfile, producer.tokenTracker.get(endpointID))
+	require.Equal(t, UnknownOutputTokens, producer.tokenTracker.get(endpointID))
 
 	// EndOfStream releases the remaining (decode) profile.
 	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)

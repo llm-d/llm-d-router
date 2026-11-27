@@ -1266,6 +1266,9 @@ These metrics are owned by the EPP ext_proc server.
 These metrics belong to `inflight-load-producer`. They are registered only when the producer is
 configured. The producer updates the per-endpoint gauges when requests are admitted and released.
 
+Stage-specific accounting and release timing are described in the
+[producer behavior](../pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload/README.md#behavior).
+
 Endpoint removal prunes its series. Late releases do not recreate deleted series or change the
 load reported for a replacement endpoint with the same labels.
 

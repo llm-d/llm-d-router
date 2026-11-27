@@ -521,7 +521,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
+		tokens := p.estimateDispatchedTokens(profileName, endpoint, request, inputTokens, result)
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
 
@@ -560,6 +560,22 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		p.PluginState.BindLiveness(ctx, request.RequestID)
 	}
 	return nil
+}
+
+func (p *InFlightLoadProducer) estimateDispatchedTokens(profileName string, endpoint fwksched.Endpoint,
+	request *fwksched.InferenceRequest, inputTokens int64, result *fwksched.SchedulingResult,
+) int64 {
+	if result.PrefillProfile().FirstEndpoint() == nil ||
+		(profileName != result.PrefillProfileName && profileName != result.PrimaryProfileName) {
+		// A coordinator's decode call can omit a prefiller selected in another call.
+		return p.estimateRequestTokens(endpoint, request, inputTokens)
+	}
+
+	if profileName == result.PrefillProfileName || !p.addEstimatedOutputTokens {
+		return uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
+	}
+
+	return p.tokenEstimator.EstimateOutputFromRequest(request)
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
