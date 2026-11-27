@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1091,20 +1092,28 @@ func TestVllmInferenceParser_ParseRequestAllocations(t *testing.T) {
 	framed := largeRequestFrame(t)
 	parser := NewVllmInferenceParser()
 	headers := map[string]string{":path": vllmpb.Inference_GenerateStream_FullMethodName}
-	require.LessOrEqual(t, testing.AllocsPerRun(20, func() {
+	parse := func() {
 		if _, err := parser.ParseRequest(context.Background(), framed, headers); err != nil {
 			t.Fatal(err)
 		}
-	}), 11.0)
-	bytesPerOp := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			if _, err := parser.ParseRequest(context.Background(), framed, headers); err != nil {
-				b.Fatal(err)
-			}
-		}
-	}).AllocedBytesPerOp()
-	require.Less(t, bytesPerOp, int64(64<<10), "a copy of the 1 MiB media would show here")
+	}
+	require.LessOrEqual(t, testing.AllocsPerRun(20, parse), 11.0)
+	require.Less(t, allocedBytesPerRun(20, parse), uint64(64<<10), "a copy of the 1 MiB media would show here")
+}
+
+// allocedBytesPerRun is the byte-count counterpart of testing.AllocsPerRun: it
+// returns the average heap bytes allocated per call of f, without the cost of
+// running a full testing.Benchmark inside a unit test.
+func allocedBytesPerRun(runs int, f func()) uint64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	f() // warm up
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
 }
 
 func BenchmarkVllmInferenceParser_ParseRequest8KTokens1MBMedia(b *testing.B) {
