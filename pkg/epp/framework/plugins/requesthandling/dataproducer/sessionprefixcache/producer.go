@@ -28,7 +28,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -183,7 +182,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	candidates := sets.New[string]()
 	for _, ep := range endpoints {
 		if md := ep.GetMetadata(); md != nil {
-			candidates.Insert(endpointID(md))
+			candidates.Insert(srckvevents.PodIdentifier(md))
 		}
 	}
 	best := make(map[string]*attrprefix.PrefixCacheMatchInfo, len(endpoints))
@@ -212,7 +211,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		if md == nil {
 			continue
 		}
-		info := best[endpointID(md)]
+		info := best[srckvevents.PodIdentifier(md)]
 		if info == nil {
 			info = emptyMatch(lookup.TotalTokens)
 		}
@@ -255,9 +254,4 @@ func emptyMatch(totalTokens int) *attrprefix.PrefixCacheMatchInfo {
 	return attrprefix.NewPrefixCacheMatchInfo(0, totalTokens, 1).
 		WithCachedBlocksByTier(map[string]int{}).
 		WithTotalTokens(totalTokens)
-}
-
-// endpointID is the KV-events source identity of an endpoint.
-func endpointID(md *fwkdl.EndpointMetadata) string {
-	return fmt.Sprintf("%s:%s", md.Address, md.Port)
 }

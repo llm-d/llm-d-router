@@ -549,6 +549,27 @@ func TestProducerIndexesSinkFullAttention(t *testing.T) {
 	assert.Equal(t, 32, firstMatch(t, p, req).CachedBlockCount())
 }
 
+func TestProducerRankEndpointsBehindOnePort(t *testing.T) {
+	p, _ := newTestProducer(t)
+	ranks := []*fwkdl.EndpointMetadata{
+		{ID: k8stypes.NamespacedName{Name: "pod-a-rank-0"}, Address: "10.0.0.1", Port: "8080", RankIndex: 0, RankByHeader: true},
+		{ID: k8stypes.NamespacedName{Name: "pod-a-rank-1"}, Address: "10.0.0.1", Port: "8080", RankIndex: 1, RankByHeader: true},
+	}
+	for i, hashes := range [][]uint64{{10, 20}, {10}} {
+		observe(t, p, nil, kvevents.EventSource{Endpoint: srckvevents.PodIdentifier(ranks[i])},
+			&kvevents.BlockStoredEvent{BlockHashes: hashes, BlockSize: 16, DeviceTier: "GPU"})
+	}
+	req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 33,
+		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
+	endpoints := []scheduling.Endpoint{scheduling.NewEndpoint(ranks[0], nil, nil), scheduling.NewEndpoint(ranks[1], nil, nil)}
+	require.NoError(t, p.Produce(t.Context(), req, endpoints))
+	for i, want := range []int{32, 16} {
+		value, ok := endpoints[i].Get(p.dk)
+		require.True(t, ok)
+		assert.Equal(t, want, value.(*attrprefix.PrefixCacheMatchInfo).CachedBlockCount())
+	}
+}
+
 func TestProducerIndependentReplicas(t *testing.T) {
 	first, _ := newTestProducer(t)
 	second, _ := newTestProducer(t)
