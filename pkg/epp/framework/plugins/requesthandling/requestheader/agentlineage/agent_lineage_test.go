@@ -96,7 +96,7 @@ func TestRequestHeader_RootDerivation(t *testing.T) {
 		},
 		{
 			name:      "opencode own session header, no parent, self-rooted",
-			headers:   map[string]string{OpenCodeSessionHeader: "S"},
+			headers:   map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S"},
 			wantRoot:  "S",
 			wantFound: true,
 		},
@@ -126,8 +126,8 @@ func TestRequestHeader_RootDerivation(t *testing.T) {
 			// parent one hop up, not this request's session ID.
 			name: "session priority: opencode own session wins over affinity",
 			headers: map[string]string{
-				OpenCodeSessionHeader:               "S1",
-				agentidentity.OpenCodeSessionHeader: "R",
+				agentidentity.OpenCodeOwnSessionHeader: "S1",
+				agentidentity.OpenCodeSessionHeader:    "R",
 			},
 			wantRoot:  "S1",
 			wantFound: true,
@@ -176,31 +176,31 @@ func TestRequestHeader_RootDerivation(t *testing.T) {
 		},
 		{
 			name:      "stray child roots at the named parent",
-			headers:   map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"},
+			headers:   map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"},
 			wantRoot:  "R",
 			wantFound: true,
 		},
 		{
 			name:      "opencode vendor parent header is honored",
-			headers:   map[string]string{OpenCodeSessionHeader: "S1", OpenCodeParentSessionHeader: "R"},
+			headers:   map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", OpenCodeParentSessionHeader: "R"},
 			wantRoot:  "R",
 			wantFound: true,
 		},
 		{
 			name:      "parent without session roots at the parent",
-			headers:   map[string]string{ParentSessionHeader: "R"},
+			headers:   map[string]string{agentidentity.ParentSessionHeader: "R"},
 			wantRoot:  "R",
 			wantFound: true,
 		},
 		{
 			name:      "whitespace is trimmed on session and parent",
-			headers:   map[string]string{OpenCodeSessionHeader: "  S1  ", ParentSessionHeader: "  R  "},
+			headers:   map[string]string{agentidentity.OpenCodeOwnSessionHeader: "  S1  ", agentidentity.ParentSessionHeader: "  R  "},
 			wantRoot:  "R",
 			wantFound: true,
 		},
 		{
 			name:      "whitespace-only parent falls back to the session as root",
-			headers:   map[string]string{OpenCodeSessionHeader: "S", ParentSessionHeader: "   "},
+			headers:   map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S", agentidentity.ParentSessionHeader: "   "},
 			wantRoot:  "S",
 			wantFound: true,
 		},
@@ -231,7 +231,7 @@ func TestRequestHeader_RootDerivation(t *testing.T) {
 		{
 			name:      "additional parent header is honored",
 			params:    `{"additionalParentHeaders":["x-custom-parent"]}`,
-			headers:   map[string]string{OpenCodeSessionHeader: "S1", "x-custom-parent": "R"},
+			headers:   map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", "x-custom-parent": "R"},
 			wantRoot:  "R",
 			wantFound: true,
 		},
@@ -272,18 +272,18 @@ func TestRequestHeader_OpenCodeChildShape(t *testing.T) {
 	p := newPlugin(t, "")
 
 	child := map[string]string{
-		OpenCodeSessionHeader:               "S1",
-		OpenCodeParentSessionHeader:         "R",
-		ParentSessionHeader:                 "R",
-		agentidentity.OpenCodeSessionHeader: "R",
-		"x-session-id":                      "R",
+		agentidentity.OpenCodeOwnSessionHeader: "S1",
+		OpenCodeParentSessionHeader:            "R",
+		agentidentity.ParentSessionHeader:      "R",
+		agentidentity.OpenCodeSessionHeader:    "R",
+		"x-session-id":                         "R",
 	}
 	wantRoot(t, p, "", child, "R")
 
 	// A later parentless replay of the child walks the recorded link to R.
 	wantRoot(t, p, "", map[string]string{
-		OpenCodeSessionHeader:               "S1",
-		agentidentity.OpenCodeSessionHeader: "R",
+		agentidentity.OpenCodeOwnSessionHeader: "S1",
+		agentidentity.OpenCodeSessionHeader:    "R",
 	}, "R")
 }
 
@@ -324,17 +324,17 @@ func TestRequestHeader_LineageWalk(t *testing.T) {
 	p := newPlugin(t, "")
 
 	wantRoot(t, p, "", map[string]string{agentidentity.ClaudeCodeSessionHeader: "R"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "SS1", ParentSessionHeader: "S1"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "SSS1", ParentSessionHeader: "SS1"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "SS1", agentidentity.ParentSessionHeader: "S1"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "SSS1", agentidentity.ParentSessionHeader: "SS1"}, "R")
 
 	// Parentless replays walk the recorded links back to R.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "SS1"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "SS1"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "R")
 	wantRoot(t, p, "", map[string]string{agentidentity.ClaudeCodeSessionHeader: "R"}, "R")
 
 	// A stray child naming an unknown parent roots at that parent.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S9", ParentSessionHeader: "UNKNOWN"}, "UNKNOWN")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S9", agentidentity.ParentSessionHeader: "UNKNOWN"}, "UNKNOWN")
 }
 
 // TestRequestHeader_TenantScoping pins that parent links never cross tenant
@@ -342,23 +342,23 @@ func TestRequestHeader_LineageWalk(t *testing.T) {
 func TestRequestHeader_TenantScoping(t *testing.T) {
 	p := newPlugin(t, "")
 
-	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "tenant-a", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"}, "R")
 	// tenant-b never sees tenant-a's link.
-	wantRoot(t, p, "tenant-b", map[string]string{OpenCodeSessionHeader: "S1"}, "S1")
+	wantRoot(t, p, "tenant-b", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "S1")
 	// tenant-b records its own link for the same session ID.
-	wantRoot(t, p, "tenant-b", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "Q"}, "Q")
+	wantRoot(t, p, "tenant-b", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "Q"}, "Q")
 	// tenant-a's link is intact.
-	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+	wantRoot(t, p, "tenant-a", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "R")
 	// The default tenant (no fairness header) has its own scope.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "N"}, "N")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "N")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "N"}, "N")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "N")
 }
 
 // TestRequestHeader_ParentEntryTTL pins idle expiry: a link unused for the
 // TTL disappears, and a link read within the TTL is refreshed by that read.
 func TestRequestHeader_ParentEntryTTL(t *testing.T) {
-	link := map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}
-	replay := map[string]string{OpenCodeSessionHeader: "S1"}
+	link := map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"}
+	replay := map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}
 
 	t.Run("within ttl the link resolves", func(t *testing.T) {
 		p := newPlugin(t, `{"parentEntryTtlSeconds": 10}`)
@@ -396,7 +396,7 @@ func TestRequestHeader_ParentEntryTTL(t *testing.T) {
 		wantRoot(t, p, "", link, "R")
 		advance(11 * time.Second)
 		wantRoot(t, p, "", replay, "S1")
-		wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R2"}, "R2")
+		wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R2"}, "R2")
 		wantRoot(t, p, "", replay, "R2")
 	})
 }
@@ -409,7 +409,7 @@ func TestRequestHeader_MapBound(t *testing.T) {
 	p.now = now
 
 	declare := func(session, parent string) {
-		wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: session, ParentSessionHeader: parent}, parent)
+		wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: session, agentidentity.ParentSessionHeader: parent}, parent)
 	}
 
 	declare("S1", "R")
@@ -418,9 +418,9 @@ func TestRequestHeader_MapBound(t *testing.T) {
 	advance(time.Second)
 	declare("S3", "R") // bound reached: S1 is the least recently used
 
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "S1")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S2"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S3"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "S1")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S2"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S3"}, "R")
 }
 
 // TestRequestHeader_CycleTerminates pins that a malformed lineage cycle
@@ -431,11 +431,11 @@ func TestRequestHeader_CycleTerminates(t *testing.T) {
 	p := newPlugin(t, "")
 
 	// A names B; B is unknown, so the walk from A stops there.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "A", ParentSessionHeader: "B"}, "B")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "A", agentidentity.ParentSessionHeader: "B"}, "B")
 	// B names A: the map now holds A -> B and B -> A.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "B", ParentSessionHeader: "A"}, "A")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "B", agentidentity.ParentSessionHeader: "A"}, "A")
 	// A later child naming A gets the same stable root.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C", ParentSessionHeader: "A"}, "B")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "C", agentidentity.ParentSessionHeader: "A"}, "B")
 }
 
 // TestRequestHeader_ReDeclarationDoesNotEvict pins the bound's behavior for
@@ -448,7 +448,7 @@ func TestRequestHeader_ReDeclarationDoesNotEvict(t *testing.T) {
 	p.now = now
 
 	declare := func(session, parent string) {
-		wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: session, ParentSessionHeader: parent}, parent)
+		wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: session, agentidentity.ParentSessionHeader: parent}, parent)
 	}
 
 	declare("S1", "R")
@@ -458,8 +458,8 @@ func TestRequestHeader_ReDeclarationDoesNotEvict(t *testing.T) {
 	declare("S3", "R") // bound reached: S1 is the least recently used
 
 	// A turn of the recorded S2 re-declares its parent; S3 must survive it.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S2", ParentSessionHeader: "R"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S3"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S2", agentidentity.ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S3"}, "R")
 }
 
 // TestRequestHeader_FirstLiveParentWins pins that a live link is
@@ -470,16 +470,16 @@ func TestRequestHeader_FirstLiveParentWins(t *testing.T) {
 	now, advance := newClock()
 	p.now = now
 
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"}, "R")
 
 	// A conflicting parent declaration does not move the session's root.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "EVIL"}, "R")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "EVIL"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "R")
 
 	// Once the entry expires, a different parent is accepted.
 	advance(11 * time.Second)
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R2"}, "R2")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R2")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R2"}, "R2")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "R2")
 }
 
 // TestRequestHeader_DoesNotTouchFairnessIDOrAgentIdentity pins the contract
@@ -488,7 +488,7 @@ func TestRequestHeader_FirstLiveParentWins(t *testing.T) {
 func TestRequestHeader_DoesNotTouchFairnessIDOrAgentIdentity(t *testing.T) {
 	p := newPlugin(t, "")
 	req := &scheduling.InferenceRequest{
-		Headers:    map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"},
+		Headers:    map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"},
 		FairnessID: "tenant-x",
 	}
 	req.PutAttribute(agentidentity.AgentIdentityKey, "S1")
@@ -517,8 +517,8 @@ func TestRequestHeader_WalkHopCap(t *testing.T) {
 	// Declare a chain C0 <- C1 <- ... <- C70, longer than maxWalkHops.
 	for i := 1; i <= 70; i++ {
 		headers := map[string]string{
-			OpenCodeSessionHeader: fmt.Sprintf("C%d", i),
-			ParentSessionHeader:   fmt.Sprintf("C%d", i-1),
+			agentidentity.OpenCodeOwnSessionHeader: fmt.Sprintf("C%d", i),
+			agentidentity.ParentSessionHeader:      fmt.Sprintf("C%d", i-1),
 		}
 		if _, ok := send(t, p, "", headers); !ok {
 			t.Fatalf("declaration %d published no root", i)
@@ -526,10 +526,10 @@ func TestRequestHeader_WalkHopCap(t *testing.T) {
 	}
 
 	// Within the cap the walk reaches the chain's root.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C5"}, "C0")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "C5"}, "C0")
 
 	// Past the cap the walk stops after maxWalkHops links.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C70"}, fmt.Sprintf("C%d", 70-maxWalkHops))
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "C70"}, fmt.Sprintf("C%d", 70-maxWalkHops))
 }
 
 // TestRequestHeader_SelfLinkNotRecorded pins that a parent header naming the
@@ -537,7 +537,7 @@ func TestRequestHeader_WalkHopCap(t *testing.T) {
 // no lineage.
 func TestRequestHeader_SelfLinkNotRecorded(t *testing.T) {
 	p := newPlugin(t, "")
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S", ParentSessionHeader: "S"}, "S")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S", agentidentity.ParentSessionHeader: "S"}, "S")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	record, ok := p.nodes[lineageKey{tenant: "", session: "S"}]
@@ -556,7 +556,7 @@ func TestRequestHeader_SelfLinkNotRecorded(t *testing.T) {
 // objective, whatever priority it selects.
 func sendBand(t *testing.T, p *Plugin, fairnessID, session string, seeded int, explicit bool, extra map[string]string) (int, bool) {
 	t.Helper()
-	headers := map[string]string{OpenCodeSessionHeader: session}
+	headers := map[string]string{agentidentity.OpenCodeOwnSessionHeader: session}
 	for k, v := range extra {
 		headers[k] = v
 	}
@@ -605,40 +605,40 @@ func TestRequestHeader_BandResolution(t *testing.T) {
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 
 	// A parented child without an explicit objective inherits the parent's band.
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 
 	// An explicit objective opts below the parent.
-	wantBand(t, p, "tenant-a", "S2", 3, true, map[string]string{ParentSessionHeader: "R"}, 3)
+	wantBand(t, p, "tenant-a", "S2", 3, true, map[string]string{agentidentity.ParentSessionHeader: "R"}, 3)
 
 	// An explicit objective never runs above the parent.
-	wantBand(t, p, "tenant-a", "S3", 7, true, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S3", 7, true, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 
 	// A declared kind is not a band input: a background child of an
 	// interactive parent keeps the parent's band.
 	wantBand(t, p, "tenant-a", "S4", 0, false, map[string]string{
-		ParentSessionHeader: "R",
-		"x-workload-kind":   "background",
+		agentidentity.ParentSessionHeader: "R",
+		"x-workload-kind":                 "background",
 	}, 5)
 
 	// A stray child whose parent never arrived falls back to its own band.
-	wantBand(t, p, "tenant-a", "S9", 2, false, map[string]string{ParentSessionHeader: "UNKNOWN"}, 2)
+	wantBand(t, p, "tenant-a", "S9", 2, false, map[string]string{agentidentity.ParentSessionHeader: "UNKNOWN"}, 2)
 
 	// A parentless request keeps its own band.
 	wantBand(t, p, "tenant-a", "chat", 1, false, nil, 1)
 
 	// A conflicting re-declaration keeps the recorded parent's band.
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "EVIL"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "EVIL"}, 5)
 
 	// An objective sent under the deprecated alias still counts as explicit:
 	// min(seeded, parent band) instead of full inheritance.
 	wantBand(t, p, "tenant-a", "S6", 3, false, map[string]string{
-		ParentSessionHeader:      "R",
-		metadata.OldObjectiveKey: "batch",
+		agentidentity.ParentSessionHeader: "R",
+		metadata.OldObjectiveKey:          "batch",
 	}, 3)
 
 	// A child of a sheddable-band parent inherits the sheddable band.
 	wantBand(t, p, "tenant-a", "P2", -1, false, nil, -1)
-	wantBand(t, p, "tenant-a", "S5", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
+	wantBand(t, p, "tenant-a", "S5", 0, false, map[string]string{agentidentity.ParentSessionHeader: "P2"}, -1)
 }
 
 // TestRequestHeader_BandUnstampedDoesNotRaise pins that an unstamped request
@@ -648,12 +648,12 @@ func TestRequestHeader_BandUnstampedDoesNotRaise(t *testing.T) {
 	p := newPlugin(t, "")
 
 	wantBand(t, p, "", "R", 5, false, nil, 5)
-	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 0)
-	wantBand(t, p, "", "S2", 7, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 0)
+	wantBand(t, p, "", "S2", 7, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 
 	// The clamp still lowers an unstamped child below its parent.
 	wantBand(t, p, "", "P2", -1, false, nil, -1)
-	wantBand(t, p, "", "S3", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
+	wantBand(t, p, "", "S3", 0, false, map[string]string{agentidentity.ParentSessionHeader: "P2"}, -1)
 }
 
 // TestRequestHeader_BandRootStaysAliveThroughChildWalks pins that child
@@ -667,9 +667,9 @@ func TestRequestHeader_BandRootStaysAliveThroughChildWalks(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5) // the root arrives once, at t0
 	advance(5 * time.Second)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	advance(6 * time.Second) // 11s since the root's own arrival
-	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 }
 
 // TestRequestHeader_EvictionPrefersParentless pins that eviction at the
@@ -680,14 +680,14 @@ func TestRequestHeader_EvictionPrefersParentless(t *testing.T) {
 	now, advance := newClock()
 	p.now = now
 
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1", agentidentity.ParentSessionHeader: "R"}, "R")
 	advance(time.Second)
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C1"}, "C1")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "C1"}, "C1")
 	advance(time.Second)
 	// Bound reached: the newer parentless node is evicted, not the older link.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S2", ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S2", agentidentity.ParentSessionHeader: "R"}, "R")
 
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+	wantRoot(t, p, "", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "R")
 }
 
 // TestRequestHeader_SessionlessRequestsDoNotShareNode pins that a request
@@ -696,8 +696,8 @@ func TestRequestHeader_EvictionPrefersParentless(t *testing.T) {
 func TestRequestHeader_SessionlessRequestsDoNotShareNode(t *testing.T) {
 	p := newPlugin(t, "")
 
-	wantRoot(t, p, "", map[string]string{ParentSessionHeader: "P1"}, "P1")
-	wantRoot(t, p, "", map[string]string{ParentSessionHeader: "P2"}, "P2")
+	wantRoot(t, p, "", map[string]string{agentidentity.ParentSessionHeader: "P1"}, "P1")
+	wantRoot(t, p, "", map[string]string{agentidentity.ParentSessionHeader: "P2"}, "P2")
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -720,8 +720,8 @@ func TestRequestHeader_MapBoundReclaimsExpired(t *testing.T) {
 	advance(time.Hour)
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
-	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
+	wantRoot(t, p, "tenant-a", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S1"}, "R")
 }
 
 // TestRequestHeader_EvictionKeepsActiveRoot pins that eviction at the bound
@@ -734,15 +734,15 @@ func TestRequestHeader_EvictionKeepsActiveRoot(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	advance(time.Second)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	advance(time.Second)
-	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	advance(time.Second)
 	// Bound reached: evict the oldest child, never the parent R.
-	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
-	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 }
 
 // TestRequestHeader_RootWithChildrenCannotBeSpliced pins that a root a live
@@ -752,12 +752,12 @@ func TestRequestHeader_RootWithChildrenCannotBeSpliced(t *testing.T) {
 	p := newPlugin(t, "")
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	wantBand(t, p, "tenant-a", "LOW", -1, false, nil, -1)
 
-	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "R", ParentSessionHeader: "LOW"}, "R")
-	wantBand(t, p, "tenant-a", "R", 5, false, map[string]string{ParentSessionHeader: "LOW"}, 5)
-	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantRoot(t, p, "tenant-a", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "R", agentidentity.ParentSessionHeader: "LOW"}, "R")
+	wantBand(t, p, "tenant-a", "R", 5, false, map[string]string{agentidentity.ParentSessionHeader: "LOW"}, 5)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 }
 
 // TestRequestHeader_DroppedChildDoesNotProtectParent pins that a child that
@@ -768,11 +768,11 @@ func TestRequestHeader_DroppedChildDoesNotProtectParent(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	// The child cannot take a slot, but its request still inherits R's band.
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 
 	// R is still standalone, so a later root can replace it.
 	wantBand(t, p, "tenant-a", "R2", 7, false, nil, 7)
-	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R2"}, 7)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R2"}, 7)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -790,7 +790,7 @@ func TestRequestHeader_ChildCountDropsWithExpiredChild(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	advance(time.Second)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	advance(9 * time.Second)
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5) // keep R live while S1 ages out
 	advance(2 * time.Second)
@@ -845,17 +845,17 @@ func TestRequestHeader_EvictionKeepsInteriorNodes(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	advance(time.Second)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	advance(time.Second)
-	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "S1"}, 5)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{agentidentity.ParentSessionHeader: "S1"}, 5)
 	advance(time.Second)
-	wantBand(t, p, "tenant-a", "L", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "L", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	advance(time.Second)
 	// The new child evicts L, not the interior S1.
-	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{ParentSessionHeader: "S2"}, 5)
+	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{agentidentity.ParentSessionHeader: "S2"}, 5)
 
 	wantBand(t, p, "tenant-a", "S2", 0, false, nil, 5)
-	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "S2"}, "R")
+	wantRoot(t, p, "tenant-a", map[string]string{agentidentity.OpenCodeOwnSessionHeader: "S2"}, "R")
 }
 
 // TestRequestHeader_BandChainInheritance pins that chains inherit through
@@ -866,9 +866,9 @@ func TestRequestHeader_BandChainInheritance(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	// S1 seeds at 0 and resolves to 5 by inheritance.
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 	// SS1 names S1 and inherits S1's resolved band, not its 0 seed.
-	wantBand(t, p, "tenant-a", "SS1", 0, false, map[string]string{ParentSessionHeader: "S1"}, 5)
+	wantBand(t, p, "tenant-a", "SS1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "S1"}, 5)
 }
 
 // TestRequestHeader_BandExpiry pins that a child falls back to its own band
@@ -880,7 +880,7 @@ func TestRequestHeader_BandExpiry(t *testing.T) {
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	advance(11 * time.Second)
-	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 0)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 0)
 }
 
 // TestRequestHeader_BandTenantScoping pins that a parent's band never leaks
@@ -889,7 +889,7 @@ func TestRequestHeader_BandTenantScoping(t *testing.T) {
 	p := newPlugin(t, "")
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
-	wantBand(t, p, "tenant-b", "S1", 2, false, map[string]string{ParentSessionHeader: "R"}, 2)
+	wantBand(t, p, "tenant-b", "S1", 2, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 2)
 }
 
 // TestRequestHeader_BandWithoutSession pins the two session-less shapes: a
@@ -899,7 +899,7 @@ func TestRequestHeader_BandWithoutSession(t *testing.T) {
 	p := newPlugin(t, "")
 
 	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
-	wantBand(t, p, "tenant-a", "", 3, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "", 3, false, map[string]string{agentidentity.ParentSessionHeader: "R"}, 5)
 
 	req := &scheduling.InferenceRequest{
 		Headers:    map[string]string{"x-unrelated": "v"},
@@ -922,8 +922,8 @@ func TestRequestHeader_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				req := &scheduling.InferenceRequest{Headers: map[string]string{
-					OpenCodeSessionHeader: fmt.Sprintf("S%d-%d", i, j%10),
-					ParentSessionHeader:   fmt.Sprintf("P%d", j%5),
+					agentidentity.OpenCodeOwnSessionHeader: fmt.Sprintf("S%d-%d", i, j%10),
+					agentidentity.ParentSessionHeader:      fmt.Sprintf("P%d", j%5),
 				}}
 				if err := p.RequestHeader(context.Background(), req); err != nil {
 					t.Errorf("RequestHeader: %v", err)
