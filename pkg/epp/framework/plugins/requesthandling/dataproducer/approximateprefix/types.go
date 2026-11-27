@@ -19,6 +19,7 @@ package approximateprefix
 
 import (
 	"math"
+	"sync"
 	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -34,8 +35,13 @@ type indexerInterface interface {
 	// blocks of hashes the candidate holds.
 	MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int
 	// Add records that server holds hashes. hashes must be a prompt's block
-	// hashes starting at block 0; MatchLongestPrefix relies on this.
-	Add(hashes []blockHash, server server)
+	// hashes starting at block 0; MatchLongestPrefix relies on this. It
+	// returns the hashes this call newly inserted; hashes already present
+	// are refreshed and not returned.
+	Add(hashes []blockHash, server server) []blockHash
+	// Remove deletes hashes from server, undoing an Add whose request never
+	// ran on the server.
+	Remove(hashes []blockHash, server ServerID)
 	RemovePod(server ServerID)
 	Pods() []ServerID
 	PodBlockCounts() map[ServerID]int
@@ -54,7 +60,20 @@ type server struct {
 	// indexer lets a metrics-derived capacity replace any earlier capacity,
 	// but never lets a fallback capacity replace a metrics-derived one.
 	CapacityFromMetrics bool
+	// OffloadCapacityUnknown reports that the index covers the offload tier but
+	// the endpoint offloads KV cache without reporting that tier's capacity, so
+	// NumOfGPUBlocks covers the HBM tier only and undercounts the cache. The
+	// indexer logs a warning for such a pod once.
+	OffloadCapacityUnknown bool
 }
+
+// Values of config.CapacityTiers.
+const (
+	// capacityTierHBM is the model server's GPU KV cache.
+	capacityTierHBM = "hbm"
+	// capacityTierCPU is the model server's host-memory offload tier.
+	capacityTierCPU = "cpu"
+)
 
 // ServerID is a unique identifier for a server, based on its NamespacedName.
 type ServerID k8stypes.NamespacedName
@@ -80,6 +99,8 @@ type SchedulingContextState struct {
 	// endpoints. Taken during Produce, the only stage that sees the candidates
 	// as they were before the scheduler's filters narrowed them.
 	BestAvailableCachedTokens int
+	// BlockSize is the block size in tokens the hashes were derived at.
+	BlockSize int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -104,6 +125,36 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
 	}
+}
+
+// updateCell coordinates the asynchronous indexer Add queued in PreRequest
+// with a rollback in ResponseBody that can run before the queued Add does.
+type updateCell struct {
+	mu         sync.Mutex
+	rolledBack bool
+}
+
+// indexUpdateRecord is the set of indexer entries PreRequest added for one
+// request: the prompt hashes and the servers they were recorded for. It
+// survives until the response reports whether the request ran, so a failed
+// response can remove entries no pod computed.
+type indexUpdateRecord struct {
+	servers         []server
+	perPromptHashes [][]blockHash
+	// inserted holds, per server, the block hashes this request's Add newly
+	// inserted. The rollback removes only those, so blocks an earlier request
+	// contributed stay indexed. Written by the queued Add under cell.mu.
+	inserted map[ServerID][][]blockHash
+	// cell is shared, not copied, so every holder of the record observes one
+	// rollback flag.
+	cell *updateCell
+}
+
+// Clone shares cell and inserted deliberately: they are coordination state
+// between the queued Add and the rollback.
+func (r *indexUpdateRecord) Clone() plugin.StateData {
+	cp := *r
+	return &cp
 }
 
 const (
@@ -180,6 +231,13 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
+	// CapacityTiers lists the KV cache tiers the auto-tuned per-pod capacity
+	// covers: "hbm" (the GPU cache) and "cpu" (a host-memory offload tier such
+	// as SGLang's HiCache host pool or vLLM's CPU offload tier). The index is
+	// sized to the largest listed tier the model server reports. Empty covers
+	// both. A single tier is for a producer that tracks one tier next to a
+	// producer tracking the other. Ignored when AutoTune is false.
+	CapacityTiers []string `json:"capacityTiers,omitempty"`
 	// SyncCrossReplicaState controls whether recent per-prompt prefix hashes are
 	// published through a configured CrossReplicaSyncer. Unset defaults to true.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
@@ -192,6 +250,10 @@ type config struct {
 	// for hybrid Mamba/GDN models whose decode endpoints cannot reuse KV received over the P/D
 	// transfer. It also removes decode-side prefix affinity for disaggregated requests.
 	ExcludeDecodeWhenDisaggregated bool `json:"excludeDecodeWhenDisaggregated,omitempty"`
+	// IndexCompletions records the prompt followed by the generated text of a
+	// non-streamed /v1/completions request on the decode endpoint that served it.
+	// It applies only with the estimate token-producer backend.
+	IndexCompletions bool `json:"indexCompletions,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.

@@ -14,7 +14,7 @@
   - [Available plugins](#available-plugins)
 - [Metric Scraping and the Data Layer](#metric-scraping-and-the-data-layer)
 - [Disaggregated Encode/Prefill/Decode (E/P/D)](#disaggregated-encodeprefilldecode-epd)
-- [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design)
+- [InferencePool, InferenceObjective & InferenceModelRewrite Design](#inferencepool-inferenceobjective--inferencemodelrewrite-design)
   - [Current Assumptions](#current-assumptions)
 - [References](#references)
 
@@ -27,7 +27,7 @@
 
 The design enables:
 
-- Support for **multiple base models** within a shared cluster (see [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design))
+- Support for **multiple base models** within a shared cluster (see [InferencePool, InferenceObjective & InferenceModelRewrite Design](#inferencepool-inferenceobjective--inferencemodelrewrite-design))
 - Efficient routing based on **KV cache locality**, **session affinity**, **load**, and
 **model metadata**
 - Disaggregated **Prefill/Decode (P/D)** execution
@@ -265,6 +265,25 @@ If the configuration is in a file, the EPP command line argument `--config-file`
  to specify the full path of the file in question. If the configuration is passed as in-line
  text the EPP command line argument `--config-text` should be used.
 
+To check a configuration before deploying it, add `--validate-config`. The EPP then runs the same
+ configuration checks as a real start (plugin types and parameters, scheduling profiles, data
+ dependencies, plugin stability and the data layer setup), logs the result and exits with code 0
+ when the configuration is valid or 1 when it is not. It does not connect to Kubernetes or start
+ any server, so it runs anywhere the EPP binary does, such as a laptop or a CI job. It checks the
+ configuration only, not whether the services that plugins connect to are reachable.
+
+Pass the same flags as the real start, since validation checks them as well. A configuration
+ without a discovery plugin runs in Kubernetes mode, which needs `--pool-name` or
+ `--endpoint-selector` and rejects `--objectives-file`:
+
+```bash
+epp --validate-config --config-file epp-config.yaml --pool-name my-pool
+```
+
+Without `--pool-name` or `--endpoint-selector` this exits with code 1 and
+ `either pool-name or endpoint-selector must be set`, as a real start would. With file discovery,
+ `--objectives-file` is loaded and checked too.
+
 Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
  comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
  entries are applied after the configuration's own `featureGates` list, so they override it.
@@ -297,9 +316,9 @@ FlowControl:
 - When the saturation detector implements the scheduling filter interface, as `utilization-detector`
   does, it is also appended as a filter to every scheduling profile that does not list it, whether or
   not the `flowControl` feature gate is enabled. With default parameters, `utilization-detector`
-  removes endpoints whose metrics are missing or older than 200ms, whose waiting queue is 5 or more,
-  or whose KV cache utilization is 0.8 or more. When that would remove every endpoint, it keeps them
-  all.
+  removes endpoints whose metrics are missing or older than 200ms, whose waiting queue, less the
+  requests whose KV transfer is in progress, is 5 or more, or whose KV cache utilization is 0.8 or
+  more. When that would remove every endpoint, it keeps them all.
 
 DataLayer:
 - `metrics-data-source` and `core-metrics-extractor` are injected and wired together. Skipped when
@@ -423,7 +442,12 @@ Enable chunked decode via the pd-sidecar flag:
 
 ---
 
-## InferencePool & InferenceModel Design
+## InferencePool, InferenceObjective & InferenceModelRewrite Design
+
+An `InferenceObjective` sets per-request scheduling goals such as priority
+within a pool.
+An `InferenceModelRewrite` tells the EPP how to rewrite a request's model name,
+with weighted targets for A/B tests and canary rollouts.
 
 ### Current Assumptions
 
@@ -433,8 +457,9 @@ Enable chunked decode via the pd-sidecar flag:
   Multiple models are supported via multiple `InferencePools`.
 
 > [!NOTE]
-> The `InferenceModel` CRD is in the process of being significantly changed in IGW.
-> Once finalized, these changes would be reflected in llm-d as well.
+> The llm-d Router repository defines `InferenceObjective` in `apix/v1` and
+> `InferenceModelRewrite` in `apix/v1alpha2`.
+> The Gateway API Inference Extension (GIE) defines the `InferencePool` API.
 
 ---
 

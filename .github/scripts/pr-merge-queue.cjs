@@ -45,6 +45,32 @@ const PR_STATUS_QUERY = `
   }
 `;
 
+const OPEN_APPROVED_PRS_QUERY = `
+  query($searchQuery: String!, $after: String) {
+    search(query: $searchQuery, type: ISSUE, first: 50, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        ... on PullRequest {
+          number
+          isDraft
+          reviewDecision
+          mergeQueueEntry {
+            id
+          }
+          labels(first: 100) {
+            nodes {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 const ENQUEUE_MUTATION = `
   mutation($pullRequestId: ID!) {
     enqueuePullRequest(input: { pullRequestId: $pullRequestId }) {
@@ -68,9 +94,63 @@ function hasWritePermission(permData) {
   return Boolean(perms && (perms.admin || perms.maintain || perms.push));
 }
 
+async function listApprovedCandidatePullRequestNumbers({ github, owner, repo }) {
+  const searchQuery = `repo:${owner}/${repo} is:pr is:open draft:false review:approved sort:created-asc`;
+  const numbers = [];
+  const seen = new Set();
+  let after = null;
+
+  while (true) {
+    const resp = await github.graphql(OPEN_APPROVED_PRS_QUERY, {
+      searchQuery,
+      after,
+    });
+    const search = resp.search;
+    const nodes = search?.nodes || [];
+    for (const pr of nodes) {
+      if (
+        !pr ||
+        !Number.isInteger(pr.number) ||
+        pr.number <= 0 ||
+        seen.has(pr.number) ||
+        pr.isDraft ||
+        pr.mergeQueueEntry ||
+        pr.reviewDecision !== 'APPROVED' ||
+        getBlockingLabels(pr).length > 0
+      ) {
+        continue;
+      }
+      seen.add(pr.number);
+      numbers.push(pr.number);
+    }
+
+    if (!search?.pageInfo?.hasNextPage || !search.pageInfo.endCursor) {
+      break;
+    }
+    after = search.pageInfo.endCursor;
+  }
+
+  console.log(
+    `Sweep found ${numbers.length} unqueued approved candidate PR(s): [${numbers.join(', ')}].`
+  );
+  return numbers;
+}
+
+function isSweepEvent(context) {
+  return (
+    context.eventName === 'schedule' ||
+    (context.eventName === 'workflow_dispatch' &&
+      !String(context.payload?.inputs?.pr_number || '').trim())
+  );
+}
+
 async function resolvePullRequestNumbers({ github, context }) {
   const owner = context.repo.owner;
   const repo = context.repo.repo;
+
+  if (isSweepEvent(context)) {
+    return listApprovedCandidatePullRequestNumbers({ github, owner, repo });
+  }
 
   if (
     context.eventName === 'pull_request_target' ||
@@ -81,8 +161,9 @@ async function resolvePullRequestNumbers({ github, context }) {
   }
 
   if (context.eventName === 'workflow_dispatch') {
-    const raw = context.payload.inputs?.pr_number;
-    const parsed = Number.parseInt(String(raw || ''), 10);
+    const raw = String(context.payload?.inputs?.pr_number || '').trim();
+    if (!/^\d+$/.test(raw)) return [];
+    const parsed = Number.parseInt(raw, 10);
     return Number.isInteger(parsed) && parsed > 0 ? [parsed] : [];
   }
 
@@ -169,6 +250,7 @@ async function evaluateAndEnqueue({
   repo,
   pull_number,
   sleep = defaultSleep,
+  retryBlocked = true,
 }) {
   let pr = null;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -192,8 +274,9 @@ async function evaluateAndEnqueue({
       pr.reviewDecision === 'APPROVED';
 
     if (
-      pr.mergeable !== 'UNKNOWN' &&
-      (!potentiallyReady || pr.mergeStateStatus === 'CLEAN')
+      !potentiallyReady ||
+      (pr.mergeable !== 'UNKNOWN' &&
+        (!retryBlocked || pr.mergeStateStatus === 'CLEAN'))
     ) {
       break;
     }
@@ -256,7 +339,7 @@ async function evaluateAndEnqueue({
     return { enqueued: true, entry };
   } catch (err) {
     const msg = String(err?.message || err);
-    if (/already in the merge queue|already queued/i.test(msg)) {
+    if (/already in the (merge )?queue|already queued/i.test(msg)) {
       console.log(`PR #${pull_number} was concurrently added to the merge queue.`);
       return { enqueued: false, reason: 'already_queued' };
     }
@@ -267,20 +350,44 @@ async function evaluateAndEnqueue({
 async function runMergeQueueCheck({ github, context, sleep = defaultSleep }) {
   const owner = context.repo.owner;
   const repo = context.repo.repo;
+  const isSweep = isSweepEvent(context);
   const numbers = await resolvePullRequestNumbers({ github, context });
   if (numbers.length === 0) {
     console.log(`No eligible pull request identified for event ${context.eventName}.`);
     return;
   }
 
+  const failures = [];
   for (const pull_number of numbers) {
-    await evaluateAndEnqueue({ github, owner, repo, pull_number, sleep });
+    try {
+      await evaluateAndEnqueue({
+        github,
+        owner,
+        repo,
+        pull_number,
+        sleep,
+        retryBlocked: !isSweep,
+      });
+    } catch (err) {
+      console.error(
+        `Failed to evaluate/enqueue PR #${pull_number}: ${err?.message || err}`
+      );
+      failures.push({ pull_number, err });
+    }
+  }
+
+  if (failures.length > 0) {
+    const failedNumbers = failures.map((f) => `#${f.pull_number}`).join(', ');
+    throw new Error(
+      `Failed to process ${failures.length} pull request(s): ${failedNumbers}`
+    );
   }
 }
 
 module.exports = {
   BLOCKING_LABELS,
   hasWritePermission,
+  listApprovedCandidatePullRequestNumbers,
   resolvePullRequestNumbers,
   getBlockingLabels,
   evaluateAndEnqueue,

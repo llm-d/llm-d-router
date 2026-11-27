@@ -71,9 +71,15 @@ const (
 // Scoring, picking, and admission are handled by separate sub-plugins:
 // LatencyScorer, AffinityWeightedPicker, and LatencyAdmission.
 type PredictedLatency struct {
-	typedName                    plugin.TypedName
-	latencypredictor             latencypredictor.PredictorInterface
-	runningRequestLists          sync.Map                                      // Key: types.NamespacedName, Value: *requestPriorityQueue
+	typedName        plugin.TypedName
+	latencypredictor latencypredictor.PredictorInterface
+	// runningRequestLists uses sync.Map because the scheduling path reads it lock-free
+	// while writes are serialized by runningRequestsMu.
+	runningRequestLists sync.Map // Key: types.NamespacedName, Value: *requestPriorityQueue
+	// runningRequestsMu serializes writers of runningRequestLists. Reads stay lock-free,
+	// but add (get-or-create + Add) and remove (Remove + delete-if-empty) are compound
+	// operations: unserialized, a request added to a queue that is being deleted is lost.
+	runningRequestsMu            sync.Mutex
 	sloContextStore              *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
 	config                       Config
 	prefixMatchDataKey           plugin.DataKey
@@ -410,6 +416,9 @@ type predictedLatencyCtx struct {
 
 	ttftSLO    float64
 	avgTPOTSLO float64
+	// elapsedMs is the time from the request's arrival at the EPP until its
+	// predictions returned, which counts against its TTFT SLO.
+	elapsedMs float64
 
 	predictionsForScheduling map[string]endpointPredictionResult
 
@@ -423,13 +432,18 @@ type predictedLatencyCtx struct {
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
+	incomingModelName := ""
 	if request.Body != nil {
 		if tp := request.Body.TokenizedRequest; tp != nil {
 			inputTokenCount = tp.TokenCount()
 		}
+		// Body.Model is the model the client asked for. A rewrite changes TargetModel
+		// and the payload but not Body.Model, so this is the director's IncomingModelName.
+		incomingModelName = request.Body.Model
 	}
 	return &predictedLatencyCtx{
 		targetModel:                    request.TargetModel,
+		incomingModelName:              incomingModelName,
 		inputTokenCount:                inputTokenCount,
 		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints:  make(map[string]float64),
@@ -437,6 +451,15 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
 		predictionsForScheduling:       make(map[string]endpointPredictionResult),
 	}
+}
+
+// msSinceReceived returns the time from the request's arrival at the EPP to t, in
+// milliseconds. It is 0 when the request carries no received time.
+func msSinceReceived(request *fwksched.InferenceRequest, t time.Time) float64 {
+	if request.ReceivedTimestamp.IsZero() {
+		return 0
+	}
+	return float64(t.Sub(request.ReceivedTimestamp)) / float64(time.Millisecond)
 }
 
 func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksched.InferenceRequest) (*predictedLatencyCtx, error) {
@@ -518,7 +541,22 @@ func (pl *PredictedLatency) getRunningRequestList(endpointName types.NamespacedN
 	return nil
 }
 
+// addRequestToEndpoint adds the request to the endpoint's running queue, creating
+// the queue if needed. It returns false if the request was already queued.
+func (pl *PredictedLatency) addRequestToEndpoint(endpointName types.NamespacedName, requestID string, tpot float64) bool {
+	pl.runningRequestsMu.Lock()
+	defer pl.runningRequestsMu.Unlock()
+	queue := pl.getRunningRequestList(endpointName)
+	if queue == nil {
+		queue = newRequestPriorityQueue()
+		pl.runningRequestLists.Store(endpointName, queue)
+	}
+	return queue.Add(requestID, tpot)
+}
+
 func (pl *PredictedLatency) removeRequestFromEndpoint(endpointName types.NamespacedName, requestID string) {
+	pl.runningRequestsMu.Lock()
+	defer pl.runningRequestsMu.Unlock()
 	if queue := pl.getRunningRequestList(endpointName); queue != nil {
 		queue.Remove(requestID)
 		if queue.GetSize() == 0 {

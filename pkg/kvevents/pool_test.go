@@ -25,10 +25,12 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -57,6 +59,49 @@ func newTestPool(t *testing.T, blockSize int) (
 	pool, err := NewPool(cfg, idx, tp, nil)
 	require.NoError(t, err)
 	return pool, idx, tp
+}
+
+// A bound global socket takes the pod identity from the topic, so NewPool
+// refuses to bind it where other hosts can reach it unless the config opts in.
+func TestNewPoolRejectsNonLocalGlobalSocket(t *testing.T) {
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 16, HashSeed: "test"})
+	require.NoError(t, err)
+
+	tests := []struct {
+		endpoint string
+		allow    bool
+		wantErr  bool
+	}{
+		{endpoint: "", wantErr: false},
+		{endpoint: "tcp://127.0.0.1:5557", wantErr: false},
+		{endpoint: "tcp://localhost:5557", wantErr: false},
+		{endpoint: "tcp://[::1]:5557", wantErr: false},
+		{endpoint: "ipc:///tmp/kv-events", wantErr: false},
+		{endpoint: "inproc://kv-events", wantErr: false},
+		{endpoint: "tcp://0.0.0.0:5557", wantErr: true},
+		{endpoint: "tcp://*:5557", wantErr: true},
+		{endpoint: "tcp://:5557", wantErr: true},
+		{endpoint: "tcp://[::]:5557", wantErr: true},
+		{endpoint: "tcp://10.0.0.5:5557", wantErr: true},
+		{endpoint: "tcp://epp.ns.svc:5557", wantErr: true},
+		{endpoint: "tcp://5557", wantErr: true},
+		{endpoint: "tcp://0.0.0.0:5557", allow: true, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s allow=%t", tt.endpoint, tt.allow), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ZMQEndpoint = tt.endpoint
+			cfg.AllowUntrustedPublishers = tt.allow
+			_, err := NewPool(cfg, idx, tp, nil)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "allowUntrustedPublishers")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 type recordingIndex struct {
@@ -113,7 +158,7 @@ func TestBigramStoreValidationAndFormatLifecycle(t *testing.T) {
 			Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
 			BlockSize: tc.blockSize, BlockHashes: tc.hashes,
 		}
-		ok, reason := blockStoredEventDigestible(event, 1)
+		ok, reason := blockStoredEventDigestible(event, event.KVCacheSpecKind, 1)
 		require.Equal(t, tc.wantReason == "", ok)
 		require.Equal(t, tc.wantReason, reason)
 	}
@@ -374,6 +419,7 @@ func TestProcessRawMessage_DropsTopicNamingAnotherPod(t *testing.T) {
 		{"IPv6 host without port", "fd00::1", "fd00::1:8000", "fd00::1:8000"},
 		{"IPv6 host without port ending in groups", "fd00::1:2", "fd00::1:2:8000", "fd00::1:2:8000"},
 		{"bracketed IPv6", "[fd00::1]:8000", "fd00::1:8000", "fd00::1:8000"},
+		{"bracketed IPv6 without port", "[fd00::1]", "fd00::1:8000", "fd00::1:8000"},
 		{"IPv6 written another way", "fd00:0:0::1:8000", "fd00::1:8000", "fd00::1:8000"},
 		{"pod name", "vllm-0", "10.0.0.1:8000", "10.0.0.1:8000"},
 		{"pod name with port", "vllm-0:8000", "10.0.0.1:8000", "10.0.0.1:8000"},
@@ -385,6 +431,7 @@ func TestProcessRawMessage_DropsTopicNamingAnotherPod(t *testing.T) {
 		{"another IPv6 host without port", "fd00::2", "fd00::1:8000", ""},
 		{"another IPv6 host without port ending in groups", "fd00::2:3", "fd00::1:2:8000", ""},
 		{"bracketed IPv6 of another pod", "[fd00::2]:8000", "fd00::1:8000", ""},
+		{"bracketed IPv6 of another pod without port", "[fd00::2]", "fd00::1:8000", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := logging.NewTestLoggerIntoContext(context.Background())
@@ -957,6 +1004,86 @@ func TestRealignExtraFeatures(t *testing.T) {
 		}
 	})
 
+	t.Run("1:many split uses the event offsets", func(t *testing.T) {
+		// Engine BS 16, canonical BS 4: each item must land only on the sub-blocks it overlaps.
+		cases := []struct {
+			name         string
+			raw          [][]any
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+			salt         string
+		}{
+			{
+				name:         "image starts mid engine block",
+				raw:          [][]any{{[]any{"img", int64(4)}}, nil},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 4, Length: 12}},
+			},
+			{
+				name:         "image spans both engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(-6)}}},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 22}},
+			},
+			{
+				name:         "two images back to back in one engine block",
+				raw:          [][]any{{[]any{"a", int64(0)}, []any{"b", int64(6)}}, nil},
+				hashes:       []string{"a", "b"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 0, Length: 6}, {Offset: 6, Length: 10}},
+			},
+			{
+				name:         "cache salt stays on the first sub-block",
+				raw:          [][]any{{[]any{"img", int64(4)}, "salt"}, nil},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 4, Length: 12}},
+				salt:         "salt",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
+				require.NoError(t, err)
+				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
+					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 4, 32)
+				if tc.salt != "" {
+					if want[0] == nil {
+						want[0] = &kvblock.BlockExtraFeatures{}
+					}
+					want[0].CacheSalt = tc.salt
+				}
+				assert.Equal(t, want, realignExtraFeatures(engine, 4, 32))
+			})
+		}
+	})
+
+	t.Run("1:many split replicates without usable offsets", func(t *testing.T) {
+		img := kvblock.MMHash{Hash: "img"}
+		vid := kvblock.MMHash{Hash: "vid"}
+		cases := []struct {
+			name string
+			feat *kvblock.BlockExtraFeatures
+		}{
+			// vLLM <= v0.18 sends no offsets, so an item's position in the engine block is unknown.
+			{"bare identifiers", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img}}},
+			{"offset past the block end", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img}, MMOffsets: []int{16}}},
+			{"offsets out of order", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img, vid}, MMOffsets: []int{8, 2}}},
+			{"negative offset after the first", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img, vid}, MMOffsets: []int{2, -1}}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				result := realignExtraFeatures([]*kvblock.BlockExtraFeatures{tc.feat}, 4, 16)
+				assert.Equal(t, []*kvblock.BlockExtraFeatures{tc.feat, tc.feat, tc.feat, tc.feat}, result)
+			})
+		}
+	})
+
+	t.Run("1:many split replicates when the canonical BS does not divide the engine BS", func(t *testing.T) {
+		// Engine BS 6, canonical BS 4: sub-block 1 straddles both engine blocks.
+		feat := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "img"}}, MMOffsets: []int{4}}
+		result := realignExtraFeatures([]*kvblock.BlockExtraFeatures{feat, nil}, 4, 12)
+		assert.Equal(t, []*kvblock.BlockExtraFeatures{feat, feat, nil}, result)
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
@@ -966,6 +1093,33 @@ func TestRealignExtraFeatures(t *testing.T) {
 		result := realignExtraFeatures(features, 64, 16)
 		assert.Empty(t, result)
 	})
+}
+
+func TestDropOffsetsUnlessDense(t *testing.T) {
+	cases := []struct {
+		name      string
+		blockSize int
+		numTokens int
+		keep      bool
+	}{
+		{"one entry per page", 8, 16, true},
+		{"null page skipped", 8, 24, false},
+		{"undeclared block size", 0, 16, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			features, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"img", int64(4)}}, nil}, "")
+			require.NoError(t, err)
+			ev := &BlockStoredEvent{BlockSize: tc.blockSize, Tokens: makeTokens(tc.numTokens)}
+			dropOffsetsUnlessDense(ev, features)
+			if tc.keep {
+				assert.Equal(t, []int{4}, features[0].MMOffsets)
+			} else {
+				assert.Nil(t, features[0].MMOffsets)
+			}
+			assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, features[0].MMHashes)
+		})
+	}
 }
 
 // TestCanonicalWritePath_ExtraKeysOneToMany verifies that events with ExtraKeys
@@ -2105,6 +2259,61 @@ func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, erro
 }
 
 func (stubAdapter) ShardingKey(_ *RawMessage) string { return "pod-1" }
+
+// skippedTagsAdapter decodes every message to a batch with no events and the
+// configured skipped tags.
+type skippedTagsAdapter struct {
+	tags []string
+}
+
+func (a *skippedTagsAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "pod-1", "model-1", EventBatch{SkippedTags: a.tags}, nil
+}
+
+func (a *skippedTagsAdapter) ShardingKey(*RawMessage) string { return "pod-1" }
+
+// TestProcessRawMessage_ReportsSkippedTags verifies that every skipped event is
+// counted under its tag while the log line appears once per tag per pool.
+func TestProcessRawMessage_ReportsSkippedTags(t *testing.T) {
+	const tagA, tagB = "PoolTestUnknownA", "PoolTestUnknownB"
+
+	// The default funcr verbosity drops V(1) and above, so a captured line
+	// was logged at the level operators see without raising verbosity.
+	var skipLogs []string
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "Skipping KV events with an unknown tag") {
+			skipLogs = append(skipLogs, args)
+		}
+	}, funcr.Options{})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	skipped := func(tag string) float64 {
+		return counterValue(t, metrics.KVEventUnknownTagsSkipped.WithLabelValues(tag))
+	}
+	beforeA, beforeB := skipped(tagA), skipped(tagB)
+
+	adapter := &skippedTagsAdapter{tags: []string{tagA, tagB, tagA}}
+	pool, _, _ := newTestPool(t, 4)
+	pool.adapter = adapter
+
+	msg := &RawMessage{Topic: "kv@pod-1@model-1"}
+	pool.processRawMessage(ctx, msg)
+	pool.processRawMessage(ctx, msg)
+
+	assert.Equal(t, 4.0, skipped(tagA)-beforeA)
+	assert.Equal(t, 2.0, skipped(tagB)-beforeB)
+
+	require.Len(t, skipLogs, 2, "each tag is logged once across both messages")
+	assert.Contains(t, skipLogs[0], `"tag"="`+tagA+`"`)
+	assert.Contains(t, skipLogs[0], `"podIdentifier"="pod-1"`)
+	assert.Contains(t, skipLogs[0], `"modelName"="model-1"`)
+	assert.Contains(t, skipLogs[1], `"tag"="`+tagB+`"`)
+
+	other, _, _ := newTestPool(t, 4)
+	other.adapter = adapter
+	other.processRawMessage(ctx, msg)
+	assert.Len(t, skipLogs, 4, "a new pool logs each tag again")
+}
 
 // A non-positive worker count leaves no shard for AddTask to select; the
 // first event would divide by zero in the subscriber goroutine. The

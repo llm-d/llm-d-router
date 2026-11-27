@@ -31,10 +31,12 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
@@ -76,10 +78,15 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 		return nil
 	}
 
-	for _, header := range req.RequestHeaders.Headers.Headers {
+	headers := req.RequestHeaders.Headers.Headers
+	reqCtx.Request.clientHeaderNames = make([]string, 0, len(headers))
+	for _, header := range headers {
 		key := strings.ToLower(header.Key)
 		if request.InternalRoutingHeaders.Has(key) {
 			continue
+		}
+		if _, seen := reqCtx.Request.Headers[key]; !seen && !strings.HasPrefix(key, ":") && key != "host" {
+			reqCtx.Request.clientHeaderNames = append(reqCtx.Request.clientHeaderNames, key)
 		}
 		reqCtx.Request.Headers[key] = envoy.GetHeaderValue(header)
 	}
@@ -127,6 +134,12 @@ func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *Reques
 			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
+	if endpoint.RankByHeader {
+		if reqCtx.Request.Headers == nil {
+			reqCtx.Request.Headers = map[string]string{}
+		}
+		reqCtx.Request.Headers[routing.DataParallelRankHeader] = strconv.Itoa(endpoint.RankIndex)
+	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
 	reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
@@ -153,14 +166,15 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 		maps.Copy(dynamicMetadata.Fields, reqCtx.Response.DynamicMetadata.Fields)
 	}
 
+	setHeaders := s.generateHeaders(ctx, reqCtx)
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extProcPb.HeadersResponse{
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders:    s.generateHeaders(ctx, reqCtx),
-						RemoveHeaders: unsetRoutingHeaders(ctx, reqCtx),
+						SetHeaders:    setHeaders,
+						RemoveHeaders: unsetRoutingHeaders(reqCtx.Request, setHeaders),
 					},
 				},
 			},
@@ -226,24 +240,28 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 	return headers
 }
 
-// unsetRoutingHeaders lists the headers Envoy removes before forwarding: the
-// screening headers, the routing headers no plugin set, and the attribution
-// handoff when EPP does not send it, so no client-supplied value reaches the
-// sidecar or the model server.
-func unsetRoutingHeaders(ctx context.Context, reqCtx *RequestContext) []string {
-	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders)+2)
-	for key := range request.ScreeningHeaders {
-		remove = append(remove, key)
+// eppOwnedHeaders reach the forwarded request only with a value EPP set.
+var eppOwnedHeaders = request.InputControlHeaders.
+	Union(request.ScreeningHeaders).
+	Union(request.OutputInjectionHeaders).
+	Union(request.InternalRoutingHeaders).
+	Union(request.TracePropagationHeaders)
+
+// unsetRoutingHeaders lists the EPP-owned headers that setHeaders does not
+// carry, and the client headers a plugin deleted from req. Envoy forwards a
+// client header unless the mutation removes it.
+func unsetRoutingHeaders(req *Request, setHeaders []*configPb.HeaderValueOption) []string {
+	set := sets.New[string]()
+	for _, h := range setHeaders {
+		set.Insert(strings.ToLower(h.GetHeader().GetKey()))
 	}
-	for key := range request.InternalRoutingHeaders {
-		if _, ok := reqCtx.Request.Headers[key]; !ok {
-			remove = append(remove, key)
+	remove := eppOwnedHeaders.Difference(set)
+	for _, key := range req.clientHeaderNames {
+		if _, ok := req.Headers[key]; !ok && !set.Has(key) && !request.IsSystemOwnedHeader(key) {
+			remove.Insert(key)
 		}
 	}
-	if _, _, ok := tracing.AttributionHandoff(ctx); !ok {
-		remove = append(remove, tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader)
-	}
-	return remove
+	return sets.List(remove)
 }
 
 func (s *StreamingServer) generateMetadata(endpoint string, endpointScores map[string]float64) *structpb.Struct {

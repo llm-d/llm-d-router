@@ -57,6 +57,9 @@ type EventBatch struct {
 	Timestamp        float64
 	Events           []GenericEvent
 	DataParallelRank *int
+	// SkippedTags holds the tag of each event the adapter dropped because it
+	// does not know the tag.
+	SkippedTags []string
 }
 
 // RawMessage holds the raw transport-level data from a received pub/sub message.
@@ -74,6 +77,10 @@ type RawMessage struct {
 	reset bool
 	// retire marks a final reset: the source endpoint has no subscribers left.
 	retire bool
+	// resync limits a reset or batch to the consumers that requested a resync.
+	resync bool
+	// resyncAbort marks a resync reset that drops a partial rebuild.
+	resyncAbort bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and

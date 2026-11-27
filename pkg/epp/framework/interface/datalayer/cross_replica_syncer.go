@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -52,6 +53,34 @@ type CrossReplicaSyncer interface {
 	GetOrSet(ctx context.Context, key StateKey, id string, candidate any) (actual any, existed bool, err error)
 }
 
+// CrossReplicaStarter is an optional interface for a CrossReplicaSyncer that
+// must start serving, for example open a listener, before it is used. The data
+// layer calls Start once when cross-replica sync starts, and not when a
+// configuration is only validated. ctx bounds the start itself. An error stops
+// the EPP from starting.
+type CrossReplicaStarter interface {
+	Start(ctx context.Context) error
+}
+
+// ErrCoordinationUnsupported is returned by GetOrSet from a CrossReplicaSyncer
+// that cannot provide linearizable request-level state across replicas.
+var ErrCoordinationUnsupported = errors.New("the cross-replica syncer does not support GetOrSet")
+
+// CoordinationChecker is an optional interface for a CrossReplicaSyncer whose
+// GetOrSet fails on every call. CheckCoordination returns that error, which
+// wraps ErrCoordinationUnsupported, or nil when GetOrSet is supported.
+type CoordinationChecker interface {
+	CheckCoordination() error
+}
+
+// CoordinationConsumer is an optional interface for a plugin that calls
+// GetOrSet on the configured CrossReplicaSyncer. Configuration fails when
+// RequiresCoordination returns true and the syncer's CheckCoordination returns
+// an error.
+type CoordinationConsumer interface {
+	RequiresCoordination() bool
+}
+
 // CrossReplicaBatchSyncer is an optional interface for a CrossReplicaSyncer
 // that publishes many endpoints in one call. When the syncer implements it,
 // the publisher calls SetBatch once per contributor per cycle in place of Set.
@@ -68,6 +97,23 @@ type CrossReplicaBatchSyncer interface {
 	// can run concurrently with the same endpointIDs, so implementations must
 	// not modify it.
 	SetBatch(ctx context.Context, spec CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error
+}
+
+// CrossReplicaPeerReader is optionally implemented by a CrossReplicaSyncer.
+// PeerSnapshot returns the peer-only aggregate the syncer holds for endpointID
+// and a version of the peer state the syncer saw when it built that aggregate.
+// The version changes whenever the peer values or the set of peers behind the
+// aggregate change, and can also change while the aggregate stays the same.
+// How far a snapshot can lag the peers is up to the syncer. A snapshot with
+// no peers is spec.Aggregate(nil) and has a version too. Versions are only
+// compared for equality; one can repeat an earlier value when the peer state
+// returns to it. ok is false when the syncer holds no snapshot for
+// endpointID, which is not the same as a snapshot with no peers. The returned
+// value is shared and must not be modified. PeerSnapshot does not call the
+// store or peers itself and can run concurrently with Set, SetBatch and
+// Delete.
+type CrossReplicaPeerReader interface {
+	PeerSnapshot(spec CrossReplicaSpec, endpointID string) (peer any, version uint64, ok bool)
 }
 
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
@@ -93,7 +139,8 @@ type CrossReplicaSpec struct {
 
 	// Aggregate combines per-replica values into a single aggregate. Its output
 	// must have the same type and may be passed back as an input when Get combines
-	// the cached peer aggregate with the live local value.
+	// the cached peer aggregate with the live local value. It must accept no
+	// values and return an empty aggregate of the same type.
 	Aggregate func(values []any) any
 
 	// SyncDisabled opts this contributor out of cross-replica synchronization

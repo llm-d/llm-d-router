@@ -27,6 +27,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -43,6 +44,8 @@ type ConditionalDecodeStep struct {
 	gwClient          *gateway.Client
 	promptTokenParity string
 	forwardTokenIDs   bool
+	// budget is set when the pipeline enables force-streaming.
+	budget *forceStreamBudget
 }
 
 func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -50,6 +53,9 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 		return nil, errors.New("conditional-decode: gateway client is required")
 	}
 	if err := rejectUseOpenAIFormatOverride(ConditionalDecodeStepName, params); err != nil {
+		return nil, err
+	}
+	if err := rejectForceStreamParams(ConditionalDecodeStepName, params); err != nil {
 		return nil, err
 	}
 	parity, err := parsePromptTokenParity(params)
@@ -65,9 +71,14 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
 
+func (s *ConditionalDecodeStep) enableForceStream(budget *forceStreamBudget) { s.budget = budget }
+
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
 		return nil
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
 	}
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
@@ -76,43 +87,80 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return err
 	}
 
-	// A served hit is the KV-reuse case the parity check exists for; body is a
-	// clone, so an injected include_usage does not reach the decode step on a
-	// miss. On a 412 nothing is written, so the writer stays idle.
+	// A served probe is checked as decode's reply is; body is a clone, so an
+	// injected include_usage does not reach the decode step after a 412. On a
+	// 412 nothing is written, so the writer stays idle.
 	parity, injectedUsage := setupParity(ConditionalDecodeStepName, s.promptTokenParity, logger, reqCtx, body)
+
+	probeHeaders := map[string]string{routing.PreferHeader: routing.PreferIfAvailable}
+	var cacheMiss bool
+	var forceStreamResult string
+	onProbeResponse := func(resp *http.Response) error {
+		if err := deferOnPreconditionFailed(reqCtx, resp); err != nil {
+			cacheMiss = true
+			return err
+		}
+		coordmetrics.IncConditionalDecodeProbes(probeResult(resp.StatusCode))
+		if forceStreamResult != "" {
+			coordmetrics.IncForceStreamTotal(reqCtx.Model, ConditionalDecodeStepName, forceStreamResult)
+		}
+		return nil
+	}
+
+	// A non-streaming request the worker serves is force-streamed as decode
+	// would serve it. A decline or a fallback re-sends body through the probe
+	// below; the probe body names no KV handoff, so the re-send is safe. Its
+	// outcome is recorded when the worker answers the probe without deferring it:
+	// a deferred request is decode's to record.
+	if s.budget != nil && !reqCtx.Stream {
+		if shape, ok := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); ok {
+			// The probe result of a forced attempt is recorded once its outcome is
+			// known: a fallback re-sends the probe, which records its own.
+			var forcedStatus int
+			leg := forceStreamLeg{
+				step:     ConditionalDecodeStepName,
+				upstream: coordmetrics.UpstreamConditionalDecode,
+				headers:  probeHeaders,
+				onResponse: func(resp *http.Response) error {
+					forcedStatus = resp.StatusCode
+					return deferOnPreconditionFailed(reqCtx, resp)
+				},
+			}
+			result, _, err := tryForceStream(ctx, logger, s.gwClient, s.budget, leg, reqCtx, body, shape, parity)
+			if errors.Is(err, errCacheMiss) {
+				logger.V(logutil.DEFAULT).Info("probe deferred (412), continuing pipeline")
+				return nil
+			}
+			if result == "" {
+				if probe := forcedProbeResult(forcedStatus, err); probe != "" {
+					coordmetrics.IncConditionalDecodeProbes(probe)
+				}
+				if err != nil {
+					return err
+				}
+				logger.V(logutil.DEFAULT).Info("probe served, response forwarded")
+				return pipeline.ErrPipelineDone
+			}
+			forceStreamResult = result
+		}
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, map[string]string{"Prefer": "if-available"})
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, probeHeaders)
 	if err != nil {
 		return err
 	}
 
 	writer, finalize := parityResponseWriter(reqCtx, parity, injectedUsage)
-	var cacheMiss bool
-	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamConditionalDecode, func(resp *http.Response) error {
-		switch {
-		case resp.StatusCode == http.StatusPreconditionFailed:
-			cacheMiss = true
-			reqCtx.CaptureResponseHeaders(resp.Header)
-			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
-			return errCacheMiss
-		case resp.StatusCode >= http.StatusBadRequest:
-			// Worker error (any 4xx/5xx except 412): the response is still
-			// streamed to the client, but the outcome is not a served hit.
-			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultError)
-		default:
-			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
-		}
-		return nil
-	})
+	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamConditionalDecode, onProbeResponse)
 
 	if err := finalize(); err != nil {
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
 	}
 
 	if cacheMiss {
-		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
+		logger.V(logutil.DEFAULT).Info("probe deferred (412), continuing pipeline")
 		return nil
 	}
 	if out.TransportErr != nil {
@@ -122,10 +170,51 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return err
 	}
 
-	// A hit ends the pipeline before the decode step, so force-streaming does not
-	// apply to it; the client's stream value is forwarded verbatim.
-	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")
+	logger.V(logutil.DEFAULT).Info("probe served, response forwarded")
 	return pipeline.ErrPipelineDone
+}
+
+// deferOnPreconditionFailed returns errCacheMiss when the worker defers the
+// probe with HTTP 412, after capturing the response headers the later steps
+// forward and recording the deferred result. It returns nil for any other
+// status.
+func deferOnPreconditionFailed(reqCtx *pipeline.RequestContext, resp *http.Response) error {
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		return nil
+	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
+	coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
+	return errCacheMiss
+}
+
+// probeResult is the probe result for a status other than 412: a worker error
+// for any other 4xx/5xx, whose response still reaches the client, and served
+// otherwise.
+func probeResult(status int) string {
+	if status >= http.StatusBadRequest {
+		return coordmetrics.ProbeResultError
+	}
+	return coordmetrics.ProbeResultServed
+}
+
+// forcedProbeResult is the probe result of a forced attempt that ended the
+// request, given the status the worker answered (0 when none arrived). It is
+// probeResult of that status, except that an error frame streamed after the 200
+// is the worker error it reports. A client that left before the worker answered
+// records none.
+func forcedProbeResult(status int, err error) string {
+	var upstream *pipeline.UpstreamError
+	var streamed *pipeline.UpstreamStreamedError
+	switch {
+	case status == 0 && errors.As(err, &upstream) && upstream.StatusCode == 0:
+		return coordmetrics.ProbeResultTransportError
+	case status == 0:
+		return ""
+	case errors.As(err, &streamed):
+		return coordmetrics.ProbeResultError
+	default:
+		return probeResult(status)
+	}
 }
 
 func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (map[string]any, error) {

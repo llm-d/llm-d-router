@@ -27,6 +27,7 @@ import (
 	"math"
 	"mime"
 	"mime/multipart"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -71,8 +72,20 @@ const (
 	// audioGenerateAPI is the vLLM Omni text-to-audio generation endpoint (e.g.
 	// Stable Audio), distinct from audioSpeechAPI's text-to-speech.
 	audioGenerateAPI = "audio/generate"
+	// audioTranscriptionsAPI and audioTranslationsAPI are the OpenAI-compatible
+	// speech-to-text endpoints. Both take multipart/form-data with the same
+	// scalar fields, so one parser serves both.
+	audioTranscriptionsAPI = "audio/transcriptions"
+	audioTranslationsAPI   = "audio/translations"
 
 	octetStreamType = "application/octet-stream"
+
+	textCompletionObject = "text_completion"
+	finishReasonStop     = "stop"
+	finishReasonLength   = "length"
+	// maxCompletionResponseBytes bounds the non-streamed completions body whose text is
+	// returned in ParsedResponse.Completion. Larger bodies are not decoded for text.
+	maxCompletionResponseBytes = 1 << 20
 
 	// Text to speech api response format:
 	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
@@ -124,6 +137,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			videosAPI,
 			videosSyncAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
+			audioTranslationsAPI,
 			request.DecisionsPathSuffix,
 			audioGenerateAPI,
 		},
@@ -152,6 +167,9 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	}
 	if apiType == videosAPI || apiType == videosSyncAPI {
 		return parseVideosRequest(body, headers)
+	}
+	if apiType == audioTranscriptionsAPI || apiType == audioTranslationsAPI {
+		return parseTranscriptionsRequest(apiType, body, headers)
 	}
 	if apiType == request.DecisionsPathSuffix {
 		return parseDecisionsRequest(body)
@@ -195,6 +213,10 @@ var envelopeRawFields = map[string][]string{
 	chatCompletionsAPI: {reqcommon.FieldPrompt},
 	completionsAPI:     {reqcommon.FieldPrompt},
 	responsesAPI:       {reqcommon.FieldInput, reqcommon.FieldInstructions},
+	// input and instructions are decoded once into the typed body; ref_audio_2
+	// can be a large inline data URI, and the object and array conditioning
+	// fields stay raw on their own shape.
+	audioSpeechAPI: {reqcommon.FieldInput, reqcommon.FieldInstructions, "ref_audio", "ref_audio_2"},
 }
 
 func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
@@ -239,20 +261,27 @@ func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload
 	return parsers.RewritePriority(ctx, payload, priority)
 }
 
-// maxOutputTokensForAPI normalizes the per-API output-token cap field into a
-// single value, applying each API's field name and precedence. Endpoints with no
-// output-token concept (conversations, embeddings) return nil.
+// maxOutputTokensForAPI reads the output-token cap through the shared per-API
+// field table. Endpoints with no output-token concept (conversations,
+// embeddings) return nil.
 func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
+	var limitAPI reqcommon.APIType
 	switch apiType {
 	case chatCompletionsAPI:
-		return request.MaxOutputTokensFromPayload(bodyMap, "max_completion_tokens", "max_tokens")
+		limitAPI = reqcommon.APITypeChatCompletions
 	case completionsAPI:
-		return request.MaxOutputTokensFromPayload(bodyMap, "max_tokens")
+		limitAPI = reqcommon.APITypeCompletions
 	case responsesAPI:
-		return request.MaxOutputTokensFromPayload(bodyMap, "max_output_tokens")
+		limitAPI = reqcommon.APITypeResponses
+	case audioSpeechAPI:
+		limitAPI = reqcommon.APITypeAudioSpeech
 	default:
 		return nil
 	}
+	if n, ok := reqcommon.OutputTokenLimit(bodyMap, limitAPI); ok {
+		return ptr.To(int64(n))
+	}
+	return nil
 }
 
 // ParseResponse extracts usage metadata from JSON, SSE, and binary audio and video responses.
@@ -273,11 +302,37 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		return p.parseStreamResponse(body)
 	}
 
-	usage, err := extractUsage(body)
-	if err != nil {
-		return nil, err
+	// The transcription response formats text, srt and vtt carry no usage,
+	// and parsing them as JSON would only log an error per response. srt
+	// arrives as application/x-subrip and vtt as text/vtt.
+	if mediaType == "text/plain" || mediaType == "text/vtt" || mediaType == "application/x-subrip" {
+		return nil, nil //nolint:nilnil
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+
+	return extractResponse(body)
+}
+
+// completionChoices holds the fields of a completions response that
+// ParsedResponse.Completion is built from.
+type completionChoices struct {
+	Object  string `json:"object"`
+	Choices []struct {
+		Text         *string `json:"text"`
+		FinishReason string  `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+// completion returns the text of a completions response with exactly one choice
+// that finished with "stop" or "length", or nil.
+func (c *completionChoices) completion(bodyLen int) *fwkrh.Completion {
+	if bodyLen > maxCompletionResponseBytes || c.Object != textCompletionObject || len(c.Choices) != 1 {
+		return nil
+	}
+	choice := c.Choices[0]
+	if choice.Text == nil || (choice.FinishReason != finishReasonStop && choice.FinishReason != finishReasonLength) {
+		return nil
+	}
+	return &fwkrh.Completion{Text: *choice.Text, FinishReason: choice.FinishReason}
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
@@ -393,6 +448,12 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/audio/speech") {
 		return audioSpeechAPI
 	}
+	if request.MatchPathSuffix(path, "/"+audioTranscriptionsAPI) {
+		return audioTranscriptionsAPI
+	}
+	if request.MatchPathSuffix(path, "/"+audioTranslationsAPI) {
+		return audioTranslationsAPI
+	}
 	if request.MatchPathSuffix(path, request.DecisionsPathSuffix) {
 		return request.DecisionsPathSuffix
 	}
@@ -409,7 +470,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		validationErr := errors.New("invalid conversations request: must have items field")
 		var conversations request.ConversationsRequest
 		if err := json.Unmarshal(rawBody, &conversations); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+			return nil, requestBodyDecodeError(err, "conversations", validationErr)
 		}
 		if len(conversations.Items) == 0 {
 			return nil, validationErr
@@ -420,7 +481,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		validationErr := errors.New("invalid responses request: must have input field")
 		var responses request.ResponsesRequest
 		if err := json.Unmarshal(rawBody, &responses); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+			return nil, requestBodyDecodeError(err, "responses", validationErr)
 		}
 		if responses.Input == nil {
 			return nil, validationErr
@@ -429,23 +490,64 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 
 	case audioSpeechAPI:
 		var speechRequest struct {
-			Input        *string `json:"input"`
-			Instructions string  `json:"instructions,omitempty"`
-			RefText      string  `json:"ref_text,omitempty"`
-			CacheSalt    string  `json:"cache_salt,omitempty"`
+			Input            *string         `json:"input"`
+			Instructions     string          `json:"instructions,omitempty"`
+			RefText          string          `json:"ref_text,omitempty"`
+			CacheSalt        string          `json:"cache_salt,omitempty"`
+			Voice            json.RawMessage `json:"voice,omitempty"`
+			Speaker          json.RawMessage `json:"speaker,omitempty"`
+			Language         string          `json:"language,omitempty"`
+			TaskType         string          `json:"task_type,omitempty"`
+			RefAudio         json.RawMessage `json:"ref_audio,omitempty"`
+			RefAudio2        json.RawMessage `json:"ref_audio_2,omitempty"`
+			References       json.RawMessage `json:"references,omitempty"`
+			RefAudioCodes    json.RawMessage `json:"ref_audio_codes,omitempty"`
+			ExtraParams      json.RawMessage `json:"extra_params,omitempty"`
+			SpeakerEmbedding json.RawMessage `json:"speaker_embedding,omitempty"`
+			XVectorOnlyMode  *bool           `json:"x_vector_only_mode,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
-			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings"))
+			return nil, requestBodyDecodeError(err, "text to speech", errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings and x_vector_only_mode a boolean"))
 		}
 		if speechRequest.Input == nil {
 			return nil, errors.New("invalid text to speech request: must have string input field")
 		}
+		// The engine treats an explicit JSON null and an absent field as the
+		// same None conditioning; keep the raw fields that way too.
+		refAudio := rawFieldOrNull(speechRequest.RefAudio)
+		refAudio2 := rawFieldOrNull(speechRequest.RefAudio2)
+		references := rawFieldOrNull(speechRequest.References)
+		refAudioCodes := rawFieldOrNull(speechRequest.RefAudioCodes)
+		extraParams := rawFieldOrNull(speechRequest.ExtraParams)
+		speakerEmbedding := rawFieldOrNull(speechRequest.SpeakerEmbedding)
+		// The engine resolves "voice" and "speaker" by key presence, so
+		// "speaker" applies only when "voice" is absent; an explicit null
+		// "voice" selects the default voice. Both are a string or an object
+		// carrying an id, normalized to one string.
+		rawVoice := speechRequest.Voice
+		if len(rawVoice) == 0 {
+			rawVoice = speechRequest.Speaker
+		}
+		voice, err := voiceField(rawVoice)
+		if err != nil {
+			return nil, err
+		}
 		return &request.InferenceRequestBody{
 			TextToSpeech: &request.TextToSpeechRequest{
-				Input:        *speechRequest.Input,
-				Instructions: speechRequest.Instructions,
-				RefText:      speechRequest.RefText,
-				CacheSalt:    speechRequest.CacheSalt,
+				Input:            *speechRequest.Input,
+				Instructions:     speechRequest.Instructions,
+				RefText:          speechRequest.RefText,
+				CacheSalt:        speechRequest.CacheSalt,
+				Voice:            voice,
+				Language:         speechRequest.Language,
+				TaskType:         speechRequest.TaskType,
+				RefAudio:         refAudio,
+				RefAudio2:        refAudio2,
+				References:       references,
+				RefAudioCodes:    refAudioCodes,
+				ExtraParams:      extraParams,
+				SpeakerEmbedding: speakerEmbedding,
+				XVectorOnlyMode:  speechRequest.XVectorOnlyMode,
 			},
 		}, nil
 
@@ -455,7 +557,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			NegativePrompt string  `json:"negative_prompt,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &generateRequest); err != nil {
-			return nil, requestBodyDecodeError(err, errors.New("invalid audio generate request: input and negative_prompt must be strings"))
+			return nil, requestBodyDecodeError(err, "audio generate", errors.New("invalid audio generate request: input and negative_prompt must be strings"))
 		}
 		if generateRequest.Input == nil {
 			return nil, errors.New("invalid audio generate request: must have string input field")
@@ -468,7 +570,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		validationErr := errors.New("invalid chat completions request: must have valid messages field")
 		var chatCompletions request.ChatCompletionsRequest
 		if err := json.Unmarshal(rawBody, &chatCompletions); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+			return nil, requestBodyDecodeError(err, "chat completions", validationErr)
 		}
 		if err := validateChatCompletionsMessages(chatCompletions.Messages); err != nil {
 			return nil, validationErr
@@ -477,20 +579,24 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 
 	case completionsAPI:
 		validationErr := errors.New("invalid completions request: must have prompt field")
-		var completions request.CompletionsRequest
-		if err := json.Unmarshal(rawBody, &completions); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+		var completions struct {
+			request.CompletionsRequest
+			// vLLM accepts prompt_embeds in place of prompt.
+			PromptEmbeds jsonPresent `json:"prompt_embeds"`
 		}
-		if completions.Prompt.IsEmpty() {
+		if err := json.Unmarshal(rawBody, &completions); err != nil {
+			return nil, requestBodyDecodeError(err, "completions", validationErr)
+		}
+		if completions.Prompt.IsEmpty() && !bool(completions.PromptEmbeds) {
 			return nil, validationErr
 		}
-		return &request.InferenceRequestBody{Completions: &completions}, nil
+		return &request.InferenceRequestBody{Completions: &completions.CompletionsRequest}, nil
 
 	case embeddingsAPI:
 		validationErr := errors.New("invalid embeddings request: must have input field")
 		var embeddings request.EmbeddingsRequest
 		if err := json.Unmarshal(rawBody, &embeddings); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+			return nil, requestBodyDecodeError(err, "embeddings", validationErr)
 		}
 		if embeddings.Input.IsEmpty() {
 			return nil, validationErr
@@ -501,7 +607,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		validationErr := errors.New("invalid images generations request: must have prompt field")
 		var images request.ImagesGenerationsRequest
 		if err := json.Unmarshal(rawBody, &images); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+			return nil, requestBodyDecodeError(err, "images generations", validationErr)
 		}
 		if images.Prompt == "" {
 			return nil, validationErr
@@ -620,9 +726,9 @@ func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
 }
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
-// The uploaded image part is the image-to-image conditioning input, so it is
-// captured as UploadedMedia for input-cost estimation; the original body is
-// forwarded unchanged.
+// Each uploaded image part, under the "image" or "image[]" form name, is an
+// image-to-image conditioning input, so it is captured as UploadedMedia for
+// input-cost estimation; the original body is forwarded unchanged.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	images := &request.ImagesGenerationsRequest{}
 	extractedBody := &request.InferenceRequestBody{
@@ -652,7 +758,7 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 			}
 			images.NumInferenceSteps = &steps
 		case "stream":
-			stream, err := strconv.ParseBool(string(value))
+			stream, err := parseFormBool(value)
 			if err != nil {
 				return fmt.Errorf("invalid images edits stream field: %w", err)
 			}
@@ -660,9 +766,9 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 		}
 		return nil
 	}, func(name string) bool {
-		return name == "image"
+		return name == "image" || name == "image[]"
 	}, func(_ string, media request.UploadedMedia) error {
-		images.Image = media
+		images.InputImages = append(images.InputImages, media)
 		return nil
 	})
 	if err != nil {
@@ -735,16 +841,84 @@ func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseRes
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 }
 
-func requestBodyDecodeError(err, validationErr error) error {
+// jsonPresent records whether a field holds a non-null value without copying it.
+type jsonPresent bool
+
+func (p *jsonPresent) UnmarshalJSON(data []byte) error {
+	*p = jsonPresent(!bytes.Equal(data, []byte("null")))
+	return nil
+}
+
+// parseTranscriptionsRequest parses a multipart/form-data /v1/audio/transcriptions
+// or /v1/audio/translations request. The audio file part drives the engine's
+// cost, so it is captured as UploadedMedia for input-cost estimation; the
+// engine is authoritative for the required file field, and the original body is
+// forwarded unchanged.
+func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	transcriptions := &request.TranscriptionRequest{}
+	extractedBody := &request.InferenceRequestBody{
+		Transcriptions: transcriptions,
+		Payload:        request.RawPayload(body),
+	}
+	err := parseMultipartForm(body, headers, apiType, func(name string, value []byte) error {
+		switch name {
+		case reqcommon.FieldModel:
+			extractedBody.Model = string(value)
+		case "prompt":
+			transcriptions.Prompt = string(value)
+		case "stream":
+			stream, err := parseFormBool(value)
+			if err != nil {
+				return fmt.Errorf("invalid %s stream field: %w", apiType, err)
+			}
+			extractedBody.Stream = stream
+		}
+		return nil
+	}, func(name string) bool {
+		return name == "file"
+	}, func(_ string, media request.UploadedMedia) error {
+		transcriptions.Audio = media
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// requestBodyDecodeError reports a JSON type error in an api request by the
+// field path and the JSON value that failed to decode. Other decode errors
+// return validationErr.
+func requestBodyDecodeError(err error, api string, validationErr error) error {
 	var syntaxErr *json.SyntaxError
 	if errors.As(err, &syntaxErr) {
 		return err
 	}
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) && typeErr.Field != "" {
-		return &fwkrh.RequestFieldError{Field: typeErr.Field, Err: validationErr}
+		return &fwkrh.RequestFieldError{
+			Field: typeErr.Field,
+			Err: fmt.Errorf("invalid %s request: %s: cannot unmarshal %s into %s",
+				api, typeErr.Field, typeErr.Value, jsonTypeName(typeErr.Type)),
+		}
 	}
 	return validationErr
+}
+
+// jsonTypeName names t as a JSON type, so client errors do not carry Go type
+// names. Scalars keep their Go kind, which states the range a number exceeded.
+func jsonTypeName(t reflect.Type) string {
+	if t == nil {
+		return "value"
+	}
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array:
+		return "array"
+	case reflect.Map, reflect.Struct:
+		return "object"
+	default:
+		return t.Kind().String()
+	}
 }
 
 func validateChatCompletionsMessages(messages []request.Message) error {
@@ -752,6 +926,44 @@ func validateChatCompletionsMessages(messages []request.Message) error {
 		return errors.New("chat-completions request must have at least one message")
 	}
 	return nil
+}
+
+// rawFieldOrNull returns nil for a raw JSON field holding a literal null, so
+// it salts and fingerprints the same as an absent field.
+func rawFieldOrNull(raw json.RawMessage) json.RawMessage {
+	if string(raw) == "null" {
+		return nil
+	}
+	return raw
+}
+
+// voiceField returns the voice a voice or speaker field carries: the string
+// itself, or the object form's id, the two shapes the engine normalizes to one
+// voice name. An object's id may be null, which the engine treats as absent.
+// Empty input is an absent field.
+func voiceField(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return "", errors.New("invalid text to speech request: voice must be a string or an object with an id")
+	}
+	id, ok := obj["id"]
+	if !ok {
+		return "", errors.New("invalid text to speech request: a voice object must have an id")
+	}
+	if string(id) == "null" {
+		return "", nil
+	}
+	if err := json.Unmarshal(id, &s); err != nil {
+		return "", errors.New("invalid text to speech request: a voice object's id must be a string")
+	}
+	return s, nil
 }
 
 // toInt coerces a JSON-decoded number-ish value into an int. JSON numbers
@@ -773,6 +985,25 @@ func toInt(v any) int {
 	return 0
 }
 
+// extractResponse reads usage and completion text in one decode. A type
+// mismatch outside "usage" leaves Completion nil and does not fail usage.
+func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
+	var responseBody struct {
+		Usage map[string]any `json:"usage"`
+		completionChoices
+	}
+	var completion *fwkrh.Completion
+	err := json.Unmarshal(responseBytes, &responseBody)
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		completion = responseBody.completion(len(responseBytes))
+	case !errors.As(err, &typeErr) || typeErr.Field == reqcommon.FieldUsage:
+		return nil, err
+	}
+	return &fwkrh.ParsedResponse{Usage: usageFromFields(responseBody.Usage), Completion: completion}, nil
+}
+
 func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	var responseBody struct {
 		Usage map[string]any `json:"usage"`
@@ -781,15 +1012,20 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if responseBody.Usage == nil {
-		return nil, nil //nolint:nilnil
+	return usageFromFields(responseBody.Usage), nil
+}
+
+// usageFromFields converts a decoded "usage" object, or returns nil when absent.
+func usageFromFields(fields map[string]any) *request.Usage {
+	if fields == nil {
+		return nil
 	}
 
 	usage := request.Usage{}
 
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
 	for _, inputTokens := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
-		if v, ok := responseBody.Usage[inputTokens]; ok && v != nil {
+		if v, ok := fields[inputTokens]; ok && v != nil {
 			usage.PromptTokens = toInt(v)
 			break
 		}
@@ -797,7 +1033,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 
 	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
 	for _, outputTokens := range []string{reqcommon.FieldCompletionTokens, reqcommon.FieldOutputTokens} {
-		if v, ok := responseBody.Usage[outputTokens]; ok && v != nil {
+		if v, ok := fields[outputTokens]; ok && v != nil {
 			usage.CompletionTokens = toInt(v)
 			break
 		}
@@ -805,7 +1041,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 
 	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
 	for _, details := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
-		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
+		if detailsMap, ok := fields[details].(map[string]any); ok {
 			if cachedTokens, ok := detailsMap[reqcommon.FieldCachedTokens]; ok {
 				usage.PromptTokenDetails = &request.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
@@ -815,11 +1051,11 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	}
 
 	// total_tokens field name is consistent across all API types.
-	if v, ok := responseBody.Usage[reqcommon.FieldTotalTokens]; ok && v != nil {
+	if v, ok := fields[reqcommon.FieldTotalTokens]; ok && v != nil {
 		usage.TotalTokens = toInt(v)
 	}
 
-	return &usage, nil
+	return &usage
 }
 
 // Example message if "stream_options": {"include_usage": "true"} is included in the request:
@@ -908,4 +1144,16 @@ func extractRawUsage(raw json.RawMessage) *request.Usage {
 		return nil
 	}
 	return usage
+}
+
+// parseFormBool parses a boolean form field with the values the model servers'
+// form parsing (pydantic) accepts, in any letter case.
+func parseFormBool(value []byte) (bool, error) {
+	switch strings.ToLower(string(value)) {
+	case "1", "on", "t", "true", "y", "yes":
+		return true, nil
+	case "0", "off", "f", "false", "n", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("invalid boolean %q", value)
 }

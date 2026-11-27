@@ -9,10 +9,30 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{/*
+Base of the standalone resource names. router.fullnameOverride lets one release
+hold several aliased instances of the standalone chart.
+*/}}
+{{- define "llm-d-router.baseName" -}}
+{{- (.Values.router.fullnameOverride | default "" | trim) | default .Release.Name | default "default-pool" | lower | trim -}}
+{{- end -}}
+
+{{/*
+Whether the current chart is llm-d-router-standalone. Helm replaces .Chart.Name
+with the dependency alias, so the chart declares its kind in its values.
+*/}}
+{{- define "llm-d-router.isStandaloneChart" -}}
+{{- if eq (.Values.router.chartKind | default "") "standalone" -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
 Router deployment name
 */}}
 {{- define "llm-d-router.name" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{ $base }}-epp
 {{- end -}}
 
@@ -20,7 +40,7 @@ Router deployment name
 Cluster RBAC unique name
 */}}
 {{- define "llm-d-router.cluster-rbac-name" -}}
-{{- $release := .Release.Name | default "default-pool" | lower | trim }}
+{{- $release := include "llm-d-router.baseName" . }}
 {{- $ns := .Release.Namespace | default "default" | lower | trim }}
 {{- if and (le (len $release) 40) (le (len $ns) 40) }}
 {{- printf "%s-%s-epp" $release $ns | quote }}
@@ -113,7 +133,7 @@ pod) or "service" (proxy runs as its own horizontally scalable Deployment).
 Name of the standalone proxy Deployment and Service used in service mode.
 */}}
 {{- define "llm-d-router.proxyName" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{ $base }}-proxy
 {{- end -}}
 
@@ -136,10 +156,21 @@ it must use this helper.
 {{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $name := index $configMap "name" | default "" -}}
 {{- if empty $name -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{- $name = printf "%s-%s" $base (include "llm-d-router.proxyType" .) -}}
 {{- end -}}
 {{- $name -}}
+{{- end -}}
+
+{{/*
+Effective name of the metrics reader token Secret. A user-supplied
+router.monitoring.prometheus.auth.secretName wins; otherwise the name is
+scoped to llm-d-router.baseName so two releases, or two aliased instances in
+one release, can share a namespace. Both the Secret and the
+ServiceMonitor that reads it must use this helper.
+*/}}
+{{- define "llm-d-router.metricsReaderSecretName" -}}
+{{- .Values.router.monitoring.prometheus.auth.secretName | default (printf "%s-metrics-reader-secret" (include "llm-d-router.baseName" .)) -}}
 {{- end -}}
 
 {{/* Headless Service for active-active Envoy endpoint discovery. */}}
@@ -150,6 +181,15 @@ it must use this helper.
   {{- if eq (include "llm-d-router.epp.allActive" .) "true" -}}
     {{- printf "%s-discovery" (include "llm-d-router.name" .) -}}
   {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "llm-d-router.epp.extProcPort" -}}
+{{- $flags := .Values.router.epp.flags | default dict -}}
+{{- if hasKey $flags "grpc-port" -}}
+{{- index $flags "grpc-port" -}}
+{{- else -}}
+{{- .Values.router.epp.extProcPort | default 9002 -}}
 {{- end -}}
 {{- end -}}
 
@@ -205,7 +245,7 @@ Service instead.
 */}}
 {{- define "llm-d-router.proxy.failOpenFallback.enabled" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
-{{- if and (hasPrefix "llm-d-router-standalone" .Chart.Name) $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy") (eq (include "llm-d-router.proxy.failOpen" .) "true") -}}
+{{- if and (eq (include "llm-d-router.isStandaloneChart" .) "true") $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy") (eq (include "llm-d-router.proxy.failOpen" .) "true") -}}
 true
 {{- else -}}
 false
@@ -388,7 +428,7 @@ Return the standalone EPP model-server target ports.
 {{/*
 Return the agentgateway standalone logical backend service name.
 Derives the name from .Values.router.modelServers.matchLabels.app,
-falling back to .Release.Name if not set.
+falling back to llm-d-router.baseName if not set.
 */}}
 {{- define "llm-d-router.agentgateway.logicalBackendName" -}}
 {{- $appLabel := "" -}}
@@ -398,7 +438,7 @@ falling back to .Release.Name if not set.
 {{- if not (empty $appLabel) -}}
   {{- $appLabel -}}
 {{- else -}}
-  {{- .Release.Name -}}
+  {{- include "llm-d-router.baseName" . -}}
 {{- end -}}
 {{- end -}}
 
@@ -409,7 +449,7 @@ Standalone uses proxy presets merged with explicit proxy overrides.
 {{- define "llm-d-router.proxy" -}}
 {{- $proxy := deepCopy (.Values.router.proxy | default dict) -}}
 {{- $resolved := $proxy -}}
-{{- if hasPrefix "llm-d-router-standalone" .Chart.Name -}}
+{{- if eq (include "llm-d-router.isStandaloneChart" .) "true" -}}
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- $presets := index $proxy "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
@@ -442,7 +482,7 @@ Return the rendered proxy ConfigMap data.
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
 {{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $data := deepCopy ((index $configMap "data") | default dict) -}}
-{{- if hasPrefix "llm-d-router-standalone" .Chart.Name -}}
+{{- if eq (include "llm-d-router.isStandaloneChart" .) "true" -}}
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
@@ -489,7 +529,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (.Values.router.epp.extProcPort | default 9002) | quote }}
+              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (include "llm-d-router.epp.extProcPort" .) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}
@@ -500,6 +540,33 @@ services:
     {{- range $servicePort := $servicePorts }}
     {{ $servicePort }}: {{ $servicePort }}
     {{- end }}
+{{- end -}}
+
+{{/*
+Container image reference for an image values block with registry, repository, tag and an
+optional digest. Called with (dict "image" <block> "path" "<values path>"); the path names the
+block in render errors.
+
+A non-empty digest pins the image and replaces the tag: registry/repository@digest. The tag is
+dropped rather than kept as registry/repository:tag@digest because CRI-O (containers/image)
+rejects references that carry both. The digest must follow the OCI grammar
+(algorithm:encoded), and a sha256 digest must be 64 lowercase hex characters, so a typo fails the
+render instead of the image pull.
+*/}}
+{{- define "llm-d-router.image" -}}
+{{- $image := .image -}}
+{{- $digest := toString ($image.digest | default "") -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^[a-z0-9]+([+._-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$" $digest) -}}
+{{- fail (printf ".Values.%s.digest must be an OCI digest such as sha256:<64 hex characters>, got %q" .path $digest) -}}
+{{- end -}}
+{{- if and (hasPrefix "sha256:" $digest) (not (regexMatch "^sha256:[a-f0-9]{64}$" $digest)) -}}
+{{- fail (printf ".Values.%s.digest must be sha256: followed by 64 lowercase hex characters, got %q" .path $digest) -}}
+{{- end -}}
+{{- printf "%s/%s@%s" $image.registry $image.repository $digest -}}
+{{- else -}}
+{{- printf "%s/%s:%s" $image.registry $image.repository (toString $image.tag) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -597,7 +664,18 @@ Helper to check if priorityRouting is enabled across chart contexts.
 
 {{- define "llm-d-router.epp.healthCheckingRequired" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
-{{- if or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (include "llm-d-router.proxy.discoveryServiceName" .) (and (hasPrefix "llm-d-router-standalone" .Chart.Name) $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy")) -}}
+{{- if or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (include "llm-d-router.proxy.discoveryServiceName" .) (and (eq (include "llm-d-router.isStandaloneChart" .) "true") $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy")) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether Envoy health-checks EPP's gRPC health port, which reports NOT_SERVING while EPP drains, instead
+of the ext_proc port. ext_proc endpoints resolve to EPP pods (loopback, per-pod or headless DNS) everywhere
+except the ClusterIP Service in service mode (single-EPP or leader-elected), which exposes only the ext_proc port.
+*/}}
+{{- define "llm-d-router.proxy.eppHealthPortCheck" -}}
+{{- if and (include "llm-d-router.epp.healthCheckingRequired" .) (or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (ne (include "llm-d-router.proxyMode" .) "service") (include "llm-d-router.proxy.discoveryServiceName" .)) -}}
 true
 {{- end -}}
 {{- end -}}
@@ -670,11 +748,11 @@ true
 {{- end -}}
 {{- if not $healthChecking -}}
 {{- if $isPriorityRouting -}}
-{{- fail "priorityRouting requires EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
+{{- fail "priorityRouting requires EPP's gRPC health service (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
 {{- else if include "llm-d-router.proxy.discoveryServiceName" . -}}
 {{- fail "active-active Envoy discovery requires EPP's gRPC health service (router.epp.flags.health-checking cannot be false)" -}}
 {{- else -}}
-{{- fail "Envoy active health checks require EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false)" -}}
+{{- fail "Envoy active health checks require EPP's gRPC health service (router.epp.flags.health-checking cannot be false)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

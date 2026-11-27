@@ -275,14 +275,15 @@ func TestEveryRequestTypeDecidesConversationPrefix(t *testing.T) {
 		"Responses":       responsesBody(t, `{"input":"hi"}`),
 	}
 	unkeyed := map[string]string{
-		"Completions":   "no turn boundary",
-		"Generate":      "no turn boundary",
-		"Embeddings":    "single-shot",
-		"TextToSpeech":  "single-shot",
-		"AudioGenerate": "single-shot",
-		"Images":        "single-shot",
-		"Videos":        "single-shot",
-		"Conversations": "creates a conversation object; no generation",
+		"Completions":    "no turn boundary",
+		"Generate":       "no turn boundary",
+		"Embeddings":     "single-shot",
+		"TextToSpeech":   "single-shot",
+		"AudioGenerate":  "single-shot",
+		"Images":         "single-shot",
+		"Videos":         "single-shot",
+		"Transcriptions": "single-shot",
+		"Conversations":  "creates a conversation object; no generation",
 	}
 	prefixer := reflect.TypeFor[interface {
 		WriteConversationPrefix(PrefixWriter) bool

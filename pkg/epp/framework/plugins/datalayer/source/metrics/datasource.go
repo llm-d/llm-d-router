@@ -53,7 +53,8 @@ const maxResponseBytes = 8 << 20 // 8 MiB
 type metricsDatasourceParams struct {
 	// Scheme defines the protocol scheme used in metrics retrieval (e.g., "http").
 	Scheme string `json:"scheme"`
-	// Path defines the URL path used in metrics retrieval (e.g., "/metrics").
+	// Path defines the URL path used in metrics retrieval (e.g., "/metrics"). It may
+	// carry a query string (e.g., "/v1/loads?format=prometheus").
 	Path string `json:"path"`
 	// Port, when set, overrides the endpoint's inference port for metrics retrieval.
 	// Use when the model server exposes metrics on a port other than the InferencePool target port.
@@ -69,6 +70,9 @@ type metricsDatasourceParams struct {
 	// target authenticates this scraper by certificate instead of a bearer token. Both set together.
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
+	// ProxyURL sends scrapes through this HTTP proxy instead of dialing the endpoint,
+	// for model servers reachable only through a proxy, such as a sidecar that adds mTLS.
+	ProxyURL string `json:"proxyURL,omitempty"`
 	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
 	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
@@ -108,7 +112,12 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	opts := []http.Option{intervalOpt}
+	proxyOpt, err := http.ParseProxyURLOption(cfg.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []http.Option{intervalOpt, proxyOpt}
 	if cfg.Port != nil {
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}

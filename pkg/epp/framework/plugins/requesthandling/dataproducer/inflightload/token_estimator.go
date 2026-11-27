@@ -18,9 +18,11 @@ limitations under the License.
 package inflightload
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 )
@@ -54,6 +56,12 @@ const (
 	// observation weighs at least 1/unknownOutputWindow and the estimate follows
 	// workload shifts.
 	unknownOutputWindow = 100
+
+	// TTS output is codec frames at 12.5 frames/s. At a typical speaking rate
+	// that is about one frame per spoken character; using request bytes also
+	// keeps non-ASCII text proportional to its speech duration.
+	ttsFramesPerSpokenByte = 1.0
+	ttsMaxFrames           = 4096
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
@@ -107,6 +115,13 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 		return 0
 	}
 
+	// TTS output is codec frames derived from the spoken text, not the text
+	// output-length bucket (which the outlen-bucket plugin leaves UNKNOWN for
+	// speech).
+	if tts := request.Body.TextToSpeech; tts != nil {
+		return e.clampOutput(ttsOutputFrames(tts, request.Body.MaxOutputTokens), request.Body.MaxOutputTokens)
+	}
+
 	// An absent attribute reads as the zero value (Unknown) and is handled by the
 	// switch default; there is no separate fallback path.
 	bucket, _ := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
@@ -138,6 +153,19 @@ func (e *SimpleTokenEstimator) ObserveOutput(bucket outlenbucket.Bucket, complet
 	e.unknownN = min(e.unknownN+1, unknownOutputWindow)
 	e.unknownAvg += (float64(completionTokens) - e.unknownAvg) / float64(e.unknownN)
 	e.unknownEst.Store(min(max(int64(e.unknownAvg), ShortOutputTokens), LongOutputTokens))
+}
+
+// ttsOutputFrames estimates the codec frames a TTS request will generate.
+// Only the spoken text contributes to output length; instructions and the
+// reference transcript are prefill cost. An explicit max_new_tokens caps the
+// estimate.
+func ttsOutputFrames(tts *fwkrequest.TextToSpeechRequest, clientCap *int64) int64 {
+	expected := int64(math.Ceil(float64(len(tts.Input)) * ttsFramesPerSpokenByte))
+	if clientCap != nil && *clientCap > 0 && expected > *clientCap {
+		expected = *clientCap
+	}
+	expected = min(expected, ttsMaxFrames)
+	return max(expected, 1)
 }
 
 // clampOutput bounds est by the client-requested cap and the operator cap.

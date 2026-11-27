@@ -21,8 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 var errInvalidJSON = errors.New("invalid JSON")
@@ -66,11 +70,38 @@ func errorInternalServerError(w http.ResponseWriter, r *http.Request, err error)
 
 // sendError writes msg in the error envelope of the API r was sent to. A path
 // that is not an inference route, which only the decoder catch-all serves, and
-// a request or URL net/http never produces both get the OpenAI envelope.
+// a request or URL net/http never produces both get the OpenAI envelope. gRPC
+// requests receive a trailers-only gRPC status response.
 func sendError(w http.ResponseWriter, r *http.Request, status int, msg string) error {
+	if isGRPCRequest(r) {
+		grpcframe.WriteError(w, grpcframe.LocalHTTPStatusToCode(status), msg)
+		return nil
+	}
 	path := ""
 	if r != nil && r.URL != nil {
 		path = r.URL.Path
 	}
 	return reqcommon.WriteAPIError(w, reqcommon.DetectAPIType(path), status, msg)
+}
+
+func isVLLMGRPCPath(p string) bool {
+	_, ok := routing.PDVLLMGRPCMethods[strings.TrimSuffix(p, "/")]
+	return ok
+}
+
+func isVLLMGRPCRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && isVLLMGRPCPath(r.URL.Path)
+}
+
+func isGRPCRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+		return true
+	}
+	if r.URL != nil && strings.TrimSuffix(r.URL.Path, "/") == sglangapiv1.SglangService_Generate_FullMethodName {
+		return true
+	}
+	return isVLLMGRPCRequest(r)
 }

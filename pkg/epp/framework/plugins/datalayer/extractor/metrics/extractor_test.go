@@ -320,6 +320,69 @@ func TestBuiltinAtomEngine(t *testing.T) {
 	}
 }
 
+func TestBuiltinVLLMOmniEngine(t *testing.T) {
+	ctx := context.Background()
+
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, "vllm-omni-test", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	gauge := func(v float64) *dto.MetricFamily {
+		return &dto.MetricFamily{
+			Type: dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{
+				{Gauge: &dto.Gauge{Value: ptr.To(v)}},
+			},
+		}
+	}
+	stageGauge := func(stage string, v float64) *dto.Metric {
+		return &dto.Metric{
+			Label: []*dto.LabelPair{{Name: proto.String("stage"), Value: proto.String(stage)}},
+			Gauge: &dto.Gauge{Value: ptr.To(v)},
+		}
+	}
+
+	// No vllm:* families: this is the diffusion shape, where per-stage LLM
+	// families are absent and only the pipeline gauges exist.
+	data := sourcemetrics.PrometheusMetricMap{
+		"vllm_omni:num_requests_waiting": gauge(5),
+		"vllm_omni:num_requests_running": gauge(2),
+		"vllm_omni:stage_waiting_requests": &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{stageGauge("0", 2), stageGauge("1", 3)},
+		},
+	}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm-omni"},
+	}, nil)
+
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Payload:  data,
+		Endpoint: ep,
+	}); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	metrics := ep.GetMetrics()
+	if metrics.WaitingQueueSize != 5 {
+		t.Errorf("WaitingQueueSize = %v, want 5", metrics.WaitingQueueSize)
+	}
+	if metrics.RunningRequestsSize != 2 {
+		t.Errorf("RunningRequestsSize = %v, want 2", metrics.RunningRequestsSize)
+	}
+	if metrics.KVCacheUsagePercent != 0 {
+		t.Errorf("KVCacheUsagePercent = %v, want 0", metrics.KVCacheUsagePercent)
+	}
+	waiting, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.VLLMOmniStageWaitingRequestsDataKey)
+	if !ok {
+		t.Error("expected the summed stage waiting attribute to be set")
+	} else if float64(waiting) != 5.0 {
+		t.Errorf("summed stage waiting = %v, want 5", waiting)
+	}
+}
+
 func TestExtractorReadsEveryEngineOfDataParallelPod(t *testing.T) {
 	ctx := context.Background()
 
@@ -767,6 +830,42 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			errContains: `customMetrics entry attributeKey "shared.key" is duplicated`,
 		},
 		{
+			name: "attributeKey reject if it uses the scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "ScalarSample:WaitingQueueSize",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "ScalarSample:WaitingQueueSize" uses a prefix reserved for scalar sample keys`,
+		},
+		{
+			name: "attributeKey reject if it uses the custom scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "CustomScalarSample:depth",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "CustomScalarSample:depth" uses a prefix reserved for scalar sample keys`,
+		},
+		{
 			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",
 			params: map[string]any{
 				"engineConfigs": []map[string]any{
@@ -983,8 +1082,9 @@ func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
 	}
 	for _, engine := range defaultEngineConfigs {
 		raws := []string{
-			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
-			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.QueuedRequestsSpec, engine.DeferredRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec,
+			engine.LoRASpec, engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.CacheTotalTokensSpec, engine.CacheOffloadDetectionSpec,
 		}
 		for _, custom := range engine.CustomMetrics {
 			raws = append(raws, custom.MetricSpec)
@@ -1287,7 +1387,7 @@ func TestExtractorProducesBuiltinScalarAttributes(t *testing.T) {
 		t.Fatalf("newCoreMetricsExtractorPlugin() unexpected error: %v", err)
 	}
 	produced := ext.Produces()
-	for _, key := range []string{WaitingQueueSizeKey, RunningRequestsSizeKey, KVCacheUsagePercentKey} {
+	for _, key := range []string{WaitingQueueSizeKey, DeferredQueueSizeKey, RunningRequestsSizeKey, KVCacheUsagePercentKey} {
 		dk := attrmetrics.ScalarMetricDataKey(key)
 		got, ok := produced[dk]
 		if !ok {

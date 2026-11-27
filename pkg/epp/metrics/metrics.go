@@ -119,6 +119,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
 		metrics.Registry.MustRegister(llmdFlowControlDetectorSaturation)
+		metrics.Registry.MustRegister(llmdFlowControlDetectorCapacity)
 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
@@ -135,6 +136,9 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollDuration)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishesTotal)
+		metrics.Registry.MustRegister(LlmdCrossReplicaLastPublishTimestamp)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishCycleDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -183,6 +187,7 @@ func Reset() {
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
 	llmdFlowControlDetectorSaturation.Reset()
+	llmdFlowControlDetectorCapacity.Reset()
 	llmdFlowControlCapacityUtilizationRequests.Reset()
 	llmdFlowControlCapacityUtilizationBytes.Reset()
 	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
@@ -200,6 +205,9 @@ func Reset() {
 	LlmdDataLayerExtractErrorsTotal.Reset()
 	LlmdDataLayerPollsTotal.Reset()
 	LlmdDataLayerPollDuration.Reset()
+	LlmdCrossReplicaPublishesTotal.Reset()
+	LlmdCrossReplicaLastPublishTimestamp.Reset()
+	LlmdCrossReplicaPublishCycleDuration.Reset()
 	llmdToolCallingFieldStatusTotal.Reset()
 }
 
@@ -625,6 +633,18 @@ func DeleteFlowControlDetectorSaturationStage(stage string) {
 	llmdFlowControlDetectorSaturation.DeletePartialMatch(prometheus.Labels{"stage": stage})
 }
 
+// RecordFlowControlDetectorCapacity records the aggregate capacity, in the given unit, of the
+// endpoints a concurrency detector evaluated for a pipeline stage.
+func RecordFlowControlDetectorCapacity(detector, stage, unit string, capacity int64) {
+	llmdFlowControlDetectorCapacity.WithLabelValues(detector, stage, unit).Set(float64(capacity))
+}
+
+// DeleteFlowControlDetectorCapacityStage removes the per-detector capacity series of every
+// detector for a pipeline stage.
+func DeleteFlowControlDetectorCapacityStage(stage string) {
+	llmdFlowControlDetectorCapacity.DeletePartialMatch(prometheus.Labels{"stage": stage})
+}
+
 // RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
 // (occupancy/effective capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default
 // when unconfigured, so every configured band reports a series.
@@ -756,6 +776,59 @@ func InitDataLayerPollMetrics(sourceType string) {
 func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
 	LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome).Inc()
 	LlmdDataLayerPollDuration.WithLabelValues(sourceType).Observe(duration.Seconds())
+}
+
+// Outcome label values of LlmdCrossReplicaPublishesTotal.
+const (
+	// CrossReplicaPublishOutcomeSuccess: the syncer accepted the endpoint's value.
+	CrossReplicaPublishOutcomeSuccess = "success"
+	// CrossReplicaPublishOutcomeError: the syncer returned an error other than
+	// an expired deadline for the endpoint.
+	CrossReplicaPublishOutcomeError = "error"
+	// CrossReplicaPublishOutcomeTimeout: the publish deadline expired before
+	// the syncer accepted the endpoint's value, including an endpoint left
+	// unattempted because the deadline ran out. A slow syncer shows here; a
+	// syncer that refuses writes shows under error.
+	CrossReplicaPublishOutcomeTimeout = "timeout"
+)
+
+// InitCrossReplicaPublishMetrics creates every outcome series for a state key at
+// zero, so the first failed publish is an increment on an existing series that
+// rate() and increase() can see, and exposes the cycle-duration histogram with
+// zero observations. It does not create the last-publish timestamp series:
+// before the first successful publish that series must be absent, not 0.
+// Safe to call repeatedly.
+func InitCrossReplicaPublishMetrics(stateKey string) {
+	for _, outcome := range []string{CrossReplicaPublishOutcomeSuccess, CrossReplicaPublishOutcomeError, CrossReplicaPublishOutcomeTimeout} {
+		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome)
+	}
+	LlmdCrossReplicaPublishCycleDuration.WithLabelValues()
+}
+
+// RecordCrossReplicaCycleOutcome records one publish cycle for a state key: it
+// counts the endpoints published, failed with an error, and timed out, and
+// stamps the last-publish time only when the cycle was clean, that is, it
+// published at least one endpoint and none errored or timed out. A partial
+// failure therefore stops the clock just like an outage, so a staleness alert
+// also catches an endpoint that never publishes.
+func RecordCrossReplicaCycleOutcome(stateKey string, succeeded, errored, timedOut int, now time.Time) {
+	for outcome, n := range map[string]int{
+		CrossReplicaPublishOutcomeSuccess: succeeded,
+		CrossReplicaPublishOutcomeError:   errored,
+		CrossReplicaPublishOutcomeTimeout: timedOut,
+	} {
+		if n > 0 {
+			LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome).Add(float64(n))
+		}
+	}
+	if succeeded > 0 && errored == 0 && timedOut == 0 {
+		LlmdCrossReplicaLastPublishTimestamp.WithLabelValues(stateKey).Set(float64(now.UnixNano()) / float64(time.Second))
+	}
+}
+
+// RecordCrossReplicaPublishCycle observes the duration of one publish cycle.
+func RecordCrossReplicaPublishCycle(duration time.Duration) {
+	LlmdCrossReplicaPublishCycleDuration.WithLabelValues().Observe(duration.Seconds())
 }
 
 // RecordToolCallingFieldStatuses records outcomes only for fields present on at

@@ -549,6 +549,25 @@ func TestDetector_Filter(t *testing.T) {
 	}
 }
 
+func TestDetector_Filter_KVLimitCappedAtOne(t *testing.T) {
+	t.Parallel()
+
+	// Uncapped KV limit is 0.9 * 1.2 = 1.08, above any reachable usage.
+	config := Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.9,
+		MetricsStalenessThreshold: time.Hour,
+		Headroom:                  0.2,
+	}
+	now := time.Now()
+	full := makeSchedulingEndpoint("full", 1, 1.0, now)
+	healthy := makeSchedulingEndpoint("healthy", 1, 0.5, now)
+
+	detector := NewDetector("test-detector", config, logr.Discard())
+	got := detector.Filter(context.Background(), nil, []fwksched.Endpoint{full, healthy})
+	require.Equal(t, []fwksched.Endpoint{healthy}, got)
+}
+
 // staleGaugeValue reads the llm_d_epp_flow_control_stale_endpoints series for the given detector
 // and stage. It returns -1 when the series is absent.
 func staleGaugeValue(t *testing.T, detectorName, stage string) float64 {

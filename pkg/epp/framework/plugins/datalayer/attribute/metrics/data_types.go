@@ -29,6 +29,10 @@ const (
 	// MetricsExtractorType is the plugin type for the core metrics extractor,
 	// which publishes the custom scalar metric attributes.
 	MetricsExtractorType = "core-metrics-extractor"
+
+	// VLLMOmniStageWaitingRequestsKey holds the total waiting requests across
+	// all stages of a vLLM-Omni pipeline.
+	VLLMOmniStageWaitingRequestsKey = "vllm_omni_stage_waiting_requests"
 )
 
 // ScalarMetricValue is a numeric endpoint attribute extracted from a configured scalar metric.
@@ -44,6 +48,38 @@ func (v ScalarMetricValue) Clone() fwkdl.Cloneable {
 // is derived at construction time instead of being declared as a package var.
 func ScalarMetricDataKey(attributeKey string) plugin.DataKey {
 	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
+}
+
+// VLLMOmniStageWaitingRequestsDataKey reads the summed per-stage waiting count
+// extracted for a vLLM-Omni endpoint.
+var VLLMOmniStageWaitingRequestsDataKey = ScalarMetricDataKey(VLLMOmniStageWaitingRequestsKey)
+
+const (
+	scalarSampleKeyPrefix       = "ScalarSample:"
+	customScalarSampleKeyPrefix = "CustomScalarSample:"
+)
+
+// IsReservedAttributeKey reports whether a scalar metric attributeKey starts
+// with a prefix of the sample keys. ScalarMetricDataKey of such a key would
+// equal a sample key, so the extractor rejects it.
+func IsReservedAttributeKey(attributeKey string) bool {
+	return strings.HasPrefix(attributeKey, scalarSampleKeyPrefix) ||
+		strings.HasPrefix(attributeKey, customScalarSampleKeyPrefix)
+}
+
+// ScalarSampleDataKey returns the key a consumer declares to read
+// Metrics.ScalarSample(field). The sample is stored in Metrics rather than in
+// the AttributeMap, which is cloned per endpoint on every request.
+func ScalarSampleDataKey(field fwkdl.ScalarField) plugin.DataKey {
+	return plugin.NewDataKey(scalarSampleKeyPrefix+field.String(), MetricsExtractorType)
+}
+
+// CustomScalarSampleDataKey returns the key a consumer declares to read
+// Metrics.CustomScalarSample(attributeKey). Its prefix differs from
+// ScalarSampleDataKey, so a custom metric that overrides a standard
+// attributeKey keeps its own key.
+func CustomScalarSampleDataKey(attributeKey string) plugin.DataKey {
+	return plugin.NewDataKey(customScalarSampleKeyPrefix+attributeKey, MetricsExtractorType)
 }
 
 func ReadScalarMetricValue(attrs fwkdl.AttributeMap, key plugin.DataKey) (ScalarMetricValue, bool) {

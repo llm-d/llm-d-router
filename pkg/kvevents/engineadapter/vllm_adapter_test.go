@@ -203,6 +203,25 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
+// TestVLLMParseMessage_ModelOnlyTopic tests a per-pod subscription whose
+// topic names the model alone.
+func TestVLLMParseMessage_ModelOnlyTopic(t *testing.T) {
+	payload, err := msgpack.Marshal([]any{
+		1234567890.0,
+		[]any{[]any{"BlockStored", []any{uint64(100)}, uint64(99), []uint32{1, 2, 3}, 16, nil, "gpu", nil, nil}},
+	})
+	require.NoError(t, err)
+
+	podID, modelName, _, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic:          "kv@llama-2-7b",
+		SourceEndpoint: "10.0.0.5:5556",
+		Payload:        payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.5:5556", podID)
+	assert.Equal(t, "llama-2-7b", modelName)
+}
+
 // TestVLLMParseMessage_BatchExtraTrailingFields tests a batch from a publisher
 // that serves snapshots, which appends its publisher_id to every batch.
 func TestVLLMParseMessage_BatchExtraTrailingFields(t *testing.T) {
@@ -711,7 +730,9 @@ func TestVLLMUnknownTag(t *testing.T) {
 	event, err := adapter.decodeVLLMEvent(rawBytes)
 	assert.Error(t, err)
 	assert.Nil(t, event)
-	assert.ErrorIs(t, err, errUnknownTypedEventTag)
+	var unknown *unknownTypedEventTagError
+	require.ErrorAs(t, err, &unknown)
+	assert.Equal(t, "UnknownEventType", unknown.tag)
 }
 
 // TestVLLMMalformedPayload tests error handling for malformed msgpack data.
@@ -914,30 +935,42 @@ func TestVLLMParseMessage_SkipsUnknownEventTags(t *testing.T) {
 	}
 	unknownArray := []any{"SomethingNew", []any{uint64(7)}, map[string]any{"a": []any{1, 2}}}
 	unknownTagOnly := []any{"SomethingNew"}
+	unknownOther := []any{"AnotherNew"}
 
 	for name, tc := range map[string]struct {
-		events []any
-		want   []kvevents.EventType
+		events      []any
+		want        []kvevents.EventType
+		wantSkipped []string
 	}{
 		"map-encoded between known events": {
-			events: []any{stored, unknownMap, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			events:      []any{stored, unknownMap, removed},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			wantSkipped: []string{"SomethingNew"},
 		},
 		"array-encoded between known events": {
-			events: []any{stored, unknownArray, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			events:      []any{stored, unknownArray, removed},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			wantSkipped: []string{"SomethingNew"},
 		},
 		"array-encoded with tag only": {
-			events: []any{unknownTagOnly, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockRemoved},
+			events:      []any{unknownTagOnly, removed},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockRemoved},
+			wantSkipped: []string{"SomethingNew"},
 		},
 		"first and last": {
-			events: []any{unknownArray, stored, unknownMap},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored},
+			events:      []any{unknownArray, stored, unknownMap},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored},
+			wantSkipped: []string{"SomethingNew", "SomethingNew"},
 		},
 		"only unknown": {
-			events: []any{unknownMap, unknownArray},
-			want:   []kvevents.EventType{},
+			events:      []any{unknownMap, unknownArray},
+			want:        []kvevents.EventType{},
+			wantSkipped: []string{"SomethingNew", "SomethingNew"},
+		},
+		"distinct tags in wire order": {
+			events:      []any{unknownOther, stored, unknownMap},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored},
+			wantSkipped: []string{"AnotherNew", "SomethingNew"},
 		},
 	} {
 		payload, err := msgpack.Marshal([]any{1.0, tc.events, nil})
@@ -951,6 +984,7 @@ func TestVLLMParseMessage_SkipsUnknownEventTags(t *testing.T) {
 			got = append(got, ev.Type())
 		}
 		assert.Equal(t, tc.want, got, name)
+		assert.Equal(t, tc.wantSkipped, batch.SkippedTags, name)
 	}
 }
 

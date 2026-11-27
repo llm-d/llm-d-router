@@ -143,6 +143,7 @@ The three lifecycle clocks hand off without overlap: the deadline ends where the
 - `redis_url` must point at a standalone Redis endpoint, or a proxy presenting one. The step's client does not follow Cluster redirects or Sentinel failovers.
 - Set `maxmemory` together with `maxmemory-policy noeviction` on that Redis, with headroom below the container's memory limit. An evicted marker, counter, or mailbox silently corrupts request state, while `noeviction` turns overflow into write errors the step reports.
 - A restricted Redis user needs `@scripting` and `@pubsub`. The `wakeup_mode: auto` probe also reads CONFIG, and setting `notify` explicitly avoids it.
+- Each reserved passthrough classification and each release also writes a `quota-call:<counter key>:<token>` guard that expires after 2 minutes. These keys sit outside the quota `prefix`, so a Redis ACL scoped by key pattern must allow them.
 - Wait mode holds one gateway to coordinator connection per waiting client, so the gateway's circuit breaker limits on the coordinator cluster must be sized for held connections, not request rate. Envoy defaults are far too low.
 - `preserve_external_request_id` should be set on the gateway so client supplied request ids survive the hop for retry and fetch by id.
 - Delivery is at most once at any replica count. A message popped by an AP that then crashes is lost, and the client holds a pending id until its deadline expires. Delivery guarantees beyond this belong to client retries by id.

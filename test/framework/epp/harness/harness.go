@@ -683,13 +683,20 @@ func labelsToString(labels []label) string {
 	return strings.Join(parts, ",")
 }
 
-// MetricReqTotal renders the expected llm_d_epp_request_total exposition text.
+// MetricReqTotal renders the expected llm_d_epp_request_total exposition text
+// for a request whose path has no API surface.
 func MetricReqTotal(model, target string, priority int) string {
+	return MetricReqTotalForSurface(reqcommon.APISurfaceUnknown, model, target, priority)
+}
+
+// MetricReqTotalForSurface renders the expected llm_d_epp_request_total
+// exposition text.
+func MetricReqTotalForSurface(surface reqcommon.APISurface, model, target string, priority int) string {
 	return fmt.Sprintf(`
     # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
     # TYPE llm_d_epp_request_total counter
     llm_d_epp_request_total{%s} 1
-    `, labelsToString([]label{{"api_surface", reqcommon.APISurfaceUnknown.String()}, {"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    `, labelsToString([]label{{"api_surface", surface.String()}, {"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 // MetricReadyPods renders the expected llm_d_epp_ready_endpoints exposition text.

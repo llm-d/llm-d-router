@@ -508,6 +508,27 @@ func (s *decisionSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, id string
 	return s.actual, true, s.err
 }
 
+func TestRequiresCoordinationFollowsRevisionGating(t *testing.T) {
+	disabled := validConfig()
+	disabled.RevisionGating.DisableCoordination = true
+	inactive := validConfig()
+	inactive.RevisionGating.Mode = GatingModeDisabled
+	for name, tc := range map[string]struct {
+		config Config
+		want   bool
+	}{
+		"coordination on":     {config: validConfig(), want: true},
+		"disableCoordination": {config: disabled, want: false},
+		"revision gating off": {config: inactive, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := newTestScreener(tc.config).RequiresCoordination(); got != tc.want {
+				t.Fatalf("RequiresCoordination() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestScreenerCoordinatesOnlyWhileMultipleRevisionsAreObserved(t *testing.T) {
 	screener := newTestScreener(validConfig())
 	seedCounts(t, screener, map[string]map[string]int{"v1": {"prefill": 1, "decode": 1}})

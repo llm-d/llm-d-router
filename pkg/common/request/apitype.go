@@ -19,6 +19,9 @@ package request
 import (
 	"fmt"
 	"strings"
+
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 )
 
 // API paths shared by routing components.
@@ -63,6 +66,8 @@ const (
 	APITypeSGLangGenerate
 	// APITypeMessages is the Anthropic Messages API (/v1/messages).
 	APITypeMessages
+	// APITypeAudioSpeech is vLLM-Omni's audio speech API (/v1/audio/speech).
+	APITypeAudioSpeech
 
 	// Keep apiTypeCount last so classifiers cover every API type.
 	apiTypeCount
@@ -83,6 +88,8 @@ func (a APIType) String() string {
 		return "sglang_generate"
 	case APITypeMessages:
 		return "messages"
+	case APITypeAudioSpeech:
+		return "audio_speech"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -117,6 +124,8 @@ func (a APIType) Path() string {
 		return PathSGLangGenerate
 	case APITypeMessages:
 		return PathMessages
+	case APITypeAudioSpeech:
+		return PathAudioSpeech
 	default:
 		return PathChatCompletions
 	}
@@ -135,6 +144,8 @@ func DetectAPIType(path string) APIType {
 		return APITypeResponses
 	case strings.Contains(path, PathMessages):
 		return APITypeMessages
+	case strings.Contains(path, PathAudioSpeech):
+		return APITypeAudioSpeech
 	case strings.Contains(path, PathVLLMGenerate):
 		return APITypeVLLMGenerate
 	case strings.Contains(path, PathSGLangGenerate):
@@ -144,10 +155,22 @@ func DetectAPIType(path string) APIType {
 	}
 }
 
-// MatchAPIType classifies generation paths without a routing fallback.
+// grpcMethodAPITypes maps gRPC generation methods to the API they serve. A
+// gRPC method path has no provider prefix, so it matches exactly.
+var grpcMethodAPITypes = map[string]APIType{
+	vllmpb.Inference_Generate_FullMethodName:          APITypeVLLMGenerate,
+	vllmpb.Inference_GenerateStream_FullMethodName:    APITypeVLLMGenerate,
+	sglangapiv1.SglangService_Generate_FullMethodName: APITypeSGLangGenerate,
+}
+
+// MatchAPIType classifies generation paths and gRPC generation methods without
+// a routing fallback.
 func MatchAPIType(path string) (APIType, bool) {
 	path, _, _ = strings.Cut(path, "?")
 	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	if apiType, ok := grpcMethodAPITypes[path]; ok {
+		return apiType, true
+	}
 	// vLLM Omni's /v1/audio/generate ends in SGLang's /generate but is not a
 	// generation API this classifier names.
 	if strings.HasSuffix(path, strings.TrimPrefix(PathAudioGenerate, "/v1")) {
@@ -185,6 +208,7 @@ var (
 	chatCompletionTokenLimitFields = []string{FieldMaxCompletionTokens, FieldMaxTokens}
 	maxTokensOnlyTokenLimitFields  = []string{FieldMaxTokens}
 	responsesTokenLimitFields      = []string{FieldMaxOutputTokens}
+	audioSpeechTokenLimitFields    = []string{FieldMaxNewTokens}
 )
 
 // tokenLimitFields returns the output token cap field names the API uses.
@@ -193,6 +217,8 @@ func (a APIType) tokenLimitFields() []string {
 	switch a {
 	case APITypeResponses:
 		return responsesTokenLimitFields
+	case APITypeAudioSpeech:
+		return audioSpeechTokenLimitFields
 	case APITypeCompletions, APITypeVLLMGenerate, APITypeMessages:
 		return maxTokensOnlyTokenLimitFields
 	default:

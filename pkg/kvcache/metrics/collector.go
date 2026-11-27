@@ -38,7 +38,18 @@ const podIdentifierLabel = "pod_identifier"
 const (
 	cacheKindLabel = "cache_kind"
 	reasonLabel    = "reason"
+	tagLabel       = "tag"
 )
+
+// maxUnknownTagLabelValues caps the distinct tag label values. Tags are read
+// from the engine's wire payload, so their number is not bounded by the router.
+const maxUnknownTagLabelValues = 32
+
+var unknownTagLimiter = metricsutil.NewBoundedLabel(maxUnknownTagLabelValues)
+
+// emptyTagLabel is the tag label value for an event whose tag is the empty
+// string. Prometheus treats an empty label value as a missing label.
+const emptyTagLabel = "empty"
 
 var (
 	Admissions = prometheus.NewCounter(prometheus.CounterOpts{
@@ -120,6 +131,14 @@ var (
 			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
 			compbasemetrics.ALPHA),
 	}, []string{cacheKindLabel, reasonLabel})
+	// KVEventUnknownTagsSkipped counts events skipped because the engine
+	// adapter does not know their tag.
+	KVEventUnknownTagsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_unknown_tags_skipped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-cache events skipped because the engine adapter does not know their tag",
+			compbasemetrics.ALPHA),
+	}, []string{tagLabel})
 
 	// SubscriberActive tracks the number of ZMQ subscribers currently managed by
 	// the SubscriberManager. A subscriber is counted from creation until it is
@@ -161,6 +180,24 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of ZMQ subscriber errors", compbasemetrics.ALPHA),
 	}, []string{podIdentifierLabel, "operation"})
+	// LiveOnlySubscribers counts subscribers indexing live events without a
+	// snapshot or replay base after a load failed, from the first such event
+	// until the subscriber follows a complete event sequence again or is removed.
+	LiveOnlySubscribers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only_subscribers",
+		Help: metricsutil.HelpMsgWithStability(
+			"Number of ZMQ subscribers indexing from live events only after a failed snapshot or replay load",
+			compbasemetrics.ALPHA),
+	})
+	// SnapshotLoadDuration observes successful snapshot loads, from the request
+	// until the snapshot's batches are queued for indexing.
+	SnapshotLoadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_load_duration_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of successful snapshot loads in seconds, until the batches are queued for indexing",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+	})
 	// PoolQueueDepth tracks the total number of messages queued across all
 	// worker shards of the event processing pool.
 	PoolQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -183,10 +220,24 @@ func Collectors() []prometheus.Collector {
 		Admissions, Evictions,
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
-		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, TopicPodMismatches, ZMQErrors,
+		LiveOnlySubscribers, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
 	}
+}
+
+// RecordUnknownTagSkipped counts one event skipped for an unknown tag and
+// returns the tag label value it was counted under, which differs from tag
+// when the tag is empty or the limiter folds it.
+func RecordUnknownTagSkipped(tag string) string {
+	// An empty tag is not passed to the limiter, so a full cap cannot fold it.
+	label := emptyTagLabel
+	if tag != "" {
+		label = unknownTagLimiter.Bound(tag)
+	}
+	KVEventUnknownTagsSkipped.WithLabelValues(label).Inc()
+	return label
 }
 
 // CleanupSubscriber drops every per-pod kvevents series for podIdentifier so
@@ -209,13 +260,18 @@ func Register() {
 }
 
 // StartMetricsLogging spawns a goroutine that logs current metric values every
-// interval.
+// interval until ctx ends.
 func StartMetricsLogging(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			logMetrics(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				logMetrics(ctx)
+			}
 		}
 	}()
 }

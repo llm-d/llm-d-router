@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -215,15 +216,16 @@ type RequestContext struct {
 	// prompt-cache hits of its own, so its count describes the handoff rather
 	// than the prompt cache.
 	//
-	// A zero value is a measurement, not an absent one: vLLM sends the details
-	// object as null when nothing hit the prompt cache. nil means no prefill
-	// measurement applies to this request, and the decode worker's own count
-	// must reach the client unchanged. PrefillStep leaves it nil when prefill
-	// did not run, when the prefill response carried no usage block at all, and
-	// when a kv-nixl handoff returned no transfer params, since decode then
-	// recomputes the prompt and nothing inflates the count it reports. A
-	// consumer that treats nil as zero reports no cache hits for a request that
-	// had them.
+	// A non-nil value, zero included, is a measurement: the details object
+	// carried the number. nil means no prefill measurement applies to this
+	// request, and the decode worker's own usage must reach the client
+	// unchanged. PrefillStep leaves it nil when prefill did not run, when the
+	// prefill response carried no usage block, when that block's details object
+	// carried no number (vLLM without --enable-prompt-tokens-details sends no
+	// details however many tokens were cached), and when a kv-nixl handoff
+	// returned no transfer params, since decode then recomputes the prompt and
+	// nothing inflates the count it reports. A consumer that treats nil as zero
+	// reports no cache hits for a request that had them.
 	PrefillCachedTokens *int
 	// PeerTopology carries the prefill endpoint's encoded topology from the
 	// prefill response to the decode request, for topology-affinity-filter
@@ -242,32 +244,115 @@ type RequestContext struct {
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
+	// stepRerunsLeft counts the StepRerunError requests that the pipeline
+	// still honors for this request. Pipeline.Execute sets it.
+	stepRerunsLeft int
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
 
-	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
-	// native gRPC Generate request with client bootstrap fields removed. It
-	// aliases OriginalBody unless a field was removed. The prefill and decode
-	// steps send it as is, between a frame header and their bootstrap
-	// fields, so neither copies it. Nil for JSON HTTP requests. Use
-	// IsSGLangGRPC to test for a gRPC Generate request.
-	GRPCGeneratePayload []byte
+	// GRPC holds protocol-specific gRPC request state when worker legs execute
+	// over gRPC (native SGLang gRPC, native vLLM gRPC, or HTTP
+	// /inference/v1/generate translated onto vLLM gRPC). Nil for HTTP worker
+	// pipelines.
+	GRPC GRPCRequest
+}
+
+// GRPCRequest carries protocol-specific gRPC state on RequestContext.
+type GRPCRequest interface {
+	isNativeGRPC() bool
+	closeStream()
+}
+
+// SGLangGRPCRequest carries state for a native SGLang gRPC Generate request.
+type SGLangGRPCRequest struct {
+	// Payload holds the unframed protobuf payload of an SGLang native gRPC
+	// Generate request with client bootstrap fields removed. It aliases
+	// OriginalBody unless a field was removed. The prefill and decode steps
+	// send it as is, between a frame header and their bootstrap fields, so
+	// neither copies it.
+	Payload []byte
 	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
 	// started by PrefillStep and coordinated with DecodeStep.
 	PrefillStream *SGLangPrefillStream
 }
 
-// IsSGLangGRPC reports whether the request is an SGLang native gRPC Generate
-// request. An empty GenerateRequest has an empty but non-nil payload.
-func (rc *RequestContext) IsSGLangGRPC() bool {
-	return rc.GRPCGeneratePayload != nil
+func (*SGLangGRPCRequest) isNativeGRPC() bool { return true }
+func (r *SGLangGRPCRequest) closeStream() {
+	if r != nil && r.PrefillStream != nil {
+		r.PrefillStream.Close()
+	}
+}
+
+// GenerateOutputMode values for vLLM /inference/v1/generate responses.
+const (
+	GenerateOutputModeTokens = "tokens"
+	GenerateOutputModeText   = "text"
+)
+
+// HTTPGenerateReply carries response-formatting options when an inbound HTTP
+// POST /inference/v1/generate request is executed over vllm.Inference gRPC.
+type HTTPGenerateReply struct {
+	// IncludeUsage reports whether the HTTP stream requested
+	// stream_options.include_usage.
+	IncludeUsage bool
+	// ReturnTokenIDs reports whether the HTTP request asked to echo prompt
+	// token IDs in the response.
+	ReturnTokenIDs bool
+	// OutputMode is the /inference/v1/generate response level ("tokens" or
+	// "text"). Empty defaults to GenerateOutputModeTokens.
+	OutputMode string
+	// ClientRequestID holds a request_id supplied in the HTTP JSON body so
+	// translated responses echo the client's identifier when present.
+	ClientRequestID string
+}
+
+// VLLMGRPCRequest carries state for a request whose worker legs execute over
+// vllm.Inference gRPC.
+type VLLMGRPCRequest struct {
+	// Req holds the scanned vllm.Inference GenerateRequest with client
+	// kv_transfer_params and ec_transfer_params stripped.
+	Req vllmwire.Request
+	// HTTP is non-nil when Req was translated from an inbound HTTP POST
+	// /inference/v1/generate request rather than a native gRPC RPC.
+	HTTP *HTTPGenerateReply
+	// EncodeRan reports whether EncodeStep ran on this request, so downstream
+	// legs strip preprocessed media bytes to metadata-only.
+	EncodeRan bool
+	// PrefillRan reports whether PrefillStep ran on this request,
+	// distinguishing P/D handoff from decode-only or encode->decode.
+	PrefillRan bool
+	// PrefillPromptTokens holds prefill's PromptInfo.num_prompt_tokens when
+	// reported, so DecodeStep can run the prompt_token_parity check.
+	PrefillPromptTokens *uint32
+}
+
+func (r *VLLMGRPCRequest) isNativeGRPC() bool { return r != nil && r.HTTP == nil }
+func (*VLLMGRPCRequest) closeStream()         {}
+
+// IsGRPC reports whether worker stages execute via a gRPC worker protocol
+// (SGLang or vLLM).
+func (rc *RequestContext) IsGRPC() bool {
+	return rc != nil && rc.GRPC != nil
+}
+
+// IsNativeGRPC reports whether the inbound client request itself is a native
+// gRPC RPC rather than an HTTP JSON request.
+func (rc *RequestContext) IsNativeGRPC() bool {
+	return rc != nil && rc.GRPC != nil && rc.GRPC.isNativeGRPC()
+}
+
+// CanRerunStep reports whether the pipeline still honors a StepRerunError for
+// this request. A step checks it before it holds back an upstream error from
+// the client.
+func (rc *RequestContext) CanRerunStep() bool {
+	return rc != nil && rc.stepRerunsLeft > 0
 }
 
 // ClosePrefillStream cancels and releases any active concurrent prefill stream.
 func (rc *RequestContext) ClosePrefillStream() {
-	if rc != nil && rc.PrefillStream != nil {
-		rc.PrefillStream.Close()
+	if rc != nil && rc.GRPC != nil {
+		rc.GRPC.closeStream()
 	}
 }
 

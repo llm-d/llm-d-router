@@ -410,7 +410,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	// ── Stage 3: Prefill (optional) ────────────────────────────────────────
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
-			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
+			if h.pdDecider != nil && hasPDRoute(request) && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
 				// Publish the decode pick so plugins in the prefill profile (e.g.
 				// topology affinity) can compare candidates against it.
 				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
@@ -449,8 +449,9 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	}
 
 	// ── Stage 1: Prefill (optional) ────────────────────────────────────────
-	// In prefill-first mode, prefill runs whenever the prefill profile is configured.
-	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
+	// In prefill-first mode, prefill runs whenever the prefill profile is
+	// configured and the request has a P/D route.
+	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile && hasPDRoute(request) {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
 			return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
@@ -485,6 +486,12 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 
 	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_decode"))
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
+}
+
+// hasPDRoute reports whether the sidecar serves the request's path with
+// disaggregated prefill.
+func hasPDRoute(request *scheduling.InferenceRequest) bool {
+	return routing.HasPDRoute(fwkrequest.GetRequestPath(request.Headers))
 }
 
 // prefillRequiredButFailed reports whether the prefill profile was picked to

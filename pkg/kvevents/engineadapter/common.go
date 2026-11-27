@@ -24,6 +24,7 @@ import (
 	"github.com/vmihailenco/msgpack/v5/msgpcode"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
 const (
@@ -40,6 +41,19 @@ func parseTopic(topic string) (string, string) {
 		return topicParts[1], topicParts[2]
 	}
 	return topic, ""
+}
+
+// topicIdentity returns the pod ID and model name for a message. A subscriber
+// that dialed the pod already knows it, so with per-pod subscriptions the topic
+// may name the model alone ("kv@<model-name>"), which lets every replica of a
+// model server publish under the same topic.
+func topicIdentity(msg *kvevents.RawMessage) (string, string) {
+	if msg.SourceEndpoint != "" {
+		if _, model, ok := strings.Cut(msg.Topic, "@"); ok && model != "" && !strings.Contains(model, "@") {
+			return msg.SourceEndpoint, model
+		}
+	}
+	return parseTopic(msg.Topic)
 }
 
 func decodeTokenID(dec *msgpack.Decoder) (uint32, error) {

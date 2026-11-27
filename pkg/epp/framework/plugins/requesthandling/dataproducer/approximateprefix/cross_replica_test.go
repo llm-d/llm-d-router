@@ -68,6 +68,26 @@ func TestRecentWindowKeepsPromptBoundaries(t *testing.T) {
 		"drop oldest prompt when total exceeds max")
 }
 
+func TestRecentWindowRemovePrompt(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.removePrompt("ep", []blockHash{3, 4})
+	require.Equal(t, [][]blockHash{{1, 2}}, w.snapshot("ep"), "removed prompt leaves the window")
+
+	// A recording head-capped to the window's max is matched by its full hashes.
+	capped := newRecentWindow(3)
+	capped.record("ep", []blockHash{1, 2, 3, 4, 5})
+	require.Equal(t, [][]blockHash{{1, 2, 3}}, capped.snapshot("ep"))
+	capped.removePrompt("ep", []blockHash{1, 2, 3, 4, 5})
+	require.Nil(t, capped.snapshot("ep"), "capped recording removed by full hashes")
+
+	// Removing an unknown prompt, or from an unknown endpoint, is a no-op.
+	w.removePrompt("ep", []blockHash{99})
+	w.removePrompt("other", []blockHash{1, 2})
+	require.Equal(t, [][]blockHash{{1, 2}}, w.snapshot("ep"))
+}
+
 func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	syncOn := true
 	cfg := defaultConfig
@@ -445,4 +465,43 @@ func TestExtractIgnoresStaleDelete(t *testing.T) {
 		Endpoint: live,
 	}))
 	require.Nil(t, producer.recent.snapshot(endpointID))
+}
+
+func TestExtractDeleteDropsIndexerEntries(t *testing.T) {
+	cfg := defaultConfig
+	cfg.AutoTune = false
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	require.NoError(t, err)
+
+	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
+	serverID := ServerID(podID)
+	hashes := []blockHash{1, 2, 3}
+	live := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, fwkdl.NewMetrics())
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: live,
+	}))
+	producer.indexerInst.Add(hashes, server{ServerID: serverID})
+
+	stale := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, fwkdl.NewMetrics())
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: stale,
+	}))
+	require.Equal(t, []int{3}, producer.indexerInst.MatchLongestPrefix(hashes, []ServerID{serverID}),
+		"stale delete for a replaced endpoint must not drop the live endpoint's entries")
+
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: live,
+	}))
+	require.NotContains(t, producer.indexerInst.Pods(), serverID)
+
+	returning := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podID}, fwkdl.NewMetrics())
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: returning,
+	}))
+	require.Equal(t, []int{0}, producer.indexerInst.MatchLongestPrefix(hashes, []ServerID{serverID}),
+		"an endpoint that returns under the same name must start without the deleted endpoint's entries")
 }

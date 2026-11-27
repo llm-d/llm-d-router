@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -152,6 +153,7 @@ type Options struct {
 	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
+	ValidateConfig           bool // Validates the configuration and exits without starting the EPP.
 
 	// internal
 	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
@@ -302,6 +304,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"configuration's featureGates list, so these override entries set there.")
 	fs.BoolVar(&opts.AllowExperimentalPlugins, "allow-experimental-plugins", opts.AllowExperimentalPlugins,
 		"Allows loading of experimental Alpha plugins.")
+	fs.BoolVar(&opts.ValidateConfig, "validate-config", opts.ValidateConfig,
+		"Validate the configuration and exit, without connecting to Kubernetes or starting any server.")
 }
 
 func (opts *Options) Complete() error {
@@ -396,23 +400,16 @@ func (opts *Options) Complete() error {
 		opts.clientCAs = pool
 	}
 
-	if opts.TLSMinVersion != "" {
-		v, err := parseTLSVersion(opts.TLSMinVersion)
-		if err != nil {
-			return fmt.Errorf("invalid tls-min-version %q: %w", opts.TLSMinVersion, err)
-		}
-		if v < tls.VersionTLS12 {
-			return fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion)
-		}
-		opts.tlsMinVersionValue = v
+	v, err := tlsutil.ParseTLSVersion(opts.TLSMinVersion)
+	if err != nil {
+		return err
 	}
-	if len(opts.TLSCipherSuites) > 0 {
-		suites, err := parseCipherSuites(opts.TLSCipherSuites)
-		if err != nil {
-			return fmt.Errorf("invalid tls-cipher-suites: %w", err)
-		}
-		opts.tlsCipherSuiteValues = suites
+	opts.tlsMinVersionValue = v
+	suites, err := tlsutil.ParseCipherSuites(opts.TLSCipherSuites)
+	if err != nil {
+		return err
 	}
+	opts.tlsCipherSuiteValues = suites
 
 	// Complete logging options.
 	return opts.LoggingOptions.Complete()
@@ -578,40 +575,6 @@ func (opts *Options) TLSCipherSuiteValues() []uint16 {
 // serving listener does not require client certificates.
 func (opts *Options) ClientCAPool() *x509.CertPool {
 	return opts.clientCAs
-}
-
-var tlsVersions = map[string]uint16{
-	"VersionTLS10": tls.VersionTLS10,
-	"VersionTLS11": tls.VersionTLS11,
-	"VersionTLS12": tls.VersionTLS12,
-	"VersionTLS13": tls.VersionTLS13,
-}
-
-func parseTLSVersion(s string) (uint16, error) {
-	if v, ok := tlsVersions[s]; ok {
-		return v, nil
-	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", s)
-}
-
-func parseCipherSuites(names []string) ([]uint16, error) {
-	byName := make(map[string]uint16)
-	for _, cs := range tls.CipherSuites() {
-		byName[cs.Name] = cs.ID
-	}
-	ids := make([]uint16, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		id, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown cipher suite %q", name)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
 }
 
 // LeaderElectionOverride returns a controller manager option override that applies the lease

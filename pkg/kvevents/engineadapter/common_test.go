@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
@@ -45,6 +46,27 @@ func TestParseTopic_Plain(t *testing.T) {
 	podID, modelName := parseTopic("fallback")
 	assert.Equal(t, "fallback", podID)
 	assert.Equal(t, "", modelName)
+}
+
+// TestTopicIdentity tests that a per-pod subscription takes the model from a
+// topic that names no pod.
+func TestTopicIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, topic, source, wantPod, wantModel string
+	}{
+		{"model only, per pod", "kv@Qwen/Qwen3-32B", "10.0.0.5:5556", "10.0.0.5:5556", "Qwen/Qwen3-32B"},
+		{"pod and model, per pod", "kv@pod-1@Qwen/Qwen3-32B", "10.0.0.5:5556", "pod-1", "Qwen/Qwen3-32B"},
+		{"model only, bound socket", "kv@Qwen/Qwen3-32B", "", "kv@Qwen/Qwen3-32B", ""},
+		{"empty model, per pod", "kv@", "10.0.0.5:5556", "kv@", ""},
+		{"no separator, per pod", "fallback", "10.0.0.5:5556", "fallback", ""},
+		{"four parts, per pod", "kv@a@b@c", "10.0.0.5:5556", "kv@a@b@c", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			podID, modelName := topicIdentity(&kvevents.RawMessage{Topic: tc.topic, SourceEndpoint: tc.source})
+			assert.Equal(t, tc.wantPod, podID)
+			assert.Equal(t, tc.wantModel, modelName)
+		})
+	}
 }
 
 // TestDecodeHash tests hash format conversions.

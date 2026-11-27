@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -218,8 +219,8 @@ var _ contracts.SafeQueue = &MockSafeQueue{}
 //
 // ### Design Philosophy
 //
-//  1. **Stateful**: The mock maintains an internal map of items to accurately reflect a real queue's state. Its `Len()`
-//     and `ByteSize()` methods are derived directly from this state.
+//  1. **Stateful**: The mock maintains an internal FIFO slice of items to accurately reflect a real queue's state. Its
+//     `Len()` and `ByteSize()` methods are derived directly from this state.
 //  2. **Deadlock-Safe Overrides**: Test-specific logic (e.g., `AddFunc`) is executed instead of the default
 //     implementation. The override function is fully responsible for its own logic and synchronization, as the mock's
 //     internal mutex will *not* be held during its execution.
@@ -240,16 +241,9 @@ type MockManagedQueue struct {
 	// OrderingPolicyFunc allows a test to override OrderingPolicy.
 	OrderingPolicyFunc func() flowcontrol.OrderingPolicy
 
-	// mu protects access to the internal `items` map.
-	mu       sync.Mutex
-	initOnce sync.Once
-	items    map[flowcontrol.QueueItemHandle]flowcontrol.QueueItemAccessor
-}
-
-func (m *MockManagedQueue) init() {
-	m.initOnce.Do(func() {
-		m.items = make(map[flowcontrol.QueueItemHandle]flowcontrol.QueueItemAccessor)
-	})
+	// mu protects access to the internal `items` slice.
+	mu    sync.Mutex
+	items []flowcontrol.QueueItemAccessor
 }
 
 // FlowQueueAccessor returns the mock itself, as it fully implements the `flowcontrol.FlowQueueAccessor` interface.
@@ -268,14 +262,20 @@ func (m *MockManagedQueue) Add(item flowcontrol.QueueItemAccessor) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
 
 	// Fulfill the `SafeQueue.Add` contract: the queue is responsible for setting the handle.
 	if item.Handle() == nil {
 		item.SetHandle(&mocks.MockQueueItemHandle{})
 	}
 
-	m.items[item.Handle()] = item
+	handle := item.Handle()
+	for i, existing := range m.items {
+		if existing.Handle() == handle {
+			m.items[i] = item
+			return nil
+		}
+	}
+	m.items = append(m.items, item)
 	return nil
 }
 
@@ -286,13 +286,13 @@ func (m *MockManagedQueue) Remove(handle flowcontrol.QueueItemHandle) (flowcontr
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
-	item, ok := m.items[handle]
-	if !ok {
-		return nil, fmt.Errorf("item with handle %v not found", handle)
+	for i, item := range m.items {
+		if item.Handle() == handle {
+			m.items = slices.Delete(m.items, i, i+1)
+			return item, nil
+		}
 	}
-	delete(m.items, handle)
-	return item, nil
+	return nil, fmt.Errorf("item with handle %v not found", handle)
 }
 
 // Cleanup removes items matching a predicate. It checks for a test override before locking.
@@ -302,14 +302,17 @@ func (m *MockManagedQueue) Cleanup(predicate contracts.PredicateFunc) []flowcont
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
 	var removed []flowcontrol.QueueItemAccessor
-	for handle, item := range m.items {
+	kept := m.items[:0]
+	for _, item := range m.items {
 		if predicate(item) {
 			removed = append(removed, item)
-			delete(m.items, handle)
+		} else {
+			kept = append(kept, item)
 		}
 	}
+	clear(m.items[len(kept):])
+	m.items = kept
 	return removed
 }
 
@@ -320,12 +323,9 @@ func (m *MockManagedQueue) Drain() []flowcontrol.QueueItemAccessor {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
-	drained := make([]flowcontrol.QueueItemAccessor, 0, len(m.items))
-	for _, item := range m.items {
-		drained = append(drained, item)
-	}
-	m.items = make(map[flowcontrol.QueueItemHandle]flowcontrol.QueueItemAccessor)
+	drained := make([]flowcontrol.QueueItemAccessor, len(m.items))
+	copy(drained, m.items)
+	m.items = nil
 	return drained
 }
 
@@ -341,7 +341,6 @@ func (m *MockManagedQueue) OrderingPolicy() flowcontrol.OrderingPolicy {
 func (m *MockManagedQueue) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
 	return len(m.items)
 }
 
@@ -349,7 +348,6 @@ func (m *MockManagedQueue) Len() int {
 func (m *MockManagedQueue) ByteSize() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
 	var size uint64
 	for _, item := range m.items {
 		size += item.OriginalRequest().ByteSize()
@@ -357,13 +355,12 @@ func (m *MockManagedQueue) ByteSize() uint64 {
 	return size
 }
 
-// Peek returns the first item found in the mock queue. Note: map iteration order is not guaranteed.
+// Peek returns the oldest item in the mock queue (FIFO order), or nil if empty.
 func (m *MockManagedQueue) Peek() flowcontrol.QueueItemAccessor {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
-	for _, item := range m.items {
-		return item // Return first item found
+	if len(m.items) == 0 {
+		return nil
 	}
-	return nil // Queue is empty
+	return m.items[0]
 }

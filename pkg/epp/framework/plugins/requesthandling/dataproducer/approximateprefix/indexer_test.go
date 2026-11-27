@@ -21,12 +21,17 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"unsafe"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 func TestIndexer_AddAndGet(t *testing.T) {
@@ -70,6 +75,49 @@ func TestIndexer_AddAndGet(t *testing.T) {
 	i.Add([]blockHash{blockHash(7)}, pod)
 	assert.NotEmpty(t, i.Get(blockHash(4)), "head hash should survive tail-first eviction")
 	assert.Empty(t, i.Get(blockHash(5)), "tail hash should be evicted before the head")
+}
+
+func TestIndexer_AddReturnsInsertedHashes(t *testing.T) {
+	pod := server{
+		ServerID:       ServerID{Namespace: "default", Name: "server1"},
+		NumOfGPUBlocks: 8,
+	}
+	i := newIndexer(context.Background(), 8, "test-name", "test-type").(*indexer)
+
+	inserted := i.Add([]blockHash{1, 2, 3}, pod)
+	assert.ElementsMatch(t, []blockHash{1, 2, 3}, inserted, "a fresh Add reports every hash as inserted")
+
+	inserted = i.Add([]blockHash{1, 2, 9}, pod)
+	assert.ElementsMatch(t, []blockHash{9}, inserted, "hashes an earlier Add contributed are refreshed, not reported")
+
+	// Removing only the second Add's inserted hashes keeps the first Add's
+	// shared leading blocks, which anchor matching.
+	i.Remove(inserted, pod.ServerID)
+	assert.NotEmpty(t, i.Get(blockHash(1)), "a shared leading block survives the rollback")
+	assert.NotEmpty(t, i.Get(blockHash(2)))
+	assert.Empty(t, i.Get(blockHash(9)))
+}
+
+func TestIndexer_Remove(t *testing.T) {
+	pod := server{
+		ServerID:       ServerID{Namespace: "default", Name: "server1"},
+		NumOfGPUBlocks: 4,
+	}
+	i := newIndexer(context.Background(), 4, "test-name", "test-type").(*indexer)
+
+	i.Add([]blockHash{1, 2, 3}, pod)
+	assert.Equal(t, 3, i.PodBlockCounts()[pod.ServerID])
+
+	i.Remove([]blockHash{1, 2, 3}, pod.ServerID)
+	assert.Equal(t, 0, i.PodBlockCounts()[pod.ServerID], "removed hashes leave the pod's index")
+	assert.Empty(t, i.Get(blockHash(1)))
+
+	// Removing for a pod the indexer never tracked is a no-op.
+	i.Remove([]blockHash{1}, ServerID{Namespace: "default", Name: "unknown"})
+
+	// A prompt added after a removal re-populates the entries.
+	i.Add([]blockHash{1, 2, 3}, pod)
+	assert.NotEmpty(t, i.Get(blockHash(1)))
 }
 
 func TestIndexer_RemovePodAndEviction(t *testing.T) {
@@ -299,6 +347,48 @@ func TestIndexer_ShrinkEvictsOldestPrompts(t *testing.T) {
 
 	assert.Equal(t, []int{0}, i.MatchLongestPrefix(old, []ServerID{id}), "older prompt should be evicted by the shrink")
 	assert.Equal(t, []int{2}, i.MatchLongestPrefix(recent, []ServerID{id}), "recent prompt should survive the shrink intact")
+}
+
+// TestIndexer_OffloadWarningLogsOncePerPod checks that the indexer logs the
+// offload undercount warning once for a pod and stays silent on later Adds,
+// and that it logs when the pod starts reporting the undercount after its
+// index was sized and the size does not change.
+func TestIndexer_OffloadWarningLogsOncePerPod(t *testing.T) {
+	id := ServerID{Namespace: "default", Name: "server1"}
+	otherID := ServerID{Namespace: "default", Name: "server2"}
+	sized := func(id ServerID, n int, undercount bool) server {
+		return server{ServerID: id, NumOfGPUBlocks: n, CapacityFromMetrics: true, OffloadCapacityUnknown: undercount}
+	}
+
+	tests := []struct {
+		name  string
+		steps []server
+		want  int32
+	}{
+		{name: "undercount from the first add", steps: []server{sized(id, 8, true), sized(id, 8, true), sized(id, 8, true)}, want: 1},
+		{name: "undercount after sizing at the same capacity", steps: []server{sized(id, 8, false), sized(id, 8, true), sized(id, 8, true)}, want: 1},
+		{name: "undercount together with a resize", steps: []server{sized(id, 4, false), sized(id, 8, true), sized(id, 8, true)}, want: 1},
+		{name: "undercount reported, cleared, and reported again", steps: []server{sized(id, 8, true), sized(id, 8, false), sized(id, 8, true)}, want: 1},
+		{name: "no undercount", steps: []server{sized(id, 8, false), sized(id, 8, false)}, want: 0},
+		{name: "each pod warns once", steps: []server{sized(id, 8, true), sized(otherID, 8, true), sized(id, 8, true), sized(otherID, 8, true)}, want: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var warnings atomic.Int32
+			logger := funcr.New(func(_, args string) {
+				if strings.Contains(args, "does not report the offload tier's capacity") {
+					warnings.Add(1)
+				}
+			}, funcr.Options{Verbosity: logutil.DEFAULT})
+			i := newIndexer(log.IntoContext(t.Context(), logger), 100, "test-name", "test-type").(*indexer)
+			next := blockHash(0)
+			for _, s := range tc.steps {
+				i.Add([]blockHash{next}, s)
+				next++
+			}
+			assert.Equal(t, tc.want, warnings.Load())
+		})
+	}
 }
 
 func TestPodCacheIsOneCacheLine(t *testing.T) {
