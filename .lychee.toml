@@ -35,5 +35,11 @@ timeout = 60
 max_retries = 4
 retry_wait_time = 5
 
-# Accept non-200 status codes (429: rate limits)
-accept = [200, 429]
+# Accept non-200 status codes (429: rate limits, 503: transient server-side
+# unavailability). Lychee 0.24.2 does not retry 5xx responses
+# (https://github.com/lycheeverse/lychee/issues/2319), so a single 503 from
+# github.com throttling anonymous bulk requests fails the check. Dead links
+# return 404, which is still rejected. 5xx retry landed upstream in
+# https://github.com/lycheeverse/lychee/pull/2324; once a lychee release
+# past 0.24.2 ships and lychee-action is upgraded to pin it, drop 503 here.
+accept = [200, 429, 503]
