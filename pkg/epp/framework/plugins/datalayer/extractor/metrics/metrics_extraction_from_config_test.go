@@ -404,7 +404,9 @@ func TestMetricsExtractionLoRAFamilyAbsentNoError(t *testing.T) {
 }
 
 // TestMetricsExtractionDisabledSpecNoError verifies that when all metric specs are
-// disabled (empty strings), Poll does NOT return an error even when the server serves nothing.
+// disabled (empty strings), Extract does not return an error even when the server
+// serves nothing. It calls Extract directly because Poll records extractor errors
+// to LlmdDataLayerExtractErrorsTotal and returns nil.
 func TestMetricsExtractionDisabledSpecNoError(t *testing.T) {
 	srv := createMockServer([]MetricMock{})
 	defer srv.Close()
@@ -425,12 +427,15 @@ func TestMetricsExtractionDisabledSpecNoError(t *testing.T) {
 	p, err := buildPipeline(t, srv.URL, params)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
 		DefaultEngineTypeLabelKey: "vllm",
 	})
 
-	assert.NoError(t, p.Poll(ctx, ep))
+	data, err := p.source.Poll(ctx, ep)
+	require.NoError(t, err)
+	assert.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}),
+		"disabled specs must not be extracted, so absent metric families are not an error")
 }
 
 func TestMetricsExtractionCustomScalarFromConfig(t *testing.T) {
