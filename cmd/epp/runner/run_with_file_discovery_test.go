@@ -42,6 +42,7 @@ import (
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
@@ -604,7 +605,7 @@ func TestServeMetrics_ServesPluginState(t *testing.T) {
 	port, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveMetrics(ctx, uint16(port), false, handle) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+	go func() { errCh <- serveMetrics(ctx, uint16(port), false, handle, nil) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, runserver.PluginStateDebugPath)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -630,6 +631,51 @@ func TestServeMetrics_ServesPluginState(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-errCh)
+}
+
+// TestServeMetrics_EndpointsAPIOptIn checks the endpoints API is only served
+// on the metrics server when a handler is passed (--enable-endpoints-api).
+func TestServeMetrics_EndpointsAPIOptIn(t *testing.T) {
+	tests := []struct {
+		name       string
+		enabled    bool
+		wantStatus int
+	}{
+		{name: "disabled by default", enabled: false, wantStatus: http.StatusNotFound},
+		{name: "enabled", enabled: true, wantStatus: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var endpointsAPI http.Handler
+			if tc.enabled {
+				endpointsAPI = runserver.NewEndpointsAPIHandler(datastore.NewDatastore(ctx, nil), func() bool { return true })
+			}
+			port, err := fwknet.GetFreePort()
+			require.NoError(t, err)
+			errCh := make(chan error, 1)
+			go func() { errCh <- serveMetrics(ctx, uint16(port), false, testutils.NewTestHandle(ctx), endpointsAPI) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+
+			url := fmt.Sprintf("http://127.0.0.1:%d%s", port, runserver.EndpointsAPIPath)
+			client := &http.Client{Timeout: 2 * time.Second}
+			var status int
+			require.Eventually(t, func() bool {
+				resp, err := client.Get(url)
+				if err != nil {
+					return false
+				}
+				defer resp.Body.Close()
+				status = resp.StatusCode
+				return true
+			}, 2*time.Second, 20*time.Millisecond, "metrics server should accept connections")
+			assert.Equal(t, tc.wantStatus, status)
+
+			cancel()
+			require.NoError(t, <-errCh)
+		})
+	}
 }
 
 // TestRunWithFileDiscovery_InvalidObjectivesFile checks that --objectives-file is

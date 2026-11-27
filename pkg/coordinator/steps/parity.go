@@ -17,7 +17,6 @@ limitations under the License.
 package steps
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -87,7 +86,7 @@ func setupParity(step, mode string, logger logr.Logger, reqCtx *pipeline.Request
 		return nil, false
 	}
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
-	injected, invalid := injectIncludeUsage(body, reqCtx.Stream, apiType)
+	injected, invalid := reqcommon.InjectIncludeUsage(body, reqCtx.Stream, apiType)
 	if invalid {
 		return nil, false
 	}
@@ -114,7 +113,7 @@ func idsForwardedIn(body map[string]any, apiType reqcommon.APIType) bool {
 	case reqcommon.APITypeVLLMGenerate:
 		return true
 	case reqcommon.APITypeCompletions:
-		_, ok := body[reqcommon.FieldPrompt].([]int)
+		_, ok := body[reqcommon.FieldPrompt].([]uint32)
 		return ok
 	}
 	kv, ok := body[reqcommon.FieldKVTransferParams].(map[string]any)
@@ -187,71 +186,4 @@ func recordPromptTokenMismatch(
 		return
 	}
 	logger.Info("prompt token mismatch between render and worker", keysAndValues...)
-}
-
-// injectIncludeUsage asks a streamed chat or completions leg for the trailing
-// usage frame when the client did not, so the parity check can read it. It
-// reports whether it added the option; the response writer then drops that
-// frame so the client's stream stays as requested. invalid is true when the
-// client sent a stream_options that is not an object: the body is left as it
-// is for the worker to judge, and nothing is injected. Responses and Messages
-// streams carry usage on their own terminal events.
-func injectIncludeUsage(body map[string]any, stream bool, apiType reqcommon.APIType) (injected bool, invalid bool) {
-	if !stream {
-		return false, false
-	}
-	switch apiType {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions:
-	default:
-		return false, false
-	}
-	options, present, ok := streamOptions(body)
-	if present && !ok {
-		return false, true
-	}
-	if include, ok := options[reqcommon.FieldIncludeUsage].(bool); ok && include {
-		return false, false
-	}
-	// vLLM reports usage on every chunk when include_usage and
-	// continuous_usage_stats are both set. A client that sent only the latter
-	// gets no usage today; adding include_usage would put a usage block in
-	// each of its content chunks, which the writer cannot drop, so the check
-	// is skipped rather than reshaping the stream.
-	if continuous, ok := options[reqcommon.FieldContinuousUsageStats].(bool); ok && continuous {
-		return false, false
-	}
-	merged := make(map[string]any, len(options)+1)
-	for k, v := range options {
-		merged[k] = v
-	}
-	merged[reqcommon.FieldIncludeUsage] = true
-	body[reqcommon.FieldStreamOptions] = merged
-	return true, false
-}
-
-// streamOptions returns the request's stream_options object. present says
-// whether the field is in the body at all; ok says whether it decoded to an
-// object (a JSON null counts as absent). The server decodes only the fields
-// the pipeline inspects and keeps the rest as raw JSON (decodeRequestBody),
-// so the value is usually json.RawMessage here.
-func streamOptions(body map[string]any) (options map[string]any, present bool, ok bool) {
-	raw, present := body[reqcommon.FieldStreamOptions]
-	if !present || raw == nil {
-		return nil, false, true
-	}
-	switch v := raw.(type) {
-	case map[string]any:
-		return v, true, true
-	case json.RawMessage:
-		var decoded map[string]any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, true, false
-		}
-		if decoded == nil {
-			return nil, false, true
-		}
-		return decoded, true, true
-	default:
-		return nil, true, false
-	}
 }

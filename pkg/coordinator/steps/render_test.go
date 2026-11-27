@@ -655,6 +655,32 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	}
 }
 
+func TestRenderStep_CompletionsTokenArray_AboveUint32Rejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("render service should not be called for an invalid token array prompt")
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathCompletions,
+		Body: map[string]any{
+			"model":  "test",
+			"prompt": []any{float64(1), float64(5000000000)},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for a token ID above the uint32 range")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("above-range token ID should be a client error: %v", err)
+	}
+}
+
 func TestRenderStep_OtherAPIs_SkipRender(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Errorf("render service should not be called for %s", reqcommon.PathSGLangGenerate)
@@ -708,9 +734,9 @@ func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	if len(reqCtx.TokenIDs) != 3 {
 		t.Fatalf("expected 3 token_ids, got %d", len(reqCtx.TokenIDs))
 	}
-	promptTokens, ok := reqCtx.Body["prompt"].([]int)
+	promptTokens, ok := reqCtx.Body["prompt"].([]uint32)
 	if !ok {
-		t.Fatalf("expected prompt to be replaced with []int, got %T", reqCtx.Body["prompt"])
+		t.Fatalf("expected prompt to be replaced with []uint32, got %T", reqCtx.Body["prompt"])
 	}
 	if len(promptTokens) != 3 || promptTokens[0] != 1 {
 		t.Fatalf("unexpected prompt tokens: %v", promptTokens)

@@ -97,11 +97,11 @@ func sampleGenerateRequest(t testing.TB) *vllmpb.GenerateRequest {
 			Seed:         proto.Int64(42),
 		},
 		Decoding: &vllmpb.DecodingParameters{
-			PresencePenalty:   0.1,
-			FrequencyPenalty:  0.2,
-			RepetitionPenalty: 1.05,
-			AllowedTokenIds:   []uint32{1, 2, 3},
-			StructuredOutput:  &vllmpb.DecodingParameters_JsonObject{JsonObject: true},
+			PresencePenalty:        0.1,
+			FrequencyPenalty:       0.2,
+			RepetitionPenalty:      1.05,
+			AllowedTokenIds:        []uint32{1, 2, 3},
+			LegacyStructuredOutput: &vllmpb.DecodingParameters_JsonObject{JsonObject: true},
 		},
 		Stopping: &vllmpb.StoppingCriteria{
 			MaxNewTokens:        128,

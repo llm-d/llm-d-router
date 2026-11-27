@@ -70,6 +70,10 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"SnapshotLoadDuration", SnapshotLoadDuration},
 		{"PoolQueueDepth", PoolQueueDepth},
 		{"PoolCapacity", PoolCapacity},
+		{"EventsSequenceGaps", EventsSequenceGaps},
+		{"EventsMissed", EventsMissed},
+		{"EventsDropped", EventsDropped},
+		{"EventsProcessingLag", EventsProcessingLag},
 	}
 
 	for _, e := range expected {
@@ -87,6 +91,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived,
 		ZMQErrors, LiveOnlySubscribers, SnapshotLoadDuration, PoolQueueDepth, PoolCapacity,
+		EventsSequenceGaps, EventsMissed, EventsDropped, EventsProcessingLag,
 	}
 	for _, c := range kvevents {
 		reg.MustRegister(c)
@@ -104,6 +109,10 @@ func TestKVEventsMetricNames(t *testing.T) {
 	KVEventUnknownTagsSkipped.WithLabelValues("BlockInactive").Inc()
 	PoolQueueDepth.Set(3)
 	PoolCapacity.Set(4)
+	EventsSequenceGaps.WithLabelValues("pod-a").Inc()
+	EventsMissed.WithLabelValues("pod-a").Add(2)
+	EventsDropped.WithLabelValues("pod-a", "decode_error").Inc()
+	EventsProcessingLag.Observe(0.05)
 
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -127,6 +136,10 @@ func TestKVEventsMetricNames(t *testing.T) {
 		"llm_d_epp_kv_cache_events_unknown_tags_skipped_total",
 		"llm_d_epp_kv_cache_events_pool_queue_depth",
 		"llm_d_epp_kv_cache_events_pool_capacity",
+		"llm_d_epp_kv_cache_events_sequence_gaps_total",
+		"llm_d_epp_kv_cache_events_missed_total",
+		"llm_d_epp_kv_cache_events_dropped_total",
+		"llm_d_epp_kv_cache_events_processing_lag_seconds",
 	} {
 		if !got[name] {
 			t.Errorf("expected metric %q to be registered, got names: %v", name, got)
@@ -141,14 +154,21 @@ func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
 	MessagesReceived.WithLabelValues("pod-a").Inc()
 	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
 	ZMQErrors.WithLabelValues("pod-a", "connect").Inc()
+	EventsSequenceGaps.WithLabelValues("pod-a").Inc()
+	EventsMissed.WithLabelValues("pod-a").Add(3)
+	EventsDropped.WithLabelValues("pod-a", "malformed_frame").Inc()
+	EventsDropped.WithLabelValues("pod-a", "decode_error").Inc()
 	SubscriberReconnections.WithLabelValues("pod-b").Inc()
 	MessagesReceived.WithLabelValues("pod-b").Inc()
 	ZMQErrors.WithLabelValues("pod-b", "recv").Inc()
+	EventsSequenceGaps.WithLabelValues("pod-b").Inc()
+	EventsMissed.WithLabelValues("pod-b").Inc()
+	EventsDropped.WithLabelValues("pod-b", "replay_cooldown").Inc()
 
 	CleanupSubscriber("pod-a")
 
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(SubscriberReconnections, MessagesReceived, ZMQErrors)
+	reg.MustRegister(SubscriberReconnections, MessagesReceived, ZMQErrors, EventsSequenceGaps, EventsMissed, EventsDropped)
 	mfs, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather() failed: %v", err)
@@ -164,13 +184,13 @@ func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
 		}
 	}
 
-	// pod-b must be untouched: three series across the three metrics.
+	// pod-b must be untouched: six series across the six per-pod metrics.
 	remaining := 0
 	for _, mf := range mfs {
 		remaining += len(mf.GetMetric())
 	}
-	if remaining != 3 {
-		t.Errorf("expected 3 remaining pod-b series, got %d", remaining)
+	if remaining != 6 {
+		t.Errorf("expected 6 remaining pod-b series, got %d", remaining)
 	}
 
 	CleanupSubscriber("pod-b")

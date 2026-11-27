@@ -48,13 +48,14 @@ type QueueInfo struct {
 	Len     int
 }
 
-func newStrategy(cfg Config) (Strategy, error) {
+func newStrategy(cfg Config, labels prometheus.Labels) (Strategy, error) {
 	switch cfg.Strategy {
 	case "", "las":
 		return &LASStrategy{
-			weightService:   cfg.LASWeightService,
-			weightHeadWait:  cfg.LASWeightHeadWait,
-			halfLifeSeconds: cfg.LASHalfLifeSeconds,
+			weightService:         cfg.LASWeightService,
+			weightHeadWait:        cfg.LASWeightHeadWait,
+			halfLifeSeconds:       cfg.LASHalfLifeSeconds,
+			attainedServiceTokens: newAttainedServiceCollector(labels),
 		}, nil
 	case turnPriorityStrategyName:
 		return &turnPriorityStrategy{

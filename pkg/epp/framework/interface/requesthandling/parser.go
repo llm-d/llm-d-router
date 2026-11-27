@@ -96,6 +96,18 @@ type PriorityRewriter interface {
 	RewritePriority(ctx PriorityRewriteContext, payload fwkrequest.MarshalablePayload, priority int) (fwkrequest.MarshalablePayload, bool, error)
 }
 
+// StreamUsageRequester is implemented by parsers whose API reports token usage
+// in a streamed response only when the request asks for it.
+type StreamUsageRequester interface {
+	// RequestStreamUsage asks the model server to report usage in the streamed
+	// response of a request whose client did not ask for it. requestPath is the
+	// request path without its query string. Taking and returning a
+	// MarshalablePayload guarantees the result is repackageable. The returned
+	// bool reports whether the payload was changed; the EPP then removes the
+	// usage-only frame the server adds before the response reaches the client.
+	RequestStreamUsage(requestPath string, payload fwkrequest.MarshalablePayload) (fwkrequest.MarshalablePayload, bool)
+}
+
 // Claims defines the matching criteria for a parser.
 type Claims struct {
 	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
@@ -128,8 +140,7 @@ type ParsedResponse struct {
 	// token the count approximates the tokens in the parsed chunk, but protocol events (role
 	// deltas, finish reasons, usage-only events, Responses API lifecycle events) inflate it, a
 	// server that batches tokens into one event deflates it, and the scan recognizes only the
-	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
-	// and keep-alive data lines skew it further).
+	// data-field framing (multi-line data fields and keep-alive data lines skew it further).
 	StreamedEvents int
 	// DisjointInputTokens is set by parsers of protocols that report the uncached,
 	// cache-read, and cache-creation input counts separately and may spread them

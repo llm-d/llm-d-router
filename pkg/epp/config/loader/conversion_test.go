@@ -240,6 +240,7 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 			Parsers:            []configapiv1alpha1.ParserConfig{{PluginRef: "parser"}},
 			PropagatePriority:  true,
 			ComposeFairnessIDs: true,
+			RequestStreamUsage: true,
 		},
 	}
 }

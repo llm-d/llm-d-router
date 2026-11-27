@@ -171,6 +171,36 @@ func TestAdmit(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "sheddable, all invalid, zero running requests but dispatched requests — reject",
+			request: makeSheddableRequest("100", "30"),
+			endpoints: []fwksched.Endpoint{
+				makeLatencyAdmissionEndpoint("pod1", 0.5, 0),
+				makeLatencyAdmissionEndpoint("pod2", 0.4, 0),
+			},
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 3))
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 2))
+			},
+			wantErr: true,
+		},
+		{
+			name:    "sheddable, all invalid, running requests but zero dispatched — reject",
+			request: makeSheddableRequest("100", "30"),
+			endpoints: []fwksched.Endpoint{
+				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
+				makeLatencyAdmissionEndpoint("pod2", 0.4, 3),
+			},
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 3))
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
+			},
+			wantErr: true,
+		},
+		{
 			name:    "sheddable, all invalid, but cold pod exists — admit",
 			request: makeSheddableRequest("100", "30"),
 			endpoints: []fwksched.Endpoint{
@@ -287,7 +317,7 @@ func TestAdmitIgnoresNeverScrapedEndpoints(t *testing.T) {
 
 	busy := makeLatencyAdmissionEndpoint("busy", 0.5, 5)
 	busy.Put(attrlatency.LatencyPredictionInfoDataKey,
-		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
+		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
 	// The predictor sees the same zero-value metrics, so its prediction for a
 	// never-scraped endpoint looks valid.
 	neverScraped := fwksched.NewEndpoint(

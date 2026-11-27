@@ -99,6 +99,7 @@ type Options struct {
 	//
 	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
 	EndpointTargetPorts         []int           // Target ports of model server pods.
+	DataParallelStartRankLabel  string          // Pod label holding the pod's index in a data-parallel group that spans pods.
 	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
 	EmitEndpointScores          bool            // Enables emitting per-endpoint scheduler scores in the request-path dynamic metadata.
 	//
@@ -121,11 +122,13 @@ type Options struct {
 	//
 	logging.LoggingOptions              // Logging configuration.
 	Tracing                    bool     // Enables emitting traces.
+	TraceBaggageKeys           []string // W3C Baggage keys recorded as attributes on the request span.
 	EnableToolCallingTelemetry bool     // Enables tool-calling request and response telemetry.
 	HealthChecking             bool     // Enables health checking.
 	MetricsPort                uint16   // The metrics port exposed by EPP.
 	GRPCHealthPort             uint16   // The port used for gRPC liveness and readiness probes.
 	EnablePprof                bool     // Enables pprof handlers.
+	EnableEndpointsAPI         bool     // Serves the read-only endpoints API on the metrics server.
 	CertPath                   string   // The path to the certificate for secure serving.
 	EnableCertReload           bool     // Enables certificate reloading of the certificates specified in --cert-path.
 	SecureServing              bool     // Enables secure serving.
@@ -141,8 +144,9 @@ type Options struct {
 	// clientCAs is the CA pool parsed from ClientCAFile.
 	clientCAs *x509.CertPool
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
-	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
-	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
+	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow and
+	// operator-configured fairness IDs do not count against the cap. Bounds metric cardinality in deployments with
+	// many distinct fairness IDs.
 	FairnessIDMetricLabelLimit int
 	//
 	// Configuration.
@@ -232,6 +236,12 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"set-based (e.g., 'env in (prod,staging),tier!=frontend'), and existence (e.g., 'key,!deprecated').")
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
+	fs.StringVar(&opts.DataParallelStartRankLabel, "data-parallel-start-rank-label", opts.DataParallelStartRankLabel,
+		"Pod label holding the pod's index in a data-parallel group that spans pods, such as "+
+			"leaderworkerset.sigs.k8s.io/worker-index. Pod k then serves global ranks k*N to k*N+N-1, where N is "+
+			"the pod's rank count, and requests and metrics use the global rank. A pod with more than one rank "+
+			"and no valid label gets no endpoints. vLLM's Python API server reads x-data-parallel-rank as a "+
+			"pod-local index under hybrid or external load balancing, so this label requires the vLLM Rust frontend.")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,
@@ -264,6 +274,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	opts.LoggingOptions.AddFlags(fs) // Add logging flags.
 
 	fs.BoolVar(&opts.Tracing, "tracing", opts.Tracing, "Enables emitting traces.")
+	fs.StringSliceVar(&opts.TraceBaggageKeys, "trace-baggage-keys", opts.TraceBaggageKeys,
+		"Comma-separated W3C Baggage keys to record as attributes on the request span, each named after its key. "+
+			"Baggage is set by the client, so list only keys that are safe to export. Empty records none.")
 	fs.BoolVar(&opts.EnableToolCallingTelemetry, "enable-tool-calling-telemetry", opts.EnableToolCallingTelemetry, "Enable tool-calling request and response telemetry.")
 	fs.BoolVar(&opts.HealthChecking, "health-checking", opts.HealthChecking, "Enables health checking.")
 	fs.Uint16Var(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")
@@ -271,6 +284,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"The port used for gRPC liveness and readiness probes.")
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")
+	fs.BoolVar(&opts.EnableEndpointsAPI, "enable-endpoints-api", opts.EnableEndpointsAPI,
+		"Serves a read-only list of the pool's endpoints and their labels at "+EndpointsAPIPath+" on the metrics server. Defaults to false.")
 	fs.StringVar(&opts.CertPath, "cert-path", opts.CertPath,
 		"Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableCertReload, "enable-cert-reload", opts.EnableCertReload,
@@ -279,7 +294,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables ext_proc gRPC stream metrics (in-flight gauge, hold-duration histogram, completions counter by code).")
 	fs.IntVar(&opts.FairnessIDMetricLabelLimit, "fairness-id-metric-label-limit", opts.FairnessIDMetricLabelLimit,
 		"Caps the number of distinct fairness_id label values recorded on metrics; values beyond the cap collapse to a "+
-			"single overflow series, and 0 collapses all of them. default-flow does not count against the cap. "+
+			"single overflow series, and 0 collapses all of them. default-flow and operator-configured fairness IDs "+
+			"do not count against the cap. "+
 			"Bounds metric cardinality with many distinct fairness IDs.")
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Serve the listener over TLS.")
 	fs.StringVar(&opts.TLSMinVersion, "tls-min-version", opts.TLSMinVersion,

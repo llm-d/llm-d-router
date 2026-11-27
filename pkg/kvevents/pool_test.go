@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-logr/logr/funcr"
+	zmq4 "github.com/go-zeromq/zmq4"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -2254,6 +2257,77 @@ func TestNewPool_RejectsNonPositiveConcurrency(t *testing.T) {
 	}
 }
 
+func TestNewPool_MaxConcurrentReplays(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PodDiscoveryConfig.MaxConcurrentReplays = -1
+	_, err := NewPool(cfg, nil, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maxConcurrentReplays")
+
+	for _, tc := range []struct {
+		configured, slots int
+	}{{0, defaultMaxConcurrentReplays}, {3, 3}} {
+		cfg := DefaultConfig()
+		cfg.PodDiscoveryConfig.MaxConcurrentReplays = tc.configured
+		pool, err := NewPool(cfg, nil, nil, nil)
+		require.NoError(t, err)
+		assert.True(t, pool.replayLimiter.TryAcquire(int64(tc.slots)))
+		assert.False(t, pool.replayLimiter.TryAcquire(1), "configured %d", tc.configured)
+	}
+}
+
+// More subscribers than replay slots all fetch their snapshots when each
+// fetch fits the snapshot timeout and the wait for a slot does not.
+func TestFetchSnapshot_SlotWaitDoesNotCountAgainstTimeout(t *testing.T) {
+	const (
+		subscribers = 8
+		slots       = 2
+		loadTime    = 200 * time.Millisecond
+	)
+	cfg := DefaultConfig()
+	cfg.PodDiscoveryConfig.MaxConcurrentReplays = slots
+	p, err := NewPool(cfg, nil, nil, nil)
+	require.NoError(t, err)
+	// The fourth round of fetches waits longer than this for a slot.
+	p.snapshotTimeout = 500 * time.Millisecond
+
+	var inFlight, peak atomic.Int32
+	errs := make([]error, subscribers)
+	var wg sync.WaitGroup
+	for i := range subscribers {
+		rep := zmq4.NewRep(t.Context())
+		require.NoError(t, rep.Listen("tcp://127.0.0.1:0"))
+		t.Cleanup(func() { _ = rep.Close() })
+		go func() {
+			for {
+				if _, err := rep.Recv(); err != nil {
+					return
+				}
+				n := inFlight.Add(1)
+				for prev := peak.Load(); n > prev && !peak.CompareAndSwap(prev, n); prev = peak.Load() {
+				}
+				select {
+				case <-time.After(loadTime):
+				case <-t.Context().Done():
+					return
+				}
+				inFlight.Add(-1)
+				if err := rep.Send(zmq4.NewMsgFrom(make([]byte, 8), make([]byte, publisherIDSize))); err != nil {
+					return
+				}
+			}
+		}()
+		z := newZMQSubscriber(p, fmt.Sprintf("pod-%d", i), "", "", "", "tcp://"+rep.Addr().String(), "", true)
+		wg.Go(func() { _, _, _, errs[i] = z.fetchSnapshot(t.Context()) })
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		assert.NoError(t, err, "subscriber %d", i)
+	}
+	assert.Equal(t, int32(slots), peak.Load(), "loads in flight must not exceed the configured slots")
+}
+
 // TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
 // enqueues and dequeues, and is reset once the pool shuts down.
 func TestPool_QueueDepthAccounting(t *testing.T) {
@@ -2779,4 +2853,119 @@ func TestBlockStoredEvent_SaltedMMExtraKeysMatchRequestKeys(t *testing.T) {
 			assert.Equal(t, "pod-a", result[requestKeys[0]][0].PodIdentifier)
 		})
 	}
+}
+
+type failingParseAdapter struct{}
+
+func (failingParseAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "wire-pod-from-parse", "", EventBatch{}, fmt.Errorf("malformed msgpack")
+}
+
+func (failingParseAdapter) ShardingKey(*RawMessage) string { return "pod-shard" }
+
+func TestProcessRawMessage_DecodeErrorIncrementsDroppedMetric(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	pool.adapter = failingParseAdapter{}
+
+	const pod = "default/pod-a"
+	t.Cleanup(func() { metrics.CleanupSubscriber(pod) })
+	before := counterVecValue(t, metrics.EventsDropped, pod, "decode_error")
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:          "kv@10.0.9.1:8000@test-model",
+		Payload:        []byte{0xff},
+		SourceEndpoint: "10.0.9.1:8000",
+		PodIdentifier:  pod,
+	})
+	after := counterVecValue(t, metrics.EventsDropped, pod, "decode_error")
+	assert.Equal(t, before+1, after)
+
+	// Without a subscriber-bound PodIdentifier, decode failures fall back to
+	// "unknown" so series do not leak from SourceEndpoint or wire topics.
+	unknownBefore := counterVecValue(t, metrics.EventsDropped, "unknown", "decode_error")
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:          "kv@untrusted-wire-pod:8000@test-model",
+		Payload:        []byte{0xff},
+		SourceEndpoint: "10.0.9.2:8000",
+	})
+	assert.Equal(t, unknownBefore+1, counterVecValue(t, metrics.EventsDropped, "unknown", "decode_error"))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(metrics.EventsDropped)
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	forbidden := map[string]struct{}{
+		"10.0.9.1:8000":           {},
+		"10.0.9.2:8000":           {},
+		"untrusted-wire-pod:8000": {},
+		"pod-shard":               {},
+		"wire-pod-from-parse":     {},
+	}
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "pod_identifier" {
+					_, bad := forbidden[l.GetValue()]
+					assert.False(t, bad, "unexpected pod_identifier label %q", l.GetValue())
+				}
+			}
+		}
+	}
+}
+
+type timestampAdapter struct {
+	timestamp float64
+}
+
+func (a *timestampAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "pod-a", "test-model", EventBatch{Timestamp: a.timestamp}, nil
+}
+
+func (a *timestampAdapter) ShardingKey(*RawMessage) string { return "pod-a" }
+
+func TestProcessRawMessage_ProcessingLagMetric(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	adapter := &timestampAdapter{}
+	pool.adapter = adapter
+
+	readLagCount := func() (uint64, float64) {
+		var m dto.Metric
+		require.NoError(t, metrics.EventsProcessingLag.Write(&m))
+		return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+	}
+
+	countBefore, sumBefore := readLagCount()
+	// Timestamp == 0 does not observe processing lag.
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model"})
+	countZero, _ := readLagCount()
+	assert.Equal(t, countBefore, countZero)
+
+	// Replayed batches skip processing lag even with a historical timestamp.
+	adapter.timestamp = float64(time.Now().Add(-time.Hour).UnixNano()) / 1e9
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model", replayed: true})
+	countReplay, sumReplay := readLagCount()
+	assert.Equal(t, countBefore, countReplay)
+	assert.InDelta(t, sumBefore, sumReplay, 1e-9)
+
+	// Positive past timestamp on a live batch observes >= 0 lag.
+	adapter.timestamp = float64(time.Now().Add(-200*time.Millisecond).UnixNano()) / 1e9
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model"})
+	countAfter, sumAfter := readLagCount()
+	assert.Equal(t, countBefore+1, countAfter)
+	assert.GreaterOrEqual(t, sumAfter-sumBefore, 0.15)
+
+	// Future timestamp clamps observed lag at 0 rather than negative.
+	adapter.timestamp = float64(time.Now().Add(10*time.Second).UnixNano()) / 1e9
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@pod-a@test-model"})
+	countFuture, sumFuture := readLagCount()
+	assert.Equal(t, countAfter+1, countFuture)
+	assert.InDelta(t, sumAfter, sumFuture, 1e-9)
+}
+
+func counterVecValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, vec.WithLabelValues(labels...).Write(&m))
+	return m.GetCounter().GetValue()
 }

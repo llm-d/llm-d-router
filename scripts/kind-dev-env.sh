@@ -444,6 +444,8 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
     # is split here; any other value is substituted unchanged, as envsubst would.
     /^[[:space:]]*-[[:space:]]+"?[$][{]VLLM_EXTRA_ARGS_[EPD][}]"?[[:space:]]*$/ {
       match($0, /VLLM_EXTRA_ARGS_[EPD]/); name = substr($0, RSTART, RLENGTH); v = ENVIRON[name]
+      # An unquoted item with an empty value would render as a null arg, so it is dropped.
+      if (v ~ /^[[:space:]]*$/ && $0 !~ /"/) next
       tok = "--[A-Za-z0-9_=.,/:+@%-]+"
       if (v ~ ("^[[:blank:]]*" tok "([[:blank:]]+" tok ")+[[:blank:]]*$") && v !~ /:[[:blank:]]/) {
         match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)

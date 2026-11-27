@@ -22,12 +22,16 @@ plugins:
   parameters:
     evictionTtlSeconds: 3600
     evictionSweepSeconds: 300
+    maxSessions: 100000
+    maxIdentityBytes: 256
 ```
 
 | Parameter | Default | Description |
 |---|---:|---|
 | `evictionTtlSeconds` | `3600` | Maximum session idle time before its state is removed. Set to `0` to disable eviction. |
 | `evictionSweepSeconds` | `300` | Interval between idle-state scans. Must be greater than `0`. |
+| `maxSessions` | `100000` | Maximum number of tracked sessions. A new session at the bound evicts the least recently active session that has no pending or in-flight request. Set to `0` to disable the bound. |
+| `maxIdentityBytes` | `256` | Longest `agent-identity` value tracked, in bytes. A request with a longer identity gets no session state. Set to `0` to disable the limit. |
 
 ## Produced data
 
@@ -65,8 +69,18 @@ be incomplete. A naturally completed response without usage data contributes
 zero tokens.
 
 State is local to one EPP replica. A session is removed when its latest
-request or response is older than the eviction TTL, at the next sweep.
-Sessions are retained while a request is pending (observed at `RequestHeader`
-but not yet dispatched, for example waiting in a flow-control queue) or in
-flight. A pending request that is rejected before dispatch is released through
+request or response is older than the eviction TTL, at the next sweep. When a
+new session arrives while `maxSessions` sessions are tracked, the least
+recently active session is removed. Sessions are retained while a request is
+pending (observed at `RequestHeader` but not yet dispatched, for example
+waiting in a flow-control queue) or in flight. When every tracked session has
+such a request, the new session is tracked above `maxSessions`, so the count
+can exceed the bound by the number of requests the replica holds at once. The
+next new session evicts idle sessions until the count is back at the bound. A
+pending request that is rejected before dispatch is released through
 `RequestAbandoned`.
+
+The session identity comes from client headers, so a client that sends a new
+identity on every request adds one session per request. `maxSessions` and
+`maxIdentityBytes` bound the memory such traffic holds; each tracked session
+holds about 400 bytes plus its identity.

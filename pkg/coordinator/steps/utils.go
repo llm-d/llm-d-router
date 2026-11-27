@@ -470,7 +470,7 @@ func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMo
 // interleaves other tokens inside a range cannot have the span collapsed to
 // its first token: the worker would expand a different prompt than render
 // produced.
-func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
+func checkUniformSpan(tokenIDs []uint32, span pipeline.PlaceholderRange) error {
 	if span.Offset < 0 || span.Length < 1 || span.Offset > len(tokenIDs) || span.Length > len(tokenIDs)-span.Offset {
 		return fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
 			span.Offset, span.Length, len(tokenIDs))
@@ -488,13 +488,13 @@ func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
 // its first token. A generate request that carries content_parts takes an
 // unexpanded prompt: the worker's multimodal processor expands each
 // placeholder itself, so every span must pass checkUniformSpan.
-func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([]int, error) {
+func collapsePlaceholders(tokenIDs []uint32, entries []pipeline.MultimodalEntry) ([]uint32, error) {
 	ranges := make([]pipeline.PlaceholderRange, len(entries))
 	for i, entry := range entries {
 		ranges[i] = entry.Placeholder
 	}
 	slices.SortFunc(ranges, func(a, b pipeline.PlaceholderRange) int { return a.Offset - b.Offset })
-	collapsed := make([]int, 0, len(tokenIDs))
+	collapsed := make([]uint32, 0, len(tokenIDs))
 	pos := 0
 	for _, r := range ranges {
 		if r.Offset < pos {
@@ -534,26 +534,21 @@ func coerceParamsMap(logger logr.Logger, v any, label string) map[string]any {
 	}
 }
 
-// toIntSlice converts a JSON-unmarshalled []any of numeric elements to []int.
-// Each element must be a non-negative integer (see reqcommon.NonNegativeInt).
-// The returned error identifies the offending element by index and wraps
+// parseTokenIDs converts a JSON-unmarshalled []any of numeric elements to
+// token IDs (see reqcommon.ParseTokenIDs). The returned error wraps
 // pipeline.ErrBadRequest.
-func toIntSlice(values []any) ([]int, error) {
-	out := make([]int, 0, len(values))
-	for i, v := range values {
-		n, err := reqcommon.NonNegativeInt(v)
-		if err != nil {
-			return nil, fmt.Errorf("invalid token at index %d: %v: %w", i, err, pipeline.ErrBadRequest)
-		}
-		out = append(out, n)
+func parseTokenIDs(values []any) ([]uint32, error) {
+	ids, err := reqcommon.ParseTokenIDs(values)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", err, pipeline.ErrBadRequest)
 	}
-	return out, nil
+	return ids, nil
 }
 
-// extractTokenIDs converts body["token_ids"] from a JSON-unmarshalled value to []int.
-// Returns ErrBadRequest when the field is absent, not an array, empty, or contains
-// non-integer or negative values.
-func extractTokenIDs(raw any) ([]int, error) {
+// extractTokenIDs converts body["token_ids"] from a JSON-unmarshalled value to
+// token IDs. Returns ErrBadRequest when the field is absent, not an array,
+// empty, or contains an element that is not a uint32-range integer.
+func extractTokenIDs(raw any) ([]uint32, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("token_ids is required: %w", pipeline.ErrBadRequest)
 	}
@@ -564,7 +559,7 @@ func extractTokenIDs(raw any) ([]int, error) {
 	if len(arr) == 0 {
 		return nil, fmt.Errorf("token_ids must not be empty: %w", pipeline.ErrBadRequest)
 	}
-	return toIntSlice(arr)
+	return parseTokenIDs(arr)
 }
 
 // mmModalityArray reads features[field][modality] as a JSON array. present is
@@ -787,11 +782,11 @@ func validatePlaceholderBounds(entries []pipeline.MultimodalEntry, tokenCount in
 	return nil
 }
 
-// sendsPromptTokenIDs reports whether a decode-leg body for apiType carries the
-// rendered IDs in kv_transfer_params.prompt_token_ids. Multimodal and echo
-// requests are excluded: vLLM renders messages for them and ignores the IDs.
-// Chat requests with return_prompt_text are excluded because vLLM reuses the
-// IDs without the prompt text and returns prompt_text as null.
+// sendsPromptTokenIDs reports whether a prefill or decode body for apiType
+// carries the rendered IDs in kv_transfer_params.prompt_token_ids. Multimodal
+// and echo requests are excluded: vLLM renders messages for them and ignores
+// the IDs. Chat requests with return_prompt_text are excluded because vLLM
+// reuses the IDs without the prompt text and returns prompt_text as null.
 func sendsPromptTokenIDs(enabled bool, reqCtx *pipeline.RequestContext, apiType reqcommon.APIType) bool {
 	switch apiType {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:

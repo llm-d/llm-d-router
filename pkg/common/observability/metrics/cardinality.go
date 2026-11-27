@@ -82,7 +82,7 @@ func (b *BoundedLabel) BoundWithOverflow(v string) (string, bool) {
 	if v == "" {
 		return v, false
 	}
-	if len(v) > MaxLabelValueLength || !utf8.ValidString(v) {
+	if !validLabelValue(v) {
 		return OverflowValue, true
 	}
 	b.mu.RLock()
@@ -109,6 +109,11 @@ func (b *BoundedLabel) BoundWithOverflow(v string) (string, bool) {
 	return v, false
 }
 
+// validLabelValue reports whether v fits Prometheus and the length cap.
+func validLabelValue(v string) bool {
+	return len(v) <= MaxLabelValueLength && utf8.ValidString(v)
+}
+
 // Pin marks v as always admitted without consuming a cap slot. Pins are never
 // removed: a value deconfigured at runtime keeps emitting its real label,
 // which matches Prometheus semantics (its existing series persist regardless)
@@ -127,23 +132,37 @@ func (b *BoundedLabel) Pin(v string) {
 // per-request, flow-control, and plugin metrics; without a cap, every distinct
 // fairness ID ever observed permanently grows the time series set. The cap
 // defaults to DefaultFairnessIDLabelLimit and collapses excess values to
-// OverflowValue. The fallback ID for requests without one is pinned so it stays
-// visible after the cap fills. A cap of 0 folds every ID, including the
-// fallback, onto the single overflow series.
+// OverflowValue. The fallback ID for requests without one and the IDs passed to
+// PinFairnessID are pinned so they stay visible after the cap fills. A cap of 0
+// folds every ID, including the pinned ones, onto the single overflow series.
 const DefaultFairnessIDLabelLimit = 1000
 
 var fairnessLimiter atomic.Pointer[BoundedLabel]
+
+// fairnessPins holds the IDs passed to PinFairnessID. SetFairnessIDLabelLimit
+// pins them on each limiter it installs, so the two can run in either order.
+// fairnessPinsMu also keeps a pin from landing on a limiter that is being replaced.
+var (
+	fairnessPinsMu sync.Mutex
+	fairnessPins   = map[string]struct{}{}
+)
 
 func init() {
 	SetFairnessIDLabelLimit(DefaultFairnessIDLabelLimit)
 }
 
 // SetFairnessIDLabelLimit configures the cap on distinct fairness_id label
-// values from startup configuration.
+// values from startup configuration. IDs passed to PinFairnessID stay pinned
+// under the new cap.
 func SetFairnessIDLabelLimit(limit int) {
+	fairnessPinsMu.Lock()
+	defer fairnessPinsMu.Unlock()
 	limiter := NewBoundedLabel(limit)
 	if limit > 0 {
 		limiter.Pin(request.DefaultFairnessID)
+		for id := range fairnessPins {
+			limiter.Pin(id)
+		}
 	}
 	fairnessLimiter.Store(limiter)
 }
@@ -158,4 +177,28 @@ func BoundFairnessID(fairnessID string) string {
 // cap folded the ID.
 func BoundFairnessIDWithOverflow(fairnessID string) (string, bool) {
 	return fairnessLimiter.Load().BoundWithOverflow(fairnessID)
+}
+
+// PinFairnessID keeps an operator-configured fairness ID on its own label value
+// after the cap fills, unless the limit is 0. An ID pinned before it is first
+// seen takes no cap slot. The pin lasts for the life of the process.
+// It ignores "", OverflowValue, and IDs longer than MaxLabelValueLength or not
+// valid UTF-8, since the cap never emits those as their own label value.
+func PinFairnessID(fairnessID string) {
+	if fairnessID == "" || fairnessID == OverflowValue || !validLabelValue(fairnessID) {
+		return
+	}
+	fairnessPinsMu.Lock()
+	defer fairnessPinsMu.Unlock()
+	fairnessPins[fairnessID] = struct{}{}
+	if limiter := fairnessLimiter.Load(); limiter.limit > 0 {
+		limiter.Pin(fairnessID)
+	}
+}
+
+// PinnedFairnessIDCount returns the number of distinct IDs recorded by PinFairnessID.
+func PinnedFairnessIDCount() int {
+	fairnessPinsMu.Lock()
+	defer fairnessPinsMu.Unlock()
+	return len(fairnessPins)
 }

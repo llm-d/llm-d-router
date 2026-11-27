@@ -484,6 +484,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
+	ds.WithDataParallelStartRankLabel(opts.DataParallelStartRankLabel)
 	eppConfig, err := r.parseConfigurationPhaseTwo(servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
@@ -493,6 +494,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	setupLog.Info("fairness_id metric label cap", "limit", opts.FairnessIDMetricLabelLimit, "pinnedFairnessIDs", metricsutil.PinnedFairnessIDCount())
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.InitFairnessIDResolutionMetrics(gknn.Name)
@@ -544,6 +546,13 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	} else if err = runserver.SetupPluginStateDebugHandler(mgr, r.PluginHandle); err != nil {
 		setupLog.Error(err, "Failed to setup plugin state debug handler")
 		return nil, nil, err
+	}
+
+	if opts.EnableEndpointsAPI {
+		if err = mgr.AddMetricsServerExtraHandler(runserver.EndpointsAPIPath, runserver.NewEndpointsAPIHandler(ds, ds.PoolHasSynced)); err != nil {
+			setupLog.Error(err, "Failed to setup endpoints API handler")
+			return nil, nil, err
+		}
 	}
 
 	// --- Initialize Core EPP Components ---
@@ -1006,6 +1015,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	r.parserRegistry = cfg.ParserRegistry
 	r.requestControlConfig.WithPropagatePriority(cfg.PropagatePriority)
 	r.requestControlConfig.WithComposeFairnessIDs(cfg.ComposeFairnessIDs)
+	r.requestControlConfig.WithRequestStreamUsage(cfg.RequestStreamUsage)
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
@@ -1456,6 +1466,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	setupLog.Info("fairness_id metric label cap", "limit", opts.FairnessIDMetricLabelLimit, "pinnedFairnessIDs", metricsutil.PinnedFairnessIDCount())
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.InitFairnessIDResolutionMetrics(poolName)
@@ -1519,7 +1530,18 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle)
+		var endpointsAPI http.Handler
+		if opts.EnableEndpointsAPI {
+			endpointsAPI = runserver.NewEndpointsAPIHandler(ds, func() bool {
+				select {
+				case <-disc.Ready():
+					return true
+				default:
+					return false
+				}
+			})
+		}
+		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle, endpointsAPI)
 	})
 	// A canceled context is the normal shutdown. Any other error ends the
 	// process with exit status 1 and is logged by runFileDiscovery. The error is
@@ -1548,7 +1570,8 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins) error {
+// endpointsAPI is served at runserver.EndpointsAPIPath when non-nil.
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins, endpointsAPI http.Handler) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
@@ -1557,6 +1580,9 @@ func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fw
 		}
 	}
 	mux.Handle(runserver.PluginStateDebugPath, runserver.NewPluginStateDebugHandler(plugins))
+	if endpointsAPI != nil {
+		mux.Handle(runserver.EndpointsAPIPath, endpointsAPI)
+	}
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

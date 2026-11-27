@@ -65,6 +65,12 @@ type parameters struct {
 	// reports on the response as x-llm-d-prefiller-host-port. Empty, the default,
 	// reports nothing.
 	PrefillProfile string `json:"prefillProfile"`
+	// PrefillProfileName names the scheduling profile that runs the prefill stage. The
+	// handler reports it in the SchedulingResult so prefill-aware plugins honor a
+	// prefill profile that is not named "prefill". Empty follows PrefillProfile, which a
+	// coordinator deployment sets to the same profile; both empty leave the
+	// SchedulingResult field unset for the scheduler to default.
+	PrefillProfileName string `json:"prefillProfileName"`
 }
 
 // HeaderProfileHandlerFactory defines the factory function for HeaderProfileHandler.
@@ -77,7 +83,8 @@ func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwk
 	}
 
 	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).
-		WithPrefillProfile(params.PrefillProfile).WithName(name), nil
+		WithPrefillProfile(params.PrefillProfile).
+		WithPrefillProfileName(params.PrefillProfileName).WithName(name), nil
 }
 
 // NewHeaderProfileHandler trims and defaults both arguments, additionally
@@ -109,10 +116,11 @@ func NewHeaderProfileHandler(headerName, defaultProfile string) *HeaderProfileHa
 // there's nothing to choose or the header is missing/blank; an unrecognized header value
 // is still an error.
 type HeaderProfileHandler struct {
-	typedName      fwkplugin.TypedName
-	headerName     string
-	defaultProfile string
-	prefillProfile string
+	typedName          fwkplugin.TypedName
+	headerName         string
+	defaultProfile     string
+	prefillProfile     string
+	prefillProfileName string
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -131,6 +139,24 @@ func (h *HeaderProfileHandler) WithName(name string) *HeaderProfileHandler {
 func (h *HeaderProfileHandler) WithPrefillProfile(name string) *HeaderProfileHandler {
 	h.prefillProfile = strings.TrimSpace(name)
 	return h
+}
+
+// WithPrefillProfileName sets the profile this handler reports in the SchedulingResult
+// as the request's prefill stage.
+func (h *HeaderProfileHandler) WithPrefillProfileName(name string) *HeaderProfileHandler {
+	h.prefillProfileName = strings.TrimSpace(name)
+	return h
+}
+
+// resultPrefillProfileName is the prefill profile name ProcessResults reports:
+// prefillProfileName when configured, else prefillProfile, which a coordinator
+// deployment sets to the profile that runs prefill. Empty leaves the field unset and the
+// scheduler fills in the default.
+func (h *HeaderProfileHandler) resultPrefillProfileName() string {
+	if h.prefillProfileName != "" {
+		return h.prefillProfileName
+	}
+	return h.prefillProfile
 }
 
 // profileHeader returns the trimmed value of the profile-selecting header, or "" when
@@ -226,6 +252,7 @@ func (h *HeaderProfileHandler) ProcessResults(_ context.Context, request *fwksch
 	return &fwksched.SchedulingResult{
 		ProfileResults:     profileResults,
 		PrimaryProfileName: profileName,
+		PrefillProfileName: h.resultPrefillProfileName(),
 	}, nil
 }
 

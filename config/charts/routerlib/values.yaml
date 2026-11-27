@@ -90,6 +90,9 @@ epp:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker
     tag: main
+    # Pins the image by digest (sha256:<64 hex characters>). When set, the image renders as
+    # registry/repository@digest and the tag is ignored.
+    digest: ""
     pullPolicy: Always
   extProcPort: 9002
   # gRPC port serving EPP liveness and readiness checks, 9003 if unset.
@@ -241,6 +244,8 @@ tokenizer:
     registry: docker.io
     repository: vllm/vllm-openai-cpu
     tag: v0.31.0
+    # Pins the image by digest; when set, the tag is ignored. See router.epp.image.digest.
+    digest: ""
     pullPolicy: IfNotPresent
   port: 8000
   command: []
@@ -351,6 +356,8 @@ latencyPredictor:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-training-server
       tag: "0.9.0"
+      # Pins the image by digest; when set, the tag is ignored. See router.epp.image.digest.
+      digest: ""
       pullPolicy: Always
     command: []
     args: []
@@ -399,6 +406,8 @@ latencyPredictor:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-prediction-server
       tag: "0.9.0"
+      # Pins the image by digest; when set, the tag is ignored. See router.epp.image.digest.
+      digest: ""
       pullPolicy: Always
     command: ["uvicorn"]
     args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]

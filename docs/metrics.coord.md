@@ -112,10 +112,12 @@ Recorded by the pipeline executor, which brackets every step it runs. This famil
 |---|---|---|
 | `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). Carries a trace exemplar; see [Exemplars](metrics.md#exemplars). |
 | `step_errors_total` | Counter | Step failures; adds label `error_code`. |
+| `step_reruns_total` | Counter | Re-runs that the step requested after a retryable upstream failure. See [Step re-runs](coordinator_architecture.md#step-re-runs). |
 | `step_running` | Gauge | Requests currently executing the step. Saturation rather than latency: `decode` stays in flight for the whole stream, so its value is the number of active streams. |
 
 **Key details:**
 *   Only steps that actually executed are recorded. Trailing steps from early exits (e.g., conditional-decode hit) or failures are not emitted.
+*   A step that runs again records `step_duration_seconds` for each attempt. A failure that a re-run follows does not count in `step_errors_total`.
 
 ### Upstream call family
 

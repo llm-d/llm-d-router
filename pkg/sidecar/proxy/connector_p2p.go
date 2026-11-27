@@ -221,12 +221,27 @@ func (l *httpSequentialPDLeg) report(ctx context.Context) {
 
 func (l *httpSequentialPDLeg) runPrefill(prefillCtx context.Context, prefillHandler http.Handler, pw *bufferedResponseWriter, r *http.Request, prefillSpan trace.Span) error {
 	l.toolFields.compareDispatchedForSpan(l.prefillBody, prefillSpan)
-	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, l.prefillBody))
-	return nil
+	return servePrefill(prefillHandler, pw, cloneRequestWithBody(prefillCtx, r, l.prefillBody))
 }
 
-func (l *httpSequentialPDLeg) completePrefill(_ context.Context, w http.ResponseWriter, r *http.Request, pw *bufferedResponseWriter, _ error, prefillSpan trace.Span) bool {
+func (l *httpSequentialPDLeg) completePrefill(prefillCtx context.Context, w http.ResponseWriter, r *http.Request, pw *bufferedResponseWriter, prefillErr error, prefillSpan trace.Span) bool {
 	logger := log.FromContext(r.Context())
+	if prefillErr != nil {
+		defer prefillSpan.End()
+		// The reverse proxy also aborts the prefill body copy when the client
+		// disconnects, which is not a prefill failure.
+		if prefillCtx.Err() != nil {
+			logger.V(logging.DEFAULT).Info("client disconnected during prefill")
+			return false
+		}
+		observeStageError(r.Context(), routing.StagePrefill)
+		prefillSpan.SetStatus(codes.Error, "prefill request failed")
+		logger.Error(prefillErr, "prefill request failed", "status", pw.statusCode)
+		if err := errorBadGateway(w, r); err != nil {
+			logger.Error(err, "failed to send error response to client")
+		}
+		return false
+	}
 	prefillFailed := isHTTPError(pw.statusCode)
 	if prefillFailed {
 		observeStageError(r.Context(), routing.StagePrefill)

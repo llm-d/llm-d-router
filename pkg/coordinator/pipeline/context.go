@@ -191,7 +191,7 @@ type RequestContext struct {
 	// run, was skipped, or found no multimodal entries.
 	EncodeFanout int
 
-	TokenIDs          []int
+	TokenIDs          []uint32
 	MultimodalEntries []MultimodalEntry
 	// MMPayload is the render step's mm_payload when render returned no
 	// kwargs_data for the entries: "none". Empty when the entries
@@ -244,6 +244,9 @@ type RequestContext struct {
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
+	// stepRerunsLeft counts the StepRerunError requests that the pipeline
+	// still honors for this request. Pipeline.Execute sets it.
+	stepRerunsLeft int
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
@@ -337,6 +340,13 @@ func (rc *RequestContext) IsGRPC() bool {
 // gRPC RPC rather than an HTTP JSON request.
 func (rc *RequestContext) IsNativeGRPC() bool {
 	return rc != nil && rc.GRPC != nil && rc.GRPC.isNativeGRPC()
+}
+
+// CanRerunStep reports whether the pipeline still honors a StepRerunError for
+// this request. A step checks it before it holds back an upstream error from
+// the client.
+func (rc *RequestContext) CanRerunStep() bool {
+	return rc != nil && rc.stepRerunsLeft > 0
 }
 
 // ClosePrefillStream cancels and releases any active concurrent prefill stream.

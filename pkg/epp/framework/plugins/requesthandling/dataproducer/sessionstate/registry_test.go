@@ -17,6 +17,7 @@ limitations under the License.
 package sessionstate
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -244,4 +245,188 @@ func TestRegistryConcurrentUpdates(t *testing.T) {
 	assert.Equal(t, int64(requests), state.CompletedRequests)
 	assert.Equal(t, int64(2*requests), state.TotalInputTokens)
 	assert.Equal(t, int64(3*requests), state.TotalOutputTokens)
+}
+
+// assertIdleListConsistent checks that the idle list holds exactly the tracked
+// sessions without pending or in-flight requests. An unbounded registry leaves
+// the list unused.
+func assertIdleListConsistent(t *testing.T, registry *SessionStateRegistry) {
+	t.Helper()
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	idle := 0
+	for identity, record := range registry.sessions {
+		active := record.pendingRequests > 0 || record.state.InFlightRequests > 0
+		if active {
+			assert.Nil(t, record.idleElem, "active session %q must not be on the idle list", identity)
+			continue
+		}
+		idle++
+		if registry.maxSessions > 0 {
+			if assert.NotNil(t, record.idleElem, "idle session %q must be on the idle list", identity) {
+				assert.Same(t, record, record.idleElem.Value)
+			}
+		} else {
+			assert.Nil(t, record.idleElem, "idle session %q must not hold an idle-list entry in an unbounded registry", identity)
+		}
+	}
+	if registry.maxSessions > 0 {
+		assert.Equal(t, idle, registry.idle.Len())
+	} else {
+		assert.Zero(t, registry.idle.Len())
+	}
+}
+
+func registryHasSession(registry *SessionStateRegistry, identity string) bool {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	_, ok := registry.sessions[identity]
+	return ok
+}
+
+func TestRegistryEvictsLeastRecentlyActiveSessionAtBound(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{maxSessions: 2}
+	registry.RecordDispatch("session-a", "")
+	registry.RecordResponse("session-a", true, TurnUsage{})
+	registry.GetState("session-b")
+	// A new turn makes session-a the most recently active session.
+	registry.GetState("session-a")
+
+	registry.GetState("session-c")
+	assert.Equal(t, 2, registrySessionCount(registry))
+	assert.False(t, registryHasSession(registry, "session-b"), "the least recently active session is evicted")
+	assert.Equal(t, int64(1), registry.GetState("session-a").TurnsTaken, "a retained session keeps its history")
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryBoundCountsResponseActivity(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{maxSessions: 2}
+	registry.RecordDispatch("session-a", "")
+	registry.GetState("session-b")
+	// The response of session-a ends after session-b was last seen.
+	registry.RecordResponse("session-a", true, TurnUsage{})
+
+	registry.GetState("session-c")
+	assert.True(t, registryHasSession(registry, "session-a"))
+	assert.False(t, registryHasSession(registry, "session-b"))
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryBoundKeepsPendingAndInFlightSessions(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{maxSessions: 1}
+	registry.observe("session-a", "request-1")
+	registry.GetState("session-b")
+	assert.Equal(t, 2, registrySessionCount(registry), "a session with a pending request is not evicted")
+	assertIdleListConsistent(t, registry)
+
+	registry.RecordDispatch("session-a", "request-1")
+	registry.GetState("session-c")
+	assert.True(t, registryHasSession(registry, "session-a"), "a session with an in-flight request is not evicted")
+	assert.False(t, registryHasSession(registry, "session-b"))
+	assert.Equal(t, 2, registrySessionCount(registry))
+	assertIdleListConsistent(t, registry)
+
+	registry.RecordResponse("session-a", true, TurnUsage{})
+	assert.Equal(t, 2, registrySessionCount(registry))
+	registry.GetState("session-d")
+	assert.Equal(t, 1, registrySessionCount(registry), "the next new session evicts down to the bound")
+	assert.True(t, registryHasSession(registry, "session-d"))
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryBoundKeepsSessionWhoseRequestIsReleased(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{maxSessions: 2}
+	registry.observe("session-a", "request-1")
+	registry.GetState("session-b")
+	// The rejected request of session-a leaves after session-b was seen.
+	registry.ReleasePending("request-1")
+	assertIdleListConsistent(t, registry)
+
+	registry.GetState("session-c")
+	assert.True(t, registryHasSession(registry, "session-a"))
+	assert.False(t, registryHasSession(registry, "session-b"))
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryBoundAfterIdleEviction(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{maxSessions: 2}
+	registry.GetState("session-a")
+	ttl := time.Hour
+	start := time.Now().Add(-2 * ttl)
+	setRegistrySessionTimes(t, registry, "session-a", start, start)
+	registry.EvictIdle(time.Now(), ttl)
+	require.Zero(t, registrySessionCount(registry))
+	assertIdleListConsistent(t, registry)
+
+	registry.GetState("session-b")
+	// session-a returns as a new session, more recently active than session-b.
+	registry.GetState("session-a")
+	registry.GetState("session-c")
+	assert.True(t, registryHasSession(registry, "session-a"))
+	assert.False(t, registryHasSession(registry, "session-b"))
+	assert.Equal(t, 2, registrySessionCount(registry))
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryRequestMovingSessionsReleasesPrior(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{maxSessions: 2}
+	registry.observe("session-a", "request-1")
+	// The same request observed under a new session leaves session-a idle.
+	registry.observe("session-b", "request-1")
+	assertIdleListConsistent(t, registry)
+
+	registry.GetState("session-c")
+	assert.False(t, registryHasSession(registry, "session-a"), "the session the request left is evictable")
+	assert.True(t, registryHasSession(registry, "session-b"))
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryZeroBoundIsUnbounded(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{}
+	for _, identity := range []string{"session-a", "session-b", "session-c"} {
+		registry.GetState(identity)
+	}
+	assert.Equal(t, 3, registrySessionCount(registry))
+	assertIdleListConsistent(t, registry)
+}
+
+func TestRegistryBoundUnderConcurrentSessions(t *testing.T) {
+	t.Parallel()
+
+	const maxSessions = 8
+	registry := &SessionStateRegistry{maxSessions: maxSessions}
+	var wg sync.WaitGroup
+	for i := range 200 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			identity := fmt.Sprintf("session-%d", i)
+			requestID := fmt.Sprintf("request-%d", i)
+			registry.observe(identity, requestID)
+			registry.RecordDispatch(identity, requestID)
+			registry.RecordResponse(identity, true, TurnUsage{})
+		}()
+	}
+	wg.Wait()
+	assertIdleListConsistent(t, registry)
+
+	// Sessions added above the bound while every session had a request in
+	// flight are evicted by the next new session.
+	registry.GetState("session-next")
+	assert.Equal(t, maxSessions, registrySessionCount(registry))
+	assertIdleListConsistent(t, registry)
 }

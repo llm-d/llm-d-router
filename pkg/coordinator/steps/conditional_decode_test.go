@@ -78,7 +78,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		RequestID:      "req-1",
 		OriginalPath:   testChatCompletionsPath,
 		Body:           map[string]any{"model": testModelName, "stream": false, "messages": []any{}},
-		TokenIDs:       []int{1, 2345, 6789},
+		TokenIDs:       []uint32{1, 2345, 6789},
 		ResponseWriter: recorder,
 	}
 
@@ -136,7 +136,7 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 		RequestID:      "req-1",
 		OriginalPath:   reqcommon.PathVLLMGenerate,
 		Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
-		TokenIDs:       []int{1, 2345},
+		TokenIDs:       []uint32{1, 2345},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -179,7 +179,7 @@ func TestConditionalDecodeStep_ResponsesFormat_PassesBodyThrough(t *testing.T) {
 		RequestID:      "req-responses",
 		OriginalPath:   reqcommon.PathResponses,
 		Body:           map[string]any{"model": testModelName, "input": "hello"},
-		TokenIDs:       []int{1, 2345, 6789},
+		TokenIDs:       []uint32{1, 2345, 6789},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -222,7 +222,7 @@ func TestConditionalDecodeStep_MessagesFormat_PassesBodyThrough(t *testing.T) {
 			"max_tokens": 10,
 			"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
 		},
-		TokenIDs:       []int{1, 2345, 6789},
+		TokenIDs:       []uint32{1, 2345, 6789},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -260,7 +260,7 @@ func TestConditionalDecodeStep_CompletionsFormat_RewritesPrompt(t *testing.T) {
 		RequestID:      "req-1",
 		OriginalPath:   reqcommon.PathCompletions,
 		Body:           map[string]any{"model": testModelName, "prompt": "Hello"},
-		TokenIDs:       []int{1, 2345},
+		TokenIDs:       []uint32{1, 2345},
 		ResponseWriter: httptest.NewRecorder(),
 	}
 
@@ -296,30 +296,7 @@ func TestConditionalDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
 // in kv_transfer_params.prompt_token_ids; multimodal, unrendered and
 // non-chat requests, and probes with the parameter unset, carry none.
 func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
-	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
-	forward := map[string]any{ParamForwardPromptTokenIDs: true}
-	tests := []struct {
-		name    string
-		params  map[string]any
-		path    string
-		tokens  []int
-		entries []pipeline.MultimodalEntry
-		extra   map[string]any
-		want    bool
-	}{
-		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
-		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
-		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
-		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
-		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
-		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
-		{name: "return_prompt_text on responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
-		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
-		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
-		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
-		{name: "off by default", params: nil, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
-	}
-	for _, tc := range tests {
+	for _, tc := range promptTokenIDsCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
 			require.NoError(t, err)

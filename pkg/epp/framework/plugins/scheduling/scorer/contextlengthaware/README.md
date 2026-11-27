@@ -196,8 +196,9 @@ are retained by filtering as general-purpose candidates.
 
 Configure `p2p-cache-source` as shown in the
 [producer configuration](../../../requesthandling/dataproducer/p2psource/README.md#configuration).
-Its `prefillProfileName` must match both the profile selected by
-`disagg-profile-handler` and the profile that references the work classifier.
+Its `prefillProfileName` names the profile selected by `disagg-profile-handler`, which is
+also the profile that references the work classifier. Unset, it follows the scheduling
+result.
 The profile's picker is omitted here. Threshold parameters for the gate are
 described in the
 [prefix-cache-affinity-filter README](../../filter/prefixcacheaffinity/README.md).

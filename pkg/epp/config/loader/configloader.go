@@ -190,6 +190,7 @@ func InstantiateAndConfigure(
 		ParserRegistry:     parserRegistry,
 		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
 		ComposeFairnessIDs: rawConfig.RequestHandler.ComposeFairnessIDs,
+		RequestStreamUsage: rawConfig.RequestHandler.RequestStreamUsage,
 		DataProducerPhases: dataProducerPhases,
 	}, nil
 }

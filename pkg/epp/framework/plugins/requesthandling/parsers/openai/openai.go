@@ -96,9 +96,10 @@ const (
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser            = &OpenAIParser{}
-	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
-	_ fwkrh.PriorityRewriter  = &OpenAIParser{}
+	_ fwkrh.Parser               = &OpenAIParser{}
+	_ fwkrh.ModelNameRewriter    = &OpenAIParser{}
+	_ fwkrh.PriorityRewriter     = &OpenAIParser{}
+	_ fwkrh.StreamUsageRequester = &OpenAIParser{}
 )
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
@@ -249,6 +250,29 @@ func (p *OpenAIParser) RewriteModelName(payload request.MarshalablePayload, mode
 	return m, nil
 }
 
+// RequestStreamUsage sets stream_options.include_usage on a streamed chat
+// completions or completions request that does not ask for usage. The director
+// only calls this when requestHandler.requestStreamUsage is enabled.
+func (p *OpenAIParser) RequestStreamUsage(requestPath string, payload request.MarshalablePayload) (request.MarshalablePayload, bool) {
+	m, ok := payload.(request.PayloadMap)
+	if !ok || request.MatchPathSuffix(requestPath, chatCompletionsAPI+"/render") ||
+		request.MatchPathSuffix(requestPath, completionsAPI+"/render") {
+		return payload, false
+	}
+	var apiType reqcommon.APIType
+	api := determineAPITypeFromPath(requestPath)
+	switch api {
+	case chatCompletionsAPI:
+		apiType = reqcommon.APITypeChatCompletions
+	case completionsAPI:
+		apiType = reqcommon.APITypeCompletions
+	default:
+		return payload, false
+	}
+	injected, _ := reqcommon.InjectIncludeUsage(m, isStreamingRequest(api, m), apiType)
+	return m, injected
+}
+
 // RewritePriority removes any client-supplied priority from the
 // OpenAI-compatible request payload and writes the resolved EPP priority. The
 // director only calls this when priority propagation is enabled; see
@@ -349,18 +373,12 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 func countStreamEvents(chunk []byte) int {
 	count := 0
 	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
-		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
-		if ok && !isStreamTerminator(content) {
+		payload, ok := reqcommon.SSEDataPayload(bytes.TrimSuffix(line, []byte("\r")))
+		if ok && !reqcommon.SSEIsDone(payload) {
 			count++
 		}
 	}
 	return count
-}
-
-// isStreamTerminator reports whether an SSE data payload is the [DONE] terminator, tolerating a
-// trailing \r left by CRLF line splitting.
-func isStreamTerminator(content []byte) bool {
-	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte(reqcommon.SSEDoneMarker))
 }
 
 func responseMediaType(headers map[string]string) string {
@@ -757,6 +775,14 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 				return fmt.Errorf("invalid images edits num_inference_steps field: %w", err)
 			}
 			images.NumInferenceSteps = &steps
+		case "layers":
+			if layers, err := strconv.ParseInt(string(value), 10, 64); err == nil {
+				images.Layers = &layers
+			}
+		case "resolution":
+			if resolution, err := strconv.ParseInt(string(value), 10, 64); err == nil {
+				images.Resolution = &resolution
+			}
 		case "stream":
 			stream, err := parseFormBool(value)
 			if err != nil {
@@ -1084,12 +1110,12 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 	var result *request.Usage
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
+		payload, ok := reqcommon.SSEDataPayload(bytes.TrimSuffix(line, []byte("\r")))
 		if !ok {
 			continue
 		}
 		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if isStreamTerminator(content) || !bytes.Contains(content, []byte("usage")) {
+		if reqcommon.SSEIsDone(payload) || !bytes.Contains(payload, []byte("usage")) {
 			continue
 		}
 		var streamResponse struct {
@@ -1099,7 +1125,7 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 			} `json:"response"`
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal(content, &streamResponse); err != nil {
+		if err := json.Unmarshal(payload, &streamResponse); err != nil {
 			continue
 		}
 		// Standard ChatCompletion / vLLM usage format

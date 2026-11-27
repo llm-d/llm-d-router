@@ -74,6 +74,12 @@ func IncStepErrorTotal(step, errorCode string) {
 	stepErrorTotal.WithLabelValues(step, errorCode).Inc()
 }
 
+// IncStepRerunTotal increments step_reruns_total for the step that requested
+// the re-run.
+func IncStepRerunTotal(step string) {
+	stepRerunTotal.WithLabelValues(step).Inc()
+}
+
 // IncStepRunning increments the per-step in-flight gauge.
 func IncStepRunning(step string) {
 	stepRunning.WithLabelValues(step).Inc()

@@ -160,16 +160,6 @@ func (e *forceStreamUpstreamError) Error() string {
 	return fmt.Sprintf("force-stream: upstream streamed an error (HTTP %d)", e.status)
 }
 
-// sseDataPrefix and sseDoneMarker delimit the SSE frames the upstream streams.
-// Each data line carries one JSON object; the stream ends with data: [DONE].
-// sseDataPrefix drops the trailing space reqcommon.SSEDataPrefix carries so it
-// matches both "data:" and "data: " framings (ssePayload trims the remainder); it
-// is derived from the shared constant so the two cannot diverge.
-var (
-	sseDataPrefix = bytes.TrimRight([]byte(reqcommon.SSEDataPrefix), " ")
-	sseDoneMarker = []byte(reqcommon.SSEDoneMarker)
-)
-
 // EnableForceStream turns on force-streaming for every step in steps that
 // supports it (decode and conditional-decode), sharing one budget built from the
 // pipeline's force_stream_buffer_size and force_stream_max_request_size. An
@@ -710,11 +700,17 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, generated, ech
 	scanner.Buffer(make([]byte, 0, initialScanBuf(frameCap)), frameCap)
 	sawDone := false
 	for scanner.Scan() {
-		payload, ok := ssePayload(scanner.Bytes())
+		payload, ok := reqcommon.SSEDataPayload(scanner.Bytes())
 		if !ok {
 			continue
 		}
-		if bytes.Equal(payload, sseDoneMarker) {
+		// A data line carrying only whitespace is no frame, and a parse of it
+		// would read as a protocol error rather than a skip.
+		payload = bytes.TrimSpace(payload)
+		if len(payload) == 0 {
+			continue
+		}
+		if reqcommon.SSEIsDone(payload) {
 			sawDone = true
 			break
 		}
@@ -868,19 +864,4 @@ func upstreamErrorStatus(frame map[string]any) int {
 		return reqcommon.AnthropicErrorStatus(errType)
 	}
 	return http.StatusInternalServerError
-}
-
-// ssePayload extracts the JSON payload of an SSE data line, trimming the data:
-// prefix and surrounding whitespace (including the trailing CR a CRLF stream
-// leaves). ok is false for any other line (event:, id:, comments, blanks) and
-// for a data line with an empty payload.
-func ssePayload(line []byte) ([]byte, bool) {
-	if !bytes.HasPrefix(line, sseDataPrefix) {
-		return nil, false
-	}
-	payload := bytes.TrimSpace(line[len(sseDataPrefix):])
-	if len(payload) == 0 {
-		return nil, false
-	}
-	return payload, true
 }

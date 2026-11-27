@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -77,7 +79,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: testKwargsB, Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -206,7 +208,7 @@ func TestPrefillStep_GenerateUsesMMMetadataWhenECPresent(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-meta",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 		},
@@ -274,7 +276,7 @@ func TestPrefillStep_GenerateFallsBackToKwargsWhenNoEC(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-no-ec",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 		},
@@ -340,7 +342,7 @@ func TestPrefillStep_GeneratePartialECCoverage_SplitsPerEntry(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-partial",
 		Model:     "llama-3",
-		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 2345},
+		TokenIDs:  []uint32{1, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: testKwargsB, MMMetadata: testMetadataB, Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
@@ -412,7 +414,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 		RequestID:         "req-compl",
 		OriginalPath:      reqcommon.PathCompletions,
 		Model:             "test-model",
-		TokenIDs:          []int{1, 2345, 6789},
+		TokenIDs:          []uint32{1, 2345, 6789},
 		MultimodalEntries: nil,
 		KVTransferParams:  make(map[string]any),
 	}
@@ -550,7 +552,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		RequestID:    "req-chat",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":  "test-model",
 			"stream": false,
@@ -634,7 +636,7 @@ func TestPrefillStep_ResponsesFormat(t *testing.T) {
 		RequestID:    "req-responses",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        "test-model",
-		TokenIDs:     []int{1, 2345},
+		TokenIDs:     []uint32{1, 2345},
 		Body: map[string]any{
 			"model":             "test-model",
 			"input":             "hello",
@@ -952,7 +954,7 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 				RequestID:        "req",
 				OriginalPath:     tc.originalPath,
 				Model:            "m",
-				TokenIDs:         []int{1, 2, 3},
+				TokenIDs:         []uint32{1, 2, 3},
 				Body:             tc.body,
 				KVTransferParams: make(map[string]any),
 			}
@@ -996,7 +998,7 @@ func TestPrefillStep_ConflictingECParams_RejectsRequest(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-conflict",
 		Model:     "test-model",
-		TokenIDs:  []int{1, 2345},
+		TokenIDs:  []uint32{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
@@ -1036,7 +1038,7 @@ func TestPrefillStep_CapturesPeerTopologyHeader(t *testing.T) {
 		RequestID:        "req-1",
 		Model:            "test",
 		OriginalPath:     reqcommon.PathVLLMGenerate,
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: make(map[string]any),
 	}
 
@@ -1074,7 +1076,7 @@ func runPrefillWithP2PAddress(t *testing.T, connector, p2pAddress string) (*pipe
 		RequestID:        "req-1",
 		Model:            "test",
 		OriginalPath:     reqcommon.PathVLLMGenerate,
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: make(map[string]any),
 	}
 	return reqCtx, step.Execute(context.Background(), reqCtx)
@@ -1122,7 +1124,7 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 		RequestID:    "req-1",
 		Model:        "test",
 		OriginalPath: reqcommon.PathVLLMGenerate,
-		TokenIDs:     []int{1, 2345},
+		TokenIDs:     []uint32{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
@@ -1208,7 +1210,7 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-1",
 				Model:            "test-model",
-				TokenIDs:         []int{1, 2345},
+				TokenIDs:         []uint32{1, 2345},
 				KVTransferParams: make(map[string]any),
 			}
 
@@ -1248,7 +1250,7 @@ func TestPrefillStep_DebugRequestRecord(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-1",
 		Model:            "test-model",
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: make(map[string]any),
 		OriginalHeaders:  http.Header{"Authorization": {"Bearer secret"}},
 	}
@@ -1306,7 +1308,7 @@ func TestPrefillStep_FreshBodyForwardsCacheSaltAndPriority(t *testing.T) {
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-salt",
 				Model:            "test",
-				TokenIDs:         []int{1, 2},
+				TokenIDs:         []uint32{1, 2},
 				Body:             tc.body,
 				KVTransferParams: make(map[string]any),
 			}
@@ -1320,6 +1322,70 @@ func TestPrefillStep_FreshBodyForwardsCacheSaltAndPriority(t *testing.T) {
 				if inClient != inPrefill || got != want {
 					t.Errorf("%s: prefill has %v (present=%v), client sent %v (present=%v)", field, got, inPrefill, want, inClient)
 				}
+			}
+		})
+	}
+}
+
+// With forward_prompt_token_ids set, chat-shaped prefill requests in the
+// OpenAI format carry the rendered token IDs in
+// kv_transfer_params.prompt_token_ids next to the connector's fields.
+// Multimodal, echo, unrendered and non-chat requests, and requests with the
+// parameter unset, carry none.
+func TestPrefillStep_PromptTokenIDsInKVParams(t *testing.T) {
+	for _, tc := range promptTokenIDsCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&sent)
+				_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+			}))
+			defer server.Close()
+
+			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				TokenIDs:          tc.tokens,
+				MultimodalEntries: tc.entries,
+				Body:              map[string]any{"model": testModelName},
+			}
+			maps.Copy(reqCtx.Body, tc.extra)
+			if err := step.Execute(t.Context(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			kvParams, _ := sent[reqcommon.FieldKVTransferParams].(map[string]any)
+			got, ok := kvParams[reqcommon.FieldPromptTokenIDs]
+			if ok != tc.want {
+				t.Fatalf("prompt_token_ids present = %v, want %v (params %v)", ok, tc.want, kvParams)
+			}
+			if tc.want && fmt.Sprint(got) != fmt.Sprint(tc.tokens) {
+				t.Fatalf("prompt_token_ids = %v, want %v", got, tc.tokens)
+			}
+			if kvParams[reqcommon.FieldDoRemoteDecode] != true {
+				t.Fatalf("do_remote_decode = %v, want true", kvParams[reqcommon.FieldDoRemoteDecode])
+			}
+			if _, onClientBody := reqCtx.Body[reqcommon.FieldKVTransferParams]; onClientBody {
+				t.Fatal("prefill must not write kv_transfer_params to reqCtx.Body")
+			}
+		})
+	}
+}
+
+func TestPrefillStep_ForwardPromptTokenIDs_RejectsInvalidParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+	}{
+		{name: "non_bool", params: map[string]any{ParamForwardPromptTokenIDs: "yes"}},
+		{name: "tokens_in_format", params: map[string]any{ParamForwardPromptTokenIDs: true, "use_openai_format": false}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params); err == nil {
+				t.Fatal("expected an error")
 			}
 		})
 	}

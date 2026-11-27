@@ -28,17 +28,19 @@ import (
 // 5e0; all three name the same value and NonNegativeInt reads each.
 func TestParseUint32ArrayJSONNumberForms(t *testing.T) {
 	tests := []struct {
-		name  string
-		raw   any
-		want  []uint32
-		errOK bool
+		name    string
+		raw     any
+		want    []uint32
+		errOK   bool
+		errPart string
 	}{
 		{name: "integer literal", raw: []any{json.Number("5")}, want: []uint32{5}},
 		{name: "decimal form", raw: []any{json.Number("5.0")}, want: []uint32{5}},
 		{name: "exponent form", raw: []any{json.Number("1e3")}, want: []uint32{1000}},
-		{name: "non-integral rejected", raw: []any{json.Number("5.5")}, errOK: true},
-		{name: "above uint32 rejected", raw: []any{json.Number("5000000000")}, errOK: true},
 		{name: "float64 decoded", raw: []any{float64(9)}, want: []uint32{9}},
+		{name: "non-integral rejected", raw: []any{json.Number("5.5")}, errOK: true, errPart: "token_ids"},
+		{name: "above uint32 rejected", raw: []any{json.Number("5000000000")}, errOK: true, errPart: "token_ids"},
+		{name: "bad element names the field and index", raw: []any{json.Number("1"), json.Number("2"), "x"}, errOK: true, errPart: "index 2"},
 	}
 
 	for _, tt := range tests {
@@ -46,6 +48,7 @@ func TestParseUint32ArrayJSONNumberForms(t *testing.T) {
 			got, err := parseUint32Array(tt.raw, "token_ids", false)
 			if tt.errOK {
 				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errPart)
 				return
 			}
 			require.NoError(t, err)

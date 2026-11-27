@@ -59,6 +59,11 @@ type Config struct {
 	// header with the agent identity into "<tenant>/<session>". Off by default:
 	// the fairness-ID header keys the flow on its own.
 	composeFairnessIDs bool
+
+	// requestStreamUsage gates whether the director asks for usage in a
+	// streamed response whose client did not. Off by default so the body is
+	// untouched.
+	requestStreamUsage bool
 }
 
 // WithPropagatePriority enables or disables injecting the resolved request
@@ -78,6 +83,13 @@ func (c *Config) ComposeFairnessIDs() bool {
 // with the agent identity into "<tenant>/<session>".
 func (c *Config) WithComposeFairnessIDs(composeFairnessIDs bool) *Config {
 	c.composeFairnessIDs = composeFairnessIDs
+	return c
+}
+
+// WithRequestStreamUsage enables or disables asking for usage in a streamed
+// response whose client did not.
+func (c *Config) WithRequestStreamUsage(requestStreamUsage bool) *Config {
+	c.requestStreamUsage = requestStreamUsage
 	return c
 }
 

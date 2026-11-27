@@ -180,7 +180,7 @@ func TestPick_IdleProgramServiceDecaysWithoutVisits(t *testing.T) {
 		LASWeightService:   1.0,
 		LASWeightHeadWait:  0.0,
 		LASHalfLifeSeconds: 1,
-	})
+	}, nil)
 	require.NoError(t, err)
 	las, ok := strategy.(*LASStrategy)
 	require.True(t, ok)
@@ -355,13 +355,9 @@ func TestEvictIdle_EvictsNeverCompletedAfterTTL(t *testing.T) {
 // limit. The gauges start empty and the default cap is restored after the test.
 func newCappedPlugin(t *testing.T, limit int) *ProgramAwarePlugin {
 	t.Helper()
-	avgWaitTimeMs.Reset()
-	attainedServiceTokens.Reset()
 	metricsutil.SetFairnessIDLabelLimit(limit)
 	t.Cleanup(func() {
 		metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit)
-		avgWaitTimeMs.Reset()
-		attainedServiceTokens.Reset()
 	})
 
 	p, err := ProgramAwarePluginFactory("test", nil, nil)
@@ -382,16 +378,16 @@ func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
 		pa.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 	}
 
-	require.Equal(t, testCap, promtestutil.CollectAndCount(avgWaitTimeMs),
+	require.Equal(t, testCap, promtestutil.CollectAndCount(pa.avgWaitTimeMs),
 		"100 distinct program IDs must leave only the cap's series, with no overflow series")
-	require.Equal(t, testCap, promtestutil.CollectAndCount(attainedServiceTokens),
+	require.Equal(t, testCap, promtestutil.CollectAndCount(pa.strategy.(*LASStrategy).attainedServiceTokens),
 		"the attained service gauge must be bounded identically")
 
 	// Eviction deletes an admitted program's series by its ID; a capped-out program has none.
 	pa.evictKey("program-0")
 	pa.evictKey("program-99")
-	require.Equal(t, testCap-1, promtestutil.CollectAndCount(avgWaitTimeMs))
-	require.Equal(t, testCap-1, promtestutil.CollectAndCount(attainedServiceTokens))
+	require.Equal(t, testCap-1, promtestutil.CollectAndCount(pa.avgWaitTimeMs))
+	require.Equal(t, testCap-1, promtestutil.CollectAndCount(pa.strategy.(*LASStrategy).attainedServiceTokens))
 }
 
 // A program whose fairness ID equals the overflow value is a real program while the cap has room,
@@ -404,8 +400,8 @@ func TestMetrics_ProgramNamedLikeOverflowValueIsReported(t *testing.T) {
 	require.NoError(t, pa.PreRequest(ctx, req, nil))
 	pa.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 
-	require.Equal(t, 1, promtestutil.CollectAndCount(avgWaitTimeMs))
-	require.Equal(t, 1, promtestutil.CollectAndCount(attainedServiceTokens))
+	require.Equal(t, 1, promtestutil.CollectAndCount(pa.avgWaitTimeMs))
+	require.Equal(t, 1, promtestutil.CollectAndCount(pa.strategy.(*LASStrategy).attainedServiceTokens))
 }
 
 func TestComputeFairnessIndex_EqualWaits(t *testing.T) {
@@ -493,7 +489,7 @@ func TestNewStrategy_TurnPriority(t *testing.T) {
 		Strategy:                      "turn-priority",
 		TurnPriorityTimeWeight:        0.25,
 		TurnPriorityInactivitySeconds: 120,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	tp, ok := strategy.(*turnPriorityStrategy)
@@ -504,7 +500,7 @@ func TestNewStrategy_TurnPriority(t *testing.T) {
 }
 
 func TestNewStrategy_UnknownRejected(t *testing.T) {
-	_, err := newStrategy(Config{Strategy: "nope"})
+	_, err := newStrategy(Config{Strategy: "nope"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "turn-priority")
 }

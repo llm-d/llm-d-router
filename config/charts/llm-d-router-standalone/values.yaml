@@ -119,11 +119,12 @@ router:
     healthCheckInterval: "10s"
     healthCheckTimeout: "2s"
     healthCheckUnhealthyThreshold: 3
-    healthCheckHealthyThreshold: 2
+    healthCheckHealthyThreshold: 1
     # Probe interval while the ext_proc cluster has not carried traffic, which
-    # includes every EPP pod start. Envoy defaults it to 60s; empty uses
-    # healthCheckInterval.
-    healthCheckNoTrafficInterval: ""
+    # includes every EPP pod start. Until a probe passes, requests reaching the
+    # new pod fail open (no EPP scheduling, or 503 with no fallback endpoints).
+    # Envoy defaults it to 60s; empty uses healthCheckInterval.
+    healthCheckNoTrafficInterval: "1s"
 
     # OpenTelemetry tracing for the Envoy proxy. When enabled, Envoy creates a
     # span per request and propagates the trace context on the ext_proc gRPC
@@ -173,6 +174,7 @@ router:
               -}}
               {{- $eppHealthPortCheck := eq (include "llm-d-router.proxy.eppHealthPortCheck" .) "true" -}}
               {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
+              {{- $extProcPort := include "llm-d-router.epp.extProcPort" . -}}
               admin:
                 address:
                   socket_address:
@@ -341,7 +343,7 @@ router:
                                     grpc_service:
                                       envoy_grpc:
                                         cluster_name: ext_proc
-                                        authority: localhost:9002
+                                        authority: localhost:{{ $extProcPort }}
                                       timeout: 10s
                                     processing_mode:
                                       request_header_mode: SEND
@@ -573,7 +575,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
@@ -592,7 +594,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
@@ -607,7 +609,7 @@ router:
                                 address:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
-                                    port_value: 9002
+                                    port_value: {{ $extProcPort }}
                                 {{- if $eppHealthPortCheck }}
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}

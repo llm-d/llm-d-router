@@ -37,7 +37,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
 const (
@@ -68,6 +67,7 @@ type Parameters struct {
 	// every request is labeled "all".
 	PromptBuckets []int `json:"promptBuckets,omitempty"`
 	// PrefillProfileName is the scheduling profile whose result marks a remote prefill.
+	// Empty follows the prefill profile name in the scheduling result.
 	PrefillProfileName string `json:"prefillProfileName,omitempty"`
 	// Priorities limits recording to these served priorities. Empty records every priority.
 	Priorities []int `json:"priorities,omitempty"`
@@ -86,7 +86,7 @@ type Plugin struct {
 
 // PluginFactory builds the plugin from its parameters.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	params := Parameters{PrefillProfileName: disagg.DefaultPrefillProfile}
+	var params Parameters
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin - %w", PluginType, err)
@@ -107,9 +107,6 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 func newPlugin(name string, params Parameters) (*Plugin, error) {
 	if !slices.IsSorted(params.PromptBuckets) || len(slices.Compact(slices.Clone(params.PromptBuckets))) != len(params.PromptBuckets) {
 		return nil, fmt.Errorf("%s plugin %q: promptBuckets must strictly increase", PluginType, name)
-	}
-	if params.PrefillProfileName == "" {
-		params.PrefillProfileName = disagg.DefaultPrefillProfile
 	}
 	labels := make([]string, 0, len(params.PromptBuckets)+1)
 	for _, b := range params.PromptBuckets {
@@ -259,7 +256,14 @@ func (p *Plugin) path(request *scheduling.InferenceRequest) string {
 	if request.SchedulingResult == nil {
 		return pathLocal
 	}
-	if res := request.SchedulingResult.ProfileResults[p.prefillProfile]; res != nil && len(res.TargetEndpoints) > 0 {
+	prefillProfile := p.prefillProfile
+	if prefillProfile == "" {
+		prefillProfile = request.SchedulingResult.PrefillProfileName
+	}
+	if prefillProfile == "" {
+		prefillProfile = scheduling.DefaultPrefillProfile
+	}
+	if res := request.SchedulingResult.ProfileResults[prefillProfile]; res != nil && len(res.TargetEndpoints) > 0 {
 		return pathRemote
 	}
 	return pathLocal

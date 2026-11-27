@@ -204,6 +204,33 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Number of worker shards (capacity) in the event processing pool", compbasemetrics.ALPHA),
 	})
+	// EventsSequenceGaps counts detected ZMQ sequence number gaps per pod.
+	EventsSequenceGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_sequence_gaps_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-event sequence gaps detected by ZMQ subscribers", compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel})
+	// EventsMissed counts missed KV-event sequence numbers inferred from gaps.
+	EventsMissed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_missed_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of missed KV-event messages inferred from sequence gaps", compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel})
+	// EventsDropped counts KV-event messages dropped before indexing, labeled by
+	// pod identifier and drop reason (e.g. "malformed_frame", "replay_cooldown", "decode_error").
+	EventsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_dropped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-event messages dropped before indexing", compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel, reasonLabel})
+	// EventsProcessingLag observes the elapsed time between the engine-emitted
+	// batch timestamp and worker-pool processing.
+	EventsProcessingLag = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_processing_lag_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Elapsed time between KV-event batch timestamp and worker-pool processing in seconds", compbasemetrics.ALPHA),
+		Buckets: prometheus.DefBuckets,
+	})
 )
 
 // Collectors returns a slice of all registered Prometheus collectors.
@@ -216,6 +243,7 @@ func Collectors() []prometheus.Collector {
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		LiveOnlySubscribers, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
+		EventsSequenceGaps, EventsMissed, EventsDropped, EventsProcessingLag,
 	}
 }
 
@@ -240,6 +268,9 @@ func CleanupSubscriber(podIdentifier string) {
 	SubscriberReconnections.DeleteLabelValues(podIdentifier)
 	MessagesReceived.DeleteLabelValues(podIdentifier)
 	ZMQErrors.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
+	EventsSequenceGaps.DeleteLabelValues(podIdentifier)
+	EventsMissed.DeleteLabelValues(podIdentifier)
+	EventsDropped.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
 }
 
 var registerMetricsOnce = sync.Once{}

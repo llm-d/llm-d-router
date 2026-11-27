@@ -551,8 +551,8 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
-	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
-	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
+	pr := schedulingResult.PrefillProfile()
+	disaggregated := pr != nil && len(pr.TargetEndpoints) > 0
 	servers := make([]server, 0, 2)
 	var decode *server
 	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
@@ -616,7 +616,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*fwkrequest.BytesPerToken, total*blockSize*fwkrequest.BytesPerToken)
 	if request.Body != nil {
-		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
+		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult)
 		selected := state.PredictedCachedTokens[ServerID(predictionProfile.TargetEndpoints[0].GetMetadata().ID)]
 		// A profile that reports no scored candidates leaves only the chosen
 		// endpoint to go on, so selected stands in for both maxima. That keeps

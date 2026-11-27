@@ -113,6 +113,8 @@ type ResponseBodyProcessor interface {
 // DataProducer is implemented by data producers which produce data from different sources.
 // Produce is called by the director before scheduling requests, in the phase
 // the producer is assigned to; see DataProducerPhase.
+// Produce implementations must treat request.Headers as read-only. Producers
+// publish data through declared attributes; PreRequest plugins edit headers for forwarding.
 type DataProducer interface {
 	plugin.ProducerPlugin
 	Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error

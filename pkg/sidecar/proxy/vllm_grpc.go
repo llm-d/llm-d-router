@@ -677,7 +677,7 @@ func (s *Server) handleMooncakeVLLMGRPC(w http.ResponseWriter, r *http.Request, 
 
 	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		setUnaryGeneratePath(prefillReq)
-		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
+		prefillReq.Header.Set(routing.DataParallelRankHeader, dpRank)
 	}, nil)
 }
 

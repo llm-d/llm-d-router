@@ -189,7 +189,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 		return endpoints // pass through if not in filter mode
 	}
 
-	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Filter")
+	logger := log.FromContext(ctx).WithName("ContextLengthAware.Filter")
 	contextLength := p.getContextLength(request)
 	logger.V(logging.TRACE).Info("Filtering endpoints by context length", "contextLength", contextLength)
 
@@ -229,7 +229,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 // Score scores endpoints based on how well their context length ranges match the request.
 // Endpoints with tighter/more specific ranges matching the request get higher scores.
 func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
-	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Score")
+	logger := log.FromContext(ctx).WithName("ContextLengthAware.Score")
 	contextLength := p.getContextLength(request)
 	logger.V(logging.TRACE).Info("Scoring endpoints by context length", "contextLength", contextLength)
 

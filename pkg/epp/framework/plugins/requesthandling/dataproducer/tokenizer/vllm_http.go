@@ -468,7 +468,8 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkre
 	defer cancel()
 	defer func() { r.observeRender(ctx, path, timeout, time.Since(start), err) }()
 
-	baseURL, err := r.endpointPicker.Pick()
+	affinityKey, _ := ctx.Value(renderAffinityKeyCtxKey{}).(string)
+	baseURL, err := r.endpointPicker.Pick(affinityKey)
 	if err != nil {
 		return fmt.Errorf("pick render endpoint: %w", err)
 	}
@@ -480,7 +481,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkre
 	if attemptErr == nil || !retryable || !canRetry || reqCtx.Err() != nil {
 		return attemptErr
 	}
-	baseURL, err = picker.PickExcluding(map[string]struct{}{baseURL: {}})
+	baseURL, err = picker.PickExcluding(affinityKey, map[string]struct{}{baseURL: {}})
 	if errors.Is(err, errNoRenderEndpoints) {
 		return attemptErr
 	}

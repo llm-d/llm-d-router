@@ -325,26 +325,20 @@ func isEventStream(headers map[string]string) bool {
 
 // extractStreamingUsage reads usage from SGLang SSE data lines.
 func extractStreamingUsage(body []byte) *request.Usage {
-	text := strings.TrimSpace(string(body))
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
-		if !ok {
-			continue
-		}
-		data = strings.TrimSpace(data)
-		if data == reqcommon.SSEDoneMarker {
+	for line := range bytes.SplitSeq(body, []byte("\n")) {
+		data, ok := reqcommon.SSEDataPayload(bytes.TrimSpace(line))
+		if !ok || reqcommon.SSEIsDone(data) {
 			continue
 		}
 		var resp sgLangResponse
-		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+		if err := json.Unmarshal(data, &resp); err != nil {
 			continue
 		}
 		// skip intermediate chunks; only the final chunk has a non-null finish_reason
 		if !hasJSONValue(resp.MetaInfo.FinishReason) {
 			continue
 		}
-		usage, _ := parseMetaInfoUsage([]byte(data))
+		usage, _ := parseMetaInfoUsage(data)
 		return usage
 	}
 	return nil

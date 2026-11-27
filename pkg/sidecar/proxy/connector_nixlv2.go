@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -36,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -322,7 +324,7 @@ func (s *Server) runNIXLV2Serial(
 		s.config.MoRIIODPSizeLocal,
 	)
 	if s.config.MoRIIODPSize > 1 {
-		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(localDPRank))
+		preq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(localDPRank))
 	}
 
 	prefillKV := s.buildNIXLV2SerialPrefillKVParams(ctx, uuidStr, globalDPRank, source)
@@ -359,19 +361,23 @@ func (s *Server) runNIXLV2Serial(
 	// because prefill already ran.
 	var pw *bufferedResponseWriter
 	var prefillErr error
+	var prefillTimedOut, clientGone bool
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
-		setPrefillReq(preq)
-		prefillErr = servePrefill(prefillHandler, pw, preq)
-		if !leg.shouldRetryPrefill(pw) || attempt >= s.config.PrefillMaxRetries {
+		// A timed-out attempt that got no response carries the prefill proxy's
+		// 502, or gRPC Unavailable, so it is retried like one.
+		prefillTimedOut, prefillErr = s.servePrefillAttempt(prefillHandler, pw, preq, setPrefillReq)
+		clientGone = preq.Context().Err() != nil
+		if clientGone || !leg.shouldRetryPrefill(pw) || attempt >= s.config.PrefillMaxRetries {
 			break
 		}
 		logger.Info("retrying prefill request",
 			"attempt", attempt+1,
 			"target", prefillPodHostPort,
 			"request_id", uuidStr,
-			"previous_code", pw.statusCode)
+			"previous_code", pw.statusCode,
+			"timed_out", prefillTimedOut)
 		select {
 		case <-time.After(s.config.PrefillRetryBackoff):
 		case <-preq.Context().Done():
@@ -386,11 +392,26 @@ retryLoop:
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
-	// The reverse proxy also aborts the prefill body copy when the client
-	// disconnects, which is not a prefill failure.
-	if prefillErr != nil && preq.Context().Err() != nil {
+	// A client that disconnects during an attempt fails it without a prefill
+	// failure: the prefill proxy answers 502, or gRPC Unavailable, itself before
+	// the response headers and aborts the body copy after them.
+	if clientGone && (prefillErr != nil || prefillAttemptFailed(pw)) {
 		logger.Info("client disconnected during prefill", "request_id", uuidStr)
 		prefillSpan.End()
+		return
+	}
+
+	if prefillTimedOut {
+		observeStageError(r.Context(), routing.StagePrefill)
+		logger.Error(context.DeadlineExceeded, "prefill request timed out",
+			"request_id", uuidStr,
+			"timeout", s.config.PrefillTimeout.String())
+		prefillSpan.SetStatus(codes.Error, "prefill request timed out")
+		prefillSpan.End()
+		if err := sendError(w, r, http.StatusGatewayTimeout,
+			"prefill request timed out after "+s.config.PrefillTimeout.String()); err != nil {
+			logger.Error(err, "failed to send error response to client")
+		}
 		return
 	}
 
@@ -424,7 +445,7 @@ retryLoop:
 		return
 	}
 	if decodeLocalRank != "" {
-		dreq.Header.Set(requestHeaderDataParallelRank, decodeLocalRank)
+		dreq.Header.Set(routing.DataParallelRankHeader, decodeLocalRank)
 	}
 
 	wrapDecodeWriter, observeDecodeSpan, dispatchDecode, dbodyLen, ok := leg.prepareDecode(w, r, dreq, uuidStr, pKVTransferParams)
@@ -487,6 +508,33 @@ func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (
 	}()
 	h.ServeHTTP(pw, r)
 	return nil
+}
+
+// servePrefillAttempt sends one prefill attempt, its body set by setReq,
+// bounded by Config.PrefillTimeout when it is set. timedOut reports whether the
+// timeout ended the attempt before a complete response arrived.
+func (s *Server) servePrefillAttempt(h http.Handler, pw *bufferedResponseWriter, preq *http.Request, setReq func(*http.Request)) (timedOut bool, err error) {
+	ctx := preq.Context()
+	attempt := preq
+	if s.config.PrefillTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.config.PrefillTimeout)
+		defer cancel()
+		attempt = preq.WithContext(ctx)
+	}
+	setReq(attempt)
+	err = servePrefill(h, pw, attempt)
+	timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded) &&
+		preq.Context().Err() == nil &&
+		(err != nil || prefillAttemptFailed(pw))
+	return timedOut, err
+}
+
+// prefillAttemptFailed reports whether pw holds an error response. The prefill
+// proxy answers a gRPC request it could not complete with a gRPC error status
+// over HTTP 200.
+func prefillAttemptFailed(pw *bufferedResponseWriter) bool {
+	return isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers)
 }
 
 // decodeResponseWriter returns the writer the decode response is streamed
@@ -673,7 +721,7 @@ func (s *Server) executeNIXLV2WriteParallel(
 	preq := r.Clone(pCtx)
 	preq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
-		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
+		preq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(dpRank))
 	}
 	pbodyLen := leg.preparePrefill(preq, prefillSpan)
 
@@ -689,7 +737,7 @@ func (s *Server) executeNIXLV2WriteParallel(
 	dreq := r.Clone(dCtx)
 	dreq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
-		dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
+		dreq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(dpRank))
 	}
 	dbodyLen := leg.prepareDecode(dreq)
 

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,21 +145,36 @@ func TestExplorationLimits(t *testing.T) {
 }
 
 func TestExplorationDistribution(t *testing.T) {
-	const trials = 100000
+	t.Parallel()
+	var seed uint64 = 1
 	for _, temperature := range []float64{0.5, 1, 2} {
 		for _, budget := range []float64{0, .05, 1} {
-			for _, zeros := range []int{1, 10, 100} {
-				for _, k := range []int{1, 2, 8} {
-					t.Run(fmt.Sprintf("temperature=%g/budget=%g/zeros=%d/k=%d", temperature, budget, zeros, k), func(t *testing.T) {
+			zerosList := []int{1, 10, 100}
+			kList := []int{1, 2, 8}
+			if budget == 0 {
+				zerosList = []int{100}
+				kList = []int{8}
+			}
+			for _, zeros := range zerosList {
+				for _, k := range kList {
+					subSeed := seed
+					seed++
+					trials := 20000
+					if budget == .05 && zeros == 100 {
+						// 100000 trials keeps expected per-zero count (50) above the 6-sigma threshold (43.4).
+						trials = 100000
+					}
+					t.Run(fmt.Sprintf("temperature_%g_budget_%g_zeros_%d_k_%d", temperature, budget, zeros, k), func(t *testing.T) {
+						t.Parallel()
+						ctx := t.Context()
 						scores := append([]float64{1, 3, -1}, make([]float64, zeros)...)
 						input := explorationCandidates(scores...)
-						p := NewWeightedRandomPicker(k)
+						p := NewWeightedRandomPicker(k).WithTemperature(temperature).WithRand(rand.NewPCG(1, subSeed))
 						p.explorationBudget = budget
-						p.WithTemperature(temperature)
 						counts := make(map[string]int)
 						firstPositive := 0
 						for range trials {
-							result := p.Pick(context.Background(), input).TargetEndpoints
+							result := p.Pick(ctx, input).TargetEndpoints
 							counts[result[0].GetMetadata().ID.Name]++
 							for i, ep := range result {
 								if ep.(*fwksched.ScoredEndpoint).Score == 0 && i != 0 {
@@ -186,6 +202,9 @@ func TestExplorationDistribution(t *testing.T) {
 							count := counts[strconv.Itoa(i)]
 							zeroTotal += count
 							check(count, trials, budget/float64(zeros))
+						}
+						if budget == 0 && zeroTotal != 0 {
+							t.Fatalf("selected %d zero-score endpoints with budget=0", zeroTotal)
 						}
 						check(zeroTotal, trials, budget)
 						positiveProbability := 1 / (1 + math.Pow(3, 1/temperature))
@@ -228,16 +247,22 @@ func BenchmarkExploration(b *testing.B) {
 }
 
 func TestExplorationSinglePositiveDistribution(t *testing.T) {
+	t.Parallel()
 	const trials = 20000
+	var seed uint64 = 1
 	for _, zeros := range []int{2, 100} {
 		for _, k := range []int{1, 8} {
-			t.Run(fmt.Sprintf("zeros=%d/k=%d", zeros, k), func(t *testing.T) {
-				p := NewWeightedRandomPicker(k)
+			subSeed := seed
+			seed++
+			t.Run(fmt.Sprintf("zeros_%d_k_%d", zeros, k), func(t *testing.T) {
+				t.Parallel()
+				ctx := t.Context()
+				p := NewWeightedRandomPicker(k).WithRand(rand.NewPCG(2, subSeed))
 				p.explorationBudget = .05
 				input := explorationCandidates(append([]float64{1}, make([]float64, zeros)...)...)
 				count := 0
 				for range trials {
-					result := p.Pick(context.Background(), input).TargetEndpoints
+					result := p.Pick(ctx, input).TargetEndpoints
 					if result[0].GetMetadata().ID.Name != "0" {
 						count++
 					}
@@ -280,18 +305,30 @@ func TestExplorationConcurrent(t *testing.T) {
 }
 
 func TestExplorationLowTemperatureMultiPick(t *testing.T) {
+	t.Parallel()
 	const trials = 20000
+	var seed uint64 = 1
 	for _, budget := range []float64{0, .05, 1} {
-		for _, zeros := range []int{1, 10} {
-			for _, k := range []int{2, 3, 8} {
-				t.Run(fmt.Sprintf("budget=%g/zeros=%d/k=%d", budget, zeros, k), func(t *testing.T) {
+		zerosList := []int{1, 10}
+		kList := []int{2, 3, 8}
+		if budget == 0 {
+			zerosList = []int{10}
+			kList = []int{8}
+		}
+		for _, zeros := range zerosList {
+			for _, k := range kList {
+				subSeed := seed
+				seed++
+				t.Run(fmt.Sprintf("budget_%g_zeros_%d_k_%d", budget, zeros, k), func(t *testing.T) {
+					t.Parallel()
+					ctx := t.Context()
 					input := explorationCandidates(append([]float64{.25, .5, 1, -1}, make([]float64, zeros)...)...)
-					p := NewWeightedRandomPicker(k).WithTemperature(.01)
+					p := NewWeightedRandomPicker(k).WithTemperature(.01).WithRand(rand.NewPCG(3, subSeed))
 					p.explorationBudget = budget
 					counts := make([]int, zeros)
 					explorations := 0
 					for range trials {
-						result := p.Pick(context.Background(), input).TargetEndpoints
+						result := p.Pick(ctx, input).TargetEndpoints
 						offset := 0
 						for i, zero := range input[4:] {
 							if result[0] == zero {
@@ -309,6 +346,9 @@ func TestExplorationLowTemperatureMultiPick(t *testing.T) {
 								t.Fatalf("position %d: expected original positive endpoint %d, got %v", i+offset, 2-i, endpoint)
 							}
 						}
+					}
+					if budget == 0 && explorations != 0 {
+						t.Fatalf("selected %d zero-score endpoints with budget=0", explorations)
 					}
 					check := func(count int, probability float64) {
 						t.Helper()

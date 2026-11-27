@@ -860,6 +860,32 @@ func TestDirector_HandleRequest(t *testing.T) {
 		PrimaryProfileName: "testProfile",
 	}
 
+	rankEndpoint := func(rank int, score float64) *fwksched.ScoredEndpoint {
+		return &fwksched.ScoredEndpoint{
+			Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				Address:      "192.168.5.100",
+				Port:         "8000",
+				MetricsHost:  "192.168.5.100:8000",
+				ID:           types.NamespacedName{Name: fmt.Sprintf("pod5-rank-%d", rank), Namespace: "default"},
+				RankIndex:    rank,
+				RankByHeader: true,
+			}, nil, nil),
+			Score: score,
+		}
+	}
+	rank1Endpoint, rank0Endpoint := rankEndpoint(1, 0.83), rankEndpoint(0, 0.41)
+	newRankScheduleResults := func() *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"testProfile": {
+					TargetEndpoints:  []fwksched.Endpoint{rank1Endpoint, rank0Endpoint, scoredEndpoint2},
+					ScoredCandidates: []fwksched.ScoredEndpoint{*rank1Endpoint, *rank0Endpoint, *scoredEndpoint2},
+				},
+			},
+			PrimaryProfileName: "testProfile",
+		}
+	}
+
 	tests := []struct {
 		name                    string
 		reqBodyMap              map[string]any
@@ -884,6 +910,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
 		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		composeFairnessIDs      bool   // If true, enable requestHandler.composeFairnessIDs on the director.
+		requestStreamUsage      bool   // If true, enable requestHandler.requestStreamUsage on the director.
+		wantUsageRequested      bool   // Asserted against returnedReqCtx.StreamUsageRequested.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		wantAdmitPriority       *int   // If non-nil, asserted against the priority passed to Admit and carried on the request.
@@ -978,6 +1006,119 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 		},
 		{
+			name: "streamed chat request asks for usage when requestStreamUsage is enabled",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":   true,
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			requestStreamUsage: true,
+			wantUsageRequested: true,
+			wantMutatedBody: map[string]any{
+				"model":          model,
+				"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":         true,
+				"stream_options": map[string]any{"include_usage": true},
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "streamed chat request is forwarded unchanged when requestStreamUsage is disabled",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":   true,
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantRawBodyUnchanged:   true,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "non-streaming chat request is forwarded unchanged with requestStreamUsage",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			requestStreamUsage:     true,
+			wantRawBodyUnchanged:   true,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "streamed chat request that asks for usage is forwarded unchanged with requestStreamUsage",
+			reqBodyMap: map[string]any{
+				"model":          model,
+				"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":         true,
+				"stream_options": map[string]any{"include_usage": true},
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			requestStreamUsage:     true,
+			wantRawBodyUnchanged:   true,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
 			name: "successful request with scored endpoints",
 			reqBodyMap: map[string]any{
 				"model":  model,
@@ -1002,6 +1143,32 @@ func TestDirector_HandleRequest(t *testing.T) {
 					"192.168.1.100:8000": 0.91,
 					"192.168.2.100:8000": 0.74,
 					"192.168.3.100:8000": 0.12,
+				},
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "a data-parallel rank is sent without fallback destinations and takes its address's best score",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = newRankScheduleResults()
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod:       rank1Endpoint.GetMetadata(),
+				TargetEndpoint:  "192.168.5.100:8000",
+				TargetEndpointScores: map[string]float64{
+					"192.168.5.100:8000": 0.83,
+					"192.168.2.100:8000": 0.74,
+				},
+				Request: &handlers.Request{
+					Headers: map[string]string{routing.DataParallelRankHeader: "1"},
 				},
 			},
 			inferenceObjectiveName: objectiveName,
@@ -2206,6 +2373,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if test.composeFairnessIDs {
 					config = config.WithComposeFairnessIDs(true)
 				}
+				if test.requestStreamUsage {
+					config = config.WithRequestStreamUsage(true)
+				}
 
 				endpointCandidates := NewDatastoreEndpointCandidates(ds)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config, "")
@@ -2328,7 +2498,14 @@ func TestDirector_HandleRequest(t *testing.T) {
 					}
 					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
 					assert.Equal(t, test.wantReqCtx.TargetEndpointScores, returnedReqCtx.TargetEndpointScores, "reqCtx.TargetEndpointScores mismatch")
+					if test.wantReqCtx.Request != nil {
+						for k, v := range test.wantReqCtx.Request.Headers {
+							assert.Equal(t, v, returnedReqCtx.Request.Headers[k], "reqCtx.Request.Headers[%q] mismatch", k)
+						}
+					}
 				}
+
+				assert.Equal(t, test.wantUsageRequested, returnedReqCtx.StreamUsageRequested, "reqCtx.StreamUsageRequested mismatch")
 
 				if test.wantFairnessID != "" {
 					require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")
@@ -2973,6 +3150,79 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}
 }
 
+// grpcStatusSnapshot records the grpc-status value each ResponseBody call saw
+// at call time, so a later write to the shared headers map cannot rewrite
+// what an earlier chunk observed.
+type grpcStatusSnapshot struct {
+	mu       sync.Mutex
+	statuses []string
+	// served records the endpoint each call saw on the response metadata, which
+	// response plugins read to tell a fallback-served response from one the
+	// target served.
+	served []string
+}
+
+func (p *grpcStatusSnapshot) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "grpc-status-snapshot", Name: "snapshot"}
+}
+
+func (p *grpcStatusSnapshot) ResponseBody(_ context.Context, _ *fwksched.InferenceRequest,
+	response *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.statuses = append(p.statuses, response.Headers[grpcframe.HeaderStatus])
+	served, _ := metadata.ServedEndpoint(response.ReqMetadata)
+	p.served = append(p.served, served)
+}
+
+// A gRPC stream's final status arrives in trailers, after the response
+// headers were already reported, so the director publishes it on the
+// end-of-stream response headers: intermediate chunks do not see it, and the
+// final chunk does.
+func TestDirector_HandleResponseBody_PublishesGRPCStatus(t *testing.T) {
+	snapshot := &grpcStatusSnapshot{}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	ds := datastore.NewDatastore(t.Context(), nil)
+	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, NewDatastoreEndpointCandidates(ds),
+		NewConfig().WithResponseStreamingPlugins(snapshot), "")
+
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{
+			ID:      "grpc-status-req",
+			Headers: map[string]string{},
+			// Envoy reports the endpoint that actually served the request in
+			// the response metadata, which a fallback-served response needs so
+			// response plugins do not charge the target endpoint for it.
+			Metadata: map[string]any{
+				metadata.DestinationEndpointNamespace: map[string]any{
+					metadata.DestinationEndpointServedKey: "10.0.0.2:50051",
+				},
+			},
+		},
+		Response: &handlers.Response{Headers: map[string]string{"content-type": grpcframe.MediaType}},
+		TargetPod: &fwkdl.EndpointMetadata{
+			ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"},
+		},
+		ResponseGRPCStatus: "14",
+	}
+
+	director.HandleResponseBody(ctx, reqCtx, false)
+	require.Eventually(t, func() bool {
+		snapshot.mu.Lock()
+		defer snapshot.mu.Unlock()
+		return len(snapshot.statuses) >= 1
+	}, time.Second, 10*time.Millisecond, "the intermediate chunk should have been processed")
+
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	require.Equal(t, []string{"", "14"}, snapshot.statuses)
+	require.Equal(t, []string{"10.0.0.2:50051", "10.0.0.2:50051"}, snapshot.served,
+		"every body-phase response carries the endpoint Envoy reports it served")
+}
+
 func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	// orderTrackingPlugin records the RequestId of each chunk it processes.
 	// Since we set a unique RequestId per chunk, the recorded order lets us
@@ -3343,6 +3593,59 @@ func TestDirector_ReleasesDispatchReservationAfterPreRequest(t *testing.T) {
 	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
 	require.NoError(t, err)
 	require.True(t, released)
+}
+
+func TestDirector_ForwardsRoutingHeadersAfterProducerTimeout(t *testing.T) {
+	for _, phase := range []fwkrh.DataProducerPhase{fwkrh.DataProducerPhaseRequestHandling, fwkrh.DataProducerPhaseScheduling} {
+		t.Run(string(phase), func(t *testing.T) {
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				Address: "192.168.1.100",
+				Port:    "8000",
+				ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+			}, nil, fwkdl.NewAttributes())
+			result := &fwksched.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"decode": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+				},
+			}
+			dir, ctx := newSinglePodDirector(t, result)
+			producer := &lateHeaderPlugin{
+				header:   routing.KVCacheSourceHeader,
+				started:  make(chan struct{}),
+				release:  make(chan struct{}),
+				observed: make(chan string, 1),
+			}
+			t.Cleanup(func() { close(producer.release) })
+			cfg := NewConfig().WithPreRequestPlugins(&mockPreRequestPlugin{
+				name: "stamp-routing-header",
+				modifyFn: func(request *fwksched.InferenceRequest) {
+					routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
+				},
+			})
+			if phase == fwkrh.DataProducerPhaseRequestHandling {
+				cfg.WithRequestHandlingDataProducers(producer)
+			} else {
+				cfg.WithDataProducerPlugins(producer)
+			}
+			dir.requestControlPlugins = *cfg
+
+			body := []byte(`{"model":"m","prompt":"p"}`)
+			originalHeaders := map[string]string{":path": "/v1/completions"}
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{ID: "test-producer-timeout", Headers: originalHeaders, RawBody: body},
+				Parser:  openai.NewOpenAIParser(),
+			}
+			parsed, err := reqCtx.Parser.ParseRequest(ctx, body, originalHeaders)
+			require.NoError(t, err)
+			got, err := dir.HandleRequest(ctx, reqCtx, parsed.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "10.0.0.1:5555", got.Request.Headers[routing.KVCacheSourceHeader])
+			assert.Equal(t, got.SchedulingRequest.Headers, got.Request.Headers)
+			assert.Equal(t, "/v1/completions", got.Request.Headers[":path"])
+			assert.NotContains(t, originalHeaders, routing.KVCacheSourceHeader)
+		})
+	}
 }
 
 // TestDirector_ReleasesProducerStateOnEarlyReturn verifies that per-request state a DataProducer
@@ -3927,4 +4230,147 @@ func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
 	assert.Equal(t, reqCtx.FirstTokenTimestamp(), resp.FirstTokenTimestamp)
 	assert.Equal(t, reqCtx.ResponseCompleteTimestamp(), resp.CompleteTimestamp)
 	assert.Equal(t, reqCtx.ModelServerStreaming(), resp.Streaming)
+}
+
+func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	endpoint := func(name, address string, rank, ranksPerPort int) fwksched.Endpoint {
+		meta := &fwkdl.EndpointMetadata{
+			ID:           types.NamespacedName{Name: name, Namespace: "default"},
+			Address:      address,
+			Port:         "8000",
+			RankIndex:    rank,
+			RankByHeader: ranksPerPort > 1,
+		}
+		return &fwksched.ScoredEndpoint{Endpoint: fwksched.NewEndpoint(meta, nil, nil)}
+	}
+	result := func(targets ...fwksched.Endpoint) *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": {TargetEndpoints: targets}},
+			PrimaryProfileName: "decode",
+		}
+	}
+
+	tests := []struct {
+		name         string
+		result       *fwksched.SchedulingResult
+		wantEndpoint string
+		wantRank     string
+		// wantTargets lists the endpoints that the result holds for the PreRequest plugins.
+		wantTargets []string
+	}{
+		{
+			name:         "rank endpoint sets its global rank and drops fallbacks",
+			result:       result(endpoint("pod1-rank-1", "10.0.0.1", 3, 2), endpoint("pod1-rank-0", "10.0.0.1", 2, 2), endpoint("pod2", "10.0.0.2", 0, 0)),
+			wantEndpoint: "10.0.0.1:8000",
+			wantRank:     "3",
+			wantTargets:  []string{"pod1-rank-1"},
+		},
+		{
+			// pod2 has a RankIndex, as one port of a multi-port pod has, but no marker.
+			name: "endpoint without the marker keeps the client's header and its fallbacks without ranks",
+			result: result(endpoint("pod2", "10.0.0.2", 1, 0), endpoint("pod1-rank-1", "10.0.0.1", 1, 2),
+				endpoint("pod3", "10.0.0.3", 0, 0)),
+			// The EPP sets no rank here, so the rank endpoint must not get the client's.
+			wantEndpoint: "10.0.0.2:8000,10.0.0.3:8000",
+			wantRank:     "7",
+			wantTargets:  []string{"pod2", "pod3"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig()}
+			headers := map[string]string{routing.DataParallelRankHeader: "7"}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req", Headers: headers},
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, tt.result)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEndpoint, got.TargetEndpoint)
+			assert.Equal(t, tt.wantRank, got.SchedulingRequest.Headers[routing.DataParallelRankHeader])
+			var targets []string
+			for _, target := range tt.result.ProfileResults["decode"].TargetEndpoints {
+				targets = append(targets, target.GetMetadata().ID.Name)
+			}
+			assert.Equal(t, tt.wantTargets, targets, "the result lists only the endpoints that get the request")
+		})
+	}
+
+	// A PreRequest plugin that writes or deletes the header, as endpoint-header-stamper
+	// can, must not change the rank of the endpoint that the scheduler picked.
+	for name, modify := range map[string]func(*fwksched.InferenceRequest){
+		"a plugin that replaces the header": func(r *fwksched.InferenceRequest) { r.Headers[routing.DataParallelRankHeader] = "9" },
+		"a plugin that deletes the header":  func(r *fwksched.InferenceRequest) { delete(r.Headers, routing.DataParallelRankHeader) },
+	} {
+		t.Run("rank endpoint keeps its rank after "+name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(&mockPreRequestPlugin{name: "stamper", modifyFn: modify})}
+			headers := map[string]string{}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req", Headers: headers},
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2)))
+
+			require.NoError(t, err)
+			assert.Equal(t, "1", got.Request.Headers[routing.DataParallelRankHeader])
+		})
+	}
+
+	// The header mutation is built from Request.Headers, so the rank must be there
+	// when no header map exists yet, without dropping headers written by PreRequest
+	// plugins onto SchedulingRequest.Headers.
+	t.Run("rank endpoint sets its rank on a request without headers", func(t *testing.T) {
+		dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(&mockPreRequestPlugin{
+			name: "marker",
+			modifyFn: func(r *fwksched.InferenceRequest) {
+				r.Headers["x-plugin-header"] = "kept"
+			},
+		})}
+		reqCtx := &handlers.RequestContext{
+			Request:           &handlers.Request{},
+			SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req"},
+		}
+
+		got, err := dir.prepareRequest(ctx, reqCtx, result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2)))
+
+		require.NoError(t, err)
+		assert.Equal(t, "1", got.Request.Headers[routing.DataParallelRankHeader])
+		assert.Equal(t, "1", got.SchedulingRequest.Headers[routing.DataParallelRankHeader])
+		assert.Equal(t, "kept", got.Request.Headers["x-plugin-header"])
+	})
+
+	// Secondary profiles (such as encode fan-out) must not repeat the same host:port
+	// when multiple ranks of one pod are selected.
+	t.Run("secondary profile deduplicates colocated rank endpoints by address", func(t *testing.T) {
+		dir := &Director{requestControlPlugins: *NewConfig()}
+		headers := map[string]string{}
+		reqCtx := &handlers.RequestContext{
+			Request:           &handlers.Request{Headers: headers},
+			SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req", Headers: headers},
+		}
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"decode": {TargetEndpoints: []fwksched.Endpoint{endpoint("dec-rank-1", "10.0.0.1", 1, 2)}},
+				"encode": {TargetEndpoints: []fwksched.Endpoint{
+					endpoint("enc1-rank-0", "10.0.0.2", 0, 2),
+					endpoint("enc1-rank-1", "10.0.0.2", 1, 2),
+					endpoint("enc2-rank-0", "10.0.0.3", 0, 2),
+				}},
+			},
+		}
+
+		_, err := dir.prepareRequest(ctx, reqCtx, res)
+
+		require.NoError(t, err)
+		encTargets := make([]string, 0, len(res.ProfileResults["encode"].TargetEndpoints))
+		for _, ep := range res.ProfileResults["encode"].TargetEndpoints {
+			encTargets = append(encTargets, ep.GetMetadata().ID.Name)
+		}
+		assert.Equal(t, []string{"enc1-rank-0", "enc2-rank-0"}, encTargets)
+	})
 }

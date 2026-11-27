@@ -28,13 +28,13 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
-| `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
+| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output work to the in-flight counter. Text estimates are read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. Image requests use diffusion work instead. |
+| `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the text output estimate added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. Image diffusion work is not capped. |
 | `prefixMatchInfoProducerName` | `string` | No | _(none)_ | Optional `prefix-cache producer` name to read to find cached prefix discount. Unset defaults to approximate-prefix producer. |
 | `syncCrossReplicaState` | `bool` | No | `true` | When a `CrossReplicaSyncer` is configured, publishes this producer's per-endpoint load and adds the other replicas' published load to the value its consumers read. Set `false` to count only this replica's requests. See [Multiple active replicas](../../../../../flowcontrol/README.md#multiple-active-replicas). |
-| `kvEventsSourceRef` | `string` | No | _(none)_ | Name of the `kv-events-source` covering the engines that decode the requests (the decode engines in disaggregated serving). With it set, the producer stamps requests with a session id and completes their prefill accounting from those engines' `BlockStored` events. Requires a `token-producer` on its `vllm` backend: the match compares the request's rendered token ids with the event's, so the producer declares that backend as a required attribute of the tokenized request and the configuration is refused at startup with the `estimate` backend. The engines have to run prefix caching with KV cache events enabled and echo the session id on `BlockStored`; requests on engines that do not complete at the first response byte. |
+| `kvEventsSourceRef` | `string` | No | _(none)_ | Name of the `kv-events-source` covering the engines that decode the requests (the decode engines in disaggregated serving). With it set, the producer stamps requests with a session id and completes their prefill accounting from those engines' `BlockStored` events. Requires a `token-producer` that emits exact engine tokens (`exact_tokens: "true"`, provided by `backend: vllm` or `backend: passthrough`): the match compares the request's token ids with the event's, so the producer requires that capability on the tokenized request and startup rejects `backend: estimate`. The engines have to run prefix caching with KV cache events enabled and echo the session id on `BlockStored`; requests on engines that do not complete at the first response byte. |
 
-When `addEstimatedOutputTokens` is true, the estimated output per request is determined
+When `addEstimatedOutputTokens` is true, a text request's estimated output is determined
 by the output-length bucket published by the `outlen-bucket` plugin:
 
 | Output-Length Bucket | Estimated output tokens |
@@ -43,9 +43,14 @@ by the output-length bucket published by the `outlen-bucket` plugin:
 | `SHORT` (tool-call JSON) | 100 |
 | `UNKNOWN` (no reliable signal) | running average of the completion tokens of finished UNKNOWN requests, weighted toward roughly the last 100 (1 000 until the first one) |
 
-The estimate is then bounded by the client-requested cap (`max_output_tokens` / `max_tokens`)
-and `maxEstimatedOutputTokens`. The UNKNOWN average is kept within [100, 4 096], so
-SHORT <= UNKNOWN <= LONG.
+For text requests, the estimate is then bounded by the client-requested cap
+(`max_output_tokens` / `max_tokens`) and `maxEstimatedOutputTokens`. The UNKNOWN
+average is kept within [100, 4 096], so SHORT <= UNKNOWN <= LONG.
+Image requests are estimated as diffusion work (`num_inference_steps` x output
+pixels x `n`, in token-equivalent units); they are not read from the bucket and
+are not bounded by these caps. Layered image requests denoise `layers + 1`
+frames and use `resolution`, or the 640px layered default, when `size` is
+absent or `auto`.
 When the `outlen-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
 logs a one-time warning.
 

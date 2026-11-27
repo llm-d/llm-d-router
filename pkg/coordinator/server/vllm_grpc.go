@@ -855,7 +855,7 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 
 	applied := false
 	ensureUnset := func() error {
-		if decoding.StructuredOutput != nil {
+		if decoding.LegacyStructuredOutput != nil {
 			return errors.New("at most one structured output constraint may be specified")
 		}
 		applied = true
@@ -868,7 +868,7 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Json{Json: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Json{Json: s}
 	}
 	if s, ok, err := decodeOptionalStringField(obj, "regex"); err != nil {
 		return false, fmt.Errorf("%s.%w", qualified, err)
@@ -876,7 +876,7 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Regex{Regex: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Regex{Regex: s}
 	}
 	if choices, ok, err := parseStringChoiceArray(obj, "choice", qualified+".choice"); err != nil {
 		return false, err
@@ -884,8 +884,8 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Choice{
-			Choice: &vllmpb.DecodingParameters_StringChoices{Choices: choices},
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Choice{
+			Choice: &vllmpb.StructuredOutput_StringChoices{Choices: choices},
 		}
 	}
 	if s, ok, err := decodeOptionalStringField(obj, "grammar"); err != nil {
@@ -894,7 +894,7 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Grammar{Grammar: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Grammar{Grammar: s}
 	}
 	if b, ok, err := decodeOptionalBoolField(obj, "json_object"); err != nil {
 		return false, fmt.Errorf("%s.%w", qualified, err)
@@ -902,7 +902,7 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_JsonObject{JsonObject: true}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_JsonObject{JsonObject: true}
 	}
 	if s, ok, err := decodeStringOrJSONField(obj, "structural_tag", qualified+".structural_tag"); err != nil {
 		return false, err
@@ -910,7 +910,7 @@ func applyStructuredOutputMap(decoding *vllmpb.DecodingParameters, m map[string]
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_StructuralTag{StructuralTag: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_StructuralTag{StructuralTag: s}
 	}
 
 	return applied, nil
@@ -922,7 +922,7 @@ func applySamplingStructuredOutput(decoding *vllmpb.DecodingParameters, sp map[s
 		return false, err
 	}
 	ensureUnset := func() error {
-		if decoding.StructuredOutput != nil {
+		if decoding.LegacyStructuredOutput != nil {
 			return errors.New("at most one structured output constraint may be specified")
 		}
 		applied = true
@@ -935,7 +935,7 @@ func applySamplingStructuredOutput(decoding *vllmpb.DecodingParameters, sp map[s
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Json{Json: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Json{Json: s}
 	}
 	if s, ok, err := decodeOptionalStringField(sp, "guided_regex"); err != nil {
 		return false, fmt.Errorf("sampling_params.%w", err)
@@ -943,7 +943,7 @@ func applySamplingStructuredOutput(decoding *vllmpb.DecodingParameters, sp map[s
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Regex{Regex: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Regex{Regex: s}
 	}
 	if choices, ok, err := parseStringChoiceArray(sp, "guided_choice", "sampling_params.guided_choice"); err != nil {
 		return false, err
@@ -951,8 +951,8 @@ func applySamplingStructuredOutput(decoding *vllmpb.DecodingParameters, sp map[s
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Choice{
-			Choice: &vllmpb.DecodingParameters_StringChoices{Choices: choices},
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Choice{
+			Choice: &vllmpb.StructuredOutput_StringChoices{Choices: choices},
 		}
 	}
 	if s, ok, err := decodeOptionalStringField(sp, "guided_grammar"); err != nil {
@@ -961,7 +961,7 @@ func applySamplingStructuredOutput(decoding *vllmpb.DecodingParameters, sp map[s
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_Grammar{Grammar: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_Grammar{Grammar: s}
 	}
 	if s, ok, err := decodeStringOrJSONField(sp, "structural_tag", "sampling_params.structural_tag"); err != nil {
 		return false, err
@@ -969,7 +969,7 @@ func applySamplingStructuredOutput(decoding *vllmpb.DecodingParameters, sp map[s
 		if err := ensureUnset(); err != nil {
 			return false, err
 		}
-		decoding.StructuredOutput = &vllmpb.DecodingParameters_StructuralTag{StructuralTag: s}
+		decoding.LegacyStructuredOutput = &vllmpb.DecodingParameters_StructuralTag{StructuralTag: s}
 	}
 
 	return applied, nil
@@ -1276,15 +1276,11 @@ func parseUint32Array(raw any, fieldName string, allowEmpty bool) ([]uint32, err
 	if !allowEmpty && len(arr) == 0 {
 		return nil, fmt.Errorf("%s must not be empty", fieldName)
 	}
-	out := make([]uint32, 0, len(arr))
-	for _, elem := range arr {
-		n, err := reqcommon.NonNegativeInt(elem)
-		if err != nil || n > math.MaxUint32 {
-			return nil, fmt.Errorf("%s elements must be uint32 integers", fieldName)
-		}
-		out = append(out, uint32(n)) //#nosec G115 -- guarded by [0, MaxUint32] above
+	ids, err := reqcommon.ParseTokenIDs(arr)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", fieldName, err)
 	}
-	return out, nil
+	return ids, nil
 }
 
 func parseStopStrings(raw any) ([]string, error) {

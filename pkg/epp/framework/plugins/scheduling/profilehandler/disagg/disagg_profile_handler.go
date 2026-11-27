@@ -48,9 +48,6 @@ const (
 	// DisaggProfileHandlerType is the canonical type for the unified disaggregation profile handler.
 	DisaggProfileHandlerType = "disagg-profile-handler"
 
-	// DefaultPrefillProfile is the prefill scheduling profile name used when none is configured.
-	DefaultPrefillProfile = "prefill"
-
 	defaultDecodeProfile = "decode"
 	defaultEncodeProfile = "encode"
 )
@@ -196,7 +193,7 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Hand
 		parameters.Profiles.Decode = defaultDecodeProfile
 	}
 	if parameters.Profiles.Prefill == "" {
-		parameters.Profiles.Prefill = DefaultPrefillProfile
+		parameters.Profiles.Prefill = scheduling.DefaultPrefillProfile
 	}
 	if parameters.Profiles.Encode == "" {
 		parameters.Profiles.Encode = defaultEncodeProfile
@@ -558,6 +555,7 @@ func (h *Handler) ProcessResults(
 
 	return &scheduling.SchedulingResult{
 		PrimaryProfileName: h.decodeProfile,
+		PrefillProfileName: h.prefillProfile,
 		ProfileResults:     updatedResults,
 	}, nil
 }

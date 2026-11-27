@@ -73,6 +73,8 @@ type RawMessage struct {
 	Payload []byte
 	// SourceEndpoint is the serving endpoint associated with the subscriber.
 	SourceEndpoint string
+	// PodIdentifier is the subscriber key passed to EnsureSubscriber and CleanupSubscriber.
+	PodIdentifier string
 	// reset clears the message's pod before later messages on the same queue.
 	reset bool
 	// retire marks a final reset: the source endpoint has no subscribers left.
@@ -81,6 +83,8 @@ type RawMessage struct {
 	resync bool
 	// resyncAbort marks a resync reset that drops a partial rebuild.
 	resyncAbort bool
+	// replayed marks batches delivered from a replay or snapshot rebuild.
+	replayed bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and

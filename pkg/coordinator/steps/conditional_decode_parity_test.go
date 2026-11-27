@@ -47,7 +47,7 @@ func conditionalParityRequest(t *testing.T, server *httptest.Server, params map[
 		Model:          "llama-3",
 		Stream:         stream,
 		Body:           map[string]any{"model": "llama-3", "stream": stream, "messages": []any{}},
-		TokenIDs:       []int{1, 2, 3, 4, 5},
+		TokenIDs:       []uint32{1, 2, 3, 4, 5},
 		ResponseWriter: recorder,
 	}
 	return step, reqCtx, recorder

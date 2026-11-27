@@ -82,6 +82,7 @@ type ExtProcServerRunner struct {
 	MaxRequestBodySize               int
 	EnableGRPCStreamMetrics          bool
 	EmitEndpointScores               bool
+	TraceBaggageKeys                 []string
 	EnableToolCallingTelemetry       bool
 
 	// EvictChannelLookup, when set, enables the ext_proc server to terminate in-flight requests
@@ -138,6 +139,7 @@ func NewExtProcServerRunner(
 		MaxRequestBodySize:               opts.MaxRequestBodySize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
+		TraceBaggageKeys:                 opts.TraceBaggageKeys,
 		EnableToolCallingTelemetry:       opts.EnableToolCallingTelemetry,
 		keepaliveTime:                    grpcKeepaliveTime,
 		keepaliveTimeout:                 grpcKeepaliveTimeout,
@@ -316,6 +318,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
+		extProcServer.SetTraceBaggageKeys(r.TraceBaggageKeys)
 		extProcServer.SetToolCallingTelemetryEnabled(r.EnableToolCallingTelemetry)
 		extProcServer.SetMaxRequestBodySize(r.MaxRequestBodySize)
 		extProcServer.SetResponders(r.Responders)

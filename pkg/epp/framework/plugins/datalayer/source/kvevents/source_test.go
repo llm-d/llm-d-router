@@ -385,3 +385,48 @@ func TestSourceResyncsEndpointAfterConsumerFailure(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Equal(t, int32(2), snapshots.Load())
 }
+
+func TestSourceRankEndpointUsesRankOffsetAndRankIdentifier(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	pub := zmq4.NewPub(ctx)
+	require.NoError(t, pub.Listen("tcp://127.0.0.1:0"))
+	defer pub.Close()
+	_, portStr, err := net.SplitHostPort(pub.Addr().String())
+	require.NoError(t, err)
+	rankPort, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	cfg := events.DefaultConfig()
+	cfg.PodDiscoveryConfig.PodLabelSelector = ""
+	// Rank endpoint carries RankIndex=3, so base SocketPort is rankPort-3.
+	cfg.PodDiscoveryConfig.SocketPort = rankPort - 3
+	s, err := New(ctx, "events", cfg)
+	require.NoError(t, err)
+	rec := &recordingConsumer{name: "cache"}
+	require.NoError(t, s.AddConsumer(rec.TypedName(), rec))
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:           types.NamespacedName{Name: "pod-rank-1"},
+		Address:      "127.0.0.1",
+		Port:         "8000",
+		RankIndex:    3,
+		RankByHeader: true,
+	}, nil)
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
+
+	payload, err := msgpack.Marshal([]any{1.0, []any{[]any{string(events.EventTypeAllBlocksCleared)}}, nil})
+	require.NoError(t, err)
+	var seq uint64
+	require.Eventually(t, func() bool {
+		seq++
+		frame := make([]byte, 8)
+		binary.BigEndian.PutUint64(frame, seq)
+		require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte("kv@wire:8000@model"), frame, payload)))
+		return rec.lastSequence() > 0
+	}, 5*time.Second, 20*time.Millisecond)
+
+	rec.mu.Lock()
+	require.Contains(t, rec.operations, "batch:127.0.0.1:8000/rank-3")
+	rec.mu.Unlock()
+}
