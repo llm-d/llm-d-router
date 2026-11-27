@@ -821,14 +821,53 @@ func TestEncodeToPrefill_DeduplicatesRenderlessOpenAIFormat(t *testing.T) {
 				reqcommon.FieldModel: "llama-3",
 				reqcommon.FieldMessages: []any{
 					map[string]any{reqcommon.FieldRole: reqcommon.RoleUser, reqcommon.FieldContent: []any{
-						map[string]any{reqcommon.FieldType: reqcommon.BlockTypeImage, reqcommon.FieldUUID: "ignored-uuid", reqcommon.FieldSource: map[string]any{reqcommon.FieldType: "base64", reqcommon.FieldMediaType: testImagePNGMIME, reqcommon.FieldData: "bXNn"}},
-						map[string]any{reqcommon.FieldType: reqcommon.BlockTypeImage, reqcommon.FieldUUID: "ignored-uuid", reqcommon.FieldSource: map[string]any{reqcommon.FieldData: "bXNn", reqcommon.FieldMediaType: testImagePNGMIME, reqcommon.FieldType: "base64"}},
-						map[string]any{reqcommon.FieldType: reqcommon.BlockTypeImage, reqcommon.FieldUUID: "ignored-uuid", reqcommon.FieldSource: map[string]any{reqcommon.FieldType: "base64", reqcommon.FieldMediaType: testImagePNGMIME, reqcommon.FieldData: "bXNnMg=="}},
+						map[string]any{
+							reqcommon.FieldType: reqcommon.BlockTypeImage,
+							reqcommon.FieldUUID: "uuid-a",
+							"cache_control":     map[string]any{"type": "ephemeral"},
+							reqcommon.FieldSource: map[string]any{
+								reqcommon.FieldType:      "base64",
+								reqcommon.FieldMediaType: testImagePNGMIME,
+								reqcommon.FieldData:      "bXNn",
+							},
+						},
+						map[string]any{
+							reqcommon.FieldType: reqcommon.BlockTypeImage,
+							reqcommon.FieldUUID: "uuid-b",
+							reqcommon.FieldSource: map[string]any{
+								reqcommon.FieldData:      "bXNn",
+								reqcommon.FieldMediaType: testImagePNGMIME,
+								reqcommon.FieldType:      "base64",
+							},
+						},
+						map[string]any{
+							reqcommon.FieldType: reqcommon.BlockTypeImage,
+							reqcommon.FieldUUID: "uuid-c",
+							"cache_control":     map[string]any{"type": "ephemeral", "ttl": "1h"},
+							reqcommon.FieldSource: map[string]any{
+								reqcommon.FieldType: reqcommon.ImageSourceTypeURL,
+								reqcommon.FieldURL:  "data:" + testImagePNGMIME + ";base64,bXNn",
+							},
+						},
+						map[string]any{
+							reqcommon.FieldType: reqcommon.BlockTypeImage,
+							reqcommon.FieldUUID: "uuid-a",
+							reqcommon.FieldSource: map[string]any{
+								reqcommon.FieldType:      "base64",
+								reqcommon.FieldMediaType: testImagePNGMIME,
+								reqcommon.FieldData:      "bXNnMg==",
+							},
+						},
 					}},
 				},
 			},
-			MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityImage}},
-			KVTransferParams:  make(map[string]any),
+			MultimodalEntries: []pipeline.MultimodalEntry{
+				{Modality: reqcommon.ModalityImage},
+				{Modality: reqcommon.ModalityImage},
+				{Modality: reqcommon.ModalityImage},
+				{Modality: reqcommon.ModalityImage},
+			},
+			KVTransferParams: make(map[string]any),
 		}
 		if err := encodeStep.Execute(context.Background(), msgCtx); err != nil {
 			t.Fatalf("messages encode failed: %v", err)
@@ -844,6 +883,125 @@ func TestEncodeToPrefill_DeduplicatesRenderlessOpenAIFormat(t *testing.T) {
 		}
 		if msgCalls != 2 {
 			t.Errorf("messages encode calls = %d, want 2", msgCalls)
+		}
+		if msgCtx.EncodeFanout != 2 {
+			t.Errorf("messages encode fanout = %d, want 2", msgCtx.EncodeFanout)
+		}
+	})
+}
+
+func TestSelectEncodeRequestIndices_SkipsAndStreamsFallbackHash(t *testing.T) {
+	largePayload := "data:image/png;base64," + string(bytes.Repeat([]byte("A"), 256*1024))
+	largePart := map[string]any{
+		reqcommon.FieldType:     reqcommon.PartTypeImageURL,
+		reqcommon.FieldImageURL: map[string]any{reqcommon.FieldURL: largePayload},
+	}
+
+	t.Run("empty and single entry return early without hashing", func(t *testing.T) {
+		if got := selectEncodeRequestIndices(nil, nil, reqcommon.APITypeChatCompletions, nil); got != nil {
+			t.Fatalf("empty entries = %v, want nil", got)
+		}
+
+		entries := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}}
+		localIdx := []int{0}
+		partsByMod := map[reqcommon.Modality][]mediaPart{
+			reqcommon.ModalityImage: {{part: largePart, modality: reqcommon.ModalityImage}},
+		}
+		got := selectEncodeRequestIndices(entries, localIdx, reqcommon.APITypeChatCompletions, partsByMod)
+		if !reflect.DeepEqual(got, []int{0}) {
+			t.Fatalf("single entry = %v, want [0]", got)
+		}
+	})
+
+	t.Run("at most one empty-hash entry per modality skips fallback hash", func(t *testing.T) {
+		entries := []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "render-hash"},
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityAudio},
+		}
+		localIdx := modalityLocalIndexes(entries)
+		// Each modality has only one empty-hash entry, so no part hashing should run.
+		// Using an unhashable marker field confirms the hash path is not entered.
+		partsByMod := map[reqcommon.Modality][]mediaPart{
+			reqcommon.ModalityImage: {
+				{part: largePart, modality: reqcommon.ModalityImage},
+				{part: map[string]any{"unhashable": func() {}}, modality: reqcommon.ModalityImage},
+			},
+			reqcommon.ModalityAudio: {
+				{part: map[string]any{"unhashable": func() {}}, modality: reqcommon.ModalityAudio},
+			},
+		}
+		res := testing.Benchmark(func(b *testing.B) {
+			for b.Loop() {
+				got := selectEncodeRequestIndices(entries, localIdx, reqcommon.APITypeChatCompletions, partsByMod)
+				if !reflect.DeepEqual(got, []int{0, 1, 2}) {
+					b.Fatalf("got %v, want [0 1 2]", got)
+				}
+			}
+		})
+		if bytesPerOp := res.AllocedBytesPerOp(); bytesPerOp > 1024 {
+			t.Errorf("single empty-hash entry per modality allocated %d B/op, want <= 1024", bytesPerOp)
+		}
+	})
+
+	t.Run("large duplicate payload hashes without full heap copy", func(t *testing.T) {
+		entries := []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityImage},
+		}
+		localIdx := modalityLocalIndexes(entries)
+		partsByMod := map[reqcommon.Modality][]mediaPart{
+			reqcommon.ModalityImage: {
+				{part: largePart, modality: reqcommon.ModalityImage},
+				{part: map[string]any{
+					reqcommon.FieldType:     reqcommon.PartTypeImageURL,
+					reqcommon.FieldImageURL: map[string]any{reqcommon.FieldURL: largePayload},
+				}, modality: reqcommon.ModalityImage},
+			},
+		}
+		res := testing.Benchmark(func(b *testing.B) {
+			for b.Loop() {
+				got := selectEncodeRequestIndices(entries, localIdx, reqcommon.APITypeChatCompletions, partsByMod)
+				if !reflect.DeepEqual(got, []int{0}) {
+					b.Fatalf("got %v, want [0]", got)
+				}
+			}
+		})
+		if bytesPerOp := res.AllocedBytesPerOp(); bytesPerOp >= int64(len(largePayload)/4) {
+			t.Errorf("streaming part hash allocated %d B/op for %d-byte payload", bytesPerOp, len(largePayload))
+		}
+	})
+
+	t.Run("messages default media type matches explicit jpeg data URL", func(t *testing.T) {
+		entries := []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityImage},
+		}
+		localIdx := modalityLocalIndexes(entries)
+		partsByMod := map[reqcommon.Modality][]mediaPart{
+			reqcommon.ModalityImage: {
+				{part: map[string]any{
+					reqcommon.FieldType: reqcommon.BlockTypeImage,
+					reqcommon.FieldUUID: "u1",
+					"cache_control":     map[string]any{"type": "ephemeral"},
+					reqcommon.FieldSource: map[string]any{
+						reqcommon.FieldType: "base64",
+						reqcommon.FieldData: "anBlZw==",
+					},
+				}, modality: reqcommon.ModalityImage},
+				{part: map[string]any{
+					reqcommon.FieldType: reqcommon.BlockTypeImage,
+					reqcommon.FieldUUID: "u2",
+					reqcommon.FieldSource: map[string]any{
+						reqcommon.FieldType: reqcommon.ImageSourceTypeURL,
+						reqcommon.FieldURL:  "data:" + reqcommon.DefaultImageMediaType + ";base64,anBlZw==",
+					},
+				}, modality: reqcommon.ModalityImage},
+			},
+		}
+		got := selectEncodeRequestIndices(entries, localIdx, reqcommon.APITypeMessages, partsByMod)
+		if !reflect.DeepEqual(got, []int{0}) {
+			t.Fatalf("messages default media type dedup = %v, want [0]", got)
 		}
 	})
 }
