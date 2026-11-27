@@ -14,7 +14,10 @@ ARG ENVTEST_VERSION=release-0.25
 ARG ENVTEST_K8S_VERSION=1.36.2
 ARG GOVULNCHECK_VERSION=v1.10.0
 
-RUN apt-get update && apt-get install -y podman && apt-get clean all
+# kind's podman provider runs `podman`. The builder only talks to the host's
+# engine through CONTAINER_HOST, so the remote client is enough.
+RUN apt-get update && apt-get install -y podman-remote && apt-get clean all && \
+    ln -s /usr/bin/podman-remote /usr/local/bin/podman
 
 # Install docker CLI and buildx plugin
 RUN ARCH=$(uname -m) && \

@@ -17,6 +17,14 @@ inputs:
     required: false
     default: '1'
     description: "Exit code on a severity match: '1' fails the build, '0' reports only. SARIF uploads either way."
+  ignore-unfixed:
+    required: false
+    default: 'false'
+    description: "'true' leaves out findings that have no fixed version."
+  skip-dirs:
+    required: false
+    default: ''
+    description: "Comma-separated directories in the image to leave out of the scan."
 
 runs:
   using: "composite"
@@ -30,6 +38,8 @@ runs:
         output: 'trivy-results.sarif'
         severity: ${{ inputs.severity }}
         exit-code: ${{ inputs.exit-code }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        skip-dirs: ${{ inputs.skip-dirs }}
         # trivy-action drops the severity filter for SARIF output unless told
         # otherwise, which fails the scan on findings outside `severity` (e.g.
         # UNKNOWN-severity Go vulndb notes).

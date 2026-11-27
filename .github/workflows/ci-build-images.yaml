@@ -250,13 +250,17 @@ jobs:
           buildx-outputs: type=docker,dest=/tmp/builder-image.tar
 
       # Findings in the Go toolchain, podman and the docker CLI never block this
-      # build. SARIF still uploads to the Security tab.
+      # build. SARIF still uploads to the Security tab. Findings without a fix
+      # and the envtest binaries, which only an ENVTEST_K8S_VERSION bump
+      # changes, are left out of the report.
       - name: Run Trivy scan for builder on AMD64
         if: steps.check.outputs.exists == 'false'
         uses: ./.github/actions/trivy-scan
         with:
           tarball: /tmp/builder-image.tar
           exit-code: '0'
+          ignore-unfixed: 'true'
+          skip-dirs: /usr/local/kubebuilder
 
       # prerelease: 'true' suppresses the composite action's floating :latest
       # tag and commit-sha is omitted to skip the per-commit tag. The builder is
