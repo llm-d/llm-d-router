@@ -23,8 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
-	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -357,10 +355,7 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	}
 	p := newProducerWithIndexer(ctx, indexer)
 	p.blockSizeTokens = 2
-	p.speculativeEnabled = true
-	p.speculativeCache = ttlcache.New[string, *speculativeEntries]()
-	p.speculativeLeases = newSpeculativeLeases(indexer.KVBlockIndex(), logr.Discard())
-	p.speculativeTTL = time.Minute
+	p.speculative = kvcache.NewSpeculativeIndex(time.Minute)
 	request := &scheduling.InferenceRequest{
 		RequestID: "mixed-formats", TargetModel: "test-model",
 		Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
@@ -396,10 +391,11 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoints[2]}},
 		},
 	}))
-	cached := p.speculativeCache.Get(request.RequestID)
-	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 1)
-	require.Len(t, cached.Value().perPodKeys["10.0.0.3:8080"][0], 4)
+	// Only the prefill endpoint is hinted, with the keys of its own format.
+	prefillKeys, err := indexer.ComputeBlockKeysForFormat(ctx, tokens[:8], "test-model", nil, formats[2])
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"10.0.0.3:8080": 4}, p.speculative.Match(prefillKeys, nil))
+	require.Equal(t, 4, p.speculative.Len())
 }
 
 // Tokens present → Produce hashes and writes per-endpoint match info.
@@ -1601,36 +1597,30 @@ func (f *fakeSubscriberManager) GetActiveSubscribers() ([]string, []string) {
 func (f *fakeSubscriberManager) Shutdown(_ context.Context) {}
 
 func TestDumpState(t *testing.T) {
-	// Start() is intentionally not called: NoTTL entries never expire, and the
-	// enumeration helpers work on an unstarted cache.
-	specCache := ttlcache.New[string, *speculativeEntries]()
-	specCache.Set("req-2", &speculativeEntries{}, ttlcache.NoTTL)
-	specCache.Set("req-1", &speculativeEntries{}, ttlcache.NoTTL)
+	speculative := kvcache.NewSpeculativeIndex(time.Minute)
+	speculative.Add([]kvblock.BlockHash{1, 2}, "10.0.0.1:8080")
 
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: "x"},
 		subscribersManager: &fakeSubscriberManager{ids: []string{"ns/pod-b", "ns/pod-a"}},
-		speculativeCache:   specCache,
-		speculativeEnabled: true,
+		speculative:        speculative,
 		blockSizeTokens:    64,
 	}
 
 	payload, err := p.DumpState()
 	require.NoError(t, err)
-	// Subscriber pod identities and live request ids are enumerated for debugging.
+	// Subscriber pod identities are enumerated for debugging.
 	assert.Contains(t, string(payload), "ns/pod-a")
 
 	var state precisePrefixState
 	require.NoError(t, json.Unmarshal(payload, &state))
 	assert.Equal(t, precisePrefixState{
-		Subscribers:             []string{"ns/pod-a", "ns/pod-b"},
-		TotalSubscribers:        2,
-		MaxSubscribers:          maxDumpSubscribers,
-		SpeculativeIndexing:     true,
-		SpeculativeEntries:      []string{"req-1", "req-2"},
-		TotalSpeculativeEntries: 2,
-		MaxSpeculativeEntries:   maxDumpSpeculativeEntries,
-		BlockSizeTokens:         64,
+		Subscribers:         []string{"ns/pod-a", "ns/pod-b"},
+		TotalSubscribers:    2,
+		MaxSubscribers:      maxDumpSubscribers,
+		SpeculativeIndexing: true,
+		SpeculativeBlocks:   2,
+		BlockSizeTokens:     64,
 	}, state)
 }
 
@@ -1640,33 +1630,25 @@ func TestDumpStateEmpty(t *testing.T) {
 	payload, err := p.DumpState()
 	require.NoError(t, err)
 	assert.True(t, json.Valid(payload))
-	// Empty lists serialize as [] not null, matching the documented response shape.
+	// The empty list serializes as [] not null, matching the documented response shape.
 	assert.Contains(t, string(payload), `"subscribers":[]`)
-	assert.Contains(t, string(payload), `"speculativeEntries":[]`)
 
 	var state precisePrefixState
 	require.NoError(t, json.Unmarshal(payload, &state))
 	assert.Equal(t, precisePrefixState{
-		Subscribers:           []string{},
-		SpeculativeEntries:    []string{},
-		MaxSubscribers:        maxDumpSubscribers,
-		MaxSpeculativeEntries: maxDumpSpeculativeEntries,
+		Subscribers:    []string{},
+		MaxSubscribers: maxDumpSubscribers,
 	}, state)
 }
 
 func TestDumpStateCaps(t *testing.T) {
-	specCache := ttlcache.New[string, *speculativeEntries]()
 	ids := make([]string, 0, maxDumpSubscribers+5)
 	for i := 0; i < maxDumpSubscribers+5; i++ {
 		ids = append(ids, fmt.Sprintf("ns/pod-%03d", i))
 	}
-	for i := 0; i < maxDumpSpeculativeEntries+7; i++ {
-		specCache.Set(fmt.Sprintf("req-%04d", i), &speculativeEntries{}, ttlcache.NoTTL)
-	}
 
 	p := &Producer{
 		subscribersManager: &fakeSubscriberManager{ids: ids},
-		speculativeCache:   specCache,
 	}
 
 	payload, err := p.DumpState()
@@ -1674,12 +1656,10 @@ func TestDumpStateCaps(t *testing.T) {
 
 	var state precisePrefixState
 	require.NoError(t, json.Unmarshal(payload, &state))
-	// Lists are capped, but the totals report the full counts so a consumer can
-	// tell the dump is partial from totalX > maxX.
+	// The list is capped, but the total reports the full count so a consumer can
+	// tell the dump is partial from totalSubscribers > maxSubscribers.
 	assert.Len(t, state.Subscribers, maxDumpSubscribers)
 	assert.Equal(t, maxDumpSubscribers+5, state.TotalSubscribers)
-	assert.Len(t, state.SpeculativeEntries, maxDumpSpeculativeEntries)
-	assert.Equal(t, maxDumpSpeculativeEntries+7, state.TotalSpeculativeEntries)
 }
 
 func rankEndpoints() []scheduling.Endpoint {

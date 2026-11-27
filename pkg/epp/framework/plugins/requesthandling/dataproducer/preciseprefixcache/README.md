@@ -20,7 +20,7 @@ Pipeline per request:
 - Consume `TokenizedPrompt` from `token-producer`.
 - Hash tokens → KV-block keys → `kvblock.Index.Lookup`.
 - Write `PrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens)` per endpoint, including the unweighted cached-block count and its per-device-tier breakdown.
-- (`PreRequest`) Speculative-index the selected endpoint(s) with TTL eviction.
+- (`PreRequest`) Hint the request's block keys as held by the selected endpoint(s) for `speculativeTTL`.
 - (`EndpointExtractor`) Per-pod ZMQ subscriber lifecycle on add/delete.
 
 Requires `TokenizedPrompt` on the request from a `token-producer` that emits exact
@@ -37,9 +37,9 @@ no `TokenizedPrompt` is a no-op.
 | `indexerConfig` | object | `kvcache.NewDefaultConfig()` | `kvcache.Indexer` config. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
 | `kvEventsSourceRef` | string | _(none)_ | Name of a `kv-events-source` whose decoded batches this producer indexes. The producer then opens no subscribers of its own, and `kvEventsConfig` is rejected. |
-| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions, covering only whole engine blocks of the block size the endpoint reports in its metrics. An endpoint that reports none gets every router block. |
-| `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
-| `seedDecodeWhenDisaggregated` | bool | `false` | Also seed a disaggregated request's speculative entries on its decode endpoint. By default only the prefill endpoint is seeded: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
+| `speculativeIndexing` | bool | `false` | Hint the selected endpoint(s) as holding the request's blocks on routing decisions, so a same-prefix request matches them before the engine's KV-events arrive. A hint scores as the `speculative` tier and covers only whole engine blocks of the block size the endpoint reports in its metrics. An endpoint that reports none gets every router block. Hints are held in EPP memory next to the KV-block index, so they are not shared between EPP replicas. |
+| `speculativeTTL` | duration | `2s` | Lifetime of a hint. A request routed to the same endpoint with the same blocks renews it. |
+| `seedDecodeWhenDisaggregated` | bool | `false` | Also hint a disaggregated request's decode endpoint. By default only the prefill endpoint is hinted: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
 
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.

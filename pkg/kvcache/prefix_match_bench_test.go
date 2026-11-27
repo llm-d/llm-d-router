@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,8 +54,10 @@ func benchIndex(b *testing.B, numPods int) (kvblock.Index, []kvblock.BlockHash) 
 	for p := range entries {
 		entries[p] = kvblock.PodEntry{PodIdentifier: fmt.Sprintf("10.0.%d.%d:8000", p/256, p%256), DeviceTier: "gpu"}
 	}
-	if err := inner.Add(context.Background(), nil, keys, entries); err != nil {
-		b.Fatal(err)
+	if numPods > 0 {
+		if err := inner.Add(context.Background(), nil, keys, entries); err != nil {
+			b.Fatal(err)
+		}
 	}
 	return kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(inner)), keys
 }
@@ -92,6 +95,30 @@ func BenchmarkMatchBlockKeys(b *testing.B) {
 					b.Fatal(err)
 				}
 				requireMatches(b, matches, numPods)
+			}
+		})
+	}
+}
+
+// BenchmarkMatchBlockKeysSpeculativeHint measures the matcher over a prefix
+// one pod is hinted for: with nothing in the index, and next to eight pods
+// holding the prefix on gpu.
+func BenchmarkMatchBlockKeysSpeculativeHint(b *testing.B) {
+	for _, numPods := range []int{0, 8} {
+		b.Run(fmt.Sprintf("keys=3750/pods=%d", numPods), func(b *testing.B) {
+			idx, keys := benchIndex(b, numPods)
+			indexer := benchMatcher(b, idx)
+			hints := kvcache.NewSpeculativeIndex(time.Hour)
+			hints.Add(keys, "10.9.0.0:8000")
+			indexer.SetSpeculativeIndex(hints)
+			ctx := benchContext()
+			b.ReportAllocs()
+			for b.Loop() {
+				matches, err := indexer.MatchBlockKeys(ctx, keys, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				requireMatches(b, matches, numPods+1)
 			}
 		})
 	}
