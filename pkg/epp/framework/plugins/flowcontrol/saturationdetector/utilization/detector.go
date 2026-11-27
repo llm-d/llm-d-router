@@ -168,6 +168,12 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 	return d.typedName
 }
 
+// MetricsStalenessThreshold returns how old an endpoint's metrics can be before the detector
+// treats them as stale.
+func (d *Detector) MetricsStalenessThreshold() time.Duration {
+	return d.config.MetricsStalenessThreshold
+}
+
 // Saturation calculates the saturation level of the pool.
 //
 // It returns an aggregate saturation signal where:
