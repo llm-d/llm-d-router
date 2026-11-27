@@ -54,9 +54,7 @@ func salvageDroppedSSELine(ctx context.Context, reqCtx *RequestContext, dropped 
 	reqCtx.sseSalvage = nil
 	if usage != nil {
 		// Fold into a pending bucket that is merged after the parser runs (see
-		// HandleResponseBody). A dropped line following a parsed usage line in
-		// the same chunk must still win, matching the parsers' "last usage
-		// event in a chunk wins" rule that mergeUsage alone would invert.
+		// HandleResponseBody).
 		if reqCtx.salvagedUsage == nil {
 			reqCtx.salvagedUsage = &fwkrequest.Usage{}
 		}
