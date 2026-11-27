@@ -253,26 +253,15 @@ func eventEndpoint(endpoint fwksched.Endpoint) string {
 
 // watchPrefill registers the dispatched request for completion from KV
 // events. targets maps each profile name to the request's endpoint for that
-// profile. With stage metadata, only the primary target's events can complete
-// prefill. Separate P/D profiles sharing an event source use first-byte
-// completion because their store events cannot distinguish the two stages.
+// profile. The engines that decode the request complete it: every profile's
+// endpoint other than the prefill profile's, or the prefill endpoint when the
+// request has no other. The prefill engine holds the request's blocks until
+// the decode engine has pulled them, so the decode engine's store event marks
+// the end of the request's prefill footprint; a single engine serving both
+// phases stores the blocks as it computes them.
 func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksched.InferenceRequest,
 	result *fwksched.SchedulingResult, stamp string, ownStamp bool, targets map[string]fwksched.Endpoint,
 ) {
-	tokenized := request.Body.TokenizedRequest
-	if tokenized == nil {
-		return
-	}
-	pending := &pendingPrefill{
-		requestID: request.RequestID,
-		result:    result,
-		stamp:     stamp,
-		ownStamp:  ownStamp,
-		done:      make([]bool, len(tokenized.Prompts)),
-	}
-	for _, prompt := range tokenized.Prompts {
-		pending.prompts = append(pending.prompts, prompt.TokenIDs)
-	}
 	if result.PrefillProfileName != "" && result.PrimaryProfileName != "" {
 		primary := targets[result.PrimaryProfileName]
 		if primary == nil {
@@ -287,21 +276,34 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 				return
 			}
 		}
-		pending.endpoints = append(pending.endpoints, addr)
-	} else {
-		for profileName, endpoint := range targets {
-			if profileName == result.PrefillProfileName {
-				continue
-			}
+	}
+	tokenized := request.Body.TokenizedRequest
+	if tokenized == nil {
+		return
+	}
+	pending := &pendingPrefill{
+		requestID: request.RequestID,
+		result:    result,
+		stamp:     stamp,
+		ownStamp:  ownStamp,
+		done:      make([]bool, len(tokenized.Prompts)),
+	}
+	for _, prompt := range tokenized.Prompts {
+		pending.prompts = append(pending.prompts, prompt.TokenIDs)
+	}
+	prefillProfile := result.PrefillProfileName
+	for profileName, endpoint := range targets {
+		if profileName == prefillProfile {
+			continue
+		}
+		if addr := eventEndpoint(endpoint); addr != "" {
+			pending.endpoints = append(pending.endpoints, addr)
+		}
+	}
+	if len(pending.endpoints) == 0 {
+		if endpoint, ok := targets[prefillProfile]; ok {
 			if addr := eventEndpoint(endpoint); addr != "" {
 				pending.endpoints = append(pending.endpoints, addr)
-			}
-		}
-		if len(pending.endpoints) == 0 {
-			if endpoint, ok := targets[result.PrefillProfileName]; ok {
-				if addr := eventEndpoint(endpoint); addr != "" {
-					pending.endpoints = append(pending.endpoints, addr)
-				}
 			}
 		}
 	}

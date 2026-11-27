@@ -541,7 +541,11 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 		if stamp != "" {
 			entry.onRelease = func() { p.watch.remove(request.RequestID) }
-			targets[profileName] = endpoint
+			// Named stages exclude unrelated profiles from the KV-event watch.
+			if result.PrefillProfileName == "" || result.PrimaryProfileName == "" ||
+				profileName == result.PrefillProfileName || profileName == result.PrimaryProfileName {
+				targets[profileName] = endpoint
+			}
 		}
 		p.PluginState.Write(request.RequestID, key, entry)
 		tracked = true
