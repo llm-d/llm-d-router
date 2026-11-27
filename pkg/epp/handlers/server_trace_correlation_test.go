@@ -283,30 +283,47 @@ func TestProcessRecordsAllowlistedBaggageOnRequestSpan(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		keys    []string
-		baggage string
+		baggage []string
 		want    map[string]string
 	}{
-		{name: "empty allowlist", baggage: clientBaggage},
+		{name: "empty allowlist", baggage: []string{clientBaggage}},
 		{
 			name:    "allowlisted keys",
 			keys:    []string{"focus.workload.id", " focus.task.id ", "focus.outcome.id", ""},
-			baggage: clientBaggage,
+			baggage: []string{clientBaggage},
 			want: map[string]string{
 				"focus.workload.id": "support_bot",
 				"focus.task.id":     longValue[:maxBaggageAttributeValueLen],
 			},
 		},
 		{
+			name:    "multiple_baggage_headers",
+			keys:    []string{"focus.workload.id", "focus.task.id"},
+			baggage: []string{"focus.workload.id=support_bot", "focus.task.id=task_1,other.key=ignored"},
+			want: map[string]string{
+				"focus.workload.id": "support_bot",
+				"focus.task.id":     "task_1",
+			},
+		},
+		{
+			name:    "duplicate_key_across_baggage_headers",
+			keys:    []string{"focus.workload.id"},
+			baggage: []string{"focus.workload.id=first", "focus.workload.id=second"},
+			want: map[string]string{
+				"focus.workload.id": "second",
+			},
+		},
+		{
 			// The cap falls inside the two-byte rune, which is dropped whole.
 			name:    "value cut on a rune boundary",
 			keys:    []string{"focus.workload.id"},
-			baggage: "focus.workload.id=" + strings.Repeat("v", maxBaggageAttributeValueLen-1) + "%C3%A9",
+			baggage: []string{"focus.workload.id=" + strings.Repeat("v", maxBaggageAttributeValueLen-1) + "%C3%A9"},
 			want:    map[string]string{"focus.workload.id": strings.Repeat("v", maxBaggageAttributeValueLen-1)},
 		},
 		{
 			name:    "allowlisted EPP attribute names",
 			keys:    []string{string(semconv.LLMDEPPFairnessIDKey), string(semconv.LLMDEPPAPISurfaceKey)},
-			baggage: string(semconv.LLMDEPPFairnessIDKey) + "=spoofed," + string(semconv.LLMDEPPAPISurfaceKey) + "=spoofed",
+			baggage: []string{string(semconv.LLMDEPPFairnessIDKey) + "=spoofed," + string(semconv.LLMDEPPAPISurfaceKey) + "=spoofed"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -317,13 +334,24 @@ func TestProcessRecordsAllowlistedBaggageOnRequestSpan(t *testing.T) {
 			))
 			tracing.InitTextMapPropagator()
 
+			reqHeaders := make([]*configPb.HeaderValue, 0, 2+len(tt.baggage))
+			reqHeaders = append(reqHeaders,
+				&configPb.HeaderValue{Key: ":path", RawValue: []byte(reqcommon.PathCompletions)},
+				&configPb.HeaderValue{Key: metadata.FlowFairnessIDKey, RawValue: []byte("tenant-a")},
+			)
+			for _, value := range tt.baggage {
+				reqHeaders = append(reqHeaders, &configPb.HeaderValue{Key: "baggage", RawValue: []byte(value)})
+			}
+
 			server := NewStreamingServer(nil, nil, nil, 0)
 			server.SetTraceBaggageKeys(tt.keys)
-			srv := &scriptedProcessServer{ctx: context.Background(), reqs: []*extProcPb.ProcessingRequest{newRequestHeaders(map[string]string{
-				":path":                    reqcommon.PathCompletions,
-				metadata.FlowFairnessIDKey: "tenant-a",
-				"baggage":                  tt.baggage,
-			})}}
+			srv := &scriptedProcessServer{ctx: context.Background(), reqs: []*extProcPb.ProcessingRequest{{
+				Request: &extProcPb.ProcessingRequest_RequestHeaders{
+					RequestHeaders: &extProcPb.HttpHeaders{
+						Headers: &configPb.HeaderMap{Headers: reqHeaders},
+					},
+				},
+			}}}
 			require.NoError(t, server.Process(srv))
 
 			var requestSpans []sdktrace.ReadOnlySpan

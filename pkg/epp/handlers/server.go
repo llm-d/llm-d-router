@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -405,14 +406,20 @@ func compareEPPToolCallingSnapshotToBody(surface reqcommon.APIType, inbound tool
 func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_RequestHeaders) context.Context {
 	ctx = tracing.ExtractGRPCMetadata(ctx)
 
-	carrier := make(propagation.MapCarrier)
+	headers := make(http.Header)
 	if req != nil && req.RequestHeaders != nil && req.RequestHeaders.Headers != nil {
 		for _, header := range req.RequestHeaders.Headers.Headers {
-			carrier[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
+			headers.Add(header.Key, envoy.GetHeaderValue(header))
 		}
 	}
-	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
-	id, _ := metadata.GetLowerCaseHeaderValue(carrier, metadata.FlowFairnessIDKey)
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(headers))
+	var id string
+	for _, name := range metadata.HeaderNames(metadata.FlowFairnessIDKey) {
+		if values := headers.Values(name); len(values) > 0 && values[len(values)-1] != "" {
+			id = values[len(values)-1]
+			break
+		}
+	}
 	return tracing.BeginRequestAttribution(ctx, id)
 }
 

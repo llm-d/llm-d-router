@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -322,6 +323,34 @@ func TestGenerateHeaders_ForwardsTraceContextWhenTracingDisabled(t *testing.T) {
 	}
 	assert.Equal(t, clientTraceparent, got["traceparent"])
 	assert.Equal(t, "vendor=abc", got["tracestate"])
+}
+
+func TestGenerateHeaders_MergesMultipleBaggageHeaders(t *testing.T) {
+	useTracerProvider(t, noop.NewTracerProvider())
+	tracing.InitTextMapPropagator()
+
+	req := &extProcPb.ProcessingRequest_RequestHeaders{RequestHeaders: &extProcPb.HttpHeaders{
+		Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+			{Key: "Baggage", RawValue: []byte("focus.workload.id=support_bot")},
+			{Key: "baggage", RawValue: []byte("tenant.id=t-7")},
+		}},
+	}}
+	ctx := extractTraceContext(context.Background(), req)
+
+	server := &StreamingServer{}
+	reqCtx := &RequestContext{
+		TargetEndpoint: "1.2.3.4:8080",
+		Request:        &Request{Headers: map[string]string{}},
+	}
+	got := map[string]string{}
+	for _, h := range server.generateHeaders(ctx, reqCtx) {
+		got[strings.ToLower(h.Header.Key)] = string(h.Header.RawValue)
+	}
+
+	parsed, err := baggage.Parse(got["baggage"])
+	require.NoError(t, err)
+	assert.Equal(t, "support_bot", parsed.Member("focus.workload.id").Value())
+	assert.Equal(t, "t-7", parsed.Member("tenant.id").Value())
 }
 
 // Envoy keeps a client header unless the mutation removes it, so a trace header
@@ -1268,6 +1297,9 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 		{"canonical header", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
 		{"deprecated alias", []*configPb.HeaderValue{{Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
 		{"empty canonical falls back to alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
+		{"duplicate_canonical_last_wins", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}, {Key: metadata.FlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
+		{"empty_then_nonempty_canonical", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
+		{"nonempty_then_empty_canonical_falls_back_to_alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}, {Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{
