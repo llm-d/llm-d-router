@@ -126,6 +126,8 @@ endpoints:
 
 A peer may serve its pool metrics on a different host or port than its routable address. Set a `metricsAddress` label (and an optional `metricsPort` label, defaulting to the endpoint port) on the entry, and the metrics source scrapes there instead of the endpoint address.
 
+A `pins` label (comma-separated tenants, matched against `x-llm-d-inference-fairness-id`) sends those tenants to that cluster; see the [rendezvous filter](../../../scheduling/filter/rendezvous/README.md).
+
 ## Endpoint attributes
 
 An entry may declare an `attributes` section: string key/value pairs published on the endpoint as dynamic attributes (resolved on read, so edits to a watched file take effect) and surfaced by the `attributes-producer` extractor for downstream plugins to consume through the framework's declared data dependencies. For example, the `endpoint-header-stamper` PreRequest plugin can prepend such an attribute to the request path, so endpoints behind one shared gateway host are discriminated by path instead of needing a hostname per endpoint:

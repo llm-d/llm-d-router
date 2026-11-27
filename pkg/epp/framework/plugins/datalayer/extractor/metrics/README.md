@@ -237,4 +237,12 @@ parameters:
 
 ## Multi-cluster support
 
-`multicluster-metrics-extractor` is the cluster-scoped variant. It reads only a pool's aggregate metrics (`llm_d_epp_average_kv_cache_utilization`, `llm_d_epp_average_queue_size`) into the `llm-d.ai/multicluster-*` attributes the multicluster scorers read, rather than running per-pod engine extraction. Pair it with `multicluster-metrics-data-source`. See the [wiring example](../../../README.md#example).
+`multicluster-metrics-extractor` is the cluster-scoped variant. It reads only a pool's aggregate metrics into the `llm-d.ai/multicluster-*` attributes that the multicluster scorers and `multicluster-rendezvous-filter` read, rather than running per-pod engine extraction. Pair it with `multicluster-metrics-data-source`. See the [wiring example](../../../README.md#example).
+
+| Pool metric (parameter) | Attribute | Notes |
+| --- | --- | --- |
+| `llm_d_epp_average_kv_cache_utilization` (`kvCacheUtilizationMetric`) | `llm-d.ai/multicluster-kv-cache-utilization` | |
+| `llm_d_epp_average_queue_size` (`queueSizeMetric`) | `llm-d.ai/multicluster-queue-size` | |
+| `llm_d_epp_ready_endpoints` (`readyEndpointsMetric`) | `llm-d.ai/multicluster-ready-endpoints` | Optional. A new count applies after holding 5 min (from 0: 30 s); a drop to 0 at once; missing for 5 min: -1 (not reported) |
+| `llm_d_epp_flow_control_queue_size` (`flowControlQueueMetric`), `llm_d_epp_flow_control_request_queue_duration_seconds` (`flowControlWaitMetric`) | `llm-d.ai/multicluster-flow-control` | Optional. Per priority: requests held, mean wait of requests dispatched in the last 30 s, last dispatch time. Each series is diffed on its own, so a deleted idle flow is not a counter reset |
+| (written on every scrape that reads a pool aggregate) | `llm-d.ai/multicluster-metrics-updated-at` | Unix seconds; readers treat an old value as a cluster that stopped answering |
