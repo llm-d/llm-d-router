@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -225,6 +226,10 @@ func (p *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
 	}
 }
 
+// maxDispatchesPerWake bounds the items one wake-up of the Run loop dispatches, so enqueues and
+// control-plane updates are served between batches.
+const maxDispatchesPerWake = 32
+
 // Run is the main operational loop for the processor. It must be run as a goroutine.
 // It uses a `select` statement to interleave accepting new requests with dispatching existing ones, balancing
 // responsiveness with throughput.
@@ -280,9 +285,9 @@ func (p *Processor) Run(ctx context.Context) {
 				continue
 			}
 			p.enqueue(item)
-			p.dispatchCycle(ctx) // Process immediately when an item arrives
+			p.drainCycles(ctx) // Process immediately when an item arrives
 		case <-dispatchTicker.C():
-			p.dispatchCycle(ctx) // Periodically attempt to dispatch from queues
+			p.drainCycles(ctx) // Periodically attempt to dispatch from queues
 		case desired := <-priorityBandUpdateCh:
 			p.registryBackground.ApplyDesiredPriorities(desired)
 		case <-gcCh:
@@ -481,10 +486,34 @@ func (p *Processor) recordCapacityUtilization() {
 	}
 }
 
-// dispatchCycle attempts to dispatch a single item by offering priority bands a dispatch opportunity in the
+// dispatchCycle runs one dispatch cycle with no saturation floor and reports whether it dispatched an item.
+func (p *Processor) dispatchCycle(ctx context.Context) bool {
+	_, dispatched, _ := p.dispatchCycleAbove(ctx, math.Inf(-1))
+	return dispatched
+}
+
+// drainCycles dispatches up to maxDispatchesPerWake items in one wake-up of the Run loop. After a
+// dispatch it runs another cycle only when the saturation detector holds a reservation for the
+// dispatched request, and that cycle dispatches only when the reading is above the one that admitted
+// the previous request. The gate therefore sees every request it admits within the wake-up. A
+// detector that does not hold reservations, or whose reading does not count them, keeps one dispatch
+// per wake-up.
+func (p *Processor) drainCycles(ctx context.Context) {
+	floor := math.Inf(-1)
+	for range maxDispatchesPerWake {
+		saturation, _, reserved := p.dispatchCycleAbove(ctx, floor)
+		if !reserved {
+			return
+		}
+		floor = saturation
+	}
+}
+
+// dispatchCycleAbove attempts to dispatch a single item by offering priority bands a dispatch opportunity in the
 // order chosen by the BandSelectionPolicy. It applies the configured policies for each band to select an item
-// and then attempts to dispatch it. It returns true if an item was successfully dispatched, and false
-// otherwise. It enforces Head-of-Line (HoL) blocking for bands the UsageLimitPolicy gates.
+// and then attempts to dispatch it. It enforces Head-of-Line (HoL) blocking for bands the UsageLimitPolicy gates.
+// The cycle stops before band selection when the pool saturation is at or below floor. It returns the reading,
+// whether an item was dispatched, and whether the saturation detector holds a reservation for it.
 //
 // # Work Conservation and Head-of-Line (HoL) Blocking
 //
@@ -493,7 +522,7 @@ func (p *Processor) recordCapacityUtilization() {
 // saturation holding back higher-priority work. Ceilings are monotonically non-increasing across descending
 // priority, so gated bands form a contiguous tail and a skip under strict order only ever reaches further
 // gated bands.
-func (p *Processor) dispatchCycle(ctx context.Context) bool {
+func (p *Processor) dispatchCycleAbove(ctx context.Context, floor float64) (saturation float64, dispatched, reserved bool) {
 	dispatchCycleStart := p.clock.Now()
 	defer func() {
 		metrics.RecordFlowControlDispatchCycleDuration(p.clock.Since(dispatchCycleStart))
@@ -513,7 +542,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	prefill = append(prefill, interleaved...)
 	decode = append(decode, interleaved...)
 
-	saturation := -1.0
+	saturation = -1.0
 	for _, part := range []struct {
 		name      string
 		endpoints []fwkdl.Endpoint
@@ -544,6 +573,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}
 
 	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
+	if saturation <= floor {
+		return saturation, false, false
+	}
 
 	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
 	p.recordCapacityUtilization()
@@ -598,19 +630,19 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 
 		// --- Dispatch ---
 		req := item.OriginalRequest()
-		dispatched, err := p.dispatchItem(item)
+		itemDispatched, itemReserved, err := p.dispatchItem(item)
 		if err != nil {
 			p.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
 		}
-		if !dispatched {
+		if !itemDispatched {
 			// The band may still hold live items. End the cycle so the next one re-selects from it
 			// before any lower-ranked band is offered the slot.
-			return false
+			return saturation, false, false
 		}
 		p.bandSelectionPolicy.RecordDispatch(ctx, priority)
-		return true
+		return saturation, true, itemReserved
 	}
 
 	// The cycle dispatched nothing. When a band is gated, the break is where head-of-line blocking bit, and
@@ -622,7 +654,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			p.maybeReclaim(ctx, saturation, priorities, ceilings, breakIdx)
 		}
 	}
-	return false
+	return saturation, false, false
 }
 
 // ceilingsBuffer returns the reusable ceilings buffer sized to n, every element reset to 1.0 (no
@@ -710,13 +742,13 @@ func (p *Processor) selectItem(
 }
 
 // dispatchItem handles the final steps of dispatching an item: removing it from the queue and finalizing its outcome.
-// It reports whether the item was actually dispatched.
-func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, error) {
+// It reports whether the item was actually dispatched and whether the saturation detector holds a reservation for it.
+func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (dispatched, reserved bool, err error) {
 	req := itemAcc.OriginalRequest()
 	key := req.FlowKey()
 	managedQ, err := p.registry.ManagedQueue(key)
 	if err != nil {
-		return false, fmt.Errorf("failed to get ManagedQueue for flow %s: %w", key, err)
+		return false, false, fmt.Errorf("failed to get ManagedQueue for flow %s: %w", key, err)
 	}
 
 	removedItemAcc, err := managedQ.Remove(itemAcc.Handle())
@@ -725,23 +757,23 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, e
 		// We log it at a low level for visibility and report non-dispatch so the cycle ends without recording a dispatch.
 		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
 			"flowKey", key, "requestID", req.ID(), "err", err)
-		return false, nil
+		return false, false, nil
 	}
 
 	removedItem, ok := removedItemAcc.(*FlowItem)
 	if !ok {
 		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
-		return false, fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
+		return false, false, fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
 	}
 	// The request can be finalized asynchronously while it is being removed. Do not create a
 	// reservation for work that will not proceed past flow control.
 	if finalState := removedItem.FinalState(); finalState != nil {
 		p.recordDrop(finalState.Outcome)
-		return false, nil
+		return false, false, nil
 	}
 
 	reservationTracker, tracksReservations := p.saturationDetector.(flowcontrol.DispatchReservationTracker)
-	reserved := tracksReservations && reservationTracker.ReserveDispatch(req.ID())
+	reserved = tracksReservations && reservationTracker.ReserveDispatch(req.ID())
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithError(nil)
 	if outcome := removedItem.FinalState().Outcome; outcome != types.QueueOutcomeDispatched {
@@ -749,10 +781,10 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) (bool, e
 			reservationTracker.ReleaseDispatch(req.ID())
 		}
 		p.recordDrop(outcome)
-		return false, nil
+		return false, false, nil
 	}
 	p.drain.recordDispatch(key.Priority, p.clock.Now())
-	return true, nil
+	return true, reserved, nil
 }
 
 // runCleanupSweep starts a background goroutine that periodically scans all queues for externally finalized items

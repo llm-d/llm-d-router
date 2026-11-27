@@ -1775,7 +1775,7 @@ func TestProcessor(t *testing.T) {
 						h := newTestHarness(t, testCleanupTick)
 						tc.setupMocks(h)
 						item := h.newTestItem("req-dispatch-fail", testFlow, testTTL)
-						dispatched, err := h.processor.dispatchItem(item)
+						dispatched, _, err := h.processor.dispatchItem(item)
 						require.Error(t, err, "dispatchItem should return an error")
 						assert.False(t, dispatched)
 						assert.ErrorIs(t, err, tc.expectedErr, "The underlying registry error should be preserved")
@@ -1799,7 +1799,7 @@ func TestProcessor(t *testing.T) {
 				}
 
 				// --- ACT ---
-				dispatched, err := h.processor.dispatchItem(item)
+				dispatched, _, err := h.processor.dispatchItem(item)
 
 				// --- ASSERT ---
 				require.NoError(t, err, "dispatchItem should return no error for an already finalized item")
@@ -1829,7 +1829,7 @@ func TestProcessor(t *testing.T) {
 					return true
 				}
 
-				dispatched, err := h.processor.dispatchItem(item)
+				dispatched, _, err := h.processor.dispatchItem(item)
 				require.NoError(t, err)
 				require.True(t, dispatched)
 				require.True(t, reserved)
@@ -1853,7 +1853,7 @@ func TestProcessor(t *testing.T) {
 					return true
 				}
 
-				dispatched, err := h.processor.dispatchItem(item)
+				dispatched, _, err := h.processor.dispatchItem(item)
 				require.NoError(t, err)
 				assert.False(t, dispatched)
 				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
@@ -2659,4 +2659,100 @@ func capacityStages(t *testing.T, detector string) []string {
 		}
 	}
 	return stages
+}
+
+func TestProcessor_DrainCycles(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		// queued is the number of items in the flow queue before the wake-up.
+		queued int
+		// reserve makes the detector hold a reservation for every dispatched request.
+		reserve bool
+		// countReserved makes the detector's reading include the reservations it holds.
+		countReserved bool
+		// capacity is the number of held reservations at which the reading reaches 1.0.
+		capacity       int
+		wantDispatched int
+		// wantReadings is the number of Saturation calls the wake-up makes.
+		wantReadings int
+	}{
+		{name: "drains_while_the_reading_counts_reservations", queued: 5, reserve: true, countReserved: true, capacity: 100, wantDispatched: 5, wantReadings: 6},
+		{name: "stops_at_the_usage_limit", queued: 5, reserve: true, countReserved: true, capacity: 3, wantDispatched: 3, wantReadings: 4},
+		{name: "stops_at_the_per_wake_up_bound", queued: maxDispatchesPerWake + 8, reserve: true, countReserved: true, capacity: 1000, wantDispatched: maxDispatchesPerWake, wantReadings: maxDispatchesPerWake},
+		{name: "one_dispatch_without_reservations", queued: 5, reserve: false, countReserved: false, capacity: 100, wantDispatched: 1, wantReadings: 1},
+		{name: "one_dispatch_when_the_reading_ignores_reservations", queued: 5, reserve: true, countReserved: false, capacity: 100, wantDispatched: 1, wantReadings: 2},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newTestHarness(t, testCleanupTick)
+			q := h.addQueue(testFlow)
+			for i := range tc.queued {
+				require.NoError(t, q.Add(h.newTestItem(fmt.Sprintf("req-%d", i), testFlow, testTTL)))
+			}
+			var held, readings atomic.Int64
+			h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+				if !tc.reserve {
+					return false
+				}
+				held.Add(1)
+				return true
+			}
+			h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 {
+				readings.Add(1)
+				if !tc.countReserved {
+					return 0
+				}
+				return float64(held.Load()) / float64(tc.capacity)
+			}
+
+			h.processor.drainCycles(h.ctx)
+
+			assert.Equal(t, tc.queued-tc.wantDispatched, q.Len(), "items left in the queue after one wake-up")
+			assert.Equal(t, int64(tc.wantReadings), readings.Load(), "Saturation calls in one wake-up")
+		})
+	}
+}
+
+func TestProcessor_DispatchTickDrainsCountedBacklog(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t, testCleanupTick)
+	q := h.addQueue(testFlow)
+	items := make([]*FlowItem, 5)
+	for i := range items {
+		items[i] = h.newTestItem(fmt.Sprintf("req-%d", i), testFlow, testTTL)
+		require.NoError(t, q.Add(items[i]))
+	}
+	var held atomic.Int64
+	h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+		held.Add(1)
+		return true
+	}
+	h.saturationDetector.SaturationFunc = func(context.Context, []fwkdl.Endpoint) float64 {
+		return float64(held.Load()) / 100
+	}
+
+	h.Start()
+	h.Go()
+	// Step the dispatch ticker until the first item leaves, then stop stepping: the rest of the
+	// backlog must go out in the same wake-up.
+	stepper := time.NewTicker(time.Millisecond)
+	defer stepper.Stop()
+	timeout := time.After(testWaitTimeout)
+	for items[0].FinalState() == nil {
+		select {
+		case <-stepper.C:
+			h.clock.Step(time.Millisecond)
+		case <-timeout:
+			t.Fatal("timed out waiting for the first dispatch")
+		}
+	}
+	for _, item := range items {
+		require.Eventually(t, func() bool { return item.FinalState() != nil }, testWaitTimeout, time.Millisecond,
+			"item %q was not dispatched in the wake-up that dispatched the first item", item.OriginalRequest().ID())
+		assert.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
+	}
 }
