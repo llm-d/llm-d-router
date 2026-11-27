@@ -11,13 +11,14 @@ An EPP instance handles a single `InferencePool` (and so for each `InferencePool
 - Endpoint Selection
   - The EPP determines the appropriate Pod endpoint for the load balancer (LB) to route requests.
   - It selects from the pool of ready Pods designated by the assigned InferencePool's [Selector](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/api/v1/inferencepool_types.go) field.
-  - Endpoint selection is contingent on the request's ModelName matching an `InferenceObjective` that references the `InferencePool`.
-  - Requests with unmatched ModelName values trigger an error response to the proxy.
+- Request Priority
+  - The `InferenceObjective` named by the `x-llm-d-inference-objective` request header sets per-request scheduling goals such as priority, which admission and flow control use to rank requests.
+  - Requests without a matching `InferenceObjective` use the default priority of 0.
 - Traffic Splitting and ModelName Rewriting
-  - The EPP facilitates controlled rollouts of new adapter versions by implementing traffic splitting between adapters within the same `InferencePool`, as defined by the `InferenceObjective`.
-  - EPP rewrites the model name in the request to the [target model name](https://github.com/llm-d/llm-d-router/blob/main/apix/v1alpha2/inferencemodelrewrite_types.go) as defined on the `InferenceObjective` object.
+  - The EPP facilitates controlled rollouts of new model or adapter versions by implementing weighted traffic splitting between models within the same `InferencePool`, as defined by the `InferenceModelRewrite`.
+  - EPP rewrites the model name in the request to a [target model name](https://github.com/llm-d/llm-d-router/blob/main/apix/v1alpha2/inferencemodelrewrite_types.go) as defined on the `InferenceModelRewrite` object.
 - Observability
   - The EPP generates metrics to enhance observability.
-  - It reports InferenceObjective-level metrics, further broken down by target model.
+  - It reports model-level metrics, labeled by both the requested and the target model name.
   - Detailed information regarding metrics can be found in the [metrics documentation](../../docs/metrics.md).
   
