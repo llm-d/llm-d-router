@@ -587,4 +587,8 @@ func TestProducesAgentIdentity(t *testing.T) {
 			t.Fatalf("Produces()[%s] has type %T, want string", key, produced)
 		}
 	}
+
+	if produces := (&Plugin{silent: true}).Produces(); len(produces) != 0 {
+		t.Fatalf("Produces() = %v with publishIdentity false, want nothing", produces)
+	}
 }
