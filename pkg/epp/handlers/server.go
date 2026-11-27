@@ -227,6 +227,14 @@ type RequestContext struct {
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool
+	// sseSalvage scans the bytes of the oversized SSE line being dropped for
+	// its usage object, which is merged when the line ends.
+	sseSalvage *usageSalvager
+	// salvagedUsage accumulates usage folded out of dropped oversized SSE lines
+	// this chunk. It is merged into Usage after the parser runs so a dropped
+	// line that follows a parsed usage line still wins (last usage event in a
+	// chunk wins), rather than being clobbered by the earlier parser merge.
+	salvagedUsage *fwkrequest.Usage
 
 	// usageFrames removes the usage-only frame when StreamUsageRequested is set.
 	usageFrames usageFrameFilter

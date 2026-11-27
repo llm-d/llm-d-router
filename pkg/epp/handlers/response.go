@@ -108,6 +108,13 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
 		}
 	}
+	// Usage salvaged from dropped oversized SSE lines is merged after the parser
+	// so a dropped line that follows a parsed usage line in the same chunk still
+	// wins, matching the parsers' "last usage event in a chunk wins" rule.
+	if reqCtx.salvagedUsage != nil {
+		mergeUsage(&reqCtx.Usage, *reqCtx.salvagedUsage)
+		reqCtx.salvagedUsage = nil
+	}
 	if endOfStream && parsedResp != nil && reqCtx.responseStatusCode == "" {
 		reqCtx.Completion = parsedResp.Completion
 	}
@@ -141,19 +148,26 @@ func isEventStream(contentType string) bool {
 }
 
 // completeSSELines returns only whole lines, carrying a partial last line to the next chunk.
-// A line longer than maxSSELineBytes is dropped up to its newline.
+// A line longer than maxSSELineBytes is dropped up to its newline, its usage salvaged.
 func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte, endOfStream bool) []byte {
 	if reqCtx.sseLineDiscarding {
 		lineEnd := bytes.IndexByte(chunk, '\n')
 		if lineEnd < 0 {
+			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			return nil
 		}
 		reqCtx.sseLineDiscarding = false
+		salvageDroppedSSELine(ctx, reqCtx, chunk[:lineEnd], true)
 		chunk = chunk[lineEnd+1:]
 	}
 	lineEnd := bytes.LastIndexByte(chunk, '\n')
 	if lineEnd < 0 {
 		if len(reqCtx.sseLineCarry)+len(chunk) > maxSSELineBytes {
+			// This chunk has no newline, so every byte still belongs to the
+			// dropped line. The newline that ends it arrives in a later chunk
+			// and finishes the salvage there.
+			salvageDroppedSSELine(ctx, reqCtx, reqCtx.sseLineCarry, false)
+			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			dropSSELine(ctx, reqCtx, endOfStream)
 			return nil
 		}
@@ -172,19 +186,27 @@ func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte,
 	}
 	reqCtx.sseLineCarry = nil
 	tail := chunk[lineEnd+1:]
+	// Drop oversized lines in data before salvaging the tail. The tail and the
+	// oversized lines inside data share one salvager, and the tail is fed first;
+	// running dropOversizedLines first lets each salvager see exactly one line
+	// instead of flushing a following oversized line into the still-open tail
+	// scan and losing both usages.
+	kept := dropOversizedLines(ctx, reqCtx, data)
 	switch {
 	case len(tail) > maxSSELineBytes:
+		salvageDroppedSSELine(ctx, reqCtx, tail, endOfStream)
 		dropSSELine(ctx, reqCtx, endOfStream)
 	case endOfStream:
-		data = append(data, tail...)
+		kept = append(kept, tail...)
 	case len(tail) > 0:
 		reqCtx.sseLineCarry = bytes.Clone(tail)
 	}
-	return dropOversizedLines(ctx, data)
+	return kept
 }
 
 // dropOversizedLines removes the lines of data longer than maxSSELineBytes, copying only when one is dropped.
-func dropOversizedLines(ctx context.Context, data []byte) []byte {
+// Each dropped line's usage is salvaged first.
+func dropOversizedLines(ctx context.Context, reqCtx *RequestContext, data []byte) []byte {
 	if len(data) <= maxSSELineBytes {
 		return data
 	}
@@ -197,6 +219,7 @@ func dropOversizedLines(ctx context.Context, data []byte) []byte {
 		}
 		line := data[start:end]
 		if len(bytes.TrimSuffix(line, []byte("\n"))) > maxSSELineBytes {
+			salvageDroppedSSELine(ctx, reqCtx, line, true)
 			if !dropped {
 				logSSELineDrop(ctx)
 				kept = append(kept, data[:start]...)
