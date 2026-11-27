@@ -128,11 +128,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	// kv_transfer_params tells a model server which pod to pull KV from, so
-	// only the KV connector and the EPP may write it, but not every step
-	// rebuilds the body, so a client copy is dropped once here.
-	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
-	delete(parsed, reqcommon.FieldKVTransferParams)
+	// kv_transfer_params and ec_transfer_params tell a model server which pod to
+	// pull KV or EC data from, so only the coordinator connectors and the EPP may
+	// write them. Not every step rebuilds the body, so client copies are dropped
+	// once here.
+	clientKVTransferParams := dropClientTransferParams(parsed)
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
@@ -279,12 +279,48 @@ var inspectedRequestFields = map[string]struct{}{
 	"prompt":                      {},
 	"token_ids":                   {},
 	reqcommon.FieldSamplingParams: {},
+	reqcommon.FieldVLLMXargs:      {},
 	"features":                    {},
 }
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
 	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
+}
+
+func deleteTransferParams(m map[string]any) bool {
+	var dropped bool
+	if _, ok := m[reqcommon.FieldKVTransferParams]; ok {
+		delete(m, reqcommon.FieldKVTransferParams)
+		dropped = true
+	}
+	if _, ok := m[reqcommon.FieldECTransferParams]; ok {
+		delete(m, reqcommon.FieldECTransferParams)
+		dropped = true
+	}
+	return dropped
+}
+
+// dropClientTransferParams removes client-supplied kv_transfer_params and
+// ec_transfer_params from the top level, from top-level vllm_xargs (OpenAI and
+// Anthropic routes), and from sampling_params.extra_args (vLLM generate).
+// Container maps (vllm_xargs, extra_args) are kept even when emptied so
+// worker_protocol=grpc still rejects unsupported fields such as extra_args.
+func dropClientTransferParams(parsed map[string]any) bool {
+	dropped := deleteTransferParams(parsed)
+	if vllmXargs, ok := parsed[reqcommon.FieldVLLMXargs].(map[string]any); ok {
+		if deleteTransferParams(vllmXargs) {
+			dropped = true
+		}
+	}
+	if samplingParams, ok := parsed[reqcommon.FieldSamplingParams].(map[string]any); ok {
+		if extraArgs, ok := samplingParams[reqcommon.FieldExtraArgs].(map[string]any); ok {
+			if deleteTransferParams(extraArgs) {
+				dropped = true
+			}
+		}
+	}
+	return dropped
 }
 
 // classifyPipelineError maps a pipeline error to a client-facing status and

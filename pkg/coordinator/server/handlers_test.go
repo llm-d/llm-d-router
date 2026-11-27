@@ -722,12 +722,97 @@ func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
 	const dropped = "dropped client-supplied kv_transfer_params"
 	const host = "10.9.9.9"
 	cases := map[string]struct {
-		body     string
-		wantDrop bool
+		path         string
+		body         string
+		keepFields   []string
+		keepExtraArg string
+		keepVLLMXarg string
+		wantDrop     bool
 	}{
-		"client block": {body: `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":` +
-			`{"kv_request_id":"x","remote_host":"` + host + `","remote_port":7777}}}`, wantDrop: true},
-		"no block": {body: `{"model":"m","messages":[]}`},
+		"client block": {
+			path:       reqcommon.PathChatCompletions,
+			body:       `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":{"kv_request_id":"x","remote_host":"` + host + `","remote_port":7777}}}`,
+			keepFields: []string{"model", "messages"},
+			wantDrop:   true,
+		},
+		"no block": {
+			path:       reqcommon.PathChatCompletions,
+			body:       `{"model":"m","messages":[]}`,
+			keepFields: []string{"model", "messages"},
+		},
+		"extra_args_kv_transfer_params": {
+			path:         reqcommon.PathVLLMGenerate,
+			body:         `{"model":"m","token_ids":[1,2,3],"sampling_params":{"max_tokens":16,"extra_args":{"kv_transfer_params":{"do_remote_prefill":true,"remote_host":"` + host + `"},"custom":"keep"}}}`,
+			keepFields:   []string{"model", "token_ids"},
+			keepExtraArg: "custom",
+			wantDrop:     true,
+		},
+		"top_level_and_extra_args": {
+			path:       reqcommon.PathVLLMGenerate,
+			body:       `{"model":"m","token_ids":[1,2,3],"kv_transfer_params":{"do_remote_prefill":true},"sampling_params":{"extra_args":{"kv_transfer_params":{"do_remote_prefill":true,"remote_host":"` + host + `"}}}}`,
+			keepFields: []string{"model", "token_ids"},
+			wantDrop:   true,
+		},
+		"extra_args_without_kv_transfer_params": {
+			path:         reqcommon.PathVLLMGenerate,
+			body:         `{"model":"m","token_ids":[1,2,3],"sampling_params":{"extra_args":{"custom":"keep"}}}`,
+			keepFields:   []string{"model", "token_ids"},
+			keepExtraArg: "custom",
+		},
+		"extra_args_unicode_escaped": {
+			path:       reqcommon.PathVLLMGenerate,
+			body:       `{"model":"m","token_ids":[1,2,3],"sampling_params":{"extra_\u0061rgs":{"kv_\u0074ransfer_params":{"do_remote_prefill":true,"remote_host":"` + host + `"}}}}`,
+			keepFields: []string{"model", "token_ids"},
+			wantDrop:   true,
+		},
+		"vllm_xargs_kv_transfer_params": {
+			path:         reqcommon.PathChatCompletions,
+			body:         `{"model":"m","messages":[],"vllm_xargs":{"kv_transfer_params":"` + host + `","session_id":"keep"}}`,
+			keepFields:   []string{"model", "messages"},
+			keepVLLMXarg: "session_id",
+			wantDrop:     true,
+		},
+		"vllm_xargs_unicode_escaped": {
+			path:       reqcommon.PathChatCompletions,
+			body:       `{"model":"m","messages":[],"vllm_\u0078args":{"kv_\u0074ransfer_params":"` + host + `"}}`,
+			keepFields: []string{"model", "messages"},
+			wantDrop:   true,
+		},
+		"ec_transfer_params_top_level": {
+			path:       reqcommon.PathVLLMGenerate,
+			body:       `{"model":"m","token_ids":[1,2,3],"ec_transfer_params":{"h":{"peer_host":"` + host + `","peer_port":5501}}}`,
+			keepFields: []string{"model", "token_ids"},
+			wantDrop:   true,
+		},
+		"ec_transfer_params_extra_args": {
+			path:         reqcommon.PathVLLMGenerate,
+			body:         `{"model":"m","token_ids":[1,2,3],"sampling_params":{"extra_args":{"ec_transfer_params":{"h":{"peer_host":"` + host + `"}},"custom":"keep"}}}`,
+			keepFields:   []string{"model", "token_ids"},
+			keepExtraArg: "custom",
+			wantDrop:     true,
+		},
+		"ec_transfer_params_vllm_xargs": {
+			path:         reqcommon.PathChatCompletions,
+			body:         `{"model":"m","messages":[],"vllm_xargs":{"ec_transfer_params":"` + host + `","session_id":"keep"}}`,
+			keepFields:   []string{"model", "messages"},
+			keepVLLMXarg: "session_id",
+			wantDrop:     true,
+		},
+		"non_object_sampling_params": {
+			path:       reqcommon.PathVLLMGenerate,
+			body:       `{"model":"m","token_ids":[1,2,3],"sampling_params":"not-an-object"}`,
+			keepFields: []string{"model", "token_ids", "sampling_params"},
+		},
+		"non_object_extra_args": {
+			path:       reqcommon.PathVLLMGenerate,
+			body:       `{"model":"m","token_ids":[1,2,3],"sampling_params":{"extra_args":[1,2]}}`,
+			keepFields: []string{"model", "token_ids", "sampling_params"},
+		},
+		"non_object_vllm_xargs": {
+			path:       reqcommon.PathChatCompletions,
+			body:       `{"model":"m","messages":[],"vllm_xargs":null}`,
+			keepFields: []string{"model", "messages"},
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -736,16 +821,50 @@ func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			lines := handlerLogLines(t, func() { srv.handleInference(httptest.NewRecorder(), req) })
 
 			if step.captured == nil {
 				t.Fatal("pipeline step did not run")
 			}
-			if _, ok := step.captured.Body[reqcommon.FieldKVTransferParams]; ok {
-				t.Fatalf("client-supplied kv_transfer_params must be dropped, body: %v", step.captured.Body)
+			for _, field := range []string{reqcommon.FieldKVTransferParams, reqcommon.FieldECTransferParams} {
+				if _, ok := step.captured.Body[field]; ok {
+					t.Fatalf("client-supplied %s must be dropped, body: %v", field, step.captured.Body)
+				}
 			}
-			for _, field := range []string{"model", "messages"} {
+			if vllmXargs, ok := step.captured.Body[reqcommon.FieldVLLMXargs].(map[string]any); ok {
+				for _, field := range []string{reqcommon.FieldKVTransferParams, reqcommon.FieldECTransferParams} {
+					if _, ok := vllmXargs[field]; ok {
+						t.Fatalf("client-supplied vllm_xargs.%s must be dropped, body: %v", field, step.captured.Body)
+					}
+				}
+				if tc.keepVLLMXarg != "" {
+					if _, ok := vllmXargs[tc.keepVLLMXarg]; !ok {
+						t.Fatalf("vllm_xargs.%s must be kept, body: %v", tc.keepVLLMXarg, step.captured.Body)
+					}
+				}
+			} else if tc.keepVLLMXarg != "" {
+				t.Fatalf("vllm_xargs must be kept, body: %v", step.captured.Body)
+			}
+			if sp, ok := step.captured.Body[reqcommon.FieldSamplingParams].(map[string]any); ok {
+				if extraArgs, ok := sp[reqcommon.FieldExtraArgs].(map[string]any); ok {
+					for _, field := range []string{reqcommon.FieldKVTransferParams, reqcommon.FieldECTransferParams} {
+						if _, ok := extraArgs[field]; ok {
+							t.Fatalf("client-supplied sampling_params.extra_args.%s must be dropped, body: %v", field, step.captured.Body)
+						}
+					}
+					if tc.keepExtraArg != "" {
+						if _, ok := extraArgs[tc.keepExtraArg]; !ok {
+							t.Fatalf("sampling_params.extra_args.%s must be kept, body: %v", tc.keepExtraArg, step.captured.Body)
+						}
+					}
+				} else if tc.keepExtraArg != "" {
+					t.Fatalf("sampling_params.extra_args must be kept, body: %v", step.captured.Body)
+				}
+			} else if tc.keepExtraArg != "" {
+				t.Fatalf("sampling_params must be kept, body: %v", step.captured.Body)
+			}
+			for _, field := range tc.keepFields {
 				if _, ok := step.captured.Body[field]; !ok {
 					t.Fatalf("%s must be kept, body: %v", field, step.captured.Body)
 				}
@@ -761,6 +880,37 @@ func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
 			}
 			if want := map[bool]int{true: 1, false: 0}[tc.wantDrop]; drops != want {
 				t.Fatalf("%d drop lines, want %d: %v", drops, want, lines)
+			}
+		})
+	}
+}
+
+func TestHandleInference_GRPCRejectsEmptiedUnsupportedContainers(t *testing.T) {
+	cases := map[string]string{
+		"emptied_extra_args": `{"model":"m","token_ids":[1,2,3],"sampling_params":{"extra_args":{"kv_transfer_params":{"do_remote_prefill":true}}}}`,
+		"emptied_vllm_xargs": `{"model":"m","token_ids":[1,2,3],"vllm_xargs":{"kv_transfer_params":"x"}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			step := &capturingStep{}
+			srv, err := New(
+				config.ServerConfig{},
+				pipeline.New([]pipeline.Step{step}),
+				gateway.NewWithTransport(&http.Transport{}, stubGatewayURL),
+				WithWorkerProtocol(config.WorkerProtocolGRPC),
+			)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathVLLMGenerate, strings.NewReader(body))
+			srv.handleInference(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if step.captured != nil {
+				t.Fatal("pipeline step must not run when gRPC validation rejects the container field")
 			}
 		})
 	}

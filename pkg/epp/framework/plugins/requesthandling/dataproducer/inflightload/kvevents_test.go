@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -291,14 +292,14 @@ func TestSessionStampPrecedence(t *testing.T) {
 	t.Parallel()
 	header := newStampedRequest("req-h", seq(0, 64))
 	header.Headers["X-Session-ID"] = "from-header"
-	header.Body.Payload = fwkrequest.PayloadMap{extraArgsField: map[string]any{sessionIDField: "from-xargs"}}
+	header.Body.Payload = fwkrequest.PayloadMap{reqcommon.FieldVLLMXargs: map[string]any{sessionIDField: "from-xargs"}}
 	stamp, own, ok := sessionStamp(header)
 	require.True(t, ok)
 	require.False(t, own)
 	require.Equal(t, "from-header", stamp)
 
 	xargs := newStampedRequest("req-x", seq(0, 64))
-	xargs.Body.Payload = fwkrequest.PayloadMap{extraArgsField: map[string]any{sessionIDField: "from-xargs"}}
+	xargs.Body.Payload = fwkrequest.PayloadMap{reqcommon.FieldVLLMXargs: map[string]any{sessionIDField: "from-xargs"}}
 	stamp, own, ok = sessionStamp(xargs)
 	require.True(t, ok)
 	require.False(t, own)

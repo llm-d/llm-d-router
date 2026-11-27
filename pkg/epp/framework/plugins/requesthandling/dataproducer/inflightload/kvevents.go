@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
@@ -38,10 +39,9 @@ const (
 	// the body carries none. The engine echoes the id on the KV events for the
 	// blocks the request stores.
 	sessionIDHeader = "x-session-id"
-	// sessionIDField and extraArgsField are the body locations vLLM reads for
-	// the session id ahead of the header.
+	// sessionIDField is the top-level body location vLLM reads for the session id
+	// ahead of the header (alongside reqcommon.FieldVLLMXargs).
 	sessionIDField = "session_id"
-	extraArgsField = "vllm_xargs"
 
 	signalKVEvent   = "kv_event"
 	signalFirstByte = "first_byte"
@@ -229,7 +229,7 @@ func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok boo
 			return value, false, true
 		}
 	}
-	if xargs, found := parserutil.ObjectField(payload, extraArgsField); found {
+	if xargs, found := parserutil.ObjectField(payload, reqcommon.FieldVLLMXargs); found {
 		if s, found := xargs[sessionIDField].(string); found && s != "" {
 			return s, false, true
 		}

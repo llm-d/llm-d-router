@@ -85,7 +85,8 @@ const (
 	FieldToolChoice           = "tool_choice"
 	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args" // sampling_params field: vLLM reads kv_transfer_params from it
+	FieldExtraArgs            = "extra_args" // sampling_params field: vLLM reads kv_transfer_params and ec_transfer_params from it
+	FieldVLLMXargs            = "vllm_xargs" // OpenAI/Anthropic request field vLLM copies into SamplingParams.extra_args
 	FieldN                    = "n"
 	FieldCacheSalt            = "cache_salt"
 	FieldPriority             = "priority"
