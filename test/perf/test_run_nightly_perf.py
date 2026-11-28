@@ -587,6 +587,35 @@ class TargetTests(OfflineTestCase):
         self.assertEqual((args.sim_replicas, args.epp_replicas, args.router_machine_family), (10, 1, "e2"))
         self.assertEqual(args.epp_log_verbosity, perf.EPP_LOG_VERBOSITY)
 
+    def test_parity_target_differs_from_the_nightly_target_only_in_the_scorers(self):
+        repo = Path(perf.__file__).resolve().parents[2]
+        targets = repo / "test/perf/config/targets"
+        baseline = perf.load_target(str(targets / "optimized-baseline-job1.yaml"))
+        parity = perf.load_target(str(targets / "endpoint-attribute-parity-job1.yaml"))
+        self.assertEqual(parity["setup"].pop("router_config"), "test/perf/config/router-configs/endpoint-attribute-parity.yaml")
+        baseline["setup"].pop("router_config")
+        self.assertEqual(parity, baseline)
+
+        configs = repo / "test/perf/config/router-configs"
+        baseline = yaml.safe_load((configs / "optimized-baseline.yaml").read_text())
+        parity = yaml.safe_load((configs / "endpoint-attribute-parity.yaml").read_text())
+        baseline_plugins = yaml.safe_load(baseline["router"]["epp"].pop("pluginsCustomConfig").popitem()[1])
+        parity_plugins = yaml.safe_load(parity["router"]["epp"].pop("pluginsCustomConfig").popitem()[1])
+        baseline["router"]["epp"].pop("pluginsConfigFile")
+        parity["router"]["epp"].pop("pluginsConfigFile")
+        self.assertEqual(parity["router"]["epp"]["flags"].pop("allow-experimental-plugins"), "true")
+        self.assertEqual(parity, baseline)
+
+        swapped = {"queue-scorer": "ea-queue-scorer", "kv-cache-utilization-scorer": "ea-kv-cache-scorer"}
+        self.assertEqual(
+            [p for p in parity_plugins["plugins"] if p.get("name") not in swapped.values()],
+            [p for p in baseline_plugins["plugins"] if p["type"] not in swapped],
+        )
+        for profile in baseline_plugins["schedulingProfiles"]:
+            for ref in profile["plugins"]:
+                ref["pluginRef"] = swapped.get(ref["pluginRef"], ref["pluginRef"])
+        self.assertEqual(parity_plugins["schedulingProfiles"], baseline_plugins["schedulingProfiles"])
+
     def test_target_setup_is_repository_relative(self):
         target = self.target_for(self.repo_with_target())
         self.assertEqual(target["id"], "bench")
