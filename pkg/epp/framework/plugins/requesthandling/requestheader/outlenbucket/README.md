@@ -59,7 +59,8 @@ concurrent use.
 
 - `request.Body.ChatCompletions.ChatTemplateKWArgs` -- `enable_thinking`,
   `thinking_budget` (populated by vLLM from the client's `extra_body`).
-  Vendor aliases: `reasoning_budget` (Nemotron), `thinking.type` (DeepSeek V4).
+  Vendor aliases: `reasoning_budget` (Nemotron), a boolean `thinking`
+  (DeepSeek V3.1, Granite 3.2), `thinking.type` (DeepSeek V4).
   Chat-completions only.
 - `request.Body.ChatCompletions.Tools` -- presence implies `has_tools`.
 - `request.Body.Responses.Tools` -- presence implies `has_tools`.

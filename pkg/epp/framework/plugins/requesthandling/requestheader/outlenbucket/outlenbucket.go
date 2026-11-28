@@ -88,7 +88,7 @@ func (b Bucket) String() string {
 
 // EstimateOutlen predicts the output-length bin using request-time signals.
 // Precedence (first match wins): LONG pushers (enable_thinking / reasoning.effort,
-// DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
+// thinking=true, DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
 // are checked first; SHORT pushers (tool_choice, has_tools,
 // continue_final_message, max_output_tokens<500)
 // follow; everything else is UNKNOWN. A max_output_tokens cap below the LONG
@@ -121,6 +121,11 @@ func EstimateOutlen(body *fwkrequest.InferenceRequestBody) Bucket {
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
 		enableThinking = boolPtrFromAny(kwArgs[reqcommon.FieldEnableThinking])
+		// DeepSeek V3.1 and Granite 3.2 templates take a boolean
+		// chat_template_kwargs={"thinking": true}.
+		if enableThinking == nil {
+			enableThinking = boolPtrFromAny(kwArgs["thinking"])
+		}
 		// DeepSeek V4 activation: extra_body={"thinking":{"type":"enabled"|"disabled"}}.
 		if enableThinking == nil {
 			if m, ok := kwArgs["thinking"].(map[string]any); ok {
