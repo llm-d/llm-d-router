@@ -30,6 +30,18 @@ engines.
   model in the pod's KV-events topic and the engine hash, so pods of different
   models keep separate mappings even when their engines report the same block
   hashes.
+- **Partial-block anchors.** An engine whose blocks are smaller than the
+  canonical block and divide it evenly (SGLang with `--page-size 1`, for
+  example) can store a block whose parent ends mid canonical block. The pool
+  keeps, per pod and engine block, the request key of the last completed
+  canonical block and the tokens after it, so such a store continues the chain
+  from those tokens. An anchor lives until the engine removes the block on
+  every device tier that announced it, or the pod is cleared. A store whose
+  parent has no anchor, such as one stored before the pool started on a
+  persisted index, resumes from the request key the index maps the parent
+  to. Engine block
+  sizes that do not divide the canonical block are not anchored; a store there
+  whose parent ends mid canonical block is skipped or misaligned.
 - **Reference-count dedup.** A dedup filter reference-counts block hashes so a
   removal is forwarded to the index only once no remaining announcement
   references the block, preventing premature eviction of blocks that multiple

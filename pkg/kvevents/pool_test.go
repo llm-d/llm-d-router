@@ -515,21 +515,33 @@ func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("a child of the trailing block is skipped", func(t *testing.T) {
+	t.Run("a child of the trailing block completes its canonical block", func(t *testing.T) {
 		ctx := logging.NewTestLoggerIntoContext(context.Background())
-		pool, idx, _ := store(t)
-		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
-			cacheKindLabel(""), "unresolved_sub_canonical_parent")
-		before := counterValue(t, skipped)
+		pool, idx, tp := newTestPool(t, 64)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, BlockSize: 16},
+		}}, "pod-a", "test-model")
 
 		childKeys := makeEngineKeys(4, 200)
 		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
 			&BlockStoredEvent{BlockHashes: childKeys, Tokens: makeTokens(208)[144:], ParentHash: trailing, BlockSize: 16},
 		}}, "pod-a", "test-model")
 
-		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
-		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[0]))
-		assert.Error(t, err, "a child chained on the wrong canonical key is not indexed")
+		canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, makeTokens(208), "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, canonicalKeys, 3)
+		result, err := idx.Lookup(ctx, canonicalKeys, nil)
+		require.NoError(t, err)
+		assert.Len(t, result[canonicalKeys[2]], 1, "the block spanning both stores should be held by pod-a")
+
+		// The trailing block and the child's first three blocks form the third
+		// canonical block, which the third names; the child's last block starts
+		// a fourth.
+		reqKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[2]))
+		require.NoError(t, err, "engine key %d", childKeys[2])
+		assert.Equal(t, canonicalKeys[2], reqKey, "engine key %d", childKeys[2])
+		_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[3]))
+		assert.Error(t, err, "the child's last engine key holds no full canonical block")
 	})
 }
 
@@ -2131,7 +2143,7 @@ func TestPool_DeviceTierUpdateWithNoResolvedKeysDoesNotTrack(t *testing.T) {
 		groupIdx:         noGroupIdx,
 		dataParallelRank: noDataParallelRank,
 	}
-	kept := pool.dedup.filterRemove(scope, engineKeys)
+	kept, _ := pool.dedup.filterRemove(scope, engineKeys)
 	assert.Equal(t, engineKeys, kept,
 		"a device-tier update that resolved no keys must not be tracked; the remove passes through")
 }

@@ -35,6 +35,11 @@ func gpuScope(pod string) blockScope {
 	return testScope(pod, "gpu", noGroupIdx, noDataParallelRank)
 }
 
+// forwarded returns the hashes filterRemove forwards to the index.
+func forwarded(kept, _ []uint64) []uint64 {
+	return kept
+}
+
 // TestEventDedupFilter_DuplicateStoreSuppressesFirstRemove is the core contract:
 // two announcements of the same hashes (overlapping offloaded chunks) require
 // two removes before the index eviction is forwarded.
@@ -46,9 +51,9 @@ func TestEventDedupFilter_DuplicateStoreSuppressesFirstRemove(t *testing.T) {
 	f.trackStore(s, hashes)
 	f.trackStore(s, hashes) // sibling chunk re-announces the same constituent hashes
 
-	assert.Empty(t, f.filterRemove(s, hashes),
+	assert.Empty(t, forwarded(f.filterRemove(s, hashes)),
 		"first of two duplicate removes must be fully suppressed")
-	assert.Equal(t, hashes, f.filterRemove(s, hashes),
+	assert.Equal(t, hashes, forwarded(f.filterRemove(s, hashes)),
 		"second remove must forward every hash to the index")
 }
 
@@ -64,8 +69,8 @@ func TestEventDedupFilter_AggregatesAcrossSources(t *testing.T) {
 	f.trackStore(s, []uint64{7}) // source 1
 	f.trackStore(s, []uint64{7}) // source 2, same scope
 
-	assert.Empty(t, f.filterRemove(s, []uint64{7}), "one reference still outstanding")
-	assert.Equal(t, []uint64{7}, f.filterRemove(s, []uint64{7}), "last reference released")
+	assert.Empty(t, forwarded(f.filterRemove(s, []uint64{7})), "one reference still outstanding")
+	assert.Equal(t, []uint64{7}, forwarded(f.filterRemove(s, []uint64{7})), "last reference released")
 }
 
 // TestEventDedupFilter_TierIndependence verifies a CPU store cannot mask a GPU
@@ -81,10 +86,10 @@ func TestEventDedupFilter_TierIndependence(t *testing.T) {
 
 	// A single cpu remove must forward (cpu count 1->0); if the counts were
 	// shared this would be suppressed (2->1) and kept empty.
-	assert.Equal(t, []uint64{1}, f.filterRemove(cpu, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(cpu, []uint64{1})),
 		"cpu remove must not be masked by the gpu store")
 	// The gpu reference is still outstanding and forwards independently.
-	assert.Equal(t, []uint64{1}, f.filterRemove(gpu, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(gpu, []uint64{1})),
 		"gpu remove must still forward after the cpu remove")
 }
 
@@ -98,7 +103,7 @@ func TestEventDedupFilter_GroupIndependence(t *testing.T) {
 	f.trackStore(g0, []uint64{1})
 	f.trackStore(g1, []uint64{1})
 
-	assert.Equal(t, []uint64{1}, f.filterRemove(g1, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(g1, []uint64{1})),
 		"group 1 remove must be independent of the group 0 store")
 }
 
@@ -114,7 +119,7 @@ func TestEventDedupFilter_DataParallelRankIndependence(t *testing.T) {
 	f.trackStore(dp0, []uint64{1})
 	f.trackStore(dp1, []uint64{1})
 
-	assert.Equal(t, []uint64{1}, f.filterRemove(dp1, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(dp1, []uint64{1})),
 		"rank 1 remove must be independent of the rank 0 store")
 }
 
@@ -124,15 +129,27 @@ func TestEventDedupFilter_UnknownRemovePassesThrough(t *testing.T) {
 	f := newEventDedupFilter()
 	s := gpuScope("pod-a")
 
-	assert.Equal(t, []uint64{42}, f.filterRemove(s, []uint64{42}),
+	assert.Equal(t, []uint64{42}, forwarded(f.filterRemove(s, []uint64{42})),
 		"unknown remove must pass through")
-	assert.Equal(t, []uint64{42}, f.filterRemove(s, []uint64{42}),
+	assert.Equal(t, []uint64{42}, forwarded(f.filterRemove(s, []uint64{42})),
 		"repeated unknown remove must keep passing through (no negative count)")
 
 	// A store after underflow attempts still yields a clean single reference.
 	f.trackStore(s, []uint64{42})
-	assert.Equal(t, []uint64{42}, f.filterRemove(s, []uint64{42}),
+	assert.Equal(t, []uint64{42}, forwarded(f.filterRemove(s, []uint64{42})),
 		"store must establish a fresh single reference")
+}
+
+// TestEventDedupFilter_ReportsUntrackedRemoves verifies that a forwarded hash
+// is reported as untracked only when no store referenced it.
+func TestEventDedupFilter_ReportsUntrackedRemoves(t *testing.T) {
+	f := newEventDedupFilter()
+	s := gpuScope("pod-a")
+	f.trackStore(s, []uint64{1, 2, 2})
+
+	kept, untracked := f.filterRemove(s, []uint64{1, 1, 2, 3})
+	assert.Equal(t, []uint64{1, 1, 3}, kept)
+	assert.Equal(t, []uint64{1, 3}, untracked)
 }
 
 // TestEventDedupFilter_PartialForward verifies a mixed remove forwards only the
@@ -146,7 +163,7 @@ func TestEventDedupFilter_PartialForward(t *testing.T) {
 	f.trackStore(s, []uint64{2}) // hash 2: count 1 (released by one remove)
 
 	// hash 1 suppressed (2->1), hash 2 forwarded (1->0), hash 3 unknown forwarded.
-	assert.Equal(t, []uint64{2, 3}, f.filterRemove(s, []uint64{1, 2, 3}))
+	assert.Equal(t, []uint64{2, 3}, forwarded(f.filterRemove(s, []uint64{1, 2, 3})))
 }
 
 // TestEventDedupFilter_ClearResets verifies clear zeroes a pod's counts.
@@ -160,7 +177,7 @@ func TestEventDedupFilter_ClearResets(t *testing.T) {
 	f.clear("pod-a")
 
 	// If clear had not reset the count, this remove would be suppressed (2->1).
-	assert.Equal(t, []uint64{1}, f.filterRemove(s, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(s, []uint64{1})),
 		"clear must reset the count so the remove passes through")
 }
 
@@ -178,9 +195,9 @@ func TestEventDedupFilter_ClearIsolatesPods(t *testing.T) {
 
 	f.clear("pod-a")
 
-	assert.Equal(t, []uint64{1}, f.filterRemove(a, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(a, []uint64{1})),
 		"cleared pod-a count must be reset")
-	assert.Empty(t, f.filterRemove(b, []uint64{1}),
+	assert.Empty(t, forwarded(f.filterRemove(b, []uint64{1})),
 		"pod-b count must survive pod-a clear (first of two removes suppressed)")
 }
 
@@ -210,7 +227,7 @@ func TestEventDedupFilter_NilSafe(t *testing.T) {
 
 	assert.NotPanics(t, func() { f.trackStore(s, []uint64{1}) })
 	assert.NotPanics(t, func() { f.clear("pod-a") })
-	assert.Equal(t, []uint64{1}, f.filterRemove(s, []uint64{1}),
+	assert.Equal(t, []uint64{1}, forwarded(f.filterRemove(s, []uint64{1})),
 		"nil filter must forward removes unchanged")
 }
 

@@ -77,6 +77,7 @@ func NewIndexConsumer(index kvblock.Index, tokenProcessor kvblock.TokenProcessor
 		groupCatalog:   kvblock.NewGroupCatalog(),
 		cacheFormats:   kvblock.NewCacheFormatCatalog(),
 		dedup:          newEventDedupFilter(),
+		anchors:        newPartialBlockAnchors(),
 	}
 }
 

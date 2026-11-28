@@ -19,8 +19,11 @@ package engineadapter //nolint:testpackage // Tests access unexported functions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -216,6 +219,181 @@ func testSGLangBigramEventIndex(t *testing.T, indexConfig *kvblock.IndexConfig) 
 		matches, err := index.Lookup(ctx, requestKeys, nil)
 		return err == nil && len(matches) == 0
 	}, time.Second, time.Millisecond)
+}
+
+// TestSGLangSingleTokenPageChainMatchesRequestKeys replays a conversation as
+// SGLang publishes it with page_size 1: one map-encoded BlockStored per radix
+// node, one signed hash per token, each node chaining from the last page of the
+// node before it. Node boundaries fall mid canonical block.
+func TestSGLangSingleTokenPageChainMatchesRequestKeys(t *testing.T) {
+	server := miniredis.RunT(t)
+	for name, config := range map[string]*kvblock.IndexConfig{
+		"memory":     kvblock.DefaultIndexConfig(),
+		"cost-aware": {CostAwareMemoryConfig: &kvblock.CostAwareMemoryIndexConfig{Size: "16MiB", NumCounters: 1000}},
+		"redis":      {RedisConfig: &kvblock.RedisIndexConfig{Address: server.Addr()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			testSGLangSingleTokenPageChain(t, config)
+		})
+	}
+}
+
+// newSGLangPool starts a single-worker pool with the SGLang adapter, so
+// messages are applied in the order they are queued.
+func newSGLangPool(
+	t *testing.T, canonical int, indexConfig *kvblock.IndexConfig,
+) (*kvevents.Pool, kvblock.Index, kvblock.TokenProcessor) {
+	t.Helper()
+	ctx := context.Background()
+	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: canonical})
+	require.NoError(t, err)
+	config, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	config.KVBlockIndexConfig = indexConfig
+	indexer, err := kvcache.NewKVCacheIndexer(ctx, config, processor)
+	require.NoError(t, err)
+	poolConfig := kvevents.DefaultConfig()
+	poolConfig.Concurrency = 1
+	pool, err := kvevents.NewPool(poolConfig, indexer.KVBlockIndex(), processor, NewSGLangAdapter())
+	require.NoError(t, err)
+	pool.Start(ctx)
+	t.Cleanup(func() { pool.Shutdown(ctx) })
+	return pool, indexer.KVBlockIndex(), processor
+}
+
+func testSGLangSingleTokenPageChain(t *testing.T, indexConfig *kvblock.IndexConfig) {
+	t.Helper()
+	ctx := context.Background()
+	pool, index, processor := newSGLangPool(t, 16, indexConfig)
+
+	conversation := make([]uint32, 300)
+	for i := range conversation {
+		conversation[i] = uint32(i + 1) //#nosec G115 -- test data
+	}
+	// SGLang publishes hashes as signed 64-bit integers.
+	pageHash := func(position int) int64 { return int64(position) - 150 }
+	publish := func(event map[string]any) {
+		payload, err := msgpack.Marshal([]any{0.0, []any{event}, 0})
+		require.NoError(t, err)
+		pool.AddTask(&kvevents.RawMessage{Topic: "kv@pod-1@test-model", Payload: payload})
+	}
+	pageHashes := func(start, end int) []any {
+		hashes := make([]any, 0, end-start)
+		for position := start; position < end; position++ {
+			hashes = append(hashes, pageHash(position))
+		}
+		return hashes
+	}
+	store := func(start, end int) {
+		event := map[string]any{
+			"type":         "BlockStored",
+			"block_hashes": pageHashes(start, end),
+			"token_ids":    conversation[start:end],
+			"block_size":   1,
+			"medium":       "GPU",
+		}
+		if start > 0 {
+			event["parent_block_hash"] = pageHash(start - 1)
+		}
+		publish(event)
+	}
+	indexedPrefix := func() int {
+		requestKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, conversation, "test-model", nil)
+		require.NoError(t, err)
+		matches, err := index.Lookup(ctx, requestKeys, nil)
+		if err != nil {
+			return -1
+		}
+		for i, key := range requestKeys {
+			if len(matches[key]) == 0 {
+				return i
+			}
+		}
+		return len(requestKeys)
+	}
+
+	// Turn 1 prompt, turn 1 output, turn 2.
+	store(0, 100)
+	store(100, 180)
+	store(180, 300)
+	require.Eventually(t, func() bool { return indexedPrefix() == 18 }, time.Second, time.Millisecond)
+
+	// Evicting the last node takes the block it completed over tokens 176..179.
+	publish(map[string]any{"type": "BlockRemoved", "block_hashes": pageHashes(180, 300), "medium": "GPU"})
+	require.Eventually(t, func() bool { return indexedPrefix() == 11 }, time.Second, time.Millisecond)
+}
+
+// TestSGLangRecordedSingleTokenPageSession replays KV events recorded from an
+// SGLang server with page_size 1 serving Qwen/Qwen2.5-1.5B-Instruct: a
+// four-turn chat, two branches off earlier turns and a chat whose prompts start
+// shorter than three canonical blocks. The recording interleaves the published
+// payloads with the requests, each carrying its prompt tokens and the
+// cached_tokens the engine reported for it. Before each request the index must
+// hold the same number of leading canonical blocks for the pod.
+func TestSGLangRecordedSingleTokenPageSession(t *testing.T) {
+	const model = "Qwen/Qwen2.5-1.5B-Instruct"
+	raw, err := os.ReadFile("testdata/sglang_page_size_1_session.json")
+	require.NoError(t, err)
+	var recording []struct {
+		Pod            string   `json:"pod"`
+		Payload        []byte   `json:"payload"`
+		Request        string   `json:"request"`
+		PromptTokenIDs []uint32 `json:"prompt_token_ids"`
+		CachedTokens   int      `json:"cached_tokens"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &recording))
+
+	for _, canonical := range []int{16, 64} {
+		t.Run(fmt.Sprintf("canonical-%d", canonical), func(t *testing.T) {
+			ctx := context.Background()
+			pool, index, processor := newSGLangPool(t, canonical, kvblock.DefaultIndexConfig())
+			indexedPrefix := func(pod string, tokens []uint32) int {
+				requestKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
+				require.NoError(t, err)
+				if len(requestKeys) == 0 {
+					return 0
+				}
+				matches, err := index.Lookup(ctx, requestKeys, nil)
+				if err != nil {
+					return 0
+				}
+				for i, key := range requestKeys {
+					if !slices.ContainsFunc(matches[key], func(entry kvblock.PodEntry) bool {
+						return entry.PodIdentifier == pod
+					}) {
+						return i
+					}
+				}
+				return len(requestKeys)
+			}
+			// processed waits for the worker to reach a marker store queued
+			// behind every recorded payload.
+			markers := 0
+			processed := func() {
+				markers++
+				tokens := make([]uint32, canonical)
+				tokens[0] = uint32(markers) //#nosec G115 -- test data
+				payload, err := msgpack.Marshal([]any{0.0, []any{map[string]any{
+					"type": "BlockStored", "block_hashes": []any{int64(markers)}, "token_ids": tokens,
+					"block_size": canonical, "medium": "GPU",
+				}}, 0})
+				require.NoError(t, err)
+				pool.AddTask(&kvevents.RawMessage{Topic: "kv@marker@" + model, Payload: payload})
+				require.Eventually(t, func() bool { return indexedPrefix("marker", tokens) == 1 },
+					10*time.Second, time.Millisecond)
+			}
+
+			for _, entry := range recording {
+				if entry.Request == "" {
+					pool.AddTask(&kvevents.RawMessage{Topic: "kv@" + entry.Pod + "@" + model, Payload: entry.Payload})
+					continue
+				}
+				processed()
+				assert.Equal(t, entry.CachedTokens/canonical, indexedPrefix(entry.Pod, entry.PromptTokenIDs),
+					"%s: %d prompt tokens, engine cached %d", entry.Request, len(entry.PromptTokenIDs), entry.CachedTokens)
+			}
+		})
+	}
 }
 
 // TestSGLangParseMessage_Valid tests full message parsing through the SGLang adapter.
