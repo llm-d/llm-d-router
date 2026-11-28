@@ -47,6 +47,13 @@ type InFlightLoad struct {
 	// Requests is the in-flight request count this endpoint has committed to,
 	// maintained with the same lifecycle as Tokens.
 	Requests int64
+
+	// KVGrowthTokens is the projected peak of the KV cache tokens this endpoint
+	// will need beyond its scraped usage: the prompts the scrape does not show
+	// yet, the output still to come from the running requests, and one request
+	// dispatched next. Zero unless the producer's kvGrowthProjection is
+	// configured and a request is running on the endpoint.
+	KVGrowthTokens int64
 }
 
 // Clone returns an independent copy of the InFlightLoad. The value-copy

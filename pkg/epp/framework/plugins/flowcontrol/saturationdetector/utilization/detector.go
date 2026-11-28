@@ -95,6 +95,10 @@ type Detector struct {
 	// lastStaleWarnNanos is the wall-clock time (UnixNano) of the most recent stale-metrics log,
 	// accessed atomically because Saturation may be called concurrently.
 	lastStaleWarnNanos atomic.Int64
+
+	// lastKVCapacityWarnNanos is the wall-clock time (UnixNano) of the most recent log about a KV
+	// cache growth projection that cannot be applied because an endpoint reports no cache capacity.
+	lastKVCapacityWarnNanos atomic.Int64
 }
 
 // NewDetector creates a new instance of the Utilization Detector.
@@ -128,9 +132,9 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 }
 
 // Consumes declares InFlightLoad as an optional dependency: it supplies the
-// scrape-lag compensation in Saturation and Filter, but the detector still functions on
-// scraped metrics alone when no inflight-load-producer is configured. DeferredQueueSize is
-// optional too: only engine configs with a deferredRequestsSpec publish it.
+// scrape-lag compensation and the projected KV cache growth in Saturation and Filter, but the
+// detector still functions on scraped metrics alone when no inflight-load-producer is configured.
+// DeferredQueueSize is optional too: only engine configs with a deferredRequestsSpec publish it.
 func (d *Detector) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Optional: map[fwkplugin.DataKey]any{
@@ -142,11 +146,24 @@ func (d *Detector) Consumes() fwkplugin.DataDependencies {
 
 var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
 
+// inFlightLoad returns the load the inflight-load-producer published for the endpoint, or nil.
+func (d *Detector) inFlightLoad(attrs datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
+	if attrs == nil {
+		return nil
+	}
+	if val, ok := attrs.Get(d.inFlightLoadDataKey); ok {
+		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
+			return load
+		}
+	}
+	return nil
+}
+
 // queueDepth returns the scraped waiting queue less DeferredQueueSize, plus
 // the in-flight requests the scrape does not yet reflect (see Saturation). A
 // deferred count above the waiting queue comes from series scraped out of
 // step and leaves the queue term unchanged.
-func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap) int64 {
+func queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap, load *attrconcurrency.InFlightLoad) int64 {
 	waiting := int64(m.WaitingQueueSize)
 	if attrs == nil {
 		return waiting
@@ -155,12 +172,44 @@ func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap
 	if deferred, ok := attrmetrics.ReadScalarMetricValue(attrs, deferredQueueSizeDataKey); ok && deferred >= 0 && float64(deferred) <= float64(waiting) {
 		queued = waiting - int64(deferred)
 	}
-	if val, ok := attrs.Get(d.inFlightLoadDataKey); ok {
-		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-			queued += max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
-		}
+	if load != nil {
+		queued += max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
 	}
 	return queued
+}
+
+// projectedKVCacheUsage returns the share of the KV cache the endpoint is projected to need at its
+// peak (see Saturation), or zero when the inflight-load-producer publishes no projection for the
+// endpoint or the endpoint does not report its cache capacity.
+func (d *Detector) projectedKVCacheUsage(
+	metadata *datalayer.EndpointMetadata, m *datalayer.Metrics, load *attrconcurrency.InFlightLoad,
+) float64 {
+	if load == nil || load.KVGrowthTokens <= 0 {
+		return 0
+	}
+	if m.CacheBlockSize <= 0 || m.CacheNumBlocks <= 0 {
+		d.maybeLogMissingKVCapacity(metadata)
+		return 0
+	}
+	return m.KVCacheUsagePercent + float64(load.KVGrowthTokens)/(float64(m.CacheBlockSize)*float64(m.CacheNumBlocks))
+}
+
+// maybeLogMissingKVCapacity logs at most once per staleWarnInterval that an endpoint's KV cache
+// growth projection is not applied.
+func (d *Detector) maybeLogMissingKVCapacity(metadata *datalayer.EndpointMetadata) {
+	now := time.Now().UnixNano()
+	last := d.lastKVCapacityWarnNanos.Load()
+	if now-last < int64(staleWarnInterval) || !d.lastKVCapacityWarnNanos.CompareAndSwap(last, now) {
+		return
+	}
+	var endpoint string
+	if metadata != nil {
+		endpoint = metadata.ID.String()
+	}
+	d.logger.V(logutil.DEFAULT).Info(
+		"KV cache growth projection is not applied: the endpoint reports no KV cache capacity; "+
+			"check that the metrics mapping scrapes the cache block size and block count",
+		"endpoint", endpoint)
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -176,7 +225,7 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 // For each pod, the score is determined by the most constrained resource (Compute or Memory):
 //
-//	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
+//	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold, ProjectedKVCacheUsage)
 //
 // WaitingQueue is WaitingQueueSize less the DeferredQueueSize attribute when the extractor
 // publishes one.
@@ -202,6 +251,20 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 // term is left as measured. Endpoints without the attribute contribute zero
 // credit and fall back to the scraped queue depth. See the package README for
 // the assumptions the compensation rests on.
+//
+// # Projected KV cache growth
+//
+// KVCacheUsage is the usage at the time of the scrape, and a running sequence
+// keeps allocating blocks while it decodes. When the inflight-load-producer
+// publishes a growth projection (its kvGrowthProjection parameter), the score
+// also covers what the endpoint is projected to need:
+//
+//	ProjectedKVCacheUsage = KVCacheUsage + KVGrowthTokens / KVCacheCapacity
+//
+// KVGrowthTokens is the producer's projection of the tokens the endpoint will
+// need beyond its scraped usage, and KVCacheCapacity is the scraped block count
+// times the block size. The term reaches 1.0 when the projected need equals the
+// capacity; KVCacheThreshold applies to the measured usage only.
 func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoint) float64 {
 	stage := flowcontrol.SaturationStageFromContext(ctx)
 	if len(candidates) == 0 {
@@ -230,11 +293,12 @@ func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoi
 			continue
 		}
 
-		qRatio := float64(d.queueDepth(podMetrics, e.GetAttributes())) / float64(d.config.QueueDepthThreshold)
+		load := d.inFlightLoad(e.GetAttributes())
+		qRatio := float64(queueDepth(podMetrics, e.GetAttributes(), load)) / float64(d.config.QueueDepthThreshold)
 		kvRatio := podMetrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
 
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.
-		totalScore += max(qRatio, kvRatio)
+		totalScore += max(qRatio, kvRatio, d.projectedKVCacheUsage(e.GetMetadata(), podMetrics, load))
 	}
 
 	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, staleCount)
@@ -278,7 +342,8 @@ func (d *Detector) maybeLogStaleEndpoints(staleCount, total int) {
 //
 // It applies a relaxed limit (Threshold * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 // The KV cache limit is capped at 1.0.
-// The queue depth includes the same scrape-lag compensation as Saturation.
+// The queue depth includes the same scrape-lag compensation as Saturation, and an endpoint whose
+// projected KV cache usage reaches its capacity is blocked.
 func (d *Detector) Filter(
 	_ context.Context,
 	_ *fwksched.InferenceRequest,
@@ -296,7 +361,9 @@ func (d *Detector) Filter(
 			continue
 		}
 
-		if float64(d.queueDepth(podMetrics, endpoint)) < qLimit && podMetrics.KVCacheUsagePercent < kvLimit {
+		load := d.inFlightLoad(endpoint)
+		if float64(queueDepth(podMetrics, endpoint, load)) < qLimit && podMetrics.KVCacheUsagePercent < kvLimit &&
+			d.projectedKVCacheUsage(endpoint.GetMetadata(), podMetrics, load) < 1.0 {
 			filtered = append(filtered, endpoint)
 		}
 	}

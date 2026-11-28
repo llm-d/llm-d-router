@@ -446,6 +446,67 @@ func TestDetector_Saturation_ScrapeLagCredit(t *testing.T) {
 		"only unobserved in-flight credited, running not double-counted")
 }
 
+func TestDetector_Saturation_KVGrowth(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+	sink := &warnCountingSink{match: "KV cache growth projection is not applied"}
+	detector := NewDetector("test-detector", Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.8,
+		MetricsStalenessThreshold: 100 * time.Millisecond,
+	}, logr.New(sink))
+	ctx := context.Background()
+
+	// pod is half full, with numBlocks blocks of blockSize tokens and two running requests the
+	// scrape already reflects, so the queue term is zero and the measured KV term is 0.5/0.8.
+	blockSize := 16
+	pod := func(numBlocks int, load *attrconcurrency.InFlightLoad) []fwkdl.Endpoint {
+		metrics := fwkdl.NewMetrics()
+		metrics.RunningRequestsSize = 2
+		metrics.KVCacheUsagePercent = 0.5
+		metrics.CacheBlockSize = blockSize
+		metrics.CacheNumBlocks = numBlocks
+		metrics.UpdateTime = baseTime
+		e := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "pod1", Namespace: "ns1"}}, metrics)
+		if load != nil {
+			e.GetAttributes().Put(attrconcurrency.InFlightLoadDataKey, load)
+		}
+		return []fwkdl.Endpoint{e}
+	}
+
+	require.InDelta(t, 0.625, detector.Saturation(ctx, pod(100, nil)), 1e-9, "measured KV usage only")
+	require.InDelta(t, 0.625,
+		detector.Saturation(ctx, pod(100, &attrconcurrency.InFlightLoad{Requests: 2, Tokens: 400})), 1e-9,
+		"no projection published -> measured KV usage only")
+	// 0.5 + 600 / 1600. The in-flight tokens are not added: the projection covers the prompts
+	// the scrape does not show yet.
+	require.InDelta(t, 0.875,
+		detector.Saturation(ctx, pod(100, &attrconcurrency.InFlightLoad{Requests: 2, Tokens: 400, KVGrowthTokens: 600})), 1e-9,
+		"usage plus projected growth, over the cache capacity")
+	// 0.5 + 900 / 1600
+	require.InDelta(t, 1.0625,
+		detector.Saturation(ctx, pod(100, &attrconcurrency.InFlightLoad{Requests: 2, KVGrowthTokens: 900})), 1e-9,
+		"projected need above the capacity saturates below the KV threshold")
+	require.InDelta(t, 0.625, detector.Saturation(ctx, pod(0, &attrconcurrency.InFlightLoad{Requests: 2})), 1e-9)
+	require.Zero(t, sink.warnings, "no warning while the projection is applied or absent")
+	for range 2 {
+		require.InDelta(t, 0.625,
+			detector.Saturation(ctx, pod(0, &attrconcurrency.InFlightLoad{Requests: 2, KVGrowthTokens: 900})), 1e-9,
+			"cache capacity not reported -> measured KV usage only")
+	}
+	require.Equal(t, 1, sink.warnings, "a projection that cannot be applied is reported on a time budget")
+
+	blockSize = 0
+	require.InDelta(t, 0.625,
+		detector.Saturation(ctx, pod(100, &attrconcurrency.InFlightLoad{Requests: 2, KVGrowthTokens: 900})), 1e-9,
+		"block size not reported -> measured KV usage only")
+	blockSize = -16
+	require.InDelta(t, 0.625,
+		detector.Saturation(ctx, pod(-100, &attrconcurrency.InFlightLoad{Requests: 2, KVGrowthTokens: 900})), 1e-9,
+		"a negative block size and block count are no cache capacity")
+}
+
 func TestDetector_Filter(t *testing.T) {
 	t.Parallel()
 
@@ -519,6 +580,25 @@ func TestDetector_Filter(t *testing.T) {
 				}(),
 				// Pod2 (OK): Q=1, no in-flight attribute.
 				makeSchedulingEndpoint("pod2", 1, 0.1, baseTime),
+			},
+			wantLen: 1,
+		},
+		{
+			name: "Filtered - projected KV growth exceeds the cache capacity",
+			endpoints: []fwksched.Endpoint{
+				// Pod1 (Over): KV=0.5 passes, but 0.5 + 900/1600 = 1.06.
+				func() fwksched.Endpoint {
+					metrics := fwkdl.NewMetrics()
+					metrics.KVCacheUsagePercent = 0.5
+					metrics.CacheBlockSize = 16
+					metrics.CacheNumBlocks = 100
+					metrics.UpdateTime = baseTime
+					e := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "pod1", Namespace: "ns1"}}, metrics, nil)
+					e.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{KVGrowthTokens: 900})
+					return e
+				}(),
+				// Pod2 (OK): KV=0.5, no projection.
+				makeSchedulingEndpoint("pod2", 1, 0.5, baseTime),
 			},
 			wantLen: 1,
 		},
@@ -715,8 +795,9 @@ func TestDetector_StaleEndpointObservabilityIgnore(t *testing.T) {
 		"the stale endpoint gauge must record under the ignore policy too")
 }
 
-// warnCountingSink records how many Info messages mention the staleness warning.
+// warnCountingSink records how many Info messages contain match.
 type warnCountingSink struct {
+	match    string
 	warnings int
 }
 
@@ -727,7 +808,7 @@ func (s *warnCountingSink) WithValues(...any) logr.LogSink { return s }
 func (s *warnCountingSink) WithName(string) logr.LogSink   { return s }
 
 func (s *warnCountingSink) Info(_ int, msg string, _ ...any) {
-	if strings.Contains(msg, "refresh-metrics-interval exceeds metricsStalenessThreshold") {
+	if strings.Contains(msg, s.match) {
 		s.warnings++
 	}
 }
@@ -751,7 +832,7 @@ func TestUtilizationDetectorFactory_StalenessWarning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			sink := &warnCountingSink{}
+			sink := &warnCountingSink{match: "refresh-metrics-interval exceeds metricsStalenessThreshold"}
 			ctx := log.IntoContext(context.Background(), logr.New(sink))
 			handle := fwkplugin.NewEppHandle(ctx, nil, fwkplugin.WithRefreshMetricsInterval(tc.refreshInterval))
 
