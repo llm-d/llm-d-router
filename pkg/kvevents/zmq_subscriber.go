@@ -698,6 +698,10 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				z.queueResyncReset(topic, z.resyncThrough)
 				z.enqueueTask(ctx, topic, seq, payload, true)
 			} else {
+				if z.liveOnly && startSeq == 0 && replayed == 0 && !z.resyncing {
+					// A full replay replaces events indexed from the live stream alone.
+					z.resetForSource(topic)
+				}
 				z.enqueueTask(ctx, topic, seq, payload, true)
 				z.lastSeq = seq
 				z.hasLastSeq = true
