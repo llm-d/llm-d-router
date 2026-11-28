@@ -262,6 +262,21 @@ func eventEndpoint(endpoint fwksched.Endpoint) string {
 func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksched.InferenceRequest,
 	result *fwksched.SchedulingResult, stamp string, ownStamp bool, targets map[string]fwksched.Endpoint,
 ) {
+	if result.PrefillProfileName != "" && result.PrimaryProfileName != "" {
+		primary := targets[result.PrimaryProfileName]
+		if primary == nil {
+			return
+		}
+		addr := eventEndpoint(primary)
+		if addr == "" {
+			return
+		}
+		if result.PrefillProfileName != result.PrimaryProfileName {
+			if prefill := targets[result.PrefillProfileName]; prefill != nil && eventEndpoint(prefill) == addr {
+				return
+			}
+		}
+	}
 	tokenized := request.Body.TokenizedRequest
 	if tokenized == nil {
 		return
