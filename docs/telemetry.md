@@ -58,6 +58,7 @@ Custom llm-d router trace attributes.
 | `llm_d.epp.pd.prefill_pod_port` | `string` | Selected prefill pod port. | `LLMDEPPPDPrefillPodPort` |
 | `llm_d.epp.pd.reason` | `string` | Prefill/decode disaggregation reason. | `LLMDEPPPDReason` |
 | `llm_d.epp.picker.candidate_endpoints` | `int` | Candidate endpoints entering the picker. | `LLMDEPPPickerCandidateEndpoints` |
+| `llm_d.epp.picker.target_endpoints` | `string[]` | The endpoint names the picker selected. | `LLMDEPPPickerTargetEndpoints` |
 | `llm_d.epp.picker.top_endpoints` | `string[]` | The top scored endpoint names. | `LLMDEPPPickerTopEndpoints` |
 | `llm_d.epp.picker.top_scores` | `double[]` | The top scored endpoint values. | `LLMDEPPPickerTopScores` |
 | `llm_d.epp.producer.candidate_endpoints` | `int` | Producer candidate endpoints count. | `LLMDEPPProducerCandidateEndpoints` |
@@ -179,6 +180,7 @@ Selects an endpoint from the scored candidates. Kind: `internal`.
 | Attribute | Requirement |
 | --- | --- |
 | `llm_d.epp.picker.candidate_endpoints` | required |
+| `llm_d.epp.picker.target_endpoints` | When the picker selects at least one endpoint. |
 | `llm_d.epp.picker.top_endpoints` | When at least one scored endpoint is available. |
 | `llm_d.epp.picker.top_scores` | When at least one scored endpoint is available. |
 

@@ -180,6 +180,61 @@ func TestRunPickerPluginTopScoresCapped(t *testing.T) {
 	}
 }
 
+func TestRunPickerPluginRecordsTargetEndpoints(t *testing.T) {
+	recorder := setupPickerSpanRecorder(t)
+
+	picker := &fakePicker{typedName: fwkplugin.TypedName{Type: "max-score", Name: "multi"}, selected: 2}
+	profile := NewSchedulerProfile().WithPicker(picker)
+	scores := newWeightedScores("pod1", "pod2", "pod3")
+
+	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
+	result := profile.runPickerPlugin(ctx, &fwksched.InferenceRequest{}, scores)
+	root.End()
+
+	if result == nil || len(result.TargetEndpoints) != 2 {
+		t.Fatalf("runPickerPlugin returned %v, want 2 targets", result)
+	}
+	want := make([]string, 0, len(result.TargetEndpoints))
+	for _, endpoint := range result.TargetEndpoints {
+		want = append(want, endpoint.GetMetadata().ID.String())
+	}
+
+	spans := findPickerSpans(recorder.Ended(), "pick_endpoints")
+	if len(spans) != 1 {
+		t.Fatalf("got %d pick_endpoints spans, want 1", len(spans))
+	}
+	if got := pickerSpanAttributes(spans[0])[semconv.LLMDEPPPickerTargetEndpointsKey].AsStringSlice(); !reflect.DeepEqual(got, want) {
+		t.Errorf("target_endpoints = %v, want %v", got, want)
+	}
+}
+
+func TestRunPickerPluginOmitsTargetEndpointsWithoutTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		picker *fakePicker
+	}{
+		{"nil result", &fakePicker{typedName: fwkplugin.TypedName{Type: "p", Name: "nil"}, nilResult: true}},
+		{"no targets", &fakePicker{typedName: fwkplugin.TypedName{Type: "p", Name: "empty"}, selected: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupPickerSpanRecorder(t)
+			profile := NewSchedulerProfile().WithPicker(tc.picker)
+
+			ctx, root := otel.Tracer("test").Start(context.Background(), "root")
+			profile.runPickerPlugin(ctx, &fwksched.InferenceRequest{}, newWeightedScores("pod1", "pod2"))
+			root.End()
+
+			spans := findPickerSpans(recorder.Ended(), "pick_endpoints")
+			if len(spans) != 1 {
+				t.Fatalf("got %d pick_endpoints spans, want 1", len(spans))
+			}
+			if v, ok := pickerSpanAttributes(spans[0])[semconv.LLMDEPPPickerTargetEndpointsKey]; ok {
+				t.Errorf("target_endpoints = %v, want unset", v.AsStringSlice())
+			}
+		})
+	}
+}
+
 func TestRunPickerPluginNilResult(t *testing.T) {
 	recorder := setupPickerSpanRecorder(t)
 

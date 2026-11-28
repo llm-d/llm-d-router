@@ -428,6 +428,13 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		// selection. Pickers reorder and truncate the pointer slice, never the
 		// backing array, so storage still holds every scored candidate.
 		result.ScoredCandidates = storage
+		if span.IsRecording() && len(result.TargetEndpoints) > 0 {
+			names := make([]string, len(result.TargetEndpoints))
+			for i, endpoint := range result.TargetEndpoints {
+				names[i] = endpoint.GetMetadata().ID.String()
+			}
+			span.SetAttributes(semconv.LLMDEPPPickerTargetEndpoints(names))
+		}
 	}
 
 	return result
