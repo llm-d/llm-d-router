@@ -35,6 +35,8 @@ type Config struct {
 	Registry            *registry.Config
 	UsageLimitPolicy    flowcontrol.UsageLimitPolicy
 	BandSelectionPolicy flowcontrol.BandSelectionPolicy
+	// DispatchGate, when set, holds individual queued items without changing their priority.
+	DispatchGate flowcontrol.DispatchGate
 }
 
 func (c *Config) String() string {
