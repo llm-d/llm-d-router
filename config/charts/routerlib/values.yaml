@@ -1,5 +1,9 @@
 extraServicePorts: []
 
+# Port used by the EPP metrics endpoint, container port, and Service.
+# An explicit router.epp.flags.metrics-port takes precedence.
+metricsPort: 9090
+
 # Kubernetes cluster DNS domain, used to build in-cluster Service FQDNs.
 clusterDomain: cluster.local
 

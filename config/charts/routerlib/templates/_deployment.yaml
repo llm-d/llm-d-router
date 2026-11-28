@@ -6,6 +6,15 @@
       {{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . }}
       {{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml }}
       {{- $extProcPort := include "llm-d-router.epp.extProcPort" . }}
+      {{- $metricsPort := include "llm-d-router.epp.metricsPort" . }}
+      {{- if hasKey $eppFlags "metrics-port" }}
+        {{- $rawMetricsPort := index $eppFlags "metrics-port" }}
+        {{- if or (kindIs "invalid" $rawMetricsPort) (eq (trim (toString $rawMetricsPort)) "") }}
+          {{- $_ := unset $eppFlags "metrics-port" }}
+        {{- else }}
+          {{- $_ := set $eppFlags "metrics-port" (int $metricsPort) }}
+        {{- end }}
+      {{- end }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
@@ -141,6 +150,9 @@
           {{- if and (ne $extProcPort "9002") (not (hasKey $eppFlags "grpc-port")) }}
               - --grpc-port={{ $extProcPort }}
           {{- end }}
+          {{- if and (ne $metricsPort "9090") (not (hasKey $eppFlags "metrics-port")) }}
+              - --metrics-port={{ $metricsPort }}
+          {{- end }}
               # Pass additional flags via the router.epp.flags field in values.yaml.
               # Render them as --flag=value so boolean values are parsed correctly.
           {{- range $key, $value := $eppFlags }}
@@ -168,7 +180,7 @@
             - name: grpc-health
               containerPort: {{ $grpcHealthPort }}
             - name: metrics
-              containerPort: 9090
+              containerPort: {{ $metricsPort }}
         {{- if .Values.router.epp.extraContainerPorts }}
             {{- toYaml .Values.router.epp.extraContainerPorts | nindent 12 }}
         {{- end }}

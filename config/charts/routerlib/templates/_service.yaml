@@ -34,7 +34,7 @@ spec:
       appProtocol: kubernetes.io/h2c
     - name: http-metrics
       protocol: TCP
-      port: {{ $.Values.router.metricsPort | default 9090 }}
+      port: {{ include "llm-d-router.epp.metricsPort" $ }}
     {{- with $.Values.router.extraServicePorts }}
     {{- . | toYaml | nindent 4 }}
     {{- end }}
@@ -59,7 +59,7 @@ spec:
       appProtocol: kubernetes.io/h2c
     - name: http-metrics
       protocol: TCP
-      port: {{ .Values.router.metricsPort | default 9090 }}
+      port: {{ include "llm-d-router.epp.metricsPort" . }}
     {{- with .Values.router.extraServicePorts }}
     {{- . | toYaml | nindent 4 }}
     {{- end }}

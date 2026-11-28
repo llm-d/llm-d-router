@@ -1773,3 +1773,108 @@ for mode in gateway envoy-sidecar envoy-service envoy-priority agentgateway lega
     exit 1
   fi
 done
+
+echo "Verifying the configured EPP metrics port across chart modes..."
+metrics_null_base="${TEMP_DIR}/epp-metrics-port-null-base.yaml"
+metrics_null_overlay="${TEMP_DIR}/epp-metrics-port-null-overlay.yaml"
+cat > "${metrics_null_base}" <<'EOF'
+router:
+  metricsPort: 9190
+  epp:
+    flags:
+      metrics-port: 9290
+EOF
+cat > "${metrics_null_overlay}" <<'EOF'
+router:
+  epp:
+    flags:
+      metrics-port: null
+EOF
+
+for mode in gateway standalone gke-preferred-backends flag-only flag-override flag-override-default flag-trimmed flag-null-fallback flag-empty-fallback; do
+  chart=llm-d-router-standalone
+  port=9190
+  min_services=1
+  args=(--set router.metricsPort=9190)
+  case "${mode}" in
+    gateway)
+      chart=llm-d-router-gateway
+      ;;
+    gke-preferred-backends)
+      chart=llm-d-router-gateway
+      min_services=2
+      args+=(--set provider.name=gke --set provider.gke.preferredBackends.enabled=true)
+      ;;
+    flag-only)
+      port=9290
+      args=(--set router.epp.flags.metrics-port=9290)
+      ;;
+    flag-override)
+      port=9290
+      args+=(--set router.epp.flags.metrics-port=9290)
+      ;;
+    flag-override-default)
+      port=9090
+      args+=(--set router.epp.flags.metrics-port=9090)
+      ;;
+    flag-trimmed)
+      port=9290
+      args=(--set-string 'router.epp.flags.metrics-port= 9290 ')
+      ;;
+    flag-null-fallback)
+      args=(-f "${metrics_null_base}" -f "${metrics_null_overlay}")
+      ;;
+    flag-empty-fallback)
+      args+=(--set-string router.epp.flags.metrics-port=)
+      ;;
+  esac
+  if [ "${chart}" = llm-d-router-standalone ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  metrics_port_render_output="${TEMP_DIR}/epp-metrics-port-${mode}.yaml"
+  "${HELM}" template "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    "${args[@]}" > "${metrics_port_render_output}" || exit 1
+
+  metrics_args="$(${YQ} -N 'select(.kind == "Deployment" or .kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "epp") | .args[] | select(test("^--metrics-port="))' "${metrics_port_render_output}")"
+  container_port="$(${YQ} -N 'select(.kind == "Deployment" or .kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "epp") | .ports[] | select(.name == "metrics") | .containerPort' "${metrics_port_render_output}")"
+  service_ports="$(${YQ} -N 'select(.kind == "Service") | .spec.ports[] | select(.name == "http-metrics") | .port' "${metrics_port_render_output}")"
+  service_count="$(printf '%s\n' "${service_ports}" | sed '/^$/d' | wc -l)"
+  if [ "${metrics_args}" != "--metrics-port=${port}" ] ||
+     [ "${container_port}" != "${port}" ] ||
+     [ "${service_count}" -lt "${min_services}" ] ||
+     printf '%s\n' "${service_ports}" | grep -qv "^${port}$"; then
+    echo "${mode}: expected the EPP argument, container port and Service port to agree on ${port}"
+    exit 1
+  fi
+done
+
+for default_mode in unset explicit-9090; do
+  default_args=(--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false)
+  if [ "${default_mode}" = explicit-9090 ]; then
+    default_args+=(--set router.metricsPort=9090)
+  fi
+  default_render_output="${TEMP_DIR}/epp-metrics-port-default-${default_mode}.yaml"
+  "${HELM}" template "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" "${default_args[@]}" > "${default_render_output}" || exit 1
+  metrics_args="$(${YQ} -N 'select(.kind == "Deployment" or .kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "epp") | .args[] | select(test("^--metrics-port="))' "${default_render_output}")"
+  container_port="$(${YQ} -N 'select(.kind == "Deployment" or .kind == "StatefulSet") | .spec.template.spec.containers[] | select(.name == "epp") | .ports[] | select(.name == "metrics") | .containerPort' "${default_render_output}")"
+  service_ports="$(${YQ} -N 'select(.kind == "Service") | .spec.ports[] | select(.name == "http-metrics") | .port' "${default_render_output}")"
+  if [ -n "${metrics_args}" ] || [ "${container_port}" != "9090" ] || [ "${service_ports}" != "9090" ]; then
+    echo "${default_mode}: expected default metrics port 9090 with no explicit --metrics-port arg"
+    exit 1
+  fi
+done
+
+for invalid_case in \
+  "router.metricsPort=0" \
+  "router.epp.flags.metrics-port=0" \
+  "router.metricsPort=65536" \
+  "router.epp.flags.metrics-port=abc"; do
+  if "${HELM}" template "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.inferencePool.create=false \
+    --set "${invalid_case}" >/dev/null 2>&1; then
+    echo "Expected invalid metrics port (${invalid_case}) to fail rendering"
+    exit 1
+  fi
+done
