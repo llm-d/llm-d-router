@@ -34,15 +34,45 @@ import (
 )
 
 const (
-	retryInterval               = 5 * time.Second
-	replayTimeout               = 2 * time.Minute
-	replayAttemptIdleTimeout    = 2 * time.Second
-	replayRetryBackoff          = 100 * time.Millisecond
-	replayCooldown              = 30 * time.Second
-	maxReplayNoProgressAttempts = 3
-	snapshotTimeout             = 30 * time.Second
-	publisherIDSize             = 16
+	retryInterval                   = 5 * time.Second
+	defaultReplayTimeout            = 2 * time.Minute
+	defaultReplayAttemptIdleTimeout = 2 * time.Second
+	defaultReplayRetryBackoff       = 100 * time.Millisecond
+	defaultReplayCooldown           = 30 * time.Second
+	maxReplayNoProgressAttempts     = 3
+	snapshotTimeout                 = 30 * time.Second
+	publisherIDSize                 = 16
 )
+
+// ReplayTimers configures the durations governing ZMQ replay attempts and cooldown.
+// Zero or negative fields fall back to the package defaults.
+type ReplayTimers struct {
+	// Timeout bounds one replay request across all of its attempts.
+	Timeout time.Duration
+	// AttemptIdleTimeout ends a replay attempt when no message arrives for this long.
+	AttemptIdleTimeout time.Duration
+	// RetryBackoff is the wait between attempts of an interrupted replay.
+	RetryBackoff time.Duration
+	// Cooldown is the minimum interval after a failed replay before the next replay, and between
+	// endpoint resyncs.
+	Cooldown time.Duration
+}
+
+func (t ReplayTimers) withDefaults() ReplayTimers {
+	if t.Timeout <= 0 {
+		t.Timeout = defaultReplayTimeout
+	}
+	if t.AttemptIdleTimeout <= 0 {
+		t.AttemptIdleTimeout = defaultReplayAttemptIdleTimeout
+	}
+	if t.RetryBackoff <= 0 {
+		t.RetryBackoff = defaultReplayRetryBackoff
+	}
+	if t.Cooldown <= 0 {
+		t.Cooldown = defaultReplayCooldown
+	}
+	return t
+}
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
@@ -56,6 +86,7 @@ type zmqSubscriber struct {
 	snapshotEndpoint string
 	remote           bool
 	topicFilter      string
+	replayTimers     ReplayTimers
 	queueMu          sync.Mutex
 	retired          bool
 
@@ -101,6 +132,7 @@ func newZMQSubscriber(
 		snapshotEndpoint: snapshotEndpoint,
 		remote:           remote,
 		topicFilter:      topicFilter,
+		replayTimers:     (ReplayTimers{}).withDefaults(),
 	}
 }
 
@@ -456,7 +488,7 @@ func (z *zmqSubscriber) retire(resetSource bool) {
 // endpoint at most once per cooldown.
 func (z *zmqSubscriber) takeResync() bool {
 	if !z.resync.Load() || !z.canAttemptReplay() ||
-		(!z.lastResync.IsZero() && time.Since(z.lastResync) < replayCooldown) {
+		(!z.lastResync.IsZero() && time.Since(z.lastResync) < z.replayTimers.Cooldown) {
 		return false
 	}
 	z.resync.Store(false)
@@ -465,7 +497,7 @@ func (z *zmqSubscriber) takeResync() bool {
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {
-	return z.lastReplayFailure.IsZero() || time.Since(z.lastReplayFailure) >= replayCooldown
+	return z.lastReplayFailure.IsZero() || time.Since(z.lastReplayFailure) >= z.replayTimers.Cooldown
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
@@ -593,7 +625,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 	logger := log.FromContext(ctx).WithName("zmq-replay").WithValues("podIdentifier", z.podIdentifier)
 	debugLogger := logger.V(logging.DEBUG)
 
-	replayCtx, cancel := context.WithTimeout(ctx, replayTimeout)
+	replayCtx, cancel := context.WithTimeout(ctx, z.replayTimers.Timeout)
 	defer cancel()
 
 	replayed := 0
@@ -611,7 +643,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		attempt++
 
 		attemptCtx, attemptCancel := context.WithCancel(replayCtx)
-		dealer := zmq4.NewDealer(attemptCtx, zmq4.WithTimeout(replayAttemptIdleTimeout))
+		dealer := zmq4.NewDealer(attemptCtx, zmq4.WithTimeout(z.replayTimers.AttemptIdleTimeout))
 		if err := dealer.Dial(z.replayEndpoint); err != nil {
 			attemptCancel()
 			z.invalidateReplay(z.topicFilter)
@@ -654,7 +686,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			return false
 		}
 
-		idleTimer := time.AfterFunc(replayAttemptIdleTimeout, attemptCancel)
+		idleTimer := time.AfterFunc(z.replayTimers.AttemptIdleTimeout, attemptCancel)
 		attemptReplayed := 0
 		complete := false
 		expectedSeq := nextSeq
@@ -666,7 +698,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				receiveErr = err
 				break
 			}
-			idleTimer.Reset(replayAttemptIdleTimeout)
+			idleTimer.Reset(z.replayTimers.AttemptIdleTimeout)
 
 			frames := msg.Frames
 			if len(frames) > 0 && len(frames[0]) == 0 {
@@ -766,7 +798,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			"replayEndpoint", z.replayEndpoint)
 
 		select {
-		case <-time.After(replayRetryBackoff):
+		case <-time.After(z.replayTimers.RetryBackoff):
 		case <-replayCtx.Done():
 		}
 	}
