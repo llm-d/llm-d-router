@@ -134,14 +134,16 @@ jobs:
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
           echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
+      # A main push that misses the exact key saves the cache below, so it
+      # starts empty: seeding it from an older entry would carry every
+      # module version of every earlier go.sum into the new one.
       - name: Restore Go modules
         id: go-mod-cache
         uses: actions/cache/restore@v6
         with:
           path: ${{ steps.go-cache.outputs.mod }}
           key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            gomod-${{ runner.os }}-
+          restore-keys: ${{ (github.ref != 'refs/heads/main' || github.event_name != 'push') && format('gomod-{0}-', runner.os) || '' }}
 
       # This job is the only writer of the module cache. A key is never
       # overwritten, so a job that built a subset of the packages would
@@ -411,12 +413,6 @@ jobs:
           buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
           commit-sha: ${{ github.sha }}
           build-ref: ${{ github.head_ref || github.ref_name }}
-
-      - name: Pull ${{ matrix.image.name }} image
-        if: ${{ matrix.image.source == 'pull' }}
-        run: |
-          docker pull --platform linux/amd64 "${{ matrix.image.image }}"
-          docker save "${{ matrix.image.image }}" -o "${{ runner.temp }}/${{ matrix.image.archive }}.tar"
 
       - name: Upload ${{ matrix.image.name }} image
         uses: actions/upload-artifact@v7
