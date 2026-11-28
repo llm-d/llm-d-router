@@ -252,17 +252,8 @@ func maxOutputTokens(data json.RawMessage) *int64 {
 	return single.MaxNewTokens
 }
 
-// sgLangResponse is the /generate response wire format.
-// Usage lives under meta_info, not under usage like the OpenAI format.
 type sgLangResponse struct {
-	MetaInfo struct {
-		// FinishReason is parsed to identify the last meta_info of a finished stream;
-		// null on intermediate chunks, non-null on the final chunk
-		FinishReason     json.RawMessage `json:"finish_reason"`
-		PromptTokens     *int            `json:"prompt_tokens"`
-		CompletionTokens *int            `json:"completion_tokens"`
-		CachedTokens     *int            `json:"cached_tokens"`
-	} `json:"meta_info"`
+	MetaInfo request.SGLangMetaInfo `json:"meta_info"`
 }
 
 // ParseResponse extracts token usage from a /generate response.
@@ -334,12 +325,9 @@ func extractStreamingUsage(body []byte) *request.Usage {
 		if err := json.Unmarshal(data, &resp); err != nil {
 			continue
 		}
-		// skip intermediate chunks; only the final chunk has a non-null finish_reason
-		if !hasJSONValue(resp.MetaInfo.FinishReason) {
-			continue
+		if resp.MetaInfo.Finished() {
+			return resp.MetaInfo.TokenUsage()
 		}
-		usage, _ := parseMetaInfoUsage(data)
-		return usage
 	}
 	return nil
 }
@@ -349,25 +337,5 @@ func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	if resp.MetaInfo.PromptTokens == nil && resp.MetaInfo.CompletionTokens == nil {
-		return nil, nil //nolint:nilnil
-	}
-	u := &request.Usage{
-		PromptTokens:     intValue(resp.MetaInfo.PromptTokens),
-		CompletionTokens: intValue(resp.MetaInfo.CompletionTokens),
-	}
-	u.TotalTokens = u.PromptTokens + u.CompletionTokens
-	if resp.MetaInfo.CachedTokens != nil {
-		u.PromptTokenDetails = &request.PromptTokenDetails{
-			CachedTokens: *resp.MetaInfo.CachedTokens,
-		}
-	}
-	return u, nil
-}
-
-func intValue(value *int) int {
-	if value == nil {
-		return 0
-	}
-	return *value
+	return resp.MetaInfo.TokenUsage(), nil
 }

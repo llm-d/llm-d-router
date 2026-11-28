@@ -30,6 +30,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 )
 
 // A chat-completions usage line over maxSSELineBytes must still record its usage
@@ -89,6 +90,76 @@ func TestOversizedResponsesCompletedSalvaged(t *testing.T) {
 	assert.Equal(t, 775, reqCtx.Usage.PromptTokenDetails.CachedTokens)
 }
 
+func TestOversizedSGLangUsageLineSalvaged(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{sglanghttp.NewSGLangHTTPParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		Request:           &Request{Headers: map[string]string{":path": "/provider" + reqcommon.APITypeSGLangGenerate.Path()}},
+		Response:          &Response{Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+	pad := strings.Repeat("x", maxSSELineBytes)
+	chunks := []string{
+		`data: {"text":"` + pad + `\"meta_info\":{\"prompt_tokens\":999,\"finish_reason\":{}}","meta_`,
+		`info":{"prompt_tokens":37,"completion_tokens":8,"cached_tokens":12,"finish_reason":{"type":"stop"}},`,
+		`"debug":{"meta_info":{"prompt_tokens":999,"completion_tokens":999,"finish_reason":{}}}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	for i, chunk := range chunks {
+		server.HandleResponseBody(t.Context(), reqCtx, []byte(chunk), i == len(chunks)-1)
+	}
+
+	assert.Equal(t, fwkrequest.Usage{
+		PromptTokens:       37,
+		CompletionTokens:   8,
+		TotalTokens:        45,
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 12},
+	}, reqCtx.Usage)
+}
+
+func TestSalvageSGLangMetaInfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want *fwkrequest.Usage
+	}{
+		{
+			name: "zero_cached_tokens",
+			line: `data: {"meta_info":{"prompt_tokens":5,"completion_tokens":0,"cached_tokens":0,"finish_reason":{"type":"stop"}}}`,
+			want: &fwkrequest.Usage{PromptTokens: 5, TotalTokens: 5, PromptTokenDetails: &fwkrequest.PromptTokenDetails{}},
+		},
+		{
+			name: "intermediate_event",
+			line: `data: {"meta_info":{"prompt_tokens":5,"completion_tokens":1,"cached_tokens":2,"finish_reason":null}}`,
+		},
+		{
+			name: "missing_finish_reason",
+			line: `data: {"meta_info":{"prompt_tokens":5,"completion_tokens":1}}`,
+		},
+		{
+			name: "malformed_token_count",
+			line: `data: {"meta_info":{"prompt_tokens":"5","completion_tokens":1,"finish_reason":{"type":"stop"}}}`,
+		},
+		{
+			name: "nested_metadata",
+			line: `data: {"debug":[{"meta_info":{"prompt_tokens":5,"completion_tokens":1,"finish_reason":{"type":"stop"}}}]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &RequestContext{Request: &Request{Headers: map[string]string{":path": reqcommon.APITypeSGLangGenerate.Path()}}}
+			salvageDroppedSSELine(t.Context(), reqCtx, []byte(tc.line), true)
+			assert.Equal(t, tc.want, reqCtx.salvagedUsage)
+		})
+	}
+}
+
 // A usage key appearing inside a JSON string (e.g. echoed instructions) must not match;
 // only the real usage object later in the dropped line counts.
 func TestSalvageIgnoresUsageInsideStrings(t *testing.T) {
@@ -137,8 +208,8 @@ func TestScanDroppedSSEUsage(t *testing.T) {
 			want: fwkrequest.Usage{},
 		},
 		{
-			name: "no usage object, meta_info style (not covered)",
-			line: `data: {"text":"hi","meta_info":{"prompt_tokens":3,"completion_tokens":4}}`,
+			name: "ignore SGLang meta_info for other APIs",
+			line: `data: {"text":"hi","meta_info":{"prompt_tokens":3,"completion_tokens":4,"finish_reason":{"type":"stop"}}}`,
 			want: fwkrequest.Usage{},
 		},
 	}

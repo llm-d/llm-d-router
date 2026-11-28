@@ -32,6 +32,8 @@ import (
 // Every wire format reports a flat token block well below this size.
 const maxSalvageObjectBytes = 64 << 10
 
+const maxSalvageKeyBytes = max(len(reqcommon.FieldUsage), len(fwkrequest.SGLangMetaInfoKey))
+
 // salvageDroppedSSELine feeds the bytes of an SSE line dropped for exceeding
 // maxSSELineBytes. A dropped line still carries the request's only usage event
 // (a response.completed repeats instructions and output before it), so its
@@ -44,7 +46,7 @@ func salvageDroppedSSELine(ctx context.Context, reqCtx *RequestContext, dropped 
 		if len(dropped) == 0 {
 			return
 		}
-		reqCtx.sseSalvage = &usageSalvager{}
+		reqCtx.sseSalvage = &usageSalvager{sglang: reqCtx.apiType() == reqcommon.APITypeSGLangGenerate}
 	}
 	reqCtx.sseSalvage.feed(dropped)
 	if !lineDone {
@@ -73,15 +75,17 @@ func scanDroppedSSEUsage(data []byte) *fwkrequest.Usage {
 }
 
 // usageSalvager scans the byte stream of one dropped SSE line as it arrives,
-// collecting the value of every "usage" key that maps to a JSON object. Only
+// collecting JSON objects under "usage" or SGLang's top-level "meta_info". Only
 // state that spans chunks is retained: a partial string being read (as a
 // key candidate) and a usage object being collected. A usage value over
 // maxSalvageObjectBytes is discarded and skipped to its closing brace.
 // Everything else is processed byte by byte, so the memory overhead stays flat.
 type usageSalvager struct {
+	sglang      bool
 	state       int // one of the states below
+	depth       int // enclosing JSON objects and arrays
 	escape      bool
-	str         []byte // a string key being read, truncated just past len("usage")
+	str         []byte // a string key being read, truncated just past maxSalvageKeyBytes
 	obj         []byte // the usage object being collected
 	objInString bool
 	objEscape   bool
@@ -92,7 +96,7 @@ type usageSalvager struct {
 const (
 	scanOutsideString = iota // outside a JSON string
 	scanInString             // inside a string, accumulating it
-	scanAfterUsageKey        // a "usage" key just closed, expecting ':'
+	scanAfterUsageKey        // a usage key just closed, expecting ':'
 	scanAfterColon           // the colon was seen, expecting '{' or a non-object value
 	scanCollect              // inside the usage object
 	scanSkipObject           // usage value exceeded the cap; skip to its closing brace
@@ -108,10 +112,15 @@ func (s *usageSalvager) feed(data []byte) {
 func (s *usageSalvager) step(c byte) {
 	switch s.state {
 	case scanOutsideString:
-		if c == '"' {
+		switch c {
+		case '"':
 			s.str = s.str[:0]
 			s.escape = false
 			s.state = scanInString
+		case '{', '[':
+			s.depth++
+		case '}', ']':
+			s.depth--
 		}
 	case scanInString:
 		switch {
@@ -119,8 +128,12 @@ func (s *usageSalvager) step(c byte) {
 			s.escape = false
 		case c == '\\':
 			s.escape = true
+			if len(s.str) <= maxSalvageKeyBytes {
+				s.str = append(s.str, c)
+			}
 		case c == '"':
-			if string(s.str) == reqcommon.FieldUsage {
+			key := string(s.str)
+			if key == reqcommon.FieldUsage || (s.sglang && s.depth == 1 && key == fwkrequest.SGLangMetaInfoKey) {
 				s.state = scanAfterUsageKey
 			} else {
 				s.state = scanOutsideString
@@ -128,7 +141,7 @@ func (s *usageSalvager) step(c byte) {
 		default:
 			// Longer strings are not the key, but keep one extra byte so an
 			// overlong string never equals the candidate.
-			if len(s.str) <= len(reqcommon.FieldUsage) {
+			if len(s.str) <= maxSalvageKeyBytes {
 				s.str = append(s.str, c)
 			}
 		}
@@ -137,6 +150,7 @@ func (s *usageSalvager) step(c byte) {
 			s.state = scanAfterColon
 		} else if c != ' ' && c != '\t' {
 			s.state = scanOutsideString
+			s.step(c)
 		}
 	case scanAfterColon:
 		switch c {
@@ -157,12 +171,13 @@ func (s *usageSalvager) step(c byte) {
 			// keep waiting for the object
 		default:
 			s.state = scanOutsideString
+			s.step(c)
 		}
 	case scanCollect:
 		s.obj = append(s.obj, c)
 		s.trackUsageValue(c)
 		if s.objDepth == 0 {
-			if usage := parseSalvagedUsage(s.obj); usage != nil {
+			if usage := s.parseUsageObject(); usage != nil {
 				s.last = usage
 			}
 			s.state = scanOutsideString
@@ -181,6 +196,17 @@ func (s *usageSalvager) step(c byte) {
 			s.state = scanOutsideString
 		}
 	}
+}
+
+func (s *usageSalvager) parseUsageObject() *fwkrequest.Usage {
+	if string(s.str) != fwkrequest.SGLangMetaInfoKey {
+		return parseSalvagedUsage(s.obj)
+	}
+	var meta fwkrequest.SGLangMetaInfo
+	if err := json.Unmarshal(s.obj, &meta); err != nil || !meta.Finished() {
+		return nil
+	}
+	return meta.TokenUsage()
 }
 
 // trackUsageValue updates string and brace depth for one byte inside a usage
