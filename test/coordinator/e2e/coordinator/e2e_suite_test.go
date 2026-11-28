@@ -26,6 +26,7 @@ package coordinate2e
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -35,6 +36,7 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -49,7 +51,7 @@ const (
 	kindClusterName = "e2e-coordinator-tests"
 
 	defaultReadyTimeout    = 10 * time.Minute
-	defaultInterval        = time.Second * 2
+	defaultInterval        = 250 * time.Millisecond
 	defaultGatewayHostPort = 30080
 
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
@@ -129,8 +131,16 @@ var (
 	numProcesses = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
 
 	// baseNsName is the base of the namespace in which the K8S objects will be created.
-	baseNsName = env.GetEnvString("NAMESPACE", testutils.DefaultNsName(numProcesses, "e2e-coordinator"), ginkgo.GinkgoLogr)
-	k8sContext = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
+	baseNsName        = env.GetEnvString("NAMESPACE", testutils.DefaultNsName(numProcesses, "e2e-coordinator"), ginkgo.GinkgoLogr)
+	explicitNamespace = os.Getenv("NAMESPACE") != ""
+	k8sContext        = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
+
+	// activeNamespace and groupSeq track the current Ordered group's namespace
+	// on this process. Giving each suite-owned group a distinct namespace name
+	// prevents CoreDNS's 30s cache from serving a deleted group's ClusterIP to
+	// the next group on the same process.
+	activeNamespace string
+	groupSeq        int
 
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
 
@@ -223,9 +233,14 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 		// includes specs interrupted by --fail-fast) and its AfterAll then
 		// deletes it.
 		testutils.DumpPodsAndLogs(testConfig, baseNsName)
-		for idx := range numProcesses {
-			if nsName := testutils.NamespaceForProcess(baseNsName, numProcesses, idx+1); nsName != baseNsName {
-				testutils.DumpPodsAndLogs(testConfig, nsName)
+		if testConfig != nil && testConfig.KubeCli != nil {
+			prefix := baseNsName + "-"
+			if nsList, err := testConfig.KubeCli.CoreV1().Namespaces().List(testConfig.Context, metav1.ListOptions{}); err == nil {
+				for _, ns := range nsList.Items {
+					if strings.HasPrefix(ns.Name, prefix) {
+						testutils.DumpPodsAndLogs(testConfig, ns.Name)
+					}
+				}
 			}
 		}
 	}
@@ -347,10 +362,26 @@ func getGatewayNodePort() int {
 	return testutils.ProcessPort(defaultGatewayHostPort)
 }
 
-// getNamespace returns the namespace being used by the current process. Each
-// parallel process is assigned its own namespace to provide isolation between
-// the tests running in it. See testutils.Namespace.
+// nextGroupNamespace assigns and returns the namespace for the next Ordered
+// group on this process. When the suite owns parallel namespaces (numProcesses > 1
+// and NAMESPACE unset), each group receives a monotonic suffix so Service DNS
+// records do not collide with CoreDNS's 30s cache for a just-deleted group.
+func nextGroupNamespace() string {
+	ns := testutils.Namespace(baseNsName, numProcesses)
+	if numProcesses > 1 && !explicitNamespace {
+		groupSeq++
+		ns = fmt.Sprintf("%s-%d", ns, groupSeq)
+	}
+	activeNamespace = ns
+	return ns
+}
+
+// getNamespace returns the namespace active for the current Ordered group on
+// this process.
 func getNamespace() string {
+	if activeNamespace != "" {
+		return activeNamespace
+	}
 	return testutils.Namespace(baseNsName, numProcesses)
 }
 

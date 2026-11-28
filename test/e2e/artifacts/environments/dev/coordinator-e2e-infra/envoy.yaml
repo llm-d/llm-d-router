@@ -237,7 +237,9 @@ data:
         # Single ext_proc cluster — the one EPP serving all three phases.
         - name: ext_proc_epd
           type: STRICT_DNS
-          connect_timeout: 86400s
+          # Fail fast on unreachable EPP connects so a stalled handshake does
+          # not stay pending in the HTTP/2 pool.
+          connect_timeout: 1s
           lb_policy: LEAST_REQUEST
           circuit_breakers:
             thresholds:

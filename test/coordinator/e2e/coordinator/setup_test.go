@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	inferenceapi "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -53,6 +54,20 @@ var coordinatorComponentDocs = sync.OnceValue(func() []string {
 // portForwardExitTimeout bounds each wait for the port-forward process to exit,
 // first after SIGTERM and then after SIGKILL.
 const portForwardExitTimeout = 30 * time.Second
+
+// fastDeploymentOverrides bounds pod shutdown and probe intervals on
+// Deployments created by this suite without editing shared dev manifests.
+func fastDeploymentOverrides() testutils.DeploymentOverrides {
+	const (
+		terminationGracePeriodSeconds int64 = 1
+		probePeriodSeconds            int32 = 1
+	)
+	grace := terminationGracePeriodSeconds
+	return testutils.DeploymentOverrides{
+		TerminationGracePeriodSeconds: &grace,
+		ProbePeriodSeconds:            probePeriodSeconds,
+	}
+}
 
 // stopPortForward stops the port-forward process and waits for it to exit, so
 // the next group on this process can rebind the same host port: a bind that
@@ -79,11 +94,9 @@ func stopPortForward(session *gexec.Session) error {
 
 // createEnvoy applies the active topology's Envoy routing ConfigMap plus the
 // shared Envoy Deployment and Service in nsName, or the agentgateway manifest
-// when E2E_GATEWAY=agentgateway. Against an existing cluster
-// (K8S_CONTEXT set) the kind nodePort mapping is unavailable, so it also
-// forwards the gateway port and returns the session for the caller to terminate.
-// It appends to objects as it goes (see createTracked).
-func createEnvoy(nsName string, objects *[]string) *gexec.Session {
+// when E2E_GATEWAY=agentgateway. It appends created ids to objects without
+// waiting for Deployment readiness; callers wait via podsInDeploymentsReady.
+func createEnvoy(nsName string, objects *[]string) {
 	infraSubs := map[string]string{
 		"${NAMESPACE}":       nsName,
 		"${ENVOY_NODE_PORT}": strconv.Itoa(getGatewayNodePort()),
@@ -92,7 +105,7 @@ func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 		infraSubs["${EPP_NAME}"] = eppName
 		ginkgo.By("Applying agentgateway from " + agentgatewayManifest)
 		applyManifest(nsName, agentgatewayManifest, infraSubs, objects)
-		return forwardGateway(nsName)
+		return
 	}
 	manifest := envoyManifest
 	if threeEPP {
@@ -108,7 +121,6 @@ func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 	applyManifest(nsName, manifest, infraSubs, objects)
 	ginkgo.By("Applying shared Envoy Deployment and Service from " + sharedEnvoyManifest)
 	applyManifest(nsName, sharedEnvoyManifest, infraSubs, objects)
-	return forwardGateway(nsName)
 }
 
 // forwardGateway forwards the gateway port on an existing cluster, where the
@@ -144,14 +156,16 @@ func testWrapper(test func()) func() {
 	)
 	return func() {
 		ginkgo.BeforeAll(func() {
-			nsName = getNamespace()
+			nsName = nextGroupNamespace()
 			// The tracker outlives a spec whose AfterEach did not drain it (an
 			// interrupt, a failed delete, or the keepClusterOnFailure return
 			// below), and this group repeats the object names, so start from empty.
 			specWorkload = nil
 			createdNameSpace = testutils.SetupNamespace(testConfig, nsName)
-			portForwardSession = createEnvoy(nsName, &envoyObjects)
+			createEnvoy(nsName, &envoyObjects)
 			createStableInfra(nsName, &stableInfraObjects)
+			podsInDeploymentsReady(nsName, envoyObjects)
+			portForwardSession = forwardGateway(nsName)
 		})
 
 		ginkgo.AfterEach(func() {
@@ -225,21 +239,25 @@ func createCRDs() {
 }
 
 // createEndPointPickers creates each EPP's scheduling ConfigMap and Deployment
-// for the active topology and waits for the Deployments to become ready. The
-// single-EPP topology creates one EPP from eppConfig; the 3-EPP topology creates
-// one per role, each from its role config with a per-role ConfigMap.
-// It appends the created ids to specWorkload.
-func createEndPointPickers(nsName string) {
-	for _, e := range eppsToCreate() {
-		createOneEndPointPicker(nsName, e)
+// for the active topology without waiting for readiness, returning the created
+// object ids. The single-EPP topology creates one EPP from eppConfig; the 3-EPP
+// topology creates one per role, each from its role config with a per-role
+// ConfigMap. It appends the created ids to specWorkload.
+func createEndPointPickers(nsName string) []string {
+	epps := eppsToCreate()
+	created := make([]string, 0, len(epps))
+	for _, e := range epps {
+		created = append(created, createOneEndPointPicker(nsName, e)...)
 	}
+	return created
 }
 
-// createOneEndPointPicker creates a single EPP's ConfigMap and Deployment. In
-// the 3-EPP topology each role gets its own ConfigMap (epp-config-<role>) and the
-// shared Deployment's config volume is retargeted to it (see renameEPPConfigVolume),
-// so the three EPPs do not share one ConfigMap.
-func createOneEndPointPicker(nsName string, e roleEPP) {
+// createOneEndPointPicker creates a single EPP's ConfigMap and Deployment
+// without waiting for readiness, returning the created Deployment object ids.
+// In the 3-EPP topology each role gets its own ConfigMap (epp-config-<role>)
+// and the shared Deployment's config volume is retargeted to it (see
+// renameEPPConfigVolume), so the three EPPs do not share one ConfigMap.
+func createOneEndPointPicker(nsName string, e roleEPP) []string {
 	cmName := "epp-config"
 	if threeEPP {
 		cmName = "epp-config-" + e.role
@@ -256,7 +274,22 @@ func createOneEndPointPicker(nsName string, e roleEPP) {
 	if gatewayKind == gatewayAgentgateway {
 		docs = disableEPPSecureServing(docs)
 	}
-	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
+	// Pass --drain-timeout=0 so EPP exits on SIGTERM without waiting its 30s default drain.
+	const (
+		eppContainerName   = "epp"
+		eppDrainTimeoutArg = "--drain-timeout=0"
+	)
+	matched := 0
+	ids := createTracked(nsName, docs, &specWorkload, func(obj *unstructured.Unstructured) {
+		ok, err := testutils.AppendDeploymentContainerArgs(obj, eppContainerName, eppDrainTimeoutArg)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "appending %s to EPP container %q", eppDrainTimeoutArg, eppContainerName)
+		if ok {
+			matched++
+		}
+	})
+	gomega.Expect(matched).To(gomega.Equal(1),
+		"expected 1 %q container in the EPP Deployment; the shared manifest format may have changed", eppContainerName)
+	return ids
 }
 
 // renameEPPConfigVolume retargets the EPP Deployment's config volume, volume
@@ -341,10 +374,10 @@ func deletePoolIfExists(nsName, name string) {
 }
 
 // createModelServers deploys the vLLM encode/prefill/decode workers from the
-// coordinator-epd kustomize environment with the given per-type replica counts and
-// waits for their Deployments to be ready. It appends the created ids to
-// specWorkload.
-func createModelServers(nsName string, encodeReplicas, prefillReplicas, decodeReplicas int) {
+// coordinator-epd kustomize environment with the given per-type replica counts
+// without waiting for readiness, returning the created object ids. It appends
+// the created ids to specWorkload.
+func createModelServers(nsName string, encodeReplicas, prefillReplicas, decodeReplicas int) []string {
 	subs := allSubstitutions(nsName)
 	subs["${VLLM_REPLICA_COUNT_E}"] = strconv.Itoa(encodeReplicas)
 	subs["${VLLM_REPLICA_COUNT_P}"] = strconv.Itoa(prefillReplicas)
@@ -354,13 +387,13 @@ func createModelServers(nsName string, encodeReplicas, prefillReplicas, decodeRe
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	docs = e2eutil.RemoveEmptyLabels(docs)
-	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
+	return createTracked(nsName, docs, &specWorkload)
 }
 
 // createCoordinator builds the coordinator ConfigMap from the given pipeline
-// config, deploys the coordinator Deployment, and waits for readiness. It
-// appends the created ids to specWorkload.
-func createCoordinator(nsName, config string) {
+// config and deploys the coordinator Deployment without waiting for readiness,
+// returning the created object ids. It appends the created ids to specWorkload.
+func createCoordinator(nsName, config string) []string {
 	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
 		"${NAMESPACE}":        nsName,
 		"${RENDER_NAMESPACE}": baseNsName,
@@ -385,8 +418,7 @@ func createCoordinator(nsName, config string) {
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
 
-	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
-	waitForCoordinatorReady()
+	return createTracked(nsName, docs, &specWorkload)
 }
 
 // waitForCoordinatorReady polls /readyz through the gateway until it returns 200,
@@ -493,17 +525,24 @@ func applyManifest(nsName, path string, subs map[string]string, objects *[]strin
 	createTracked(nsName, docs, objects)
 }
 
-// createTracked creates docs in nsName and waits for them like
-// testutils.CreateObjsFromYaml, but appends each object's id to objects as soon
-// as the object exists, before its readiness wait. A failure partway through
-// then still leaves the already-created ids tracked for deletion, which matters
-// because the namespace delete does not cover objects when the suite did not
-// create the namespace. It returns the ids of docs.
-func createTracked(nsName string, docs []string, objects *[]string) []string {
+// createTracked decodes docs, applies fastDeploymentOverrides and any extra
+// mutators to each object, creates them in nsName without waiting for
+// Deployment readiness, and appends each object's id to objects as soon as it
+// exists. A failure partway through still leaves the already-created ids
+// tracked for deletion, which matters when the suite did not create the
+// namespace. Callers wait for Deployment readiness via podsInDeploymentsReady.
+func createTracked(nsName string, docs []string, objects *[]string, mutators ...func(*unstructured.Unstructured)) []string {
 	objs := testutils.CreateUnstructuredObjs(testConfig, docs)
+	overrides := fastDeploymentOverrides()
+	for _, obj := range objs {
+		gomega.Expect(testutils.ApplyDeploymentOverrides(obj, overrides)).To(gomega.Succeed(),
+			"applying deployment overrides to %s/%s", obj.GetKind(), obj.GetName())
+		for _, mutate := range mutators {
+			mutate(obj)
+		}
+	}
 	return testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {
 		*objects = append(*objects, kind+"/"+clientObj.GetName())
-		testutils.VerifyObj(testConfig, kind, clientObj)
 	})
 }
 
