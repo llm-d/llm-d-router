@@ -755,6 +755,35 @@ func TestZMQSubscriber_UnavailableReplayIndexesLiveEvents(t *testing.T) {
 	assert.Equal(t, int32(1), h.buffer.requests.Load(), "the replay is retried only after the cooldown")
 }
 
+// TestZMQSubscriber_FullReplayReplacesLiveState verifies that a full replay
+// replaces live-indexed state, so one BlockRemoved evicts the block.
+func TestZMQSubscriber_FullReplayReplacesLiveState(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+
+	// The replay buffer is empty, so the full replay succeeds without events and the frame is indexed.
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 50))
+	require.Eventually(t, func() bool { return h.indexed(50) },
+		5*time.Second, 50*time.Millisecond, "the first frame must be indexed")
+
+	// A backwards sequence restarts the stream, and the empty rebuild leaves it live-only.
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) },
+		5*time.Second, 50*time.Millisecond, "the restarted frame must be indexed")
+
+	// The next frame finds the buffer filled, so the full replay announces block 100 again.
+	h.buffer.set(
+		replayMessage{seq: 3, payload: buildDistinctBlockStoredPayload(t, 100)},
+		replayMessage{seq: 4, payload: buildDistinctBlockStoredPayload(t, 200)},
+	)
+	h.send(t, 4, buildDistinctBlockStoredPayload(t, 200))
+	require.Eventually(t, func() bool { return h.indexed(200) },
+		5*time.Second, 50*time.Millisecond, "the replayed frames must be indexed")
+
+	h.send(t, 5, buildBlockRemovedPayload(t, 100))
+	require.Eventually(t, func() bool { return !h.indexed(100) },
+		5*time.Second, 50*time.Millisecond, "one remove must evict a block that is resident once")
+}
+
 func TestZMQSubscriber_SequenceResetClearsAndRebuildsPod(t *testing.T) {
 	h := newReplayHarness(t, nil, false)
 	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
