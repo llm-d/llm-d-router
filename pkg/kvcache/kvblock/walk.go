@@ -83,8 +83,9 @@ const (
 // WalkKeys implements KeyWalker. Keys are peeked in batches under one
 // acquisition of the LRU's shared lock, and each key's entries are visited
 // under that key's own lock after the shared lock is released, since evicting
-// a key takes its lock before the LRU's. The visited prefix is promoted in a
-// deferred call, so every exit path refreshes what was read.
+// a key holds the store's lock across the key's own: the eviction callback
+// drains the key's cache under the key's lock. The visited prefix is
+// promoted in a deferred call, so every exit path refreshes what was read.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {

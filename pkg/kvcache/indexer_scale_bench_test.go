@@ -107,8 +107,9 @@ func BenchmarkPrefixMatchDepths(b *testing.B) {
 }
 
 // BenchmarkClearAtScale measures Clear over a pod the index held, on a
-// million-key index. Every iteration pays the O(N) scan; the per-matching
-// key removal is second-order at these densities.
+// million-key index. The cleared pod is repopulated between iterations,
+// outside the timed window, so every iteration scans a full store; the
+// per-matching key removal is second-order at these densities.
 func BenchmarkClearAtScale(b *testing.B) {
 	if !scaleBenchEnabled() {
 		b.Skip("set KVINDEXER_SCALE_BENCH=1 to run the operating-point benches")
@@ -118,14 +119,18 @@ func BenchmarkClearAtScale(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	populateScale(b, idx, numKeys, 8)
+	populateScale(b, idx, numKeys, 1)
+	pod := workload.PodName(0)
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := idx.Clear(ctx, workload.PodName(i%8)); err != nil {
+		if err := idx.Clear(ctx, pod); err != nil {
 			b.Fatal(err)
 		}
+		b.StopTimer()
+		populateScale(b, idx, numKeys, 1)
+		b.StartTimer()
 	}
 }
 
