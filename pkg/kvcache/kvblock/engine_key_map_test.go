@@ -69,21 +69,19 @@ func TestEngineKeyMapChainShapes(t *testing.T) {
 	}
 }
 
-// A set of an already-mapped engine key replaces the chain: the old chain's
-// arena nodes are not part of the new chain, and the mapping count does not
-// grow.
+// A set of an already-mapped engine key replaces the chain: the side-map
+// tail is dropped with it, and the mapping count does not grow.
 func TestEngineKeyMapSetReplacesChain(t *testing.T) {
 	m := newEngineKeyMap(0)
 	m.set(1, []BlockHash{10, 11, 12})
-	arenaBefore := len(m.arena)
-	require.Equal(t, 2, arenaBefore, "a 3-key chain holds 2 nodes past the inline first")
+	require.Len(t, m.multi[1], 2, "a 3-key chain holds 2 keys past the inline first")
 
 	m.set(1, []BlockHash{20})
 	chain, ok := m.peek(1)
 	require.True(t, ok)
 	assert.Equal(t, []BlockHash{20}, chain)
 	assert.Equal(t, 1, m.len())
-	assert.Len(t, m.free, arenaBefore, "the replaced chain's nodes must return to the free list")
+	assert.NotContains(t, m.multi, 1, "the replaced chain's tail must be dropped")
 }
 
 // get refreshes the last-visit stamp and peek does not, which is what the
@@ -122,31 +120,28 @@ func TestEngineKeyMapCountCapEvictsColdest(t *testing.T) {
 	assert.False(t, m.contains(2), "the coldest-stamped key must be evicted")
 }
 
-// remove deletes the mapping and recycles its chain; an absent key is a
-// no-op.
+// remove deletes the mapping and its chain; an absent key is a no-op.
 func TestEngineKeyMapRemove(t *testing.T) {
 	m := newEngineKeyMap(0)
 	m.set(1, []BlockHash{10, 11})
-	arenaBefore := len(m.arena)
 
 	m.remove(1)
 	assert.False(t, m.contains(1))
 	assert.Equal(t, 0, m.len())
-	assert.Len(t, m.free, arenaBefore)
+	assert.NotContains(t, m.multi, 1)
 
 	m.remove(999) // no-op
 	assert.Equal(t, 0, m.len())
 }
 
-// Chains longer than one request key keep resolving after earlier elements
-// were freed by a replacement, so recycled arena nodes cannot alias a live
-// chain.
-func TestEngineKeyMapRecycledNodesDoNotAlias(t *testing.T) {
+// Replacing one mapping's chain leaves the other mappings' chains intact:
+// each multi-key mapping owns its tail.
+func TestEngineKeyMapReplacedChainsDoNotAlias(t *testing.T) {
 	m := newEngineKeyMap(0)
 	m.set(1, []BlockHash{10, 11, 12})
 	m.set(2, []BlockHash{20, 21, 22})
 
-	m.set(1, []BlockHash{30}) // frees 1's two nodes
+	m.set(1, []BlockHash{30})
 	m.set(3, []BlockHash{40, 41, 42})
 
 	chain, ok := m.peek(2)
