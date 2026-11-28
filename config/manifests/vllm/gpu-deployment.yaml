@@ -29,6 +29,9 @@ spec:
           - "1024"
           - "--max-model-len"
           - "16000"
+          # Bound request draining to leave time for preStop and process cleanup.
+          - "--shutdown-timeout"
+          - "60"
           - "--enable-lora"
           - "--max-loras"
           - "2"
