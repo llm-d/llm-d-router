@@ -429,6 +429,36 @@ func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
 	}
 }
 
+// TestEstimateBackend_EmbeddingsMessagesMatchChat asserts each embeddings
+// conversation is estimated as its own prompt, the same way as a chat request
+// carrying that conversation, including its multimodal features.
+func TestEstimateBackend_EmbeddingsMessagesMatchChat(t *testing.T) {
+	image := []fwkrequest.Message{{
+		Role: "user",
+		Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{
+			{Type: "text", Text: "a page"},
+			{Type: "image_url", ImageURL: fwkrequest.ImageBlock{URL: pngBase64DataURL}},
+		}},
+	}}
+	query := []fwkrequest.Message{{Role: "query", Content: fwkrequest.Content{Raw: "what is shown"}}}
+
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Embeddings: &fwkrequest.EmbeddingsRequest{Messages: fwkrequest.EmbeddingsMessages{image, query}},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 2)
+	for i, conversation := range [][]fwkrequest.Message{image, query} {
+		chat, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+			ChatCompletions: &fwkrequest.ChatCompletionsRequest{Messages: conversation},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, chat.Prompts[0], tp.Prompts[i], "conversation %d", i)
+	}
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, reqcommon.ModalityImage, tp.Prompts[0].MultiModalFeatures[0].Modality)
+	assert.Empty(t, tp.Prompts[1].MultiModalFeatures)
+}
+
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
 // the same tokens (locality precondition) and that distinct prompts differ.
 func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {

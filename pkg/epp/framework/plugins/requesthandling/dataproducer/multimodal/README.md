@@ -10,7 +10,9 @@ For each request, the producer extracts stable multimodal item hashes from:
 
 - `TokenizedRequest.Prompts[].MultiModalFeatures`, when tokenized multimodal
   metadata is available on the request
-- typed OpenAI chat-completions structured media blocks, as a lightweight fallback
+- typed structured media blocks in OpenAI chat-completions messages and in
+  embeddings `messages` (or conversations passed as `input`), as a lightweight
+  fallback
 - `Generate.Features.MMHashes`, when present
 
 It keeps an in-memory model of each pod's encoder cache. In embedding-capacity
@@ -39,9 +41,9 @@ weight in that ratio.
 This producer declares `TokenizedRequest` from `token-producer` as an optional
 dependency. If `token-producer` is configured, this producer runs after it and
 uses `TokenizedRequest` multimodal placeholder lengths. If tokenized request
-data is absent at runtime, the producer falls back to typed structured
-chat-completions media blocks (or generate feature hashes) with item weight `1`
-per hash.
+data is absent at runtime, the producer falls back to typed structured media
+blocks from chat-completions or embeddings conversations (or generate feature
+hashes) with item weight `1` per hash.
 
 ## Data Produced
 

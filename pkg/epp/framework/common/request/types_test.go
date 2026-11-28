@@ -589,6 +589,102 @@ func TestEmbeddingsInput_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
 	assert.Equal(t, EmbeddingsInput{Raw: "hello", Strings: []string{"stale"}, TokenIDs: [][]uint32{{99}}}, e)
 }
 
+func TestEmbeddingsRequest_UnmarshalJSON(t *testing.T) {
+	image := Message{Role: "user", Content: Content{Structured: []ContentBlock{
+		{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/page.png"}},
+	}}}
+	query := Message{Role: "query", Content: Content{Raw: "what is shown"}}
+	const imageJSON = `{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/page.png"}}]}`
+	const queryJSON = `{"role":"query","content":"what is shown"}`
+
+	tests := []struct {
+		name string
+		body string
+		want EmbeddingsRequest
+	}{
+		{
+			name: "string_input",
+			body: `{"input":"hello","cache_salt":"salt"}`,
+			want: EmbeddingsRequest{Input: EmbeddingsInput{Raw: "hello"}, CacheSalt: "salt"},
+		},
+		{
+			name: "token_id_input",
+			body: `{"input":[[1,2],[3]]}`,
+			want: EmbeddingsRequest{Input: EmbeddingsInput{TokenIDs: [][]uint32{{1, 2}, {3}}}},
+		},
+		{
+			name: "messages_conversation",
+			body: `{"messages":[` + imageJSON + `,` + queryJSON + `],"cache_salt":"salt"}`,
+			want: EmbeddingsRequest{Messages: EmbeddingsMessages{{image, query}}, CacheSalt: "salt"},
+		},
+		{
+			name: "messages_batch",
+			body: `{"messages":[[` + imageJSON + `],[` + queryJSON + `]]}`,
+			want: EmbeddingsRequest{Messages: EmbeddingsMessages{{image}, {query}}},
+		},
+		{
+			name: "conversation_as_input",
+			body: `{"input":[` + imageJSON + `,` + queryJSON + `]}`,
+			want: EmbeddingsRequest{Messages: EmbeddingsMessages{{image, query}}},
+		},
+		{
+			name: "batch_as_input",
+			body: `{"input":[[` + imageJSON + `],[` + queryJSON + `]]}`,
+			want: EmbeddingsRequest{Messages: EmbeddingsMessages{{image}, {query}}},
+		},
+		{
+			name: "messages_take_precedence_over_input",
+			body: `{"input":{"ignored":true},"messages":[` + queryJSON + `]}`,
+			want: EmbeddingsRequest{Messages: EmbeddingsMessages{{query}}},
+		},
+		{
+			name: "null_messages_with_input",
+			body: `{"messages":null,"input":"hello"}`,
+			want: EmbeddingsRequest{Input: EmbeddingsInput{Raw: "hello"}},
+		},
+		{
+			name: "no_input",
+			body: `{"model":"m"}`,
+			want: EmbeddingsRequest{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got EmbeddingsRequest
+			require.NoError(t, json.Unmarshal([]byte(tt.body), &got))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestEmbeddingsRequest_UnmarshalJSONErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "messages_not_an_array", body: `{"messages":"hello"}`},
+		{name: "batch_with_empty_conversation", body: `{"messages":[[{"role":"user","content":"a"}],[]]}`},
+		{name: "messages_with_invalid_content", body: `{"messages":[{"role":"user","content":5}]}`},
+		{name: "input_objects_without_role", body: `{"input":[{"text":"a","image":"https://example.com/a.png"}]}`},
+		{name: "input_mixing_messages_and_strings", body: `{"input":[{"role":"user","content":"a"},"b"]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got EmbeddingsRequest
+			assert.Error(t, json.Unmarshal([]byte(tt.body), &got))
+		})
+	}
+}
+
+func TestEmbeddingsRequest_IsEmpty(t *testing.T) {
+	assert.True(t, EmbeddingsRequest{CacheSalt: "salt"}.IsEmpty())
+	assert.True(t, EmbeddingsRequest{Messages: EmbeddingsMessages{}}.IsEmpty())
+	assert.False(t, EmbeddingsRequest{Input: EmbeddingsInput{Raw: "a"}}.IsEmpty())
+	assert.False(t, EmbeddingsRequest{Messages: EmbeddingsMessages{{{Role: "user"}}}}.IsEmpty())
+}
+
 func TestPrompt_PlainText(t *testing.T) {
 	tests := []struct {
 		name string
