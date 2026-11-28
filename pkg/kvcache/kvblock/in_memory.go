@@ -81,7 +81,7 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 
 	index := &InMemoryIndex{
 		podCacheSize: podCacheSize,
-		pods: newInterner(maxInternedPods), tiers: newInterner(maxInternedTiers),
+		pods:         newInterner(maxInternedPods), tiers: newInterner(maxInternedTiers),
 		owners:        make(map[BlockHash]map[PodEntry]sets.Set[BlockHash]),
 		engineEntries: make(map[BlockHash]map[BlockHash]sets.Set[PodEntry]),
 		constituents:  make(map[BlockHash]sets.Set[BlockHash]),
@@ -118,7 +118,7 @@ var errIndexCardinality = errors.New("index cardinality limit reached")
 type InMemoryIndex struct {
 	// mu protects engine-key-level check-and-act operations (Evict's allEmpty
 	// check + mapping removal vs Add's pod entry insertion) to prevent TOCTOU races.
-	mu sync.Mutex
+	mu sync.RWMutex
 	// owners and engineEntries track distinct engine references to resident entries.
 	owners        map[BlockHash]map[PodEntry]sets.Set[BlockHash]
 	engineEntries map[BlockHash]map[BlockHash]sets.Set[PodEntry]
@@ -408,8 +408,8 @@ func (m *InMemoryIndex) promoteReadKeys(keys []BlockHash) {
 	if len(keys) == 0 {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	m.data.Promote(keys)
 	for _, key := range keys {
 		for _, engines := range m.owners[key] {
