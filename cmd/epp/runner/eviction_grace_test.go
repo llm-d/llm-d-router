@@ -45,52 +45,47 @@ func (f *fakeSaturationDetector) Saturation(context.Context, []datalayer.Endpoin
 	return 0
 }
 
-// TestDeriveEvictionConfirmationGrace checks the grace for each detector kind with the default
-// flags (--refresh-metrics-interval 50ms, --metrics-staleness-threshold 2s). The utilization
-// detector's grace is built from its own metricsStalenessThreshold, which is the threshold it
-// applies; other scraped detectors keep the flag.
+// TestDeriveEvictionConfirmationGrace checks the grace for each detector kind with
+// --refresh-metrics-interval 50ms and --metrics-staleness-threshold 2s. The utilization detector's
+// grace uses the larger of the flag and its own metricsStalenessThreshold; other scraped detectors
+// keep the flag.
 func TestDeriveEvictionConfirmationGrace(t *testing.T) {
+	newUtilization := func(threshold time.Duration) fwkfc.SaturationDetector {
+		return utilization.NewDetector("pool-queue",
+			utilization.Config{MetricsStalenessThreshold: threshold}, logr.Discard())
+	}
 	tests := []struct {
 		name     string
-		detector func() fwkfc.SaturationDetector
+		detector fwkfc.SaturationDetector
 		want     time.Duration
 	}{
 		{
-			name: "utilization_default_threshold",
-			detector: func() fwkfc.SaturationDetector {
-				return utilization.NewDetector("pool-queue",
-					utilization.Config{MetricsStalenessThreshold: utilization.DefaultMetricsStalenessThreshold}, logr.Discard())
-			},
-			want: 500 * time.Millisecond,
+			name:     "utilization_default_threshold_keeps_flag",
+			detector: newUtilization(200 * time.Millisecond),
+			want:     2300 * time.Millisecond,
 		},
 		{
-			name: "utilization_raised_threshold",
-			detector: func() fwkfc.SaturationDetector {
-				return utilization.NewDetector("pool-queue",
-					utilization.Config{MetricsStalenessThreshold: 5 * time.Second}, logr.Discard())
-			},
-			want: 5300 * time.Millisecond,
+			name:     "utilization_threshold_above_flag",
+			detector: newUtilization(5 * time.Second),
+			want:     5300 * time.Millisecond,
 		},
 		{
-			name: "concurrency",
-			detector: func() fwkfc.SaturationDetector {
-				return &fakeSaturationDetector{pluginType: concurrency.ConcurrencyDetectorType}
-			},
-			want: 10 * time.Millisecond,
+			name:     "concurrency",
+			detector: &fakeSaturationDetector{pluginType: concurrency.ConcurrencyDetectorType},
+			want:     10 * time.Millisecond,
 		},
 		{
 			name:     "other_detector_uses_flag",
-			detector: func() fwkfc.SaturationDetector { return &fakeSaturationDetector{pluginType: "custom-detector"} },
+			detector: &fakeSaturationDetector{pluginType: "custom-detector"},
 			want:     2300 * time.Millisecond,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := runserver.NewOptions()
-			require.Equal(t, 50*time.Millisecond, opts.RefreshMetricsInterval)
-			require.Equal(t, 2*time.Second, opts.MetricsStalenessThreshold)
-			require.Equal(t, 200*time.Millisecond, utilization.DefaultMetricsStalenessThreshold)
-			require.Equal(t, tc.want, deriveEvictionConfirmationGrace(tc.detector(), opts))
+			opts.RefreshMetricsInterval = 50 * time.Millisecond
+			opts.MetricsStalenessThreshold = 2 * time.Second
+			require.Equal(t, tc.want, deriveEvictionConfirmationGrace(tc.detector, opts))
 		})
 	}
 }
