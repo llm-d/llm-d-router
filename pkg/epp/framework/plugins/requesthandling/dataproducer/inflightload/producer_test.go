@@ -149,12 +149,12 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 	// (indexed 2*4=8, matched 1*4=4 -> uncached 4).
 	hit := newStubSchedulingEndpoint("ep-hit")
 	hit.Put(preciseKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
-	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, nil, 5))
+	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, nil, 5, false))
 
 	// Data under the approx (default) key is ignored, so it falls back to inputTokens.
 	miss := newStubSchedulingEndpoint("ep-miss")
 	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
-	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, nil, 5))
+	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, nil, 5, false))
 
 	// Exercise the real dependency sorter and current-request projection. The
 	// selected owner has 41,280 of 43,992 input tokens cached; charging the full
@@ -1623,7 +1623,8 @@ func newStubSchedulingEndpointWithRole(name, role string) *stubSchedulingEndpoin
 // TestInFlightLoadProducer_PDRoleAwareLoad verifies that estimateRequestTokens
 // applies a role-based load split in P/D deployments:
 //   - prefill-only endpoint: input tokens only   (output is the decode pod's cost)
-//   - decode-only endpoint:  estimated output tokens only (input was handled by the prefill pod)
+//   - decode-only endpoint:  estimated output tokens only, when a prefill pod handles the
+//     input; input + estimated output when none does (it runs prefill itself)
 //   - no-role / combined:    input + estimated output tokens  (existing monolithic behavior)
 func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 	t.Parallel()
@@ -1642,7 +1643,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)
-		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, true)
 		require.Equal(t, int64(inputTok), got)
 	})
 
@@ -1650,16 +1651,25 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpointWithRole("enc-prefill-pod", bylabel.RoleEncodePrefill)
-		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, true)
 		require.Equal(t, int64(inputTok), got)
 	})
 
-	t.Run("decode-only role -> estimated output tokens only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+	t.Run("decode-only role behind a prefill worker -> estimated output tokens only (addEstimatedOutputTokens=true)", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
-		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, true)
 		require.Equal(t, int64(outputTok), got)
+	})
+
+	t.Run("decode-only role with no prefill worker -> input + estimated output tokens", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, false)
+		require.Equal(t, int64(inputTok+outputTok), got,
+			"a decode-labeled pod with no prefill worker runs prefill itself; its input must be charged")
 	})
 
 	t.Run("decode-only role -> input tokens only when addEstimatedOutputTokens=false", func(t *testing.T) {
@@ -1667,7 +1677,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		producer := newTestProducer(t)
 		producer.addEstimatedOutputTokens = false
 		ep := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
-		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, true)
 		require.Equal(t, int64(inputTok), got, "without output estimation there is no output-length signal; input tokens are the only proxy")
 	})
 
@@ -1675,16 +1685,130 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpoint("mono-pod") // no role label
-		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, false)
 		require.Equal(t, int64(inputTok+outputTok), got)
 	})
 
 	t.Run("combined role (prefill-decode) -> input + estimated output tokens", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
-		ep := newStubSchedulingEndpointWithRole("combined-pod", "prefill-decode")
-		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		ep := newStubSchedulingEndpointWithRole("combined-pod", bylabel.RolePrefillDecode)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok, true)
 		require.Equal(t, int64(inputTok+outputTok), got)
+	})
+}
+
+// TestInFlightLoadProducer_DecodeWithoutPrefill_PreRequest verifies that a
+// decode-labeled endpoint is charged only its estimated output when the scheduler
+// ran a prefill stage on a different endpoint, whatever that endpoint's role, and
+// is charged its input tokens otherwise: a monolithic pod mislabeled decode, the
+// disagg handler's decode-only decision, and encode-decode (an encode worker runs
+// the encoder, not the LLM prefill, even when it is labeled encode-prefill).
+func TestInFlightLoadProducer_DecodeWithoutPrefill_PreRequest(t *testing.T) {
+	t.Parallel()
+
+	// 4 input tokens; a LONG outlen bucket estimates 4096 output tokens.
+	const inputTok, outputTok = 4, 4096
+
+	decodePod := func() fwksched.Endpoint { return newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode) }
+
+	tests := []struct {
+		name       string
+		profiles   map[string]fwksched.Endpoint
+		wantDecode int64
+	}{
+		{
+			name:       "decode profile only",
+			profiles:   map[string]fwksched.Endpoint{"decode": decodePod()},
+			wantDecode: inputTok + outputTok,
+		},
+		{
+			name: "encode and decode, no prefill",
+			profiles: map[string]fwksched.Endpoint{
+				"encode": newStubSchedulingEndpointWithRole("encode-pod", bylabel.RoleEncode),
+				"decode": decodePod(),
+			},
+			wantDecode: inputTok + outputTok,
+		},
+		{
+			name: "encode on an encode-prefill pod, no prefill stage",
+			profiles: map[string]fwksched.Endpoint{
+				"encode": newStubSchedulingEndpointWithRole("encode-prefill-pod", bylabel.RoleEncodePrefill),
+				"decode": decodePod(),
+			},
+			wantDecode: inputTok + outputTok,
+		},
+		{
+			name: "prefill on a prefill-decode pod",
+			profiles: map[string]fwksched.Endpoint{
+				profilePrefill: newStubSchedulingEndpointWithRole("combined-pod", bylabel.RolePrefillDecode),
+				"decode":       decodePod(),
+			},
+			wantDecode: outputTok,
+		},
+		{
+			name: "prefill on a prefill pod",
+			profiles: map[string]fwksched.Endpoint{
+				profilePrefill: newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill),
+				"decode":       decodePod(),
+			},
+			wantDecode: outputTok,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			producer := newTestProducer(t)
+			req := makeTokenRequest("req-"+tc.name, inputTok)
+			req.PutAttribute(outlenbucket.AttributeKey, outlenbucket.Long)
+			res := &fwksched.SchedulingResult{PrimaryProfileName: "decode", ProfileResults: map[string]*fwksched.ProfileRunResult{}}
+			for profile, ep := range tc.profiles {
+				res.ProfileResults[profile] = &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{ep}}
+			}
+
+			require.NoError(t, producer.PreRequest(context.Background(), req, res))
+
+			require.Equal(t, tc.wantDecode, producer.tokenTracker.get(fullEndpointName("decode-pod")))
+		})
+	}
+}
+
+// TestInFlightLoadProducer_DecodeWithoutPrefill_Produce verifies the pre-scheduling
+// estimate: a decode-labeled endpoint is published with its input tokens unless the
+// candidate pool also has a prefill-only endpoint to take the prompt.
+func TestInFlightLoadProducer_DecodeWithoutPrefill_Produce(t *testing.T) {
+	t.Parallel()
+
+	const inputTok, outputTok = 4, 4096
+
+	tokensFor := func(t *testing.T, producer *InFlightLoadProducer, ep fwksched.Endpoint) int64 {
+		t.Helper()
+		value, ok := ep.Get(producer.uncachedRequestTokensDk)
+		require.True(t, ok)
+		return value.(*attrconcurrency.UncachedRequestTokens).Tokens
+	}
+	makeReq := func() *fwksched.InferenceRequest {
+		req := makeTokenRequest("r", inputTok)
+		req.PutAttribute(outlenbucket.AttributeKey, outlenbucket.Long)
+		return req
+	}
+
+	t.Run("decode-only pool -> input + estimated output", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		decodeEP := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
+		require.NoError(t, producer.Produce(context.Background(), makeReq(), []fwksched.Endpoint{decodeEP}))
+		require.Equal(t, int64(inputTok+outputTok), tokensFor(t, producer, decodeEP))
+	})
+
+	t.Run("pool with a prefill worker -> decode charged estimated output only", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)
+		decodeEP := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
+		require.NoError(t, producer.Produce(context.Background(), makeReq(), []fwksched.Endpoint{prefillEP, decodeEP}))
+		require.Equal(t, int64(inputTok), tokensFor(t, producer, prefillEP))
+		require.Equal(t, int64(outputTok), tokensFor(t, producer, decodeEP))
 	})
 }
 

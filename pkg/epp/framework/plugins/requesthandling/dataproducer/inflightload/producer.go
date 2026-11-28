@@ -432,12 +432,19 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		inputTokens = p.tokenEstimator.EstimateInput(request)
 	}
 
+	// Before scheduling, a decode-only endpoint can only hand the prompt off if
+	// the pool has a prefill-only endpoint to hand it to. This is a pool-level
+	// estimate and can differ from what PreRequest charges once the scheduler has
+	// decided whether to run a prefill stage. The flag is only read when
+	// estimated output tokens are added, so skip the scan otherwise.
+	prefillOffloaded := p.addEstimatedOutputTokens && request != nil && anyPrefillOnlyEndpoint(endpoints)
+
 	for _, e := range endpoints {
 		if e == nil || e.GetMetadata() == nil {
 			continue
 		}
 		if request != nil {
-			tokens := p.estimateRequestTokens(e, request, inputTokens)
+			tokens := p.estimateRequestTokens(e, request, inputTokens, prefillOffloaded)
 			p.uncachedRequestTokensSlot.Put(e, &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
@@ -502,6 +509,13 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		}
 	}
 
+	// A decode-only endpoint skips the prompt only when the scheduler ran a
+	// prefill stage on a different endpoint. Otherwise (decode-only decision,
+	// encode-decode, or a monolithic pod labeled decode) it runs prefill itself.
+	// This keys on the prefill profile, as the KV-event release does, rather than
+	// on role labels: the prefill filter also admits combined-role endpoints.
+	prefillTargetID := prefillProfileTargetID(result)
+
 	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -517,11 +531,13 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 		requestCounter := p.requestTracker.inc(eid)
 
+		prefillOffloaded := prefillTargetID != "" && prefillTargetID != eid
+
 		// Compute the uncached prompt portion this endpoint must actually compute.
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
+		tokens := p.estimateRequestTokens(endpoint, request, inputTokens, prefillOffloaded)
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
 
@@ -562,13 +578,20 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	return nil
 }
 
-func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
+// estimateRequestTokens returns the token load a request adds to endpoint.
+// prefillOffloaded reports whether another endpoint takes the prompt: in
+// PreRequest, whether the scheduler ran a prefill stage on a different endpoint;
+// in Produce, before scheduling, whether the candidate pool has a prefill-only
+// endpoint.
+func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64, prefillOffloaded bool) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 
 	// In P/D disaggregation the load is role-specific:
 	//   prefill-only endpoint -> input tokens (it processes the prompt, not the output)
-	//   decode-only endpoint  -> estimated output tokens (it generates the output; the
-	//                            input was already handled by the prefill worker)
+	//   decode-only endpoint  -> estimated output tokens, but only when another
+	//                            endpoint handles the prompt (prefillOffloaded). With
+	//                            none, the decode endpoint runs prefill itself and is
+	//                            charged input + estimated output like a monolithic one.
 	//   monolithic / combined -> input + estimated output (existing behavior, no P/D split)
 	// The split is derived from the pod-role label and only activates with known roles.
 	if endpointHasPrefillOnlyRole(endpoint) {
@@ -579,12 +602,13 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 		// Estimated output comes from the output-length bucket the outlen-bucket
 		// plugin published; an absent bucket is estimated as UNKNOWN (see PreRequest,
 		// which warns once when that happens with this option enabled).
-		if endpointHasDecodeOnlyRole(endpoint) {
-			// Decode-only endpoint: the input tokens were already accounted for by
-			// the prefill worker, so charge only the estimated output it will generate.
+		if prefillOffloaded && endpointHasDecodeOnlyRole(endpoint) {
+			// Decode-only endpoint behind a prefill worker: the input tokens are
+			// accounted for on the prefill worker, so charge only the estimated output.
 			return p.tokenEstimator.EstimateOutputFromRequest(request)
 		}
-		// Monolithic or combined-role: include both input and estimated output.
+		// Monolithic, combined-role, or decode-only with no prefill worker:
+		// include both input and estimated output.
 		return adjustedInput + p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return adjustedInput
@@ -599,6 +623,35 @@ func endpointHasPrefillOnlyRole(endpoint fwksched.Endpoint) bool {
 	}
 	role := endpoint.GetMetadata().Labels[bylabel.RoleLabel]
 	return role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill
+}
+
+// anyPrefillOnlyEndpoint reports whether any endpoint is a prefill-only worker
+// (prefill or encode-prefill). An encode-only endpoint does not count: it runs
+// the encoder, not the LLM prefill.
+func anyPrefillOnlyEndpoint(endpoints []fwksched.Endpoint) bool {
+	for _, e := range endpoints {
+		if endpointHasPrefillOnlyRole(e) {
+			return true
+		}
+	}
+	return false
+}
+
+// prefillProfileTargetID returns the ID of the primary target of the prefill
+// profile in the scheduling result, or "" when no prefill stage was scheduled.
+func prefillProfileTargetID(result *fwksched.SchedulingResult) string {
+	if result == nil {
+		return ""
+	}
+	profileResult := result.ProfileResults[profilePrefill]
+	if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
+		return ""
+	}
+	endpoint := profileResult.TargetEndpoints[0]
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return ""
+	}
+	return endpoint.GetMetadata().ID.String()
 }
 
 // endpointHasDecodeOnlyRole reports whether the endpoint is labeled as a
