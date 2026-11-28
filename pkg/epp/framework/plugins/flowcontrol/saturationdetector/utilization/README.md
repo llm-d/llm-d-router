@@ -51,6 +51,12 @@ the last known score for a bounded window) can be added later.
 
 `InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit. `DeferredQueueSize` is the `core-metrics-extractor` attribute for the queued requests that wait on a KV transfer in progress; endpoints whose engine config names no `deferredRequestsSpec` carry no such attribute, and a deferred count above the waiting queue (series scraped out of step) leaves the queue term unchanged.
 
+The credit starts when `PreRequest` publishes a request to its endpoint. From its release by the Flow Controller until then, a request is counted as one unit of queue depth against the pool (a dispatch reservation), with or without an `inflight-load-producer`:
+
+    PoolScore = (sum of endpoint scores + ReleasedRequests / QueueThreshold) / Endpoints
+
+With empty queues the pool therefore has at most `QueueThreshold x Endpoints` requests in that window at a time. That bounds the dispatch rate at `QueueThreshold x Endpoints / window`, where the window is the time a request spends between release and `PreRequest`. A pool whose endpoints each complete more than `QueueThreshold` requests within one window is held below its capacity. Set `queueDepthThreshold` above that count for such a pool.
+
 The correction rests on these assumptions:
 
 - **`RunningRequestsSize` must be populated.** The subtraction of running requests is only sound when the metrics mapping defines `runningRequestsSpec` (defaults exist for vLLM and SGLang). A custom mapping without it leaves `RunningRequestsSize` at 0, and the credit over-counts by the running count.

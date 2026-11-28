@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -80,9 +81,10 @@ func UtilizationDetectorFactory(
 }
 
 var (
-	_ fwksched.Filter                = &Detector{}
-	_ flowcontrol.SaturationDetector = &Detector{}
-	_ fwkplugin.ConsumerPlugin       = &Detector{}
+	_ fwksched.Filter                        = &Detector{}
+	_ flowcontrol.SaturationDetector         = &Detector{}
+	_ flowcontrol.DispatchReservationTracker = &Detector{}
+	_ fwkplugin.ConsumerPlugin               = &Detector{}
 )
 
 // Detector determines system saturation based on metrics of the given candidate pods.
@@ -95,6 +97,36 @@ type Detector struct {
 	// lastStaleWarnNanos is the wall-clock time (UnixNano) of the most recent stale-metrics log,
 	// accessed atomically because Saturation may be called concurrently.
 	lastStaleWarnNanos atomic.Int64
+
+	// dispatchReservations holds the requests flow control released that PreRequest has not
+	// published. pendingDispatches is their count.
+	dispatchReservations sync.Map
+	pendingDispatches    atomic.Int64
+}
+
+// ReserveDispatch counts a request from its release by flow control. Neither the scrape nor the
+// in-flight credit covers it until PreRequest has run.
+func (d *Detector) ReserveDispatch(requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	if _, loaded := d.dispatchReservations.LoadOrStore(requestID, struct{}{}); loaded {
+		return false
+	}
+	d.pendingDispatches.Add(1)
+	return true
+}
+
+// ReleaseDispatch removes a dispatch reservation. Duplicate and unknown releases are no-ops.
+func (d *Detector) ReleaseDispatch(requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	if _, loaded := d.dispatchReservations.LoadAndDelete(requestID); !loaded {
+		return false
+	}
+	d.pendingDispatches.Add(-1)
+	return true
 }
 
 // NewDetector creates a new instance of the Utilization Detector.
@@ -236,6 +268,9 @@ func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoi
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.
 		totalScore += max(qRatio, kvRatio)
 	}
+
+	// A released request has no endpoint yet, so it adds one unit of queue depth to the pool.
+	totalScore += float64(d.pendingDispatches.Load()) / float64(d.config.QueueDepthThreshold)
 
 	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, staleCount)
 	if staleCount > 0 {
