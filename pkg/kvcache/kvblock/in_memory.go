@@ -25,7 +25,6 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	lru "github.com/hashicorp/golang-lru/v2"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -80,7 +79,7 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
 	}
 
-	engineToRequestKeys, err := lru.New[BlockHash, []BlockHash](cfg.Size)
+	engineToRequestKeys, err := newEngineKeyTable(cfg.Size)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize in-memory engine key map: %w", err)
 	}
@@ -118,7 +117,7 @@ type InMemoryIndex struct {
 	// data holds the mapping of requestKeys to sets of pod identifiers.
 	data *lruStore
 	// engineToRequestKeys holds the mapping of engineKeys to requestKeys.
-	engineToRequestKeys *lru.Cache[BlockHash, []BlockHash]
+	engineToRequestKeys *engineKeyTable
 	// podCacheSize is the maximum number of pod entries per key.
 	podCacheSize int
 	// pods and tiers assign the ordinals EntryRef carries. Neither is
@@ -584,11 +583,11 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 // This is what Pool uses for parent hash resolution.
 // Returns an error if the engineKey mapping is missing (e.g., already evicted).
 func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
-	rks, found := m.engineToRequestKeys.Get(engineKey)
-	if !found || len(rks) == 0 {
+	rk, found := m.engineToRequestKeys.Get(engineKey)
+	if !found {
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
-	return rks[len(rks)-1], nil
+	return rk, nil
 }
 
 // podsPerKeyPrintHelper formats a map of keys to pod names for printing.

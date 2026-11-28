@@ -50,7 +50,8 @@ func TestAddRejectsTierCardinalityPastTheCap(t *testing.T) {
 	require.ErrorIs(t, err, errIndexCardinality)
 	_, found := index.data.Peek(requestKey)
 	assert.False(t, found, "a rejected Add must not create the key")
-	assert.False(t, index.engineToRequestKeys.Contains(engineKey), "a rejected Add must not map the engine key")
+	_, mapped := index.engineToRequestKeys.Peek(engineKey)
+	assert.False(t, mapped, "a rejected Add must not map the engine key")
 	assert.Equal(t, podsBefore, len(index.pods.ids), "a rejected Add must not consume a pod ordinal")
 	assert.Equal(t, tiersBefore, len(index.tiers.ids), "a rejected Add must not consume a tier ordinal")
 

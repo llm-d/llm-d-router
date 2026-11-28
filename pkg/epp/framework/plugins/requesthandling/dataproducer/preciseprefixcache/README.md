@@ -44,6 +44,13 @@ no `TokenizedPrompt` is a no-op.
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.
 
+For SGLang pods, set `--page-size` to `tokenProcessorConfig.blockSizeTokens`
+(16 by default). Each engine block an event names is an engine key that the
+index and the KV-events pool keep until the block is removed. At `--page-size 1`
+every cached token is an engine key, and the producer holds several times the
+memory per cached token that it holds at page size 16. On large fleets that
+cost grows with the total tokens cached across all pods.
+
 The producer subscribes to each discovered endpoint's event socket and
 attributes events to the endpoint it dialed. `kvEventsConfig.zmqEndpoint` is a
 deprecated alternative that binds one socket every engine publishes to. A
