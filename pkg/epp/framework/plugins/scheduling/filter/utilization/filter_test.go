@@ -21,14 +21,17 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -226,6 +229,34 @@ func TestUtilizationFilter_Filter(t *testing.T) {
 	}
 }
 
+// TestUtilizationFilter_WaitingQueueLeavesDeferredOut filters the way the
+// scheduler does: the endpoints are scoped to the filter's declarations before
+// Filter.
+func TestUtilizationFilter_WaitingQueueLeavesDeferredOut(t *testing.T) {
+	ctx := testutils.NewTestContext(t)
+	filter, err := NewUtilizationFilter("", parameters{Conditions: []condition{condCap(MetricWaitingQueue, 1)}})
+	require.NoError(t, err)
+
+	endpoint := func(name string, waiting int, deferred float64) scheduling.Endpoint {
+		ep := newStubEndpoint(name)
+		ep.metrics = &datalayer.Metrics{WaitingQueueSize: waiting}
+		ep.Put(attrmetrics.ScalarMetricDataKey("DeferredQueueSize"), attrmetrics.ScalarMetricValue(deferred))
+		return ep
+	}
+	eppdatalayer.RegisterScopeSpecs([]fwkplugin.Plugin{filter})
+	scoped, _ := eppdatalayer.Scope(logr.Discard(), "Filter", filter, []scheduling.Endpoint{
+		endpoint("all-deferred", 2, 2),
+		endpoint("one-of-two-deferred", 2, 1),
+		endpoint("one-of-three-deferred", 3, 1),
+		endpoint("deferred-above-waiting", 2, 3),
+		endpoint("negative-deferred", 1, -1),
+	})
+
+	got := filter.Filter(ctx, nil, scoped)
+
+	assert.Equal(t, []string{"all-deferred", "one-of-two-deferred", "negative-deferred"}, endpointNames(got))
+}
+
 func TestNewUtilizationFilter_InvalidParameters(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -283,10 +314,23 @@ func TestUtilizationFilter_Consumes(t *testing.T) {
 
 		require.Len(t, consumes.Required, 1)
 		assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes.Required[attrconcurrency.InFlightLoadDataKey])
+		assert.Contains(t, consumes.Optional, attrmetrics.ScalarMetricDataKey("DeferredQueueSize"))
+	})
+
+	t.Run("waiting-queue reads the deferred count as optional", func(t *testing.T) {
+		filter, err := NewUtilizationFilter("", parameters{Conditions: []condition{condCap(MetricWaitingQueue, 0)}})
+		require.NoError(t, err)
+
+		consumes := filter.Consumes()
+
+		assert.Empty(t, consumes.Required)
+		assert.Equal(t, map[fwkplugin.DataKey]any{
+			attrmetrics.ScalarMetricDataKey("DeferredQueueSize"): attrmetrics.ScalarMetricValue(0),
+		}, consumes.Optional)
 	})
 
 	t.Run("model-server metrics require no producer", func(t *testing.T) {
-		for _, metric := range []string{MetricRunningRequests, MetricWaitingQueue, MetricKVCacheUtilization} {
+		for _, metric := range []string{MetricRunningRequests, MetricKVCacheUtilization} {
 			filter, err := NewUtilizationFilter("", parameters{Conditions: []condition{condCap(metric, 1)}})
 			require.NoError(t, err)
 
