@@ -18,10 +18,15 @@ package steps
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"net/http"
+	"slices"
+	"strconv"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -134,18 +139,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		bodies[i] = body
 	}
 
-	// A repeated non-empty hash needs one encoder response; empty hashes are independent.
-	requestIndices := make([]int, 0, len(reqCtx.MultimodalEntries))
-	seenHashes := make(map[string]struct{}, len(reqCtx.MultimodalEntries))
-	for i, entry := range reqCtx.MultimodalEntries {
-		if entry.Hash != "" {
-			if _, seen := seenHashes[entry.Hash]; seen {
-				continue
-			}
-			seenHashes[entry.Hash] = struct{}{}
-		}
-		requestIndices = append(requestIndices, i)
-	}
+	requestIndices := selectEncodeRequestIndices(reqCtx.MultimodalEntries, localIdx, format, partsByMod)
 
 	reqCtx.EncodeFanout = len(requestIndices)
 	results := make([]map[string]any, len(requestIndices))
@@ -337,4 +331,279 @@ type encodeResponse struct {
 	// ECTransferParams is decoded as any (not map[string]any) so a non-object
 	// value does not fail the decode; coerceParamsMap coerces it.
 	ECTransferParams any `json:"ec_transfer_params"`
+}
+
+type modalityUUID struct {
+	modality reqcommon.Modality
+	uuid     string
+}
+
+type partHashWriter struct {
+	h   hash.Hash
+	buf [4096]byte
+}
+
+func (w *partHashWriter) reset(modality reqcommon.Modality) {
+	if w.h == nil {
+		w.h = sha256.New()
+	} else {
+		w.h.Reset()
+	}
+	w.writeString(string(modality))
+	w.writeByte(0)
+}
+
+func (w *partHashWriter) writeByte(b byte) {
+	w.buf[0] = b
+	_, _ = w.h.Write(w.buf[:1])
+}
+
+func (w *partHashWriter) writeUint64(v uint64) {
+	binary.BigEndian.PutUint64(w.buf[:8], v)
+	_, _ = w.h.Write(w.buf[:8])
+}
+
+func (w *partHashWriter) writeString(s string) {
+	for len(s) > 0 {
+		n := copy(w.buf[:], s)
+		_, _ = w.h.Write(w.buf[:n])
+		s = s[n:]
+	}
+}
+
+func (w *partHashWriter) writeLenString(s string) {
+	w.writeUint64(uint64(len(s)))
+	w.writeString(s)
+}
+
+// writeMessagesImageSource hashes the canonical image URL vLLM derives from an
+// Anthropic Messages image block, ignoring top-level block metadata (such as
+// uuid and cache_control) and unifying url vs base64 source shapes without
+// allocating a concatenated data URL.
+func (w *partHashWriter) writeMessagesImageSource(part map[string]any) bool {
+	source, isMap := part[reqcommon.FieldSource].(map[string]any)
+	if !isMap {
+		return false
+	}
+	sourceType, _ := source[reqcommon.FieldType].(string)
+	rawURL, _ := source[reqcommon.FieldURL].(string)
+	data, _ := source[reqcommon.FieldData].(string)
+	mediaType, _ := source[reqcommon.FieldMediaType].(string)
+
+	// Mirrors reqcommon.AnthropicImageURL without allocating "data:..."+data.
+	if sourceType == reqcommon.ImageSourceTypeURL || rawURL != "" {
+		if rawURL == "" {
+			return false
+		}
+		w.writeByte('U')
+		w.writeLenString(rawURL)
+		return true
+	}
+	if data == "" {
+		return false
+	}
+	if mediaType == "" {
+		mediaType = reqcommon.DefaultImageMediaType
+	}
+	const prefix, mid = "data:", ";base64,"
+	w.writeByte('U')
+	w.writeUint64(uint64(len(prefix) + len(mediaType) + len(mid) + len(data)))
+	w.writeString(prefix)
+	w.writeString(mediaType)
+	w.writeString(mid)
+	w.writeString(data)
+	return true
+}
+
+func (w *partHashWriter) writeValue(v any) bool {
+	switch val := v.(type) {
+	case nil:
+		w.writeByte('n')
+	case bool:
+		if val {
+			w.writeByte('t')
+		} else {
+			w.writeByte('f')
+		}
+	case string:
+		w.writeByte('s')
+		w.writeLenString(val)
+	case float64:
+		if val == 0 {
+			val = 0 // normalize -0 to 0
+		}
+		w.buf[0] = '#'
+		num := strconv.AppendFloat(w.buf[9:9], val, 'g', -1, 64)
+		binary.BigEndian.PutUint64(w.buf[1:9], uint64(len(num)))
+		_, _ = w.h.Write(w.buf[:9+len(num)])
+	case int:
+		w.buf[0] = '#'
+		num := strconv.AppendInt(w.buf[9:9], int64(val), 10)
+		binary.BigEndian.PutUint64(w.buf[1:9], uint64(len(num)))
+		_, _ = w.h.Write(w.buf[:9+len(num)])
+	case int64:
+		w.buf[0] = '#'
+		num := strconv.AppendInt(w.buf[9:9], val, 10)
+		binary.BigEndian.PutUint64(w.buf[1:9], uint64(len(num)))
+		_, _ = w.h.Write(w.buf[:9+len(num)])
+	case uint64:
+		w.buf[0] = '#'
+		num := strconv.AppendUint(w.buf[9:9], val, 10)
+		binary.BigEndian.PutUint64(w.buf[1:9], uint64(len(num)))
+		_, _ = w.h.Write(w.buf[:9+len(num)])
+	case json.Number:
+		w.writeByte('#')
+		w.writeLenString(string(val))
+	case []any:
+		w.writeByte('[')
+		w.writeUint64(uint64(len(val)))
+		for _, elem := range val {
+			if !w.writeValue(elem) {
+				return false
+			}
+		}
+	case []string:
+		w.writeByte('[')
+		w.writeUint64(uint64(len(val)))
+		for _, elem := range val {
+			w.writeByte('s')
+			w.writeLenString(elem)
+		}
+	case []map[string]any:
+		w.writeByte('[')
+		w.writeUint64(uint64(len(val)))
+		for _, elem := range val {
+			if !w.writeValue(elem) {
+				return false
+			}
+		}
+	case map[string]any:
+		w.writeByte('{')
+		w.writeUint64(uint64(len(val)))
+		if len(val) == 0 {
+			return true
+		}
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			w.writeLenString(k)
+			if !w.writeValue(val[k]) {
+				return false
+			}
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+func (w *partHashWriter) sum() [sha256.Size]byte {
+	var digest [sha256.Size]byte
+	w.h.Sum(digest[:0])
+	return digest
+}
+
+// selectEncodeRequestIndices returns the entry indices that need an encoder
+// sub-request. Entries with a render-populated Hash deduplicate on that hash.
+// When Hash is empty on a client-format request (for example a pipeline with
+// use_openai_format enabled and no render step), entries deduplicate locally on
+// the client uuid when vLLM honors it, or on a streaming SHA-256 digest of the
+// media part (canonical image source for Messages) so MultimodalEntry stays
+// free of synthetic hashes and large payloads are hashed without heap copies.
+func selectEncodeRequestIndices(
+	entries []pipeline.MultimodalEntry,
+	localIdx []int,
+	format reqcommon.APIType,
+	partsByMod map[reqcommon.Modality][]mediaPart,
+) []int {
+	if len(entries) <= 1 {
+		if len(entries) == 1 {
+			return []int{0}
+		}
+		return nil
+	}
+
+	clientFormat := format == reqcommon.APITypeChatCompletions ||
+		format == reqcommon.APITypeResponses ||
+		format == reqcommon.APITypeMessages
+
+	var emptyByMod map[reqcommon.Modality]int
+	if clientFormat {
+		for _, entry := range entries {
+			if entry.Hash == "" {
+				if emptyByMod == nil {
+					emptyByMod = make(map[reqcommon.Modality]int)
+				}
+				emptyByMod[entry.Modality]++
+			}
+		}
+	}
+
+	requestIndices := make([]int, 0, len(entries))
+	var (
+		seenHashes map[string]struct{}
+		seenUUIDs  map[modalityUUID]struct{}
+		seenParts  map[[sha256.Size]byte]struct{}
+		partHasher *partHashWriter
+	)
+
+	for i, entry := range entries {
+		if entry.Hash != "" {
+			if _, seen := seenHashes[entry.Hash]; seen {
+				continue
+			}
+			if seenHashes == nil {
+				seenHashes = make(map[string]struct{}, len(entries))
+			}
+			seenHashes[entry.Hash] = struct{}{}
+			requestIndices = append(requestIndices, i)
+			continue
+		}
+		if clientFormat && emptyByMod[entry.Modality] > 1 {
+			parts := partsByMod[entry.Modality]
+			if localIdx[i] >= 0 && localIdx[i] < len(parts) {
+				part := parts[localIdx[i]].part
+				// vLLM's Anthropic conversion ignores uuid on Messages image blocks.
+				if format != reqcommon.APITypeMessages {
+					if id, _ := part[reqcommon.FieldUUID].(string); id != "" {
+						key := modalityUUID{modality: entry.Modality, uuid: id}
+						if _, seen := seenUUIDs[key]; seen {
+							continue
+						}
+						if seenUUIDs == nil {
+							seenUUIDs = make(map[modalityUUID]struct{})
+						}
+						seenUUIDs[key] = struct{}{}
+						requestIndices = append(requestIndices, i)
+						continue
+					}
+				}
+				if partHasher == nil {
+					partHasher = &partHashWriter{}
+				}
+				partHasher.reset(entry.Modality)
+				var hashed bool
+				if format == reqcommon.APITypeMessages {
+					hashed = partHasher.writeMessagesImageSource(part)
+				} else {
+					hashed = partHasher.writeValue(part)
+				}
+				if hashed {
+					digest := partHasher.sum()
+					if _, seen := seenParts[digest]; seen {
+						continue
+					}
+					if seenParts == nil {
+						seenParts = make(map[[sha256.Size]byte]struct{})
+					}
+					seenParts[digest] = struct{}{}
+				}
+			}
+		}
+		requestIndices = append(requestIndices, i)
+	}
+	return requestIndices
 }
