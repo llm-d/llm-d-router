@@ -233,10 +233,10 @@ func TestEncodeAndPrefill_GenerateContentPartsWithMMPayloadNone(t *testing.T) {
 	defer server.Close()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	encode, err := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL})
+	encode, err := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, ParamECConnector: ec.NIXL})
 	require.NoError(t, err)
 	require.NoError(t, encode.Execute(context.Background(), reqCtx))
-	prefill, err := NewPrefillStep(gwClient, map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL})
+	prefill, err := NewPrefillStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, ParamECConnector: ec.NIXL})
 	require.NoError(t, err)
 	require.NoError(t, prefill.Execute(context.Background(), reqCtx))
 
@@ -273,7 +273,7 @@ func TestEncodeStep_ContentPartsRejectsNonUniformSpan(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	encode, err := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL})
+	encode, err := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, ParamECConnector: ec.NIXL})
 	require.NoError(t, err)
 
 	reqCtx := &pipeline.RequestContext{
@@ -495,7 +495,7 @@ func TestPrefillStep_TextOnlyGenerateOmitsFeatures(t *testing.T) {
 	}))
 	defer server.Close()
 	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}),
-		map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL})
+		map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, ParamECConnector: ec.NIXL})
 	require.NoError(t, err)
 	reqCtx := &pipeline.RequestContext{
 		OriginalPath: reqcommon.PathChatCompletions,

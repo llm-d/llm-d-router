@@ -30,6 +30,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -44,7 +45,7 @@ func init() {
 }
 
 type PrefillStep struct {
-	useOpenAIFormat bool
+	workerFormat    string
 	forwardTokenIDs bool
 	gwClient        *gateway.Client
 	kv              kv.Connector
@@ -55,7 +56,7 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if gwClient == nil {
 		return nil, errors.New("prefill: gateway client is required")
 	}
-	useOpenAI, err := parseUseOpenAIFormat(params)
+	workerFormat, err := parseWorkerFormat(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
@@ -71,11 +72,12 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	if forwardTokenIDs && !useOpenAI {
-		return nil, fmt.Errorf("prefill: %s requires use_openai_format=true (the tokens-in format sends the token IDs as token_ids)", ParamForwardPromptTokenIDs)
+	if forwardTokenIDs && workerFormat == config.WorkerFormatTokens {
+		return nil, fmt.Errorf("prefill: %s requires %s=%s (the tokens-in format sends the token IDs as token_ids)",
+			ParamForwardPromptTokenIDs, config.ParamWorkerFormat, config.WorkerFormatPassthrough)
 	}
 	return &PrefillStep{
-		useOpenAIFormat: useOpenAI,
+		workerFormat:    workerFormat,
 		forwardTokenIDs: forwardTokenIDs,
 		gwClient:        gwClient,
 		kv:              kvConn,
@@ -94,7 +96,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	format := resolveFormat(s.workerFormat, reqCtx.OriginalPath)
 	body, err := s.buildPrefillBody(ctx, reqCtx, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)

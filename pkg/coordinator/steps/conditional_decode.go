@@ -52,7 +52,7 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 	if gwClient == nil {
 		return nil, errors.New("conditional-decode: gateway client is required")
 	}
-	if err := rejectUseOpenAIFormatOverride(ConditionalDecodeStepName, params); err != nil {
+	if err := rejectWorkerFormatOverride(ConditionalDecodeStepName, params); err != nil {
 		return nil, err
 	}
 	if err := rejectForceStreamParams(ConditionalDecodeStepName, params); err != nil {

@@ -37,6 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -181,7 +182,8 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 	params := base()
 	params[steps.ParamKVConnector] = "kv-shared-storage"
 	params[steps.ParamECConnector] = "ec-shared-storage"
-	params["use_openai_format"] = true
+	params[config.ParamWorkerFormat] = config.WorkerFormatPassthrough
+	params[config.ParamUseOpenAIFormat] = true
 	_, err := New(nil, params)
 	require.NoError(t, err)
 }

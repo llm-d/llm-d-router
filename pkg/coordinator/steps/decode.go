@@ -55,7 +55,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if gwClient == nil {
 		return nil, errors.New("decode: gateway client is required")
 	}
-	if err := rejectUseOpenAIFormatOverride(DecodeStepName, params); err != nil {
+	if err := rejectWorkerFormatOverride(DecodeStepName, params); err != nil {
 		return nil, err
 	}
 	if err := rejectForceStreamParams(DecodeStepName, params); err != nil {

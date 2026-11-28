@@ -189,12 +189,12 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 		Body:             map[string]any{"model": "test-model", "stream": false, "prompt": "hello"},
 	}
 
-	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("encode failed: %v", err)
 	}
 
-	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{"use_openai_format": false})
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens})
 	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("prefill failed: %v", err)
 	}

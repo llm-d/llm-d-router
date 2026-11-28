@@ -114,8 +114,8 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			stepConfigs := []config.StepConfig{
 				{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 				{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
-				{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: tc.ecConnector}},
-				{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector, steps.ParamECConnector: tc.ecConnector}},
+				{Type: "encode", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, steps.ParamECConnector: tc.ecConnector}},
+				{Type: "prefill", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, steps.ParamKVConnector: tc.kvConnector, steps.ParamECConnector: tc.ecConnector}},
 				{Type: "decode", Params: map[string]any{steps.ParamKVConnector: tc.kvConnector}},
 			}
 
@@ -256,8 +256,8 @@ func TestFullPipeline_Integration(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
-		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
-		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
+		{Type: "encode", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, steps.ParamECConnector: ec.NIXL}},
 		{Type: "decode"},
 	}
 
@@ -327,7 +327,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 	}
 
 	// The decode step's body format must track the request's original path
-	// (/v1/chat/completions) rather than the pipeline's use_openai_format
+	// (/v1/chat/completions) rather than the pipeline's worker_format
 	// setting, which decode ignores. A regression here would nest
 	// kv_transfer_params under sampling_params.extra_args instead, the
 	// generate-shaped body a chat-completions endpoint does not read.
@@ -436,8 +436,8 @@ func TestFullPipeline_MetricsSmoke(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
-		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
-		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
+		{Type: "encode", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens, steps.ParamECConnector: ec.NIXL}},
 		{Type: "decode"},
 	}
 	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
@@ -599,8 +599,8 @@ func TestFullPipeline_ResponsesFormat(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{}},
-		{Type: "encode", Params: map[string]any{"use_openai_format": true, steps.ParamECConnector: ec.NIXL}},
-		{Type: "prefill", Params: map[string]any{"use_openai_format": true, steps.ParamKVConnector: kv.NIXL, steps.ParamECConnector: ec.NIXL}},
+		{Type: "encode", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough, steps.ParamKVConnector: kv.NIXL, steps.ParamECConnector: ec.NIXL}},
 		{Type: "decode", Params: map[string]any{steps.ParamKVConnector: kv.NIXL}},
 	}
 
@@ -826,8 +826,8 @@ func TestFullPipeline_MessagesFormat(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{}},
-		{Type: "encode", Params: map[string]any{"use_openai_format": true, steps.ParamECConnector: ec.NIXL}},
-		{Type: "prefill", Params: map[string]any{"use_openai_format": true, steps.ParamKVConnector: kv.NIXL, steps.ParamECConnector: ec.NIXL}},
+		{Type: "encode", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough, steps.ParamKVConnector: kv.NIXL, steps.ParamECConnector: ec.NIXL}},
 		{Type: "decode", Params: map[string]any{steps.ParamKVConnector: kv.NIXL}},
 	}
 

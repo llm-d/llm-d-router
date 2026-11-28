@@ -84,8 +84,8 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 
 			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
 			step, err := NewPrefillStep(gwClient, map[string]any{
-				"use_openai_format": false,
-				ParamKVConnector:    tc.connector,
+				config.ParamWorkerFormat: config.WorkerFormatTokens,
+				ParamKVConnector:         tc.connector,
 			})
 			if err != nil {
 				t.Fatalf("NewPrefillStep: %v", err)
@@ -253,16 +253,38 @@ func TestDecodeStep_UnknownConnectorRejected(t *testing.T) {
 	}
 }
 
-func TestDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+func TestDecodeStep_WorkerFormatOverrideRejected(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{})
-	if _, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false}); err == nil {
-		t.Fatal("expected error overriding use_openai_format")
+	tests := []struct {
+		name   string
+		params map[string]any
+	}{
+		{name: "worker_format", params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatTokens}},
+		{name: "deprecated_use_openai_format", params: map[string]any{config.ParamUseOpenAIFormat: false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewDecodeStep(gwClient, tt.params); err == nil {
+				t.Fatalf("expected error overriding %s", tt.name)
+			}
+		})
 	}
 }
 
-func TestConditionalDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+func TestConditionalDecodeStep_WorkerFormatOverrideRejected(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{})
-	if _, err := NewConditionalDecodeStep(gwClient, map[string]any{"use_openai_format": true}); err == nil {
-		t.Fatal("expected error overriding use_openai_format")
+	tests := []struct {
+		name   string
+		params map[string]any
+	}{
+		{name: "worker_format", params: map[string]any{config.ParamWorkerFormat: config.WorkerFormatPassthrough}},
+		{name: "deprecated_use_openai_format", params: map[string]any{config.ParamUseOpenAIFormat: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewConditionalDecodeStep(gwClient, tt.params); err == nil {
+				t.Fatalf("expected error overriding %s", tt.name)
+			}
+		})
 	}
 }

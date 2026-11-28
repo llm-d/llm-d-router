@@ -5,7 +5,7 @@ This document describes the request and response formats for each stage of the c
 > [!NOTE] 
 > The encode and prefill steps support three request protocols: `/inference/v1/generate`, `/v1/chat/completions`, and `/v1/responses`. The latter two are the OpenAI formats; `/v1/responses` is forwarded on its own path and carries its prompt in an `input` array of `input_text`/`input_image` parts rather than in `messages`. 
 The `/inference/v1/generate` format is the preferred protocol as it naturally implements tokens-in protocol, and eliminates additional tokenization.
-However, it is relatively new and may contain bugs. The `/v1/chat/completions` format is available as a fallback option, reusing the existing well-tested chat completions endpoint. The active protocol is controlled by the `use_openai_format` configuration (see [Request Format Configuration](#request-format-configuration)).
+However, it is relatively new and may contain bugs. The `/v1/chat/completions` format is available as a fallback option, reusing the existing well-tested chat completions endpoint. The active protocol is controlled by the `worker_format` configuration (see [Request Format Configuration](#request-format-configuration)).
 
 ## Table of Contents
 
@@ -1093,9 +1093,9 @@ It applies when render returns the tensors and when the render step omits them (
 
 This applies to prefill legs that carry a `features` map: the completions and
 generate wire formats. A chat-completions client reaches those legs when
-`use_openai_format` is `false`, which routes prefill through
-`/inference/v1/generate`; with the default `true`, prefill forwards the client
-body, which carries no `features`. A client calling `/inference/v1/generate`
+`worker_format` is `tokens`, which routes prefill through
+`/inference/v1/generate`. With the default `passthrough`, prefill forwards the
+client body, which carries no `features`. A client calling `/inference/v1/generate`
 directly runs no encode stage (see
 [Generate Requests](#generate-requests-inferencev1generate)), so
 `ec_transfer_params` stays empty and every entry falls back to `kwargs_data`.
@@ -1360,18 +1360,20 @@ The coordinator uses the `x-llm-d-epp-profile` HTTP header to identify the pipel
 | Decode            | `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 | Conditional-Decode| `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 
-For encode and prefill, the request path matches the user's original endpoint when using OpenAI format, or `/inference/v1/generate` when using the internal format. Decode and conditional-decode always forward on the client's original path regardless of `use_openai_format`.
+For encode and prefill, the request path matches the user's original endpoint when `worker_format` is `passthrough`, or `/inference/v1/generate` when `worker_format` is `tokens`. Decode and conditional-decode always forward on the client's original path regardless of `worker_format`.
 
 ---
 
 ## Request Format Configuration
 
-The `use_openai_format` setting (`pipeline.use_openai_format`, environment variable: `COORDINATOR_PIPELINE_USE_OPENAI_FORMAT`, default: `true`) controls how encode and prefill steps construct their requests. `false` (the tokens-in format) requires a `render` step in the pipeline, since render produces the token IDs the generate format sends:
+The `worker_format` setting (`pipeline.worker_format`, environment variable: `COORDINATOR_PIPELINE_WORKER_FORMAT`, default: `passthrough`) controls how the encode and prefill steps construct requests. The `tokens` value requires a `render` step in the pipeline because `render` produces the token IDs that the generate format sends.
 
-- **`use_openai_format: true` (default):** The request path and body format are derived from the user's original request path at runtime.
-- **`use_openai_format: false`:** Uses the internal generate format (`/inference/v1/generate`) with `token_ids` and `features` (including `kwargs_data`) directly in the body.
+- **`worker_format: passthrough` (default):** Forward on the client's original request path and body format (`/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`).
+- **`worker_format: tokens`:** Rewrite requests to the internal generate format (`/inference/v1/generate`) with `token_ids` and `features` (including `kwargs_data`) in the body.
 
-A `/inference/v1/generate` client request always uses the generate wire format regardless of `use_openai_format`: the inbound path already carries token IDs, so there is no OpenAI body to preserve.
+The legacy boolean key `use_openai_format` (`true` maps to `passthrough`, `false` maps to `tokens`) is deprecated and remains accepted as a compatibility alias.
+
+A `/inference/v1/generate` client request always uses the generate wire format regardless of `worker_format`. The inbound path already carries token IDs.
 
 | User's original path | Encode format | Prefill format | Decode format |
 |---------------------|---------------|----------------|---------------|
@@ -1379,7 +1381,7 @@ A `/inference/v1/generate` client request always uses the generate wire format r
 | `/v1/completions` | N/A (no images) | `{"prompt": [...], "max_tokens": 1, "kv_transfer_params": {...}, ...}` | `{"prompt": [...], "kv_transfer_params": {...}, ...}` |
 | `/inference/v1/generate` | N/A (skipped; prefill encodes inline from `kwargs_data`) | `token_ids` + `features` (incl. `kwargs_data`) + `kv_transfer_params` | `token_ids` + `kv_transfer_params` |
 
-When `use_openai_format: false`:
+When `worker_format: tokens`:
 
 | Stage | Format |
 |-------|--------|
@@ -1458,7 +1460,7 @@ and otherwise clears the field, so a default deployment retains nothing. Where
 it is enabled, the retained object is unreachable, since `previous_response_id`
 and `conversation` are rejected.
 
-When `use_openai_format` is `false`, the encode and prefill steps collapse to the
+When `worker_format` is `tokens`, the encode and prefill steps collapse to the
 internal `/inference/v1/generate` tokens-in format the same way chat completions
 do (see [Request Format Configuration](#request-format-configuration)).
 
@@ -1508,7 +1510,7 @@ Per stage:
 `/v1/messages/count_tokens` is not a pipeline route; it passes through to the
 gateway.
 
-When `use_openai_format` is `false`, the encode and prefill steps collapse to the
+When `worker_format` is `tokens`, the encode and prefill steps collapse to the
 internal `/inference/v1/generate` tokens-in format the same way chat completions
 do (see [Request Format Configuration](#request-format-configuration)).
 

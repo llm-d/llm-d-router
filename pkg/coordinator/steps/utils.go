@@ -30,6 +30,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -103,26 +104,55 @@ func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Cl
 	return resp, nil
 }
 
-// parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to
-// true when absent. A present but non-bool value is a configuration error.
-func parseUseOpenAIFormat(params map[string]any) (bool, error) {
-	v, ok, err := paramBool(params, "use_openai_format")
-	if err != nil {
-		return false, err
+// parseWorkerFormat reads the worker_format step parameter, falling back to
+// the legacy use_openai_format boolean alias and defaulting to passthrough
+// when neither is set. Setting both keys or an invalid value is a configuration
+// error.
+func parseWorkerFormat(params map[string]any) (string, error) {
+	_, hasFormat := params[config.ParamWorkerFormat]
+	_, hasLegacy := params[config.ParamUseOpenAIFormat]
+	if hasFormat && hasLegacy {
+		return "", fmt.Errorf("%s and deprecated %s cannot both be set",
+			config.ParamWorkerFormat, config.ParamUseOpenAIFormat)
 	}
-	if !ok {
-		return true, nil
+	if hasFormat {
+		v, err := paramString(params, config.ParamWorkerFormat)
+		if err != nil {
+			return "", err
+		}
+		if v == "" {
+			return config.WorkerFormatPassthrough, nil
+		}
+		if err := config.ValidateWorkerFormat(v); err != nil {
+			return "", fmt.Errorf("%s must be %q or %q, got %q",
+				config.ParamWorkerFormat, config.WorkerFormatPassthrough, config.WorkerFormatTokens, v)
+		}
+		return v, nil
 	}
-	return v, nil
+	if hasLegacy {
+		v, ok, err := paramBool(params, config.ParamUseOpenAIFormat)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return config.WorkerFormatPassthrough, nil
+		}
+		return config.WorkerFormatFromLegacyBool(v), nil
+	}
+	return config.WorkerFormatPassthrough, nil
 }
 
-// rejectUseOpenAIFormatOverride returns an error if params sets use_openai_format.
-// decode and conditional-decode derive their body format directly from the
-// request's original path, so a step-level override has no effect; rejecting
-// the key surfaces stale config instead of silently ignoring it.
-func rejectUseOpenAIFormatOverride(step string, params map[string]any) error {
-	if _, ok := params["use_openai_format"]; ok {
-		return fmt.Errorf("%s: use_openai_format is not a valid parameter for this step", step)
+// rejectWorkerFormatOverride returns an error if params sets worker_format or
+// the deprecated use_openai_format alias. decode and conditional-decode derive
+// their body format directly from the request's original path, so a step-level
+// override has no effect; rejecting both keys surfaces stale config instead of
+// silently ignoring it.
+func rejectWorkerFormatOverride(step string, params map[string]any) error {
+	if _, ok := params[config.ParamWorkerFormat]; ok {
+		return fmt.Errorf("%s: %s is not a valid parameter for this step", step, config.ParamWorkerFormat)
+	}
+	if _, ok := params[config.ParamUseOpenAIFormat]; ok {
+		return fmt.Errorf("%s: %s is not a valid parameter for this step", step, config.ParamUseOpenAIFormat)
 	}
 	return nil
 }
@@ -137,15 +167,15 @@ func unreachableFormatError(format reqcommon.APIType) error {
 // resolveFormat maps a request path to the wire format a step emits. The steps
 // build only Completions, Chat Completions, Responses, Messages, and generate
 // bodies, so any other API collapses to APITypeVLLMGenerate; Chat Completions,
-// Responses, and Messages additionally require useOpenAIFormat. Generate is the
-// fallback because its body carries the prompt as reqCtx.TokenIDs and does not
-// depend on the client's request shape.
-func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
+// Responses, and Messages stay on their original path unless workerFormat is
+// tokens. Generate is the fallback because its body carries the prompt as
+// reqCtx.TokenIDs and does not depend on the client's request shape.
+func resolveFormat(workerFormat string, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
-		if useOpenAIFormat {
+		if workerFormat != config.WorkerFormatTokens {
 			return detected
 		}
 	}

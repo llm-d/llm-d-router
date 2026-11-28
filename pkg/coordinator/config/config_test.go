@@ -61,7 +61,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
 		{"gateway.timeout", cfg.Gateway.Timeout, 60 * time.Second},
 		{"pipeline.worker_protocol", cfg.Pipeline.WorkerProtocol, "http"},
-		{"pipeline.use_openai_format", cfg.Pipeline.UseOpenAIFormat, true},
+		{"pipeline.worker_format", cfg.Pipeline.WorkerFormat, WorkerFormatPassthrough},
 		{"pipeline.max_step_reruns", cfg.Pipeline.MaxStepReruns, 0},
 	}
 	for _, c := range checks {
@@ -80,6 +80,141 @@ func TestLoadDefaults(t *testing.T) {
 
 	if len(cfg.DeprecatedKeys) != 0 {
 		t.Errorf("DeprecatedKeys = %v, want empty", cfg.DeprecatedKeys)
+	}
+	if len(cfg.DeprecatedAliases) != 0 {
+		t.Errorf("DeprecatedAliases = %v, want empty", cfg.DeprecatedAliases)
+	}
+}
+
+func TestLoadWorkerFormat(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		envKey      string
+		envVal      string
+		wantFormat  string
+		wantAliases []DeprecatedAlias
+	}{
+		{
+			name:       "explicit_passthrough",
+			body:       "pipeline:\n  worker_format: passthrough\n",
+			wantFormat: WorkerFormatPassthrough,
+		},
+		{
+			name:       "explicit_tokens",
+			body:       "pipeline:\n  worker_format: tokens\n",
+			wantFormat: WorkerFormatTokens,
+		},
+		{
+			name:       "env_tokens",
+			body:       "",
+			envKey:     "COORDINATOR_PIPELINE_WORKER_FORMAT",
+			envVal:     "tokens",
+			wantFormat: WorkerFormatTokens,
+		},
+		{
+			name:       "legacy_file_true",
+			body:       "pipeline:\n  use_openai_format: true\n",
+			wantFormat: WorkerFormatPassthrough,
+			wantAliases: []DeprecatedAlias{
+				{Key: "pipeline.use_openai_format", Replacement: "pipeline.worker_format"},
+			},
+		},
+		{
+			name:       "legacy_file_false",
+			body:       "pipeline:\n  use_openai_format: false\n",
+			wantFormat: WorkerFormatTokens,
+			wantAliases: []DeprecatedAlias{
+				{Key: "pipeline.use_openai_format", Replacement: "pipeline.worker_format"},
+			},
+		},
+		{
+			name:       "legacy_env_false",
+			body:       "",
+			envKey:     "COORDINATOR_PIPELINE_USE_OPENAI_FORMAT",
+			envVal:     "false",
+			wantFormat: WorkerFormatTokens,
+			wantAliases: []DeprecatedAlias{
+				{Key: "pipeline.use_openai_format", Replacement: "pipeline.worker_format"},
+			},
+		},
+		{
+			name:       "legacy_step_param_reports_alias",
+			body:       "pipeline:\n  worker_format: passthrough\n  steps:\n    - type: encode\n      params:\n        use_openai_format: false\n",
+			wantFormat: WorkerFormatPassthrough,
+			wantAliases: []DeprecatedAlias{
+				{Key: "pipeline.steps[0].params.use_openai_format", Replacement: "pipeline.steps[0].params.worker_format"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envKey != "" {
+				t.Setenv(tt.envKey, tt.envVal)
+			}
+			cfg, err := Load(writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Pipeline.WorkerFormat != tt.wantFormat {
+				t.Errorf("pipeline.worker_format = %q, want %q", cfg.Pipeline.WorkerFormat, tt.wantFormat)
+			}
+			if cfg.Pipeline.UseOpenAIFormat != nil {
+				t.Errorf("pipeline.use_openai_format = %v, want nil after normalization", *cfg.Pipeline.UseOpenAIFormat)
+			}
+			if !slices.Equal(cfg.DeprecatedAliases, tt.wantAliases) {
+				t.Errorf("DeprecatedAliases = %v, want %v", cfg.DeprecatedAliases, tt.wantAliases)
+			}
+			if len(cfg.DeprecatedKeys) != 0 {
+				t.Errorf("DeprecatedKeys = %v, want empty", cfg.DeprecatedKeys)
+			}
+		})
+	}
+}
+
+func TestLoadWorkerFormatErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		envKey string
+		envVal string
+	}{
+		{
+			name: "invalid_value",
+			body: "pipeline:\n  worker_format: openai\n",
+		},
+		{
+			name:   "invalid_env_value",
+			body:   "",
+			envKey: "COORDINATOR_PIPELINE_WORKER_FORMAT",
+			envVal: "invalid",
+		},
+		{
+			name: "both_set_in_file",
+			body: "pipeline:\n  worker_format: passthrough\n  use_openai_format: true\n",
+		},
+		{
+			name:   "file_format_and_env_legacy",
+			body:   "pipeline:\n  worker_format: passthrough\n",
+			envKey: "COORDINATOR_PIPELINE_USE_OPENAI_FORMAT",
+			envVal: "false",
+		},
+		{
+			name:   "file_legacy_and_env_format",
+			body:   "pipeline:\n  use_openai_format: true\n",
+			envKey: "COORDINATOR_PIPELINE_WORKER_FORMAT",
+			envVal: "tokens",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envKey != "" {
+				t.Setenv(tt.envKey, tt.envVal)
+			}
+			if _, err := Load(writeConfig(t, tt.body)); err == nil {
+				t.Fatal("Load() error = nil, want failure")
+			}
+		})
 	}
 }
 
@@ -109,7 +244,7 @@ func TestLoadDeprecatedWriteTimeout(t *testing.T) {
 }
 
 func TestLoadEnvOverride(t *testing.T) {
-	const body = "log_level: 2\npipeline:\n  use_openai_format: true\n"
+	const body = "log_level: 2\npipeline:\n  worker_format: passthrough\n"
 
 	tests := []struct {
 		name   string
@@ -126,10 +261,10 @@ func TestLoadEnvOverride(t *testing.T) {
 		{
 			// Nested keys reach viper only because Load installs a "." -> "_"
 			// env key replacer; config/coordinator/coordinator.yaml documents this var.
-			name:   "nested bool",
-			envKey: "COORDINATOR_PIPELINE_USE_OPENAI_FORMAT",
-			envVal: "false",
-			check:  func(c *Config) (any, any) { return c.Pipeline.UseOpenAIFormat, false },
+			name:   "worker format",
+			envKey: "COORDINATOR_PIPELINE_WORKER_FORMAT",
+			envVal: "tokens",
+			check:  func(c *Config) (any, any) { return c.Pipeline.WorkerFormat, WorkerFormatTokens },
 		},
 		{
 			name:   "worker protocol",

@@ -43,7 +43,7 @@ gateway:
 pipeline:
   kv_connector: kv-nixl
   ec_connector: ec-nixl
-  use_openai_format: true
+  worker_format: passthrough
   steps:
     - type: replace-media-urls
       params:
@@ -60,13 +60,13 @@ pipeline:
     - type: decode
 `
 
-// coordinatorConfigNIXLGenerate is coordinatorConfigNIXL with OpenAI passthrough
-// disabled. With use_openai_format: false a chat/completions request collapses to
+// coordinatorConfigNIXLGenerate is coordinatorConfigNIXL with the tokens-in
+// worker format. With worker_format: tokens a chat/completions request collapses to
 // the native generate wire format on the encode and prefill steps, which build a
 // fresh sampling_params carrying only max_tokens: 1. This exercises a different
-// min_tokens-stripping path than the OpenAI clone-and-cap path.
+// min_tokens-stripping path than the passthrough clone-and-cap path.
 var coordinatorConfigNIXLGenerate = mustReplace(
-	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false")
+	coordinatorConfigNIXL, "worker_format: passthrough", "worker_format: tokens")
 
 // coordinatorConfigNIXLGenerateMMPayload is coordinatorConfigNIXLGenerate with
 // the render step asking the renderer for no tensors (mm_payload: none).

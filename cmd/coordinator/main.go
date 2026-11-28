@@ -89,6 +89,10 @@ func main() {
 	for _, key := range cfg.DeprecatedKeys {
 		log.Info("config key is deprecated and ignored", "key", key)
 	}
+	for _, alias := range cfg.DeprecatedAliases {
+		log.Info("config key is deprecated",
+			"key", alias.Key, "replacement", alias.Replacement)
+	}
 
 	// CLI -v wins over config log_level.
 	if vFlag := pflag.CommandLine.Lookup("v"); vFlag != nil && !vFlag.Changed {

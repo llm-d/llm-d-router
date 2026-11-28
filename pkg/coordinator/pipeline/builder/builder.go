@@ -33,11 +33,15 @@ import (
 // The async-broker step must intercept requests before any processing step
 // touches them (queued bodies are stored verbatim, and passthrough stamping
 // must precede routing), so it is only valid in first position. The tokens-in
-// format (use_openai_format=false) and forward_prompt_token_ids send token IDs
+// format (worker_format=tokens) and forward_prompt_token_ids send token IDs
 // that only the render step produces, so both require a render step in the
 // pipeline.
 func validatePipeline(p config.PipelineConfig) error {
 	if err := config.ValidateWorkerProtocol(p.WorkerProtocol); err != nil {
+		return err
+	}
+	workerFormat, err := p.ResolvedWorkerFormat()
+	if err != nil {
 		return err
 	}
 	if p.MaxStepReruns < 0 {
@@ -55,10 +59,21 @@ func validatePipeline(p config.PipelineConfig) error {
 	if hasRender {
 		return nil
 	}
-	if !p.UseOpenAIFormat {
-		return fmt.Errorf("pipeline.use_openai_format=false requires a %q step (the tokens-in format sends token IDs that render produces)", steps.RenderStepName)
+	if workerFormat == config.WorkerFormatTokens {
+		return fmt.Errorf("pipeline.%s=%s requires a %q step (the tokens-in format sends token IDs that render produces)",
+			config.ParamWorkerFormat, config.WorkerFormatTokens, steps.RenderStepName)
 	}
 	for _, s := range p.Steps {
+		if usesWorkerFormatParam(s.Type) {
+			if f, _ := s.Params[config.ParamWorkerFormat].(string); f == config.WorkerFormatTokens {
+				return fmt.Errorf("%s=%s on the %q step requires a %q step (the tokens-in format sends token IDs that render produces)",
+					config.ParamWorkerFormat, config.WorkerFormatTokens, s.Type, steps.RenderStepName)
+			}
+			if legacy, ok := s.Params[config.ParamUseOpenAIFormat].(bool); ok && !legacy {
+				return fmt.Errorf("%s=false on the %q step requires a %q step (the tokens-in format sends token IDs that render produces)",
+					config.ParamUseOpenAIFormat, s.Type, steps.RenderStepName)
+			}
+		}
 		if forward, _ := s.Params[steps.ParamForwardPromptTokenIDs].(bool); forward {
 			return fmt.Errorf("%s on the %q step requires a %q step (it sends token IDs that render produces)", steps.ParamForwardPromptTokenIDs, s.Type, steps.RenderStepName)
 		}
@@ -66,11 +81,12 @@ func validatePipeline(p config.PipelineConfig) error {
 	return nil
 }
 
-// usesOpenAIFormatParam reports whether stepType reads the use_openai_format
-// parameter. Only encode and prefill resolve their body format from it; decode
-// and conditional-decode derive it directly from the request's original path
-// and reject the key instead of silently ignoring it.
-func usesOpenAIFormatParam(stepType string) bool {
+// usesWorkerFormatParam reports whether stepType reads the worker_format
+// parameter (or its deprecated use_openai_format alias). Only encode and
+// prefill resolve their body format from it; decode and conditional-decode
+// derive it directly from the request's original path and reject both keys
+// instead of silently ignoring them.
+func usesWorkerFormatParam(stepType string) bool {
 	return stepType == steps.EncodeStepName || stepType == steps.PrefillStepName
 }
 
@@ -94,12 +110,19 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 		return nil, err
 	}
 
+	workerFormat, err := cfg.Pipeline.ResolvedWorkerFormat()
+	if err != nil {
+		return nil, err
+	}
+
 	pipelineSteps := make([]pipeline.Step, 0, len(cfg.Pipeline.Steps))
 	for _, stepCfg := range cfg.Pipeline.Steps {
 		params := mergePipelineDefaults(stepCfg.Params, cfg.Pipeline)
-		if usesOpenAIFormatParam(stepCfg.Type) {
-			if _, ok := params["use_openai_format"]; !ok {
-				params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
+		if usesWorkerFormatParam(stepCfg.Type) {
+			_, hasFormat := params[config.ParamWorkerFormat]
+			_, hasLegacy := params[config.ParamUseOpenAIFormat]
+			if !hasFormat && !hasLegacy {
+				params[config.ParamWorkerFormat] = workerFormat
 			}
 		}
 		step, err := pipeline.Build(stepCfg.Type, gwClient, params)

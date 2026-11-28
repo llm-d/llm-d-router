@@ -146,23 +146,26 @@ pipeline:
   #   ec-shared-storage - shared filesystem (default for non-RDMA clusters)
   ec_connector: ec-shared-storage
 
-  # use_openai_format selects the wire format for the encode and prefill steps.
-  #   true (default) - forward on the client's original path
-  #                    (/v1/chat/completions, /v1/completions, /v1/responses,
-  #                    /v1/messages).
-  #   false          - rewrite to the internal /inference/v1/generate
-  #                    token-array (tokens-in) format.
-  # false requires a render step in the pipeline (render produces the token
-  # IDs the tokens-in format sends); the coordinator fails to start otherwise.
-  # A step may override this in its own params.
-  # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
-  use_openai_format: true
+  # worker_format selects the wire format for the encode and prefill steps.
+  #   passthrough (default) - forward on the client's original path
+  #                           (/v1/chat/completions, /v1/completions,
+  #                           /v1/responses, /v1/messages).
+  #   tokens                - rewrite to the internal /inference/v1/generate
+  #                           token-array (tokens-in) format.
+  # tokens requires a render step in the pipeline because render produces the
+  # token IDs that the tokens-in format sends. Without a render step, the
+  # coordinator fails to start.
+  # encode and prefill may override this value in their own params.
+  # The legacy boolean key use_openai_format (true=passthrough, false=tokens)
+  # is deprecated and remains accepted as a compatibility alias.
+  # env: COORDINATOR_PIPELINE_WORKER_FORMAT
+  # worker_format: passthrough
 
   # worker_protocol selects the upstream protocol for HTTP /inference/v1/generate.
   #   http (default) - forward HTTP JSON to /inference/v1/generate on workers.
   #   grpc           - translate HTTP /inference/v1/generate to vllm.Inference gRPC.
-  # With grpc, the coordinator accepts use_openai_format: false without a render
-  # step because callers supply token IDs or text directly.
+  # With grpc, the coordinator still requires a render step when worker_format
+  # is tokens because OpenAI text routes continue to call HTTP workers.
   # Native gRPC paths always use gRPC upstream regardless of this setting.
   # env: COORDINATOR_PIPELINE_WORKER_PROTOCOL
   # worker_protocol: http
@@ -470,7 +473,7 @@ pipeline:
         # mm_payload selects what the rendering service returns for multimodal
         # entries. tensors: the processed tensors (kwargs_data). none: only
         # token ids, hashes and placeholders. Generate-format encode requests
-        # (use_openai_format: false) then carry the client's media as
+        # (worker_format: tokens) then carry the client's media as
         # content_parts, and the prefill request carries features whose
         # mm_metadata comes from the render response or is rebuilt from the
         # encode response's EC descriptors when every entry has metadata and
@@ -514,12 +517,12 @@ pipeline:
         # are GPU-bound or memory-tight.
         max_parallel: 8
 
-        # use_openai_format=true sends the original chat-completions body
+        # worker_format: passthrough sends the client's original API body
         # to the encoder (encoder re-preprocesses from image_url, ~16 KB
-        # per HD image). false sends features.kwargs_data with the
-        # pre-preprocessed tensor (~1 MB per HD image, no encoder CPU
-        # cost). Inherits from gateway.use_openai_format if omitted.
-        # use_openai_format: true
+        # per HD image). worker_format: tokens sends features.kwargs_data
+        # with the pre-preprocessed tensor (~1 MB per HD image, no encoder
+        # CPU cost). Inherits from pipeline.worker_format if omitted.
+        # worker_format: passthrough
 
         # ec_connector overrides pipeline.ec_connector for this step only.
         # Rarely needed.
@@ -531,15 +534,14 @@ pipeline:
     # -------------------------------------------------------------------
     - type: prefill
       # params:
-      #   use_openai_format mirrors gateway.use_openai_format but lets the
-      #   step override per-pipeline if you want a different wire format
-      #   for the text-only fast path.
-      #   use_openai_format: true
+      #   worker_format inherits from pipeline.worker_format and lets this
+      #   step override the wire format independently.
+      #   worker_format: passthrough
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
       #   forward_prompt_token_ids: false   # same as on the decode step;
       #                                     # rejected with
-      #                                     # use_openai_format: false
+      #                                     # worker_format: tokens
 
     # -------------------------------------------------------------------
     # decode: streams the completion back to the client. Last step.
