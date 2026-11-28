@@ -202,14 +202,16 @@ func (fi *FlowItem) finalizeInternal(err error) {
 
 // wrapCause normalizes a finalization cause (e.g., a Context error) into the canonical sentinel chain and wraps it
 // with the family sentinel that matches the item's admission status.
+//
+// A deadline or cancellation on the request context is caller-supplied, so either one means the caller gave up and
+// maps to ErrContextCancelled. ErrTTLExpired reaches this function only as the cause of the pre-queue distribution
+// deadline; the processor finalizes queued budget expiries itself.
 func wrapCause(cause error, isQueued bool) error {
 	var specificErr error
 	switch {
 	case errors.Is(cause, types.ErrTTLExpired):
 		specificErr = cause
-	case errors.Is(cause, context.DeadlineExceeded):
-		specificErr = fmt.Errorf("%w: %w", types.ErrTTLExpired, cause)
-	case errors.Is(cause, context.Canceled):
+	case errors.Is(cause, context.DeadlineExceeded), errors.Is(cause, context.Canceled):
 		specificErr = fmt.Errorf("%w: %w", types.ErrContextCancelled, cause)
 	default:
 		// Handle other potential causes (e.g., custom context errors).

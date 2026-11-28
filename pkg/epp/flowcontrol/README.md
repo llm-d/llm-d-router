@@ -84,8 +84,11 @@ Tuning knobs, all under the `flowControl:` config section:
   weight load) if you want requests to survive a cold start; a request shed here is reported as
   `EvictedNoEndpoints` and returns 503 rather than 429. Which budget applies is
   re-evaluated while a request is queued, so a pool that scales up moves its queued requests onto
-  `defaultRequestTTL`. A long budget only helps if the caller waits, so pair it with a gateway request
-  timeout at least as long.
+  `defaultRequestTTL`. The periodic cleanup sweep enforces both budgets, so a request is shed at the
+  first sweep at or after its budget elapses, up to `expiryCleanupInterval` late. Each change between
+  an empty and a non-empty pool starts the budget in force from zero, so flow control places no fixed
+  upper bound on total queue wait. Set a gateway request timeout to bound client wait, at least as
+  long as the longer budget.
 * The priority-holdback usage-limit policy — a gating knob, not a shedding one. It lowers the
   admission ceiling for low-priority traffic as utilization rises, so that traffic waits in queue
   rather than being rejected; it sheds only by way of the two limits above. Configure it via
