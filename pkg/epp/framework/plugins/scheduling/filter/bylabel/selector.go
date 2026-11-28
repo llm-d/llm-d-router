@@ -77,13 +77,20 @@ func (blf *Selector) TypedName() plugin.TypedName {
 	return blf.typedName
 }
 
+// RestrictsPool implements scheduling.EndpointPoolMatcher.
+func (blf *Selector) RestrictsPool() bool { return !blf.selector.Empty() }
+
+// MatchesPoolLabels implements scheduling.EndpointPoolMatcher.
+func (blf *Selector) MatchesPoolLabels(endpointLabels map[string]string) bool {
+	return blf.selector.Matches(labels.Set(endpointLabels))
+}
+
 // Filter filters out all endpoints that do not satisfy the label selector
 func (blf *Selector) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filtered := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {
-		labels := labels.Set(endpoint.GetMetadata().Labels)
-		if blf.selector.Matches(labels) {
+		if blf.MatchesPoolLabels(endpoint.GetMetadata().Labels) {
 			filtered = append(filtered, endpoint)
 		}
 	}

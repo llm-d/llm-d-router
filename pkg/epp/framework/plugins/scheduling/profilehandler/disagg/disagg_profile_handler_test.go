@@ -55,9 +55,10 @@ const (
 	DefaultPrefillProfile = scheduling.DefaultPrefillProfile
 
 	// Custom profile names for testing user-defined configurations.
-	customDecodeProfile  = "my-decode"
-	customPrefillProfile = "my-prefill"
-	customEncodeProfile  = "my-encode"
+	customDecodeProfile   = "my-decode"
+	customPrefillProfile  = "my-prefill"
+	customEncodeProfile   = "my-encode"
+	customFallbackProfile = "my-fallback"
 
 	// Test prompts
 	testLongPrompt = "hello world hello world hello world"
@@ -280,6 +281,10 @@ func TestHandlerFactory(t *testing.T) {
 			"profiles": map[string]any{"decode": "my-decode", "prefill": "my-prefill"},
 			"deciders": map[string]any{"prefill": PrefixBasedPDDeciderPluginType},
 		}, false},
+		{"PD with aggregated fallback", map[string]any{
+			"profiles": map[string]any{"fallback": customFallbackProfile},
+			"deciders": map[string]any{"prefill": AlwaysDisaggPDDeciderPluginType},
+		}, false},
 
 		// E/PD style (encode + decode)
 		{"EPD style", map[string]any{
@@ -314,6 +319,13 @@ func TestHandlerFactory(t *testing.T) {
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
 		}, true},
+		{"aggregated fallback rejects prefill-first", map[string]any{
+			"stageOrder": StageOrderPrefillFirst,
+			"profiles":   map[string]any{"fallback": customFallbackProfile},
+		}, true},
+		{"aggregated fallback differs from decode", map[string]any{
+			"profiles": map[string]any{"decode": customFallbackProfile, "fallback": customFallbackProfile},
+		}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -324,7 +336,11 @@ func TestHandlerFactory(t *testing.T) {
 				assert.Nil(t, p)
 			} else {
 				assert.NoError(t, err)
-				assert.NotNil(t, p)
+				require.NotNil(t, p)
+				profiles, _ := tt.params["profiles"].(map[string]any)
+				_, configured := profiles["fallback"]
+				_, candidateAware := p.(scheduling.CandidateAwareProfileHandler)
+				assert.Equal(t, configured, candidateAware)
 			}
 		})
 	}

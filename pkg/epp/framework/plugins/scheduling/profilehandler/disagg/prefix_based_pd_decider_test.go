@@ -856,6 +856,37 @@ func TestNeedsRemotePrefill_MemoizesOnRequest(t *testing.T) {
 	assert.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(0))))
 }
 
+func TestPreRequest_ReevaluatesPrefillForNewEndpoint(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 5})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name         string
+		cachedTokens int
+		wantReject   bool
+	}{
+		{name: "cache hit", cachedTokens: 8},
+		{name: "cache miss", wantReject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := withHeaders(makeRequestWithTokens(10), map[string]string{"prefer": "if-available"})
+			require.True(t, decider.disaggregate(ctx, req, makeTestEndpoint(0)))
+
+			fallback := makeTestEndpoint(tc.cachedTokens)
+			fallback.GetMetadata().ID.Name = "fallback-pod"
+			err := decider.PreRequest(ctx, req, resultWithEndpoint(fallback))
+			if tc.wantReject {
+				var rejection errcommon.Error
+				require.ErrorAs(t, err, &rejection)
+				assert.Equal(t, errcommon.PreconditionFailed, rejection.Code)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // TestPreRequest_ClaimsConditionalDecodeAttribute pins the contract with the
 // director's default-deny check: whenever PreRequest sees a Prefer:if-available
 // request it must mark ConditionalDecodeHandledAttributeKey so the director

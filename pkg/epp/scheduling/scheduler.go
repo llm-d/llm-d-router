@@ -86,13 +86,17 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		if verboseEnabled {
 			loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", handlerName)
 		}
-		// violations dropped: Pick has no error return, so a rejected write is
-		// visible only through plugin_data_scope_violations_total. The profiles
-		// the handler returns run against the unscoped request below; each
-		// filter and scorer is scoped against its own declarations.
-		scopedRequest, _ := datalayer.ScopeRequest(logger, profilePickerExtensionPoint, s.profileHandler, request)
+		// Pick has no error return. Rejected writes are dropped and counted.
 		before := time.Now()
-		profiles := s.profileHandler.Pick(ctx, scopedRequest, s.profiles, profileRunResults)
+		var profiles map[string]fwksched.SchedulerProfile
+		if handler, ok := s.profileHandler.(fwksched.CandidateAwareProfileHandler); ok {
+			// Candidates are wrapped only when read.
+			scopedRequest, scopedEndpoints := datalayer.ScopeInvocationWithLazyEndpoints(logger, profilePickerExtensionPoint, handler, request, candidateEndpoints)
+			profiles = handler.PickWithCandidates(ctx, scopedRequest, s.profiles, profileRunResults, scopedEndpoints)
+		} else {
+			scopedRequest, _ := datalayer.ScopeRequest(logger, profilePickerExtensionPoint, s.profileHandler, request)
+			profiles = s.profileHandler.Pick(ctx, scopedRequest, s.profiles, profileRunResults)
+		}
 		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
 		if verboseEnabled {
 			loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", handlerName, "result", profiles)

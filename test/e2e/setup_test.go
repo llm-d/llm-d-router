@@ -159,6 +159,18 @@ func createModelServersPDSharedStorage(decodeReplicas int) {
 	createModelServersPDWithConnector(1, decodeReplicas, constants.KVConnectorSharedStorage)
 }
 
+// The EPD fixture omits the routing sidecar so the fallback simulator runs locally.
+// This validates routing, not inference-engine capabilities.
+func createModelServersPDAggregatedFallback() {
+	createModelServersPDSharedStorage(1)
+	createModelServersFromKustomize(epdDeploymentDir, map[string]string{
+		"${VLLM_REPLICA_COUNT_D}":    "1",
+		"${DECODE_ROLE}":             "prefill-decode",
+		"name: vllm-d":               "name: vllm-fallback",
+		"llm-d.ai/component: decode": "llm-d.ai/component: fallback",
+	})
+}
+
 func createModelServersPDMooncake(decodeReplicas int) {
 	createModelServersPDWithConnector(1, decodeReplicas, constants.KVConnectorMooncake)
 }

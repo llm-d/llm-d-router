@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -90,8 +91,9 @@ var errCondDecodeCacheMiss = errcommon.Error{
 var remotePrefillDecisionAttributeKey = plugin.NewDataKey("remote-prefill-decision", PrefixBasedPDDeciderPluginType)
 
 type remotePrefillDecision struct {
-	needs bool
-	err   error
+	endpointID fwkdl.ID
+	needs      bool
+	err        error
 }
 
 // PrefixBasedPDDecider is a PD decider plugin which decision is based prefix aware
@@ -243,16 +245,20 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 // soft-fail on error — disaggregate returns false, PreRequest forwards.
 //
 // The outcome is memoized on the request: disaggregate populates it during
-// scheduling, and PreRequest reuses it without recomputing.
+// scheduling, and PreRequest reuses it when the primary endpoint is unchanged.
 func (d *PrefixBasedPDDecider) needsRemotePrefill(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (bool, error) {
 	if request == nil {
 		return false, errors.New("request is nil")
 	}
-	if cached, ok := scheduling.ReadRequestAttribute[remotePrefillDecision](request, remotePrefillDecisionAttributeKey); ok {
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return d.computeNeedsRemotePrefill(ctx, request, endpoint)
+	}
+	endpointID := endpoint.GetMetadata().ID
+	if cached, ok := scheduling.ReadRequestAttribute[remotePrefillDecision](request, remotePrefillDecisionAttributeKey); ok && cached.endpointID == endpointID {
 		return cached.needs, cached.err
 	}
 	needs, err := d.computeNeedsRemotePrefill(ctx, request, endpoint)
-	request.PutAttribute(remotePrefillDecisionAttributeKey, remotePrefillDecision{needs: needs, err: err})
+	request.PutAttribute(remotePrefillDecisionAttributeKey, remotePrefillDecision{endpointID: endpointID, needs: needs, err: err})
 	return needs, err
 }
 
