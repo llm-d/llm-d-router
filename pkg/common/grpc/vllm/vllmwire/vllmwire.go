@@ -60,6 +60,7 @@ var (
 	reqPriority  = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "priority")
 	reqMedia     = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "media")
 	reqLoraName  = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "lora_name")
+	reqKVHints   = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "kv_hints")
 
 	tokenIDsIDs = protoscan.FieldNum(&vllmpb.TokenIds{}, "ids")
 
@@ -160,6 +161,7 @@ type Request struct {
 	maxNewTokens    uint32
 	hasPriority     bool
 	priority        int32
+	hasKVHints      bool
 
 	bypassPrefixCache bool
 	hasCacheSalt      bool
@@ -323,6 +325,10 @@ func totalLen(bufs [][]byte) int {
 	return n
 }
 
+// HasKVHints reports whether the client sent kv_hints. Frames built from r
+// keep the field.
+func (r *Request) HasKVHints() bool { return r.hasKVHints }
+
 // HasMedia reports whether the request carries at least one media item.
 func (r *Request) HasMedia() bool { return r.media.count > 0 }
 
@@ -467,6 +473,8 @@ func (r *Request) scanBaseField(num protowire.Number, wt protowire.Type, value [
 		v, _ := protowire.ConsumeVarint(value)
 		r.hasPriority = true
 		r.priority = int32(uint32(v)) //#nosec G115 -- int32 field, protobuf truncates the same way
+	case reqKVHints:
+		r.hasKVHints = true
 	}
 	return nil
 }

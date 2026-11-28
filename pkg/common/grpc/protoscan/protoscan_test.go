@@ -258,4 +258,16 @@ func TestReplaceBytesField(t *testing.T) {
 	got, err = ReplaceBytesField(frameWithout, num, "")
 	require.NoError(t, err)
 	require.Same(t, &frameWithout[0], &got[0])
+
+	// A []byte value, such as a serialized message, writes the same field
+	// without a string copy.
+	got, err = ReplaceBytesField(frameWith, num, []byte("new"))
+	require.NoError(t, err)
+	require.Equal(t, wantFrame, got)
+	value := []byte("new")
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = ReplaceBytesField(frameWith, num, value) }))
+
+	got, err = ReplaceBytesField(frameWith, num, []byte(nil))
+	require.NoError(t, err)
+	require.Equal(t, frameWithout, got)
 }
