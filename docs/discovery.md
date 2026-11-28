@@ -240,6 +240,7 @@ endpoints:
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
     rankIndex: <int>            # optional -- defaults to 0, must be >= 0
+    rankByHeader: <bool>        # optional -- defaults to false
     zmqPort: <int>              # optional -- KV-events socket port, 1-65535
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
@@ -305,6 +306,10 @@ endpoints:
     rankIndex: 1
 ```
 
+When the ranks of a model server share one port, list one entry for each rank
+with the same `port`, the rank in `rankIndex`, and `rankByHeader: true`. See
+[Data-parallel ranks behind one port](data-parallel-ranks.md).
+
 #### Per-worker KV events
 
 With `kvEventsConfig.discoverPods: true`, the `precise-prefix-cache-producer`
@@ -353,6 +358,8 @@ endpoints:
 - `address` must be a literal IPv4 address (IPv6 is not supported).
 - `port` must be a decimal integer in the range 1-65535.
 - `rankIndex` must be an integer greater than or equal to 0.
+- Entries with `rankByHeader: true` must not repeat an `address`, `port` and
+  `rankIndex` combination.
 - `zmqPort`, when set, must be an integer in the range 1-65535.
 - The file must not exceed 1 MiB.
 - Duplicate names within the same namespace result in the last `Upsert`

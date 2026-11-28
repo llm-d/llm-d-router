@@ -2,6 +2,8 @@
 
 vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ranks on one port and sends a request to the rank named in the `x-data-parallel-rank` header. The EPP can pick a rank for each request instead of leaving the choice to the frontend.
 
+A model server that listens on a separate port for each rank needs no rank header. See [One port for each rank](#one-port-for-each-rank).
+
 ## Rank endpoints
 
 The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation. Pods in one pool can thus run different DP sizes (for example prefill with 2 ranks and decode with 4 with coordinator P/D; sidecar P/D is covered in Limitations below). The pool must have exactly one target port. N is at most 64, and a pod with a larger or malformed value gets no endpoints. The endpoints are named `<pod>-rank-<i>`, where `i` is the rank, and share the pod's address and port.
@@ -63,7 +65,24 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 - **One scrape per rank.** Each rank endpoint scrapes its pod's `/metrics` on its own, so a pod with N ranks is scraped N times per interval, each time for every engine's series.
 - **KV events from engines on another pod.** When one frontend serves engines on other pods (vLLM internal load balancing, SGLang with one HTTP server per group), those engines publish KV events on their own pods, which the EPP does not know. The precise prefix cache then sees only the frontend pod's ranks. vLLM v0.32.0 reports each engine's reachable publisher in `/kv_event_sources` when the publisher is configured with `tcp://*:0`; the EPP does not read it. SGLang has no per-node frontend ([sgl-project/sglang#47657](https://github.com/sgl-project/sglang/issues/47657)).
 - **Mooncake with `--data-parallel-start-rank-label`.** vLLM registers Mooncake engines under the pod-local rank, while the EPP sends the global one.
+- **Global ranks with one port for each rank.** The EPP ignores `--data-parallel-start-rank-label` when a pod uses multiple target ports. Every pod gets local rank offsets from `0`. When a data-parallel group spans pods, vLLM numbers its KV-event ports by global rank instead.
 
 ## Example
 
 Each model server pod runs `vllm-rs serve --data-parallel-size 2` on port 8000, selected by an InferencePool with one target port. The pods are annotated `llm-d.ai/data-parallel-size-local: "2"`, so each pod becomes two endpoints, `<pod>-rank-0` and `<pod>-rank-1`, both on port 8000. When the EPP selects `<pod>-rank-1`, the request reaches the pod's port 8000 with `x-data-parallel-rank: 1`.
+
+## One port for each rank
+
+When the model server listens on a separate port for each rank, the port selects the rank, and the EPP sends no rank header. List the port of each rank in the target ports of the pool, in rank order:
+
+- With an `InferencePool`: `spec.targetPorts`, which takes 1 to 8 ports.
+- Without an `InferencePool` (`--endpoint-selector`): `--endpoint-target-ports`, which takes 1 to 8 ports.
+- With the Helm charts: `router.modelServers.targetPorts`, which sets the one of the two that applies. See [Data-parallel ranks](../config/charts/README.md#data-parallel-ranks).
+
+The EPP makes one endpoint for each target port of a pod. The endpoint is named `<pod>-rank-<i>`, where `i` is the position of the port in the list, and the EPP scrapes its metrics on its own port. These plugins add `i` to a base port to find another listener of the same rank, so the order of the list must be the rank order of the model server:
+
+- The [precise prefix cache](../pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache/README.md), for the KV-event sockets.
+- The [`p2p-source-producer`](../pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/README.md), for the P2P port.
+- The [tokenizer](../pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer/README.md), for the render port of a port rule.
+
+With file discovery, list one entry for each port, with the rank in `rankIndex` and without `rankByHeader`. See [Endpoints file format](discovery.md#endpoints-file-format).
