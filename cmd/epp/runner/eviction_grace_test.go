@@ -50,24 +50,22 @@ func (f *fakeSaturationDetector) Saturation(context.Context, []datalayer.Endpoin
 // grace uses the larger of the flag and its own metricsStalenessThreshold; other scraped detectors
 // keep the flag.
 func TestDeriveEvictionConfirmationGrace(t *testing.T) {
-	newUtilization := func(threshold time.Duration) fwkfc.SaturationDetector {
-		return utilization.NewDetector("pool-queue",
-			utilization.Config{MetricsStalenessThreshold: threshold}, logr.Discard())
-	}
 	tests := []struct {
 		name     string
 		detector fwkfc.SaturationDetector
 		want     time.Duration
 	}{
 		{
-			name:     "utilization_default_threshold_keeps_flag",
-			detector: newUtilization(200 * time.Millisecond),
-			want:     2300 * time.Millisecond,
+			name: "utilization_default_threshold_keeps_flag",
+			detector: utilization.NewDetector("pool-queue",
+				utilization.Config{MetricsStalenessThreshold: 200 * time.Millisecond}, logr.Discard()),
+			want: 2300 * time.Millisecond,
 		},
 		{
-			name:     "utilization_threshold_above_flag",
-			detector: newUtilization(5 * time.Second),
-			want:     5300 * time.Millisecond,
+			name: "utilization_threshold_above_flag",
+			detector: utilization.NewDetector("pool-queue",
+				utilization.Config{MetricsStalenessThreshold: 5 * time.Second}, logr.Discard()),
+			want: 5300 * time.Millisecond,
 		},
 		{
 			name:     "concurrency",
