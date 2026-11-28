@@ -124,7 +124,7 @@ var (
 		reqcommon.FieldPromptLogprobs:        {},
 		reqcommon.FieldPromptLogprobTokenIDs: {},
 		reqcommon.FieldTruncatePromptTokens:  {},
-		"vllm_xargs":                         {},
+		reqcommon.FieldVLLMXargs:             {},
 	}
 
 	allowedStructuredOutputsFields = map[string]struct{}{
@@ -593,8 +593,8 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 			promptTokenIDsOpt = true
 		}
 
-		if rawXargs, present := sp["vllm_xargs"]; present && rawXargs != nil {
-			xargs, ok, err := decodeOptionalObjectField(sp, "vllm_xargs")
+		if rawXargs, present := sp[reqcommon.FieldVLLMXargs]; present && rawXargs != nil {
+			xargs, ok, err := decodeOptionalObjectField(sp, reqcommon.FieldVLLMXargs)
 			if err != nil || !ok {
 				return false, errors.New("sampling_params.vllm_xargs must be an object")
 			}
