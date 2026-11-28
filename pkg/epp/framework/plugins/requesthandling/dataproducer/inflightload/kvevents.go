@@ -72,8 +72,9 @@ type pendingPrefill struct {
 
 // markStored records a store event for the request and reports whether its
 // prefill is complete: every prompt with at least one full block has had its
-// last full block stored, or, under the producer's own stamp, the engine
-// stored a block that belongs to no prompt. Such a block holds the prompt's
+// last full block stored with contents unique among that prompt's full blocks,
+// or all its full blocks stored in one event. Under the producer's own stamp,
+// a block outside all prompts also completes prefill. Such a block holds the prompt's
 // tail and generated tokens, which the engine produces only once it has read
 // the prompt; it is the signal for a prompt the engine already held in full
 // and stored nothing new for. A client-chosen stamp may be shared with other
@@ -96,6 +97,12 @@ func (p *pendingPrefill) markStored(tokens []uint32, blockSize int) bool {
 		if !p.done[i] {
 			end := len(prompt) / blockSize * blockSize
 			p.done[i] = slices.Equal(prompt[end-blockSize:end], tail)
+			for start := 0; p.done[i] && start+blockSize < end; start += blockSize {
+				if slices.Equal(prompt[start:start+blockSize], tail) {
+					p.done[i] = len(tokens) >= end && slices.Equal(prompt[:end], tokens[len(tokens)-end:])
+					break
+				}
+			}
 		}
 		if !p.done[i] {
 			complete = false
