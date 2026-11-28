@@ -286,3 +286,11 @@ func inFlightRequests(t *testing.T, endpoint scheduling.Endpoint) int64 {
 	require.True(t, ok)
 	return load.Requests
 }
+
+func TestActiveRequestScoreAtPickParameter(t *testing.T) {
+	ctx := testutils.NewTestContext(t)
+
+	assert.False(t, NewActiveRequest(ctx, nil).ScoreAtPick(), "pick-time scoring must be off by default")
+	assert.False(t, NewActiveRequest(ctx, &Parameters{}).ScoreAtPick(), "pick-time scoring must be off by default")
+	assert.True(t, NewActiveRequest(ctx, &Parameters{ScoreAtPick: true}).ScoreAtPick())
+}

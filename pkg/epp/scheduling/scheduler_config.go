@@ -20,6 +20,7 @@ package scheduling
 import (
 	"fmt"
 
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -35,6 +36,17 @@ func NewSchedulerConfig(profileHandler fwksched.ProfileHandler, profiles map[str
 type SchedulerConfig struct {
 	profileHandler fwksched.ProfileHandler
 	profiles       map[string]fwksched.SchedulerProfile
+	// reservers are consulted after each profile run to reserve the picked
+	// endpoint for the request, so concurrently-scheduled requests observe
+	// each pick immediately. Wired at construction; empty means no reserving.
+	reservers []fwkrh.EndpointReserver
+}
+
+// WithReservers sets the EndpointReserver implementations the scheduler
+// consults after each profile run.
+func (c *SchedulerConfig) WithReservers(reservers []fwkrh.EndpointReserver) *SchedulerConfig {
+	c.reservers = reservers
+	return c
 }
 
 func (c *SchedulerConfig) String() string {

@@ -143,6 +143,8 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
+		reservationTracker:        newConcurrencyTracker(),
+		reservationTokenTracker:   newConcurrencyTracker(),
 		tokenEstimator:            NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens:  cfg.AddEstimatedOutputTokens,
 		dk:                        attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
@@ -163,6 +165,8 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 }
 
 var (
+	_ fwkrh.EndpointReserver            = &InFlightLoadProducer{}
+	_ fwkrh.RequestAbandoned            = &InFlightLoadProducer{}
 	_ fwkrh.PreRequest                  = &InFlightLoadProducer{}
 	_ fwkrh.ResponseBodyProcessor       = &InFlightLoadProducer{}
 	_ fwkrh.DataProducer                = &InFlightLoadProducer{}
@@ -174,9 +178,16 @@ var (
 )
 
 type InFlightLoadProducer struct {
-	typedName                fwkplugin.TypedName
-	requestTracker           *concurrencyTracker
-	tokenTracker             *concurrencyTracker
+	typedName      fwkplugin.TypedName
+	requestTracker *concurrencyTracker
+	tokenTracker   *concurrencyTracker
+	// reservationTracker holds pick-time reservations: requests scheduled
+	// but not yet dispatched. Included in the InFlightLoad the
+	// scorers read, so concurrent scheduling cycles see each other's picks.
+	// Decremented when a reservation entry is evicted (see reservationEntry).
+	reservationTracker *concurrencyTracker
+	// reservationTokenTracker holds the reserved uncached-token estimates.
+	reservationTokenTracker  *concurrencyTracker
 	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
@@ -266,9 +277,10 @@ type inFlightLoadState struct {
 }
 
 type endpointInFlightLoadState struct {
-	Endpoint string `json:"endpoint"`
-	Requests int64  `json:"requests"`
-	Tokens   int64  `json:"tokens"`
+	Endpoint     string `json:"endpoint"`
+	Requests     int64  `json:"requests"`
+	Tokens       int64  `json:"tokens"`
+	Reservations int64  `json:"reservations"`
 }
 
 func (p *InFlightLoadProducer) TypedName() fwkplugin.TypedName {
@@ -303,11 +315,19 @@ func (p *InFlightLoadProducer) snapshotState() inFlightLoadState {
 		tokenCounts = p.tokenTracker.snapshot()
 	}
 
+	reservationCounts := map[string]int64{}
+	if p.reservationTracker != nil {
+		reservationCounts = p.reservationTracker.snapshot()
+	}
+
 	endpointSet := make(map[string]struct{}, len(requestCounts)+len(tokenCounts))
 	for endpointID := range requestCounts {
 		endpointSet[endpointID] = struct{}{}
 	}
 	for endpointID := range tokenCounts {
+		endpointSet[endpointID] = struct{}{}
+	}
+	for endpointID := range reservationCounts {
 		endpointSet[endpointID] = struct{}{}
 	}
 
@@ -324,9 +344,10 @@ func (p *InFlightLoadProducer) snapshotState() inFlightLoadState {
 	}
 	for _, endpointID := range endpointIDs {
 		state.Endpoints = append(state.Endpoints, endpointInFlightLoadState{
-			Endpoint: endpointID,
-			Requests: requestCounts[endpointID],
-			Tokens:   tokenCounts[endpointID],
+			Endpoint:     endpointID,
+			Requests:     requestCounts[endpointID],
+			Tokens:       tokenCounts[endpointID],
+			Reservations: reservationCounts[endpointID],
 		})
 	}
 
@@ -416,8 +437,8 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
-					Tokens:   p.GetTokens(id),
-					Requests: p.GetRequests(id),
+					Tokens:   p.GetTokens(id) + p.reservationTokenTracker.get(id),
+					Requests: p.GetRequests(id) + p.reservationTracker.get(id),
 				}
 			},
 		})
@@ -524,6 +545,11 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
+		// Convert this request's pick-time reservation (if any) into the real
+		// in-flight counters: deleting the entry fires OnEvicted, which
+		// decrements the reservation side. A request that never reserved has
+		// no entry, so it cannot decrement anyone else's reservation.
+		p.PluginState.DeleteKey(request.RequestID, fwkplugin.StateKey(reservationKey(eid, profileName)))
 
 		requestGauge := inflightRequests.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority)
 		tokenGauge := inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority)
@@ -839,10 +865,120 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 	p.requestTracker.delete(endpointID)
 	p.tokenTracker.delete(endpointID)
+	p.reservationTracker.delete(endpointID)
+	p.reservationTokenTracker.delete(endpointID)
 }
 
 func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
 	return p.tokenTracker.get(eid)
+}
+
+// reservationEntry is the request-scoped state backing one pick-time
+// reservation. It is written by ReserveResult and removed by PreRequest
+// (conversion to the real counters) or by the plugin-state janitor when the
+// request is abandoned after scheduling. OnEvicted rolls the reservation back
+// exactly once.
+type reservationEntry struct {
+	// requestCtr and tokenCtr point at the reservation tracker counters this
+	// entry incremented, so the rollback lands on the same instances even if
+	// the endpoint flaps (same pattern as addedTokensEntry).
+	requestCtr *atomic.Int64
+	tokenCtr   *atomic.Int64
+	requests   atomic.Int32
+	tokens     atomic.Int64
+}
+
+var _ fwkplugin.EvictableStateData = (*reservationEntry)(nil)
+
+// Clone returns a distinct copy sharing the counter instances, mirroring
+// addedTokensEntry.Clone.
+func (e *reservationEntry) Clone() fwkplugin.StateData {
+	if e == nil {
+		return nil
+	}
+	clone := &reservationEntry{
+		requestCtr: e.requestCtr,
+		tokenCtr:   e.tokenCtr,
+	}
+	clone.requests.Store(e.requests.Load())
+	clone.tokens.Store(e.tokens.Load())
+	return clone
+}
+
+func (e *reservationEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+	if n := e.requests.Swap(0); n != 0 {
+		decrementClamped(e.requestCtr, int64(n))
+	}
+	if t := e.tokens.Swap(0); t != 0 {
+		decrementClamped(e.tokenCtr, t)
+	}
+}
+
+// ReserveProfileResult implements fwkrh.EndpointReserver: the scheduler
+// calls it immediately after a profile's picker has selected an endpoint,
+// so concurrent scheduling cycles see this request's pick immediately. The
+// primary target is reserved under the request's plugin state and converted
+// to the real in-flight counters at PreRequest; an abandoned request's
+// reservations are released by RequestAbandoned (janitor as fallback).
+func (p *InFlightLoadProducer) ReserveProfileResult(ctx context.Context, requestID, profileName string, result *fwksched.ProfileRunResult) {
+	if result == nil || requestID == "" || p.PluginState == nil {
+		return
+	}
+	if len(result.TargetEndpoints) == 0 {
+		return
+	}
+	endpoint := result.TargetEndpoints[0]
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return
+	}
+	eid := endpoint.GetMetadata().ID.String()
+
+	// The request's uncached-token estimate for this endpoint was recorded
+	// by the Produce phase; reserve that much token load.
+	var tokens int64
+	if v, ok := endpoint.Get(p.uncachedRequestTokensDk); ok {
+		if ut, ok2 := v.(*attrconcurrency.UncachedRequestTokens); ok2 && ut != nil {
+			tokens = ut.Tokens
+		}
+	}
+
+	requestCtr := p.reservationTracker.inc(eid)
+	tokenCtr := p.reservationTokenTracker.add(eid, tokens)
+
+	entry := &reservationEntry{requestCtr: requestCtr, tokenCtr: tokenCtr}
+	entry.requests.Store(1)
+	entry.tokens.Store(tokens)
+	p.PluginState.Write(requestID, fwkplugin.StateKey(reservationKey(eid, profileName)), entry)
+	// Bind the request's lifetime so the janitor reclaims reservations from
+	// requests that were scheduled but never dispatched.
+	p.PluginState.BindLiveness(ctx, requestID)
+}
+
+// reservationKey namespaces a pick-time reservation under the request's
+// plugin state, per endpoint and profile.
+func reservationKey(endpointID, profileName string) string {
+	return endpointID + "|" + profileName + "|reserved"
+}
+
+// RequestAbandoned implements fwkrh.RequestAbandoned: the director calls it
+// when a request leaves HandleRequest without being forwarded, releasing the
+// request's plugin state immediately instead of waiting for the staleness
+// janitor. Two cases arise:
+//
+//   - The request exits before PreRequest: only pick-time reservation
+//     entries exist, and deleting them rolls back the reservations.
+//   - prepareRequest fails partway: runPreRequestPlugins does not stop at
+//     the first error, so this producer's PreRequest may already have
+//     converted the reservation into real in-flight counters. Deleting the
+//     request's state then rolls those back too, which is correct: the
+//     request is never forwarded. (Before RequestAbandoned existed, these
+//     counters stayed elevated until the request's context ended and the
+//     janitor reaped the entries.)
+func (p *InFlightLoadProducer) RequestAbandoned(_ context.Context, request *fwksched.InferenceRequest) {
+	if request == nil || request.RequestID == "" || p.PluginState == nil {
+		return
+	}
+	p.PluginState.Delete(request.RequestID)
 }
 
 func (p *InFlightLoadProducer) GetRequests(eid string) int64 {

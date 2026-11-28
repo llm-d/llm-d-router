@@ -72,6 +72,29 @@ type Scorer interface {
 	Score(ctx context.Context, request *InferenceRequest, pods []Endpoint) map[Endpoint]float64
 }
 
+// PickTimeScorer is an optional Scorer extension for scorers whose input is
+// in-flight load that changes as concurrent requests are scheduled, such as
+// the load reported by inflight-load-producer, which includes pick-time
+// reservations.
+//
+// Requests are scheduled concurrently. A scorer that runs with the other
+// scorers reads the load as it was when the request started scoring, and
+// endpoints picked by concurrent requests in the meantime are invisible to
+// it, so a burst converges on the same endpoint. When ScoreAtPick returns
+// true, the scheduler profile instead runs the scorer at pick time, inside a
+// critical section that also covers the picker and the reservation of the
+// picked endpoint. Every request is then scored against all picks reserved
+// before it, which places a concurrent burst exactly as if its requests had
+// been scheduled one at a time.
+//
+// Only cheap scorers should opt in, since they run while the critical
+// section is held.
+type PickTimeScorer interface {
+	Scorer
+	// ScoreAtPick reports whether the scorer runs at pick time.
+	ScoreAtPick() bool
+}
+
 // Picker picks the final pod(s) to send the request to.
 type Picker interface {
 	plugin.Plugin

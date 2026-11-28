@@ -33,6 +33,7 @@ The plugin consumes:
 The scorer supports the following runtime parameters:
 
 - `queueThresholdTokens` (integer, default: 4194304): The maximum number of in-flight tokens used for score normalization. Endpoints exceeding this threshold will receive a score of `0.0`. The default (4Mi tokens) is equivalent to 128 requests with an average size of 32K tokens.
+- `scoreAtPick` (boolean, default: `false`): Score at pick time. The scheduler profile runs the scorer after its other scorers, inside a critical section that also covers the picker and the reservation of the picked endpoint. Each request is then scored against the in-flight load including every endpoint reserved by the requests picked before it, so a burst of concurrently scheduled requests is placed as if its requests had been scheduled one at a time instead of converging on the endpoint that looked least loaded when they all started scoring.
 
 **Configuration Example:**
 ```yaml
@@ -41,6 +42,7 @@ plugins:
     name: token-load
     parameters:
       queueThresholdTokens: 4194304
+      scoreAtPick: true
 schedulingProfiles:
   - name: default
     plugins:

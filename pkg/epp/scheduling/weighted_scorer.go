@@ -38,3 +38,10 @@ type WeightedScorer struct {
 func (s *WeightedScorer) Weight() float64 {
 	return s.weight
 }
+
+// scoresAtPick reports whether the wrapped scorer runs at pick time, inside
+// the profile's pick critical section (see fwksched.PickTimeScorer).
+func (s *WeightedScorer) scoresAtPick() bool {
+	pickTimeScorer, ok := s.Scorer.(fwksched.PickTimeScorer)
+	return ok && pickTimeScorer.ScoreAtPick()
+}

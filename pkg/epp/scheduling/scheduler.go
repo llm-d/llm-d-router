@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -33,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -46,16 +48,33 @@ const (
 )
 
 // NewSchedulerWithConfig returns a new scheduler with the given scheduler plugins configuration.
+// Every SchedulerProfile is bound to the configured reservers, so it reserves
+// its pick as soon as its picker returns, and to a pick mutex shared by all
+// profiles of the scheduler, which serializes their pick-time critical
+// sections (see SchedulerProfile.pickWithLiveLoad).
 func NewSchedulerWithConfig(config *SchedulerConfig) *Scheduler {
+	pickMu := &sync.Mutex{}
+	for name, profile := range config.profiles {
+		if schedulerProfile, ok := profile.(*SchedulerProfile); ok {
+			schedulerProfile.bindReservations(name, config.reservers, pickMu)
+		}
+	}
 	return &Scheduler{
 		profileHandler: config.profileHandler,
 		profiles:       config.profiles,
+		reservers:      config.reservers,
 	}
 }
 
 type Scheduler struct {
 	profileHandler fwksched.ProfileHandler
 	profiles       map[string]fwksched.SchedulerProfile
+	// reservers reserve the picked endpoint of each successful profile run
+	// for the request (thundering-herd prevention). A SchedulerProfile
+	// reserves its own pick inside Run, right after its picker returns; the
+	// scheduler reserves after Run only for other SchedulerProfile
+	// implementations.
+	reservers []fwkrh.EndpointReserver
 }
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
@@ -116,6 +135,17 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 				}
 				profileRunErrors[name] = fmt.Errorf("profile %q: %w", name, err)
 			} else {
+				// A bound SchedulerProfile has already reserved its pick
+				// inside Run. Any other profile implementation is reserved
+				// here, the earliest point after its pick where the request
+				// and the result are both in scope; later work
+				// (ProcessResults, logging) must not delay its visibility to
+				// concurrently-scheduled requests.
+				if !reservesInRun(profile) {
+					for _, r := range s.reservers {
+						r.ReserveProfileResult(ctx, request.RequestID, name, profileRunResult)
+					}
+				}
 				if verboseEnabled {
 					loggerVerbose.Info("Completed running scheduler profile successfully", "profile", name)
 				}
@@ -192,4 +222,11 @@ func runSchedulerProfile(ctx context.Context, name string, profile fwksched.Sche
 	defer span.End()
 
 	return profile.Run(profileCtx, request, candidateEndpoints)
+}
+
+// reservesInRun reports whether the profile reserves its own pick inside Run,
+// which a SchedulerProfile does once NewSchedulerWithConfig has bound it.
+func reservesInRun(profile fwksched.SchedulerProfile) bool {
+	schedulerProfile, ok := profile.(*SchedulerProfile)
+	return ok && schedulerProfile.bound
 }

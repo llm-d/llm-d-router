@@ -19,7 +19,9 @@ package tokenload
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -148,5 +150,29 @@ func BenchmarkTokenLoadScorer_Score(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = scorer.Score(ctx, req, endpoints)
+	}
+}
+
+func TestTokenLoadScorerScoreAtPickParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params string
+		want   bool
+	}{
+		{name: "no parameters", params: "", want: false},
+		{name: "unset", params: `{"queueThresholdTokens": 1000}`, want: false},
+		{name: "enabled", params: `{"scoreAtPick": true}`, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var decoder *json.Decoder
+			if tc.params != "" {
+				decoder = json.NewDecoder(strings.NewReader(tc.params))
+			}
+			plugin, err := TokenLoadScorerFactory("token-load", decoder, nil)
+			assert.NoError(t, err)
+			scorer, ok := plugin.(fwksched.PickTimeScorer)
+			assert.True(t, ok, "token-load-scorer must implement PickTimeScorer")
+			assert.Equal(t, tc.want, scorer.ScoreAtPick())
+		})
 	}
 }

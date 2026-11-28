@@ -56,6 +56,14 @@ type Parameters struct {
 	MaxBusyScore *float64 `json:"maxBusyScore,omitempty"`
 
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
+
+	// ScoreAtPick runs the scorer at pick time, inside the scheduler
+	// profile's pick critical section, so that each request is scored
+	// against the in-flight request counts including every endpoint reserved
+	// by the requests picked before it. This keeps a burst of concurrently
+	// scheduled requests from converging on the endpoint that looked least
+	// loaded when they started scoring. Default: false.
+	ScoreAtPick bool `json:"scoreAtPick,omitempty"`
 }
 
 // endpointScores implements logr.Marshaler to lazily convert endpoint keys
@@ -72,6 +80,7 @@ func (s endpointScores) MarshalLog() interface{} {
 
 // compile-time type assertion
 var _ scheduling.Scorer = &ActiveRequest{}
+var _ scheduling.PickTimeScorer = &ActiveRequest{}
 var _ plugin.ConsumerPlugin = &ActiveRequest{}
 
 // Factory defines the factory function for the ActiveRequest scorer.
@@ -118,8 +127,10 @@ func NewActiveRequest(ctx context.Context, params *Parameters) *ActiveRequest {
 	}
 
 	var inFlightLoadProducerName string
+	var scoreAtPick bool
 	if params != nil {
 		inFlightLoadProducerName = params.InFlightLoadProducerName
+		scoreAtPick = params.ScoreAtPick
 	}
 
 	return &ActiveRequest{
@@ -127,6 +138,7 @@ func NewActiveRequest(ctx context.Context, params *Parameters) *ActiveRequest {
 		idleThreshold:       idleThreshold,
 		maxBusyScore:        maxBusyScore,
 		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(inFlightLoadProducerName),
+		scoreAtPick:         scoreAtPick,
 	}
 }
 
@@ -140,11 +152,18 @@ type ActiveRequest struct {
 	idleThreshold int
 	// maxBusyScore defines the maximum score for busy (non-idle) pods
 	maxBusyScore float64
+	// scoreAtPick runs the scorer inside the profile's pick critical section
+	scoreAtPick bool
 }
 
 // TypedName returns the typed name of the plugin.
 func (s *ActiveRequest) TypedName() plugin.TypedName {
 	return s.typedName
+}
+
+// ScoreAtPick implements scheduling.PickTimeScorer.
+func (s *ActiveRequest) ScoreAtPick() bool {
+	return s.scoreAtPick
 }
 
 // WithName sets the name of the plugin.

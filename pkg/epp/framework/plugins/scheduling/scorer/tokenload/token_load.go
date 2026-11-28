@@ -41,16 +41,27 @@ type Config struct {
 	// Defaults to 4194304 if unset.
 	QueueThresholdTokens     int64  `json:"queueThresholdTokens"`
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
+	// ScoreAtPick runs the scorer at pick time, inside the scheduler
+	// profile's pick critical section, so that each request is scored
+	// against the in-flight load including every endpoint reserved by the
+	// requests picked before it. This keeps a burst of concurrently
+	// scheduled requests from converging on the endpoint that looked least
+	// loaded when they started scoring. Default: false.
+	ScoreAtPick bool `json:"scoreAtPick,omitempty"`
 }
 
-// compile-time type assertion
-var _ fwksched.Scorer = &TokenLoadScorer{}
+// compile-time type assertions
+var (
+	_ fwksched.Scorer         = &TokenLoadScorer{}
+	_ fwksched.PickTimeScorer = &TokenLoadScorer{}
+)
 
 type TokenLoadScorer struct {
 	typedName                    fwkplugin.TypedName
 	queueThresholdTokens         float64
 	inFlightLoadDataKey          fwkplugin.DataKey
 	uncachedRequestTokensDataKey fwkplugin.DataKey
+	scoreAtPick                  bool
 }
 
 func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -71,11 +82,17 @@ func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handl
 		queueThresholdTokens:         float64(cfg.QueueThresholdTokens),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		scoreAtPick:                  cfg.ScoreAtPick,
 	}, nil
 }
 
 func (s *TokenLoadScorer) TypedName() fwkplugin.TypedName {
 	return s.typedName
+}
+
+// ScoreAtPick implements fwksched.PickTimeScorer.
+func (s *TokenLoadScorer) ScoreAtPick() bool {
+	return s.scoreAtPick
 }
 
 func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
