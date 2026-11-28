@@ -36,3 +36,22 @@ type deciderPlugin interface {
 type prefixMatchInfoConsumer interface {
 	prefixMatchInfoDataKey() plugin.DataKey
 }
+
+// handlerScopedConsumer is implemented by deciders that read data only inside the
+// profile handler's extension points. The handler declares the decider's reads in its
+// own Consumes(). Such a decider is not a plugin.ConsumerPlugin, because the data graph
+// orders consumers by the extension points they implement and a decider implements none.
+type handlerScopedConsumer interface {
+	deciderConsumes() plugin.DataDependencies
+}
+
+// deciderConsumes returns the data decider reads, and whether it declares any.
+func deciderConsumes(decider deciderPlugin) (plugin.DataDependencies, bool) {
+	switch d := decider.(type) {
+	case plugin.ConsumerPlugin:
+		return d.Consumes(), true
+	case handlerScopedConsumer:
+		return d.deciderConsumes(), true
+	}
+	return plugin.DataDependencies{}, false
+}
