@@ -58,6 +58,11 @@ func run() int {
 		return 1
 	}
 
+	if opts.DecodeChunkSize > 0 {
+		logger.Info("DEPRECATION: chunked decode is deprecated and will be removed in a future release",
+			"decodeChunkSize", opts.DecodeChunkSize)
+	}
+
 	tracing.InitTextMapPropagator()
 
 	// Initialize tracing conditionally using config
