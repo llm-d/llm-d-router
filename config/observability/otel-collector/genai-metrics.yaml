@@ -1,0 +1,82 @@
+# OpenTelemetry Collector (contrib distribution) configuration that scrapes EPP /metrics and
+# exports the request metrics a second time under the OpenTelemetry GenAI client inference
+# metric names. The llm_d_epp_* metrics pass through unchanged.
+# See docs/metrics.md#opentelemetry-genai-metrics.
+receivers:
+  prometheus/llm-d-epp:
+    config:
+      scrape_configs:
+        # The job name becomes the service.name resource attribute.
+        - job_name: llm-d-router
+          scrape_interval: 15s
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+          kubernetes_sd_configs:
+            - role: endpointslice
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_service_name]
+              action: keep
+              regex: .+-epp
+            - source_labels: [__meta_kubernetes_endpointslice_port_name]
+              action: keep
+              regex: http-metrics
+
+processors:
+  transform/genai:
+    error_mode: ignore
+    metric_statements:
+      - statements:
+          - copy_metric(name="gen_ai.client.inference.duration", description="GenAI client inference operation duration.", unit="s") where metric.name == "llm_d_epp_request_duration_seconds"
+          - copy_metric(name="gen_ai.client.inference.time_to_first_chunk", description="Time from the start of a logical inference operation to the first chunk in its streaming response.", unit="s") where metric.name == "llm_d_epp_request_ttft_seconds"
+          - copy_metric(name="gen_ai.client.inference.time_per_output_chunk", description="Time per output chunk, recorded for each chunk received after the first one.", unit="s") where metric.name == "llm_d_epp_request_streaming_itl_seconds"
+          - copy_metric(name="gen_ai.client.inference.operation.input_tokens", description="The number of input (prompt) tokens used per inference operation.", unit="{token}") where metric.name == "llm_d_epp_request_input_tokens"
+          - copy_metric(name="gen_ai.client.inference.operation.output_tokens", description="The number of output (completion) tokens used per inference operation.", unit="{token}") where metric.name == "llm_d_epp_request_output_tokens"
+          # The usage counters are the token histograms' sums.
+          - extract_sum_metric(true, ".genai_usage") where metric.name == "llm_d_epp_request_input_tokens" or metric.name == "llm_d_epp_request_output_tokens" or metric.name == "llm_d_epp_request_cached_tokens"
+          - set(metric.name, "gen_ai.client.inference.usage.input_tokens") where metric.name == "llm_d_epp_request_input_tokens.genai_usage"
+          - set(metric.name, "gen_ai.client.inference.usage.output_tokens") where metric.name == "llm_d_epp_request_output_tokens.genai_usage"
+          - set(metric.name, "gen_ai.client.inference.usage.cache_read.input_tokens") where metric.name == "llm_d_epp_request_cached_tokens.genai_usage"
+          - set(metric.unit, "{token}") where IsMatch(metric.name, "^gen_ai\\.client\\.inference\\.usage\\.")
+          - set(metric.description, "The number of input (prompt) tokens used, including cached tokens.") where metric.name == "gen_ai.client.inference.usage.input_tokens"
+          - set(metric.description, "The number of output (completion) tokens used, including reasoning tokens.") where metric.name == "gen_ai.client.inference.usage.output_tokens"
+          - set(metric.description, "The number of input tokens served from a provider-managed cache.") where metric.name == "gen_ai.client.inference.usage.cache_read.input_tokens"
+      - conditions:
+          - IsMatch(metric.name, "^gen_ai\\.client\\.inference\\.")
+        statements:
+          - set(datapoint.attributes["gen_ai.operation.name"], "chat") where datapoint.attributes["api_surface"] == "chat_completions" or datapoint.attributes["api_surface"] == "responses" or datapoint.attributes["api_surface"] == "messages"
+          - set(datapoint.attributes["gen_ai.operation.name"], "text_completion") where datapoint.attributes["api_surface"] == "completions" or datapoint.attributes["api_surface"] == "vllm_generate" or datapoint.attributes["api_surface"] == "sglang_generate"
+          # The engine serving the pool. Set GEN_AI_PROVIDER_NAME when it is not vLLM.
+          - set(datapoint.attributes["gen_ai.provider.name"], "${env:GEN_AI_PROVIDER_NAME:-vllm}")
+          - set(datapoint.attributes["gen_ai.request.model"], datapoint.attributes["model_name"]) where datapoint.attributes["model_name"] != ""
+          - set(datapoint.attributes["gen_ai.response.model"], datapoint.attributes["target_model_name"]) where datapoint.attributes["target_model_name"] != ""
+          # The EPP does not split token counts by modality.
+          - set(datapoint.attributes["gen_ai.token.modality"], "unknown") where IsMatch(metric.name, "^gen_ai\\.client\\.inference\\.usage\\.")
+
+  filter/genai:
+    error_mode: ignore
+    metric_conditions:
+      # Requests outside the generation APIs (api_surface="unknown") are not inference operations,
+      # and the GenAI conventions define no operation name for text-to-speech
+      # (api_surface="audio_speech"), which is left unset above and dropped here.
+      - IsMatch(metric.name, "^gen_ai\\.client\\.inference\\.") and datapoint.attributes["gen_ai.operation.name"] == nil
+      - metric.name == "gen_ai.client.inference.time_to_first_chunk" and datapoint.attributes["streaming"] != "true"
+
+  # Keeps only the GenAI attributes. fairness_id and priority are summed away.
+  transform/genai_aggregate:
+    error_mode: ignore
+    metric_statements:
+      - statements:
+          - aggregate_on_attributes("sum", ["gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.response.model", "gen_ai.token.modality"]) where IsMatch(metric.name, "^gen_ai\\.client\\.inference\\.")
+
+exporters:
+  otlp_grpc:
+    endpoint: ${env:OTLP_ENDPOINT}
+    tls:
+      insecure: ${env:OTLP_INSECURE:-false}
+
+service:
+  pipelines:
+    metrics/llm-d-epp:
+      receivers: [prometheus/llm-d-epp]
+      processors: [transform/genai, filter/genai, transform/genai_aggregate]
+      exporters: [otlp_grpc]
