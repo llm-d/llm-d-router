@@ -18,13 +18,21 @@ package prefixcacheaffinity
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -119,4 +127,137 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 			assert.Equal(t, affinityOutcome(test.outcome), stored)
 		})
 	}
+}
+
+// The served endpoint's estimate is recorded with the measured TTFT at the
+// first response chunk; an endpoint without an estimate records nothing.
+func TestResponseBodyRecordsTTFTEstimate(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 2000, TTFTSource: TTFTSourcePrefillThroughput,
+		PeakPrefillThroughput: 1000, TTFTEstimate: TTFTEstimateFull})
+	p.pluginState = fwkplugin.NewPluginState(t.Context())
+	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, -1, 1500, 500), makeEndpoint("b", 10, -1, 0, 0)}
+
+	request := &fwksched.InferenceRequest{RequestID: "served-a", TargetModel: testTargetModel}
+	p.Filter(context.Background(), request, endpoints)
+	served := endpoints[0].GetMetadata()
+	p.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, served)
+
+	require.Equal(t, 1, testutil.CollectAndCount(estimatedTTFT))
+	assert.InDelta(t, 2.0, histogramSum(t, estimatedTTFT), 1e-9, "(1500 + 500) tokens / 1000 tokens/s")
+	assert.Equal(t, uint64(1), histogramCount(t, actualTTFT))
+	_, err := p.pluginState.Read(request.RequestID, ttftEstimateStateKey)
+	assert.ErrorIs(t, err, fwkplugin.ErrNotFound, "the estimates are released at the first chunk")
+
+	other := &fwksched.InferenceRequest{RequestID: "served-elsewhere", TargetModel: testTargetModel}
+	p.Filter(context.Background(), other, endpoints)
+	unknown := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "c", Namespace: "default"}}
+	p.ResponseBody(context.Background(), other, &fwkrh.Response{StartOfStream: true}, unknown)
+	assert.Equal(t, uint64(1), histogramCount(t, estimatedTTFT), "an endpoint without an estimate is not recorded")
+
+	predictor := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 2000, TTFTSource: TTFTSourceLatencyPredictor})
+	predictor.pluginState = fwkplugin.NewPluginState(t.Context())
+	predicted := &fwksched.InferenceRequest{RequestID: "predictor", TargetModel: testTargetModel}
+	predictor.Filter(context.Background(), predicted, []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0, -1), makeEndpoint("b", 10, 50, 0, -1)})
+	predictor.ResponseBody(context.Background(), predicted, &fwkrh.Response{StartOfStream: true}, served)
+	assert.Equal(t, uint64(1), histogramCount(t, estimatedTTFT), "the latency predictor source records nothing")
+}
+
+// The step source records its estimate without a peak prefill throughput: read,
+// one step and the handoff on an idle endpoint holding the whole prompt.
+func TestResponseBodyRecordsPrefillStepsEstimate(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	p := newTestPlugin(stepsConfig())
+	p.pluginState = fwkplugin.NewPluginState(t.Context())
+	endpoints := []fwksched.Endpoint{makeStepEndpoint("warm", 100, 0, 0), makeStepEndpoint("idle", 0, 0, 0)}
+
+	request := &fwksched.InferenceRequest{RequestID: "steps", TargetModel: testTargetModel}
+	p.Filter(context.Background(), request, endpoints)
+	p.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, endpoints[0].GetMetadata())
+
+	assert.Equal(t, uint64(1), histogramCount(t, estimatedTTFT))
+	assert.InDelta(t, (50+345+500)/1000.0, histogramSum(t, estimatedTTFT), 1e-9)
+}
+
+// The target model comes from the client, so the TTFT histograms bound it: a
+// name that is not valid UTF-8 folds into the overflow series instead of
+// panicking, and a flood of made-up names folds into one overflow series.
+func TestResponseBodyBoundsTTFTModelLabel(t *testing.T) {
+	const testCap = 3
+	old := boundModelName
+	boundModelName = metricsutil.NewBoundedLabel(testCap).Bound
+	resetMetrics()
+	t.Cleanup(func() {
+		boundModelName = old
+		resetMetrics()
+	})
+
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 2000, TTFTSource: TTFTSourcePrefillThroughput,
+		PeakPrefillThroughput: 1000, TTFTEstimate: TTFTEstimateBackLog})
+	p.pluginState = fwkplugin.NewPluginState(t.Context())
+	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, -1, 1500, 500), makeEndpoint("b", 10, -1, 0, 0)}
+	served := endpoints[0].GetMetadata()
+	serve := func(id, model string) {
+		request := &fwksched.InferenceRequest{RequestID: id, TargetModel: model}
+		p.Filter(context.Background(), request, endpoints)
+		p.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, served)
+	}
+
+	require.NotPanics(t, func() { serve("invalid-utf8", "model-\xff") })
+	m := &dto.Metric{}
+	require.NoError(t, estimatedTTFT.WithLabelValues("test", PluginType, metricsutil.OverflowValue).(prometheus.Histogram).Write(m))
+	assert.Equal(t, uint64(1), m.GetHistogram().GetSampleCount(), "a name that is not valid UTF-8 is recorded as the overflow value")
+
+	for i := range 100 {
+		serve(fmt.Sprintf("req-%d", i), fmt.Sprintf("model-%d", i))
+	}
+	assert.Equal(t, testCap+1, testutil.CollectAndCount(estimatedTTFT), "100 model names collapse to the cap plus the overflow series")
+	assert.Equal(t, testCap+1, testutil.CollectAndCount(actualTTFT))
+}
+
+// A request still waiting for its first chunk after the PluginState staleness
+// threshold keeps its estimate while its request ctx is alive.
+func TestResponseBodyRecordsTTFTEstimateAfterStaleness(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 2000, TTFTSource: TTFTSourcePrefillThroughput,
+		PeakPrefillThroughput: 1000, TTFTEstimate: TTFTEstimateFull})
+	p.pluginState = fwkplugin.NewPluginState(t.Context(),
+		fwkplugin.WithStalenessThreshold(20*time.Millisecond), fwkplugin.WithCleanupInterval(5*time.Millisecond))
+	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, -1, 1500, 500), makeEndpoint("b", 10, -1, 0, 0)}
+	served := endpoints[0].GetMetadata()
+
+	live := &fwksched.InferenceRequest{RequestID: "slow-live", TargetModel: testTargetModel}
+	p.Filter(t.Context(), live, endpoints)
+	ended, cancel := context.WithCancel(t.Context())
+	gone := &fwksched.InferenceRequest{RequestID: "slow-ended", TargetModel: testTargetModel}
+	p.Filter(ended, gone, endpoints)
+	cancel()
+
+	time.Sleep(100 * time.Millisecond)
+	p.ResponseBody(context.Background(), live, &fwkrh.Response{StartOfStream: true}, served)
+	p.ResponseBody(context.Background(), gone, &fwkrh.Response{StartOfStream: true}, served)
+	assert.Equal(t, uint64(1), histogramCount(t, estimatedTTFT), "only the request with a live ctx keeps its estimate")
+	assert.Equal(t, uint64(1), histogramCount(t, actualTTFT))
+}
+
+const testTargetModel = "model-a"
+
+func histogramCount(t *testing.T, h *prometheus.HistogramVec) uint64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, h.WithLabelValues("test", PluginType, testTargetModel).(prometheus.Histogram).Write(m))
+	return m.GetHistogram().GetSampleCount()
+}
+
+func histogramSum(t *testing.T, h *prometheus.HistogramVec) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, h.WithLabelValues("test", PluginType, testTargetModel).(prometheus.Histogram).Write(m))
+	return m.GetHistogram().GetSampleSum()
 }
