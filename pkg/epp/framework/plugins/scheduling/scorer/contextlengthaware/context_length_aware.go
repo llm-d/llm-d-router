@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 
@@ -54,6 +55,9 @@ type contextLengthAwareParameters struct {
 	// If false, the plugin only scores pods.
 	// Default is false.
 	EnableFiltering bool `json:"enableFiltering"`
+
+	// EscapeProbability permits longer ranges with this probability when no range matches.
+	EscapeProbability float64 `json:"escapeProbability,omitempty"`
 
 	// ReusableTokensProducerName is the name of the p2p-source-producer whose
 	// reusable prefix token count is subtracted from the total token count
@@ -92,6 +96,9 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 	if parameters.Label == "" {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'label' must be specified", ContextLengthAwareType)
 	}
+	if parameters.EscapeProbability < 0 || parameters.EscapeProbability > 1 {
+		return nil, fmt.Errorf("escapeProbability must be in [0, 1], got %f", parameters.EscapeProbability)
+	}
 	if parameters.ReusableTokensProducerName != "" && parameters.Label == DefaultContextLengthLabel {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: reusableTokensProducerName requires a work-range label other than %q", ContextLengthAwareType, DefaultContextLengthLabel)
 	}
@@ -110,6 +117,7 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 		typedName:                  plugin.TypedName{Type: ContextLengthAwareType, Name: name},
 		labelName:                  params.Label,
 		enableFiltering:            params.EnableFiltering,
+		escapeProbability:          params.EscapeProbability,
 		includeMaxOutputTokens:     params.IncludeMaxOutputTokens,
 		reusableTokensProducerName: params.ReusableTokensProducerName,
 		reusableTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.
@@ -121,7 +129,7 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // ContextLengthAware is a plugin that filters or scores endpoints based on their association
 // with input context length groups.
 // It checks for a specific label on endpoints that defines the context length ranges they support.
-// If filtering is enabled, endpoints that don't support the request's context length are filtered out.
+// Filtering selects matching ranges, with optional fallback to longer ranges and general-purpose candidates.
 // Additionally, it scores endpoints based on how well their context length ranges match the request.
 //
 // The context length is the total token count across all prompts in
@@ -138,7 +146,8 @@ type ContextLengthAware struct {
 	// labelName defines the name of the label to be checked
 	labelName string
 	// enableFiltering indicates whether filtering is enabled
-	enableFiltering bool
+	enableFiltering   bool
+	escapeProbability float64
 	// includeMaxOutputTokens adds the request's output token cap to the context length.
 	includeMaxOutputTokens bool
 	// reusableTokensProducerName enables cache subtraction when non-empty.
@@ -182,7 +191,7 @@ func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
 	}
 }
 
-// Filter filters out endpoints that don't have a context length range matching the request.
+// Filter prefers matching ranges and optionally falls back to longer ranges and general-purpose candidates.
 // This is only active when enableFiltering is true.
 func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	if !p.enableFiltering {
@@ -194,12 +203,15 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 	logger.V(logging.TRACE).Info("Filtering endpoints by context length", "contextLength", contextLength)
 
 	filteredEndpoints := []scheduling.Endpoint{}
+	matchedEndpoints := []scheduling.Endpoint{}
+	fallbackEndpoints := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {
 		metadata := endpoint.GetMetadata()
 		if metadata == nil {
 			// Endpoints without metadata are included (treated as no-label).
 			filteredEndpoints = append(filteredEndpoints, endpoint)
+			fallbackEndpoints = append(fallbackEndpoints, endpoint)
 			continue
 		}
 
@@ -207,6 +219,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 		if !hasLabel {
 			// Endpoints without the label are included (they accept any context length).
 			filteredEndpoints = append(filteredEndpoints, endpoint)
+			fallbackEndpoints = append(fallbackEndpoints, endpoint)
 			continue
 		}
 
@@ -216,11 +229,22 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 			continue
 		}
 
+		if contextLength < r.min {
+			fallbackEndpoints = append(fallbackEndpoints, endpoint)
+		}
 		if contextLength >= r.min && contextLength <= r.max {
 			filteredEndpoints = append(filteredEndpoints, endpoint)
+			matchedEndpoints = append(matchedEndpoints, endpoint)
 		}
 	}
 
+	if p.escapeProbability > 0 {
+		if len(matchedEndpoints) != 0 {
+			filteredEndpoints = matchedEndpoints
+		} else if rand.Float64() < p.escapeProbability { //#nosec G404 -- routing exploration, not security-sensitive
+			filteredEndpoints = fallbackEndpoints
+		}
+	}
 	logger.V(logging.TRACE).Info("Filtered endpoints", "originalCount", len(endpoints),
 		"filteredCount", len(filteredEndpoints))
 	return filteredEndpoints
