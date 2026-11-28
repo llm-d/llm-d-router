@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -813,48 +814,65 @@ func TestDetector_HybridFilter(t *testing.T) {
 	})
 }
 
-// TestDetector_ConcurrencyStress performs race condition check.
+// TestDetector_ConcurrencyStress races ReserveDispatch and ReleaseDispatch for
+// the same request IDs across goroutines while other goroutines read Saturation.
+// Each ID must be reserved and released exactly once, and pendingDispatches must
+// stay consistent with the reservation set.
 func TestDetector_ConcurrencyStress(t *testing.T) {
 	t.Parallel()
 
-	reg := newLocalRegistry()
-	ctx := context.Background()
-	endpointName := "stress-endpoint"
-	fullID := fullEndpointName(endpointName)
+	const (
+		numIDs      = 200
+		contenders  = 8 // goroutines racing for each ID
+		readers     = 4
+		readsPerRun = 500
+	)
+	ctx := t.Context()
+	detector := newDetector("stress", config{mode: modeRequests, maxConcurrency: numIDs}, logr.Discard())
+	endpoints := []datalayer.Endpoint{newFakeEndpoint(newLocalRegistry(), "stress-endpoint")}
+	id := func(i int) string { return fmt.Sprintf("req-%d", i) }
 
-	warmUpRes := makeSchedulingResult(reg, endpointName)
-	warmUpEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-	simulatePreRequest(ctx, reg, nil, warmUpRes)
-	simulateResponseBody(ctx, reg, nil, &fwkrh.Response{EndOfStream: true}, warmUpEndpoint.metadata)
-
-	const numGoroutines = 50
-	const opsPerRoutine = 1000
-
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 2)
-
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			res := makeSchedulingResult(reg, endpointName)
-			for range opsPerRoutine {
-				simulatePreRequest(ctx, reg, nil, res)
-			}
-		}()
+	// race runs op for every ID on each contender while readers call Saturation,
+	// and returns how many op calls reported success.
+	race := func(op func(string) bool, ids func(int) bool) (succeeded int64, outOfRange bool) {
+		var wins atomic.Int64
+		var badRead atomic.Bool
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for range contenders {
+			wg.Go(func() {
+				<-start
+				for i := range numIDs {
+					if ids(i) && op(id(i)) {
+						wins.Add(1)
+					}
+				}
+			})
+		}
+		for range readers {
+			wg.Go(func() {
+				<-start
+				for range readsPerRun {
+					if s := detector.Saturation(ctx, endpoints); s < 0 || s > 1 {
+						badRead.Store(true)
+					}
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		return wins.Load(), badRead.Load()
 	}
 
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-			for range opsPerRoutine {
-				simulateResponseBody(ctx, reg, nil, &fwkrh.Response{EndOfStream: true}, targetEndpoint.metadata)
-			}
-		}()
-	}
+	reserved, outOfRange := race(detector.ReserveDispatch, func(int) bool { return true })
+	require.Equal(t, int64(numIDs), reserved, "each ID must be reserved exactly once")
+	require.False(t, outOfRange, "Saturation left [0, 1] during reservations")
+	require.InDelta(t, 1.0, detector.Saturation(ctx, endpoints), 1e-9)
 
-	wg.Wait()
-	require.Equal(t, int64(0), reg.get(fullID).Requests)
+	released, outOfRange := race(detector.ReleaseDispatch, func(i int) bool { return i%2 == 0 })
+	require.Equal(t, int64(numIDs/2), released, "each ID must be released exactly once")
+	require.False(t, outOfRange, "Saturation left [0, 1] during releases")
+	require.InDelta(t, 0.5, detector.Saturation(ctx, endpoints), 1e-9)
 }
 
 // TestDetector_NilMetadataEndpoint verifies that endpoints with nil metadata
