@@ -35,6 +35,7 @@ type Config struct {
 	Registry            *registry.Config
 	UsageLimitPolicy    flowcontrol.UsageLimitPolicy
 	BandSelectionPolicy flowcontrol.BandSelectionPolicy
+	CrossReplica        controller.CrossReplicaConfig
 }
 
 func (c *Config) String() string {
