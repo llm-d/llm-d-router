@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -69,12 +70,17 @@ var (
 	_ datalayer.EndpointExtractor       = (*dataProducer)(nil)
 	_ datalayer.Registrant              = &dataProducer{}
 	_ datalayer.CrossReplicaContributor = (*dataProducer)(nil)
+	_ datalayer.CrossReplicaImporter    = (*dataProducer)(nil)
 )
 
 // indexUpdateStateKey identifies the per-request record of indexer entries
 // PreRequest added. The record lives until the response arrives so a failed
 // response can remove the entries.
 const indexUpdateStateKey plugin.StateKey = "indexUpdate"
+
+// errEndpointNotReady is returned by ImportCrossReplica for an endpoint whose
+// add event has not reached Extract yet; the runtime retries the import.
+var errEndpointNotReady = errors.New("approx-prefix: endpoint not registered yet")
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
@@ -91,6 +97,10 @@ type dataProducer struct {
 	// registeredEndpoints maps endpointID to the Endpoint pointer last seen on
 	// AddOrUpdate so Extract can ignore stale deletes for a replaced object.
 	registeredEndpoints sync.Map
+	// lifecycleMu orders Extract's registration changes with
+	// CleanUpInactivePods, so the cleanup never removes an endpoint that was
+	// registered after it checked.
+	lifecycleMu sync.Mutex
 	// peerMerged tracks peer prompt keys already folded into the indexer per
 	// endpoint so a stable peer window does not re-Add (and LRU-touch) on every
 	// request. Each merge replaces the set with the active peer-only window so
@@ -102,11 +112,13 @@ type dataProducer struct {
 	estimateTokens atomic.Bool
 }
 
-// mergedKeySet is the per-endpoint set stored in peerMerged. keys holds only
-// prompt keys present in the latest peer sync window for that endpoint.
-// digest is the xxhash of the last processed PrefixHashSet.Prompts so Produce
-// can skip snapshot/key work when the sync attribute is unchanged.
+// mergedKeySet is the per-endpoint set stored in peerMerged. keys holds the
+// prompt keys of the latest peer window that have been Added to the indexer.
+// digest is the xxhash of the last processed PrefixHashSet.Prompts so the
+// request-path merge can skip snapshot/key work when the sync attribute is
+// unchanged. importMu is held for a whole import of this endpoint.
 type mergedKeySet struct {
+	importMu   sync.Mutex
 	mu         sync.Mutex
 	keys       map[string]struct{}
 	digest     uint64
@@ -178,8 +190,8 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 
 // Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
-// is configured. PrefixHashSet is optional: when a CrossReplicaSyncer is wired,
-// Produce reads the syncer-backed attribute to merge peer recent windows.
+// is configured. PrefixHashSet is optional: when peer state is merged on the
+// request path, Produce reads the syncer-backed attribute.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	deps := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: plugin.ConsumedData{
@@ -187,7 +199,7 @@ func (p *dataProducer) Consumes() plugin.DataDependencies {
 			Matches: p.recordTokenBackend,
 		}},
 	}
-	if p.syncCrossReplicaState {
+	if p.syncCrossReplicaState && !p.peerImportOffPath() {
 		deps.Optional = map[plugin.DataKey]any{p.syncHashDK: attrprefix.PrefixHashSet{}}
 	}
 	return deps
@@ -290,6 +302,18 @@ func (p *dataProducer) syncerActive() bool {
 	return p.syncCrossReplicaState && p.handle != nil && p.handle.CrossReplicaSyncer() != nil
 }
 
+// peerImportOffPath reports whether the runtime imports peer state through
+// ImportCrossReplica, so Produce must not merge on the request path. It is
+// evaluated per call because the syncer is set on the handle after plugins
+// are constructed.
+func (p *dataProducer) peerImportOffPath() bool {
+	if !p.syncerActive() {
+		return false
+	}
+	_, ok := p.handle.CrossReplicaSyncer().(datalayer.CrossReplicaPeerReader)
+	return ok
+}
+
 // CleanUpInactivePods starts a goroutine that periodically removes inactive pods from the indexer.
 func (p *dataProducer) CleanUpInactivePods(ctx context.Context, handle plugin.Handle) {
 	ticker := time.NewTicker(podActiveCheckInterval)
@@ -300,24 +324,34 @@ func (p *dataProducer) CleanUpInactivePods(ctx context.Context, handle plugin.Ha
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			podNames := handle.PodList()
-			activePods := make(map[ServerID]struct{}, len(podNames))
-			for _, nsn := range podNames {
-				activePods[ServerID(nsn)] = struct{}{}
-			}
-
-			for _, pod := range p.indexerInst.Pods() {
-				if _, ok := activePods[pod]; !ok {
-					p.indexerInst.RemovePod(pod)
-					id := pod.String()
-					if p.recent != nil {
-						p.recent.forget(id)
-					}
-					p.forgetPeerMerged(id)
-					log.FromContext(ctx).V(logutil.VERBOSE).Info("Removed pod not in active set", "pod", pod)
-				}
-			}
+			p.removeInactivePods(ctx, handle.PodList())
 		}
+	}
+}
+
+// removeInactivePods drops indexer, recent-window and merged-key state of pods
+// that are neither in podNames nor registered. A registered endpoint is
+// removed by its delete event; the pod list may lag behind a registration.
+func (p *dataProducer) removeInactivePods(ctx context.Context, podNames []k8stypes.NamespacedName) {
+	activePods := make(map[ServerID]struct{}, len(podNames))
+	for _, nsn := range podNames {
+		activePods[ServerID(nsn)] = struct{}{}
+	}
+	for _, pod := range p.indexerInst.Pods() {
+		if _, ok := activePods[pod]; ok {
+			continue
+		}
+		id := pod.String()
+		p.lifecycleMu.Lock()
+		if _, registered := p.registeredEndpoints.Load(id); !registered {
+			p.indexerInst.RemovePod(pod)
+			if p.recent != nil {
+				p.recent.forget(id)
+			}
+			p.forgetPeerMerged(id)
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("Removed pod not in active set", "pod", pod)
+		}
+		p.lifecycleMu.Unlock()
 	}
 }
 
@@ -333,7 +367,9 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
-	p.mergeRemoteHashes(pods)
+	if !p.peerImportOffPath() {
+		p.mergeRemoteHashes(pods)
+	}
 
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
@@ -383,15 +419,12 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	return nil
 }
 
-// mergeRemoteHashes folds peer recent-window prompts into the local indexer.
-// Runs only when a CrossReplicaSyncer is configured. The syncer-backed
-// attribute is Aggregate(local, peers); local prompts and prompts already
-// merged for this endpoint are skipped so Produce does not re-warm or
-// LRU-touch the indexer on every request. Each new peer prompt is Added on its
-// own so indexer LRU eviction keeps prompt-prefix semantics. Peer prompts are
-// not recorded into the recent window (no echo). When the attribute digest
-// matches the last processed value, the pod is skipped without snapshot or
-// prompt-key work.
+// mergeRemoteHashes folds peer recent-window prompts into the local indexer on
+// the request path. It runs when a CrossReplicaSyncer is configured that
+// cannot provide peer snapshots for background import. The syncer-backed
+// attribute is Aggregate(local, peers). When the attribute digest matches the
+// last processed value, the pod is skipped without snapshot or prompt-key
+// work. A pod that another request is importing is skipped as well.
 func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 	if !p.syncerActive() || p.indexerInst == nil {
 		return
@@ -406,49 +439,121 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 		if p.peerMergedDigestMatches(endpointID, digest) {
 			continue
 		}
-		if len(set.Prompts) == 0 {
-			p.reconcilePeerMerged(endpointID, map[string]struct{}{})
-			p.rememberPeerMergedDigest(endpointID, digest)
+		keys := p.mergedKeys(endpointID)
+		if !keys.importMu.TryLock() {
 			continue
 		}
-		local := p.recent.snapshot(endpointID)
-		localSet := make(map[string]struct{}, len(local))
-		for _, prompt := range local {
-			localSet[promptKey(prompt)] = struct{}{}
+		if err := p.importPeerSet(context.Background(), keys, endpointID, func() server { return p.makeserver(pod) }, set); err == nil {
+			keys.rememberDigest(digest)
 		}
-		active := make(map[string]struct{}, len(set.Prompts))
-		for _, prompt := range set.Prompts {
-			if len(prompt) == 0 {
-				continue
-			}
-			key := promptKeyUint64(prompt)
-			if _, ok := localSet[key]; ok {
-				continue
-			}
-			active[key] = struct{}{}
-		}
-		if p.peerMergedCovers(endpointID, active) {
-			p.rememberPeerMergedDigest(endpointID, digest)
-			continue
-		}
-		novel := p.reconcilePeerMerged(endpointID, active)
-		if len(novel) == 0 {
-			p.rememberPeerMergedDigest(endpointID, digest)
-			continue
-		}
-		server := p.makeserver(pod)
-		for _, prompt := range set.Prompts {
-			if len(prompt) == 0 {
-				continue
-			}
-			key := promptKeyUint64(prompt)
-			if _, ok := novel[key]; !ok {
-				continue
-			}
-			p.indexerInst.Add(uint64sToBlockHashes(prompt), server)
-		}
-		p.rememberPeerMergedDigest(endpointID, digest)
+		keys.importMu.Unlock()
 	}
+}
+
+// ImportCrossReplica implements datalayer.CrossReplicaImporter. peer is the
+// peer-only PrefixHashSet for endpointID; nil or empty means no peer
+// publishes, which clears the recorded keys and leaves the indexer as is.
+func (p *dataProducer) ImportCrossReplica(ctx context.Context, endpointID string, peer any) error {
+	registered, ok := p.registeredEndpoints.Load(endpointID)
+	if !ok {
+		return errEndpointNotReady
+	}
+	endpoint, ok := registered.(endpointCapacity)
+	if !ok {
+		return fmt.Errorf("approx-prefix: endpoint %s has unexpected type %T", endpointID, registered)
+	}
+	set, ok := peer.(*attrprefix.PrefixHashSet)
+	if !ok && peer != nil {
+		return fmt.Errorf("approx-prefix: peer state for %s has unexpected type %T", endpointID, peer)
+	}
+	if set == nil {
+		set = &attrprefix.PrefixHashSet{}
+	}
+	keys := p.mergedKeys(endpointID)
+	keys.importMu.Lock()
+	defer keys.importMu.Unlock()
+	return p.importPeerSet(ctx, keys, endpointID, func() server { return p.makeserver(endpoint) }, set)
+}
+
+// importPeerSet Adds the prompts of set that are neither in the local recent
+// window nor already recorded for endpointID, and records each key only after
+// its Add. Keys that left the peer window are dropped so a prompt that leaves
+// and returns is Added again. Merged prompts are not recorded into the recent
+// window (no echo). Callers hold keys.importMu.
+func (p *dataProducer) importPeerSet(ctx context.Context, keys *mergedKeySet, endpointID string, newServer func() server, set *attrprefix.PrefixHashSet) error {
+	local := p.recent.snapshot(endpointID)
+	localSet := make(map[string]struct{}, len(local))
+	for _, prompt := range local {
+		localSet[promptKey(prompt)] = struct{}{}
+	}
+	active := make(map[string]struct{}, len(set.Prompts))
+	for _, prompt := range set.Prompts {
+		if len(prompt) == 0 {
+			continue
+		}
+		key := promptKeyUint64(prompt)
+		if _, ok := localSet[key]; ok {
+			continue
+		}
+		active[key] = struct{}{}
+	}
+	novel := keys.pruneAndDiff(active)
+	if len(novel) == 0 {
+		return nil
+	}
+	srv := newServer()
+	for _, prompt := range set.Prompts {
+		if len(prompt) == 0 {
+			continue
+		}
+		key := promptKeyUint64(prompt)
+		if _, ok := novel[key]; !ok {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		p.indexerInst.Add(uint64sToBlockHashes(prompt), srv)
+		if !keys.record(ctx, key) {
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (p *dataProducer) mergedKeys(endpointID string) *mergedKeySet {
+	v, _ := p.peerMerged.LoadOrStore(endpointID, &mergedKeySet{keys: make(map[string]struct{})})
+	return v.(*mergedKeySet)
+}
+
+// pruneAndDiff drops recorded keys that are not in active and returns the
+// active keys not recorded yet.
+func (s *mergedKeySet) pruneAndDiff(active map[string]struct{}) map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.keys {
+		if _, ok := active[k]; !ok {
+			delete(s.keys, k)
+		}
+	}
+	novel := make(map[string]struct{})
+	for k := range active {
+		if _, ok := s.keys[k]; !ok {
+			novel[k] = struct{}{}
+		}
+	}
+	return novel
+}
+
+// record marks key as Added unless ctx is done.
+func (s *mergedKeySet) record(ctx context.Context, key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	s.keys[key] = struct{}{}
+	return true
 }
 
 // peekPrefixHashSet returns the sync attribute without cloning when the
@@ -482,53 +587,14 @@ func (p *dataProducer) peerMergedDigestMatches(endpointID string, digest uint64)
 	return s.haveDigest && s.digest == digest
 }
 
-func (p *dataProducer) rememberPeerMergedDigest(endpointID string, digest uint64) {
-	v, _ := p.peerMerged.LoadOrStore(endpointID, &mergedKeySet{keys: make(map[string]struct{})})
-	s := v.(*mergedKeySet)
+// rememberDigest records the digest of the window that was just imported.
+// Callers hold s.importMu, so digests are stored in the order the imports ran
+// and a set that an endpoint delete dropped meanwhile is not stored again.
+func (s *mergedKeySet) rememberDigest(digest uint64) {
 	s.mu.Lock()
 	s.digest = digest
 	s.haveDigest = true
 	s.mu.Unlock()
-}
-
-// peerMergedCovers reports whether endpointID's remembered set already matches
-// active, so Produce can skip reconcile and Add work on a stable peer window.
-func (p *dataProducer) peerMergedCovers(endpointID string, active map[string]struct{}) bool {
-	v, ok := p.peerMerged.Load(endpointID)
-	if !ok {
-		return false
-	}
-	s := v.(*mergedKeySet)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.keys) != len(active) {
-		return false
-	}
-	for k := range active {
-		if _, ok := s.keys[k]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// reconcilePeerMerged replaces the remembered peer keys for endpointID with
-// active and returns keys that were not previously remembered (need Add).
-func (p *dataProducer) reconcilePeerMerged(endpointID string, active map[string]struct{}) map[string]struct{} {
-	v, _ := p.peerMerged.LoadOrStore(endpointID, &mergedKeySet{keys: make(map[string]struct{})})
-	s := v.(*mergedKeySet)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	novel := make(map[string]struct{})
-	next := make(map[string]struct{}, len(active))
-	for k := range active {
-		next[k] = struct{}{}
-		if _, ok := s.keys[k]; !ok {
-			novel[k] = struct{}{}
-		}
-	}
-	s.keys = next
-	return novel
 }
 
 func (p *dataProducer) forgetPeerMerged(endpointID string) {
@@ -777,6 +843,8 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 	endpointID := event.Endpoint.GetMetadata().ID.String()
 	switch event.Type {
 	case datalayer.EventDelete:
+		p.lifecycleMu.Lock()
+		defer p.lifecycleMu.Unlock()
 		// Same pointer-identity guard as inflightload: an out-of-order delete for
 		// a replaced endpoint must not clear the live recent window.
 		if registered, ok := p.registeredEndpoints.Load(endpointID); ok && registered != event.Endpoint {
@@ -795,7 +863,9 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 		p.forgetPeerMerged(endpointID)
 		return nil
 	case datalayer.EventAddOrUpdate:
+		p.lifecycleMu.Lock()
 		p.registeredEndpoints.Store(endpointID, event.Endpoint)
+		p.lifecycleMu.Unlock()
 		// Placeholder for the sync attribute only when a syncer will publish.
 		// Without a syncer, installing a local-only DynamicAttribute would make
 		// every Produce snapshot and skip the local window for no benefit.
@@ -817,13 +887,20 @@ func (p *dataProducer) coversTier(tier string) bool {
 	return len(p.config.CapacityTiers) == 0 || slices.Contains(p.config.CapacityTiers, tier)
 }
 
+// endpointCapacity is the part of an endpoint makeserver reads. Both the
+// scheduling endpoint and the data-layer endpoint delivered to Extract satisfy it.
+type endpointCapacity interface {
+	GetMetadata() *datalayer.EndpointMetadata
+	GetMetrics() *datalayer.Metrics
+}
+
 // makeserver sizes the pod's prefix index. With AutoTune, the capacity is the
 // largest tier in CapacityTiers that the endpoint reports, in router blocks:
 // the HBM tier from CacheNumBlocks and the offload-extended tier from
 // KvCacheMaxTokenCapacity. An offload tier holds a copy of what the HBM tier
 // holds (SGLang HiCache, vLLM CPU offloading), so the tiers are compared
 // rather than added. Without metrics the configured capacity applies.
-func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
+func (p *dataProducer) makeserver(targetEndpoint endpointCapacity) server {
 	capacity := defaultLRUCapacityPerServer
 	fromMetrics := false
 	offloadCapacityUnknown := false
@@ -831,7 +908,7 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 		// Each LRU entry is one router block, which minBlockSizeTokens can make
 		// larger than the engine's block, so capacities convert through tokens
 		// and the index does not outlive the engine's cache.
-		routerBlockSize := p.GetBlockSize([]fwksched.Endpoint{targetEndpoint})
+		routerBlockSize := p.blockSizeFor(m)
 		if p.coversTier(capacityTierHBM) && m.CacheNumBlocks > 0 {
 			capacity = m.CacheNumBlocks
 			if engineBlockSize := m.CacheBlockSize; engineBlockSize > 0 {
@@ -872,15 +949,21 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 // warning is logged in newDataProducer when a configured value triggers the
 // override. See #1158.
 func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
+	var m *datalayer.Metrics
+	if len(endpoints) > 0 {
+		m = endpoints[0].GetMetrics()
+	}
+	return p.blockSizeFor(m)
+}
+
+// blockSizeFor is GetBlockSize for one endpoint's metrics, which may be nil.
+func (p *dataProducer) blockSizeFor(m *datalayer.Metrics) int {
 	blockSize := p.config.BlockSizeTokens
-	if p.config.AutoTune && len(endpoints) > 0 {
-		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-			m := endpoint.GetMetrics()
-			if pmu := m.CachePrefixMatchUnit; pmu > 0 {
-				blockSize = pmu
-			} else if bs := m.CacheBlockSize; bs > 0 {
-				blockSize = bs
-			}
+	if p.config.AutoTune && m != nil {
+		if pmu := m.CachePrefixMatchUnit; pmu > 0 {
+			blockSize = pmu
+		} else if bs := m.CacheBlockSize; bs > 0 {
+			blockSize = bs
 		}
 	}
 	if blockSize < minBlockSizeTokens {

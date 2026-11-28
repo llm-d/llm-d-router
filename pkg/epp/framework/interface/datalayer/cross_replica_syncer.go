@@ -125,6 +125,20 @@ type CrossReplicaContributor interface {
 	CrossReplicaState() CrossReplicaSpec
 }
 
+// CrossReplicaImporter is optionally implemented by a CrossReplicaContributor
+// to fold peer state into local state off the request path. When the syncer
+// implements CrossReplicaPeerReader, the runtime calls it only when the peer
+// version for endpointID changed, never on the request path, and never
+// concurrently for the same (contributor, endpointID). peer is read-only and
+// shared with the syncer. An empty peer value means no peer currently
+// publishes for endpointID. ctx is canceled when the endpoint is deleted; once
+// ctx is done the importer must return promptly. The runtime dispatches
+// EventDelete for endpointID only after the call has returned. Must be
+// idempotent. A returned error makes the runtime retry the same peer value.
+type CrossReplicaImporter interface {
+	ImportCrossReplica(ctx context.Context, endpointID string, peer any) error
+}
+
 // CrossReplicaSpec declares what a CrossReplicaContributor publishes and where.
 type CrossReplicaSpec struct {
 	// StateKey namespaces this contributor's data in the syncer.

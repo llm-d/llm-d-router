@@ -532,6 +532,10 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 func (r *Runtime) ReleaseEndpoint(ep fwkdl.Endpoint) {
 	key := ep.GetMetadata().GetID()
 	if r.crossReplicaPub != nil {
+		gen := r.crossReplicaPub.beginDelete(r.logger, key)
+		// Deferred so a panic below cannot leave key draining, which would
+		// block every later registration of the same key.
+		defer r.crossReplicaPub.finishDelete(key, gen)
 		_, err := r.crossReplicaPub.delete(context.Background(), key)
 		if err != nil {
 			r.logger.Error(err, "failed to delete cross-replica state", "endpoint", key)
