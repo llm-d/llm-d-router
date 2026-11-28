@@ -89,7 +89,7 @@ type stubBands struct {
 // a new Options flag reach only one of the two hand-written composite literals.
 func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	// Fields the caller sets after construction, not the factory.
-	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true, "ForwardInputControlHeaders": true}
+	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true, "ForwardInputControlHeaders": true, "serving": true}
 
 	opts := server.NewOptions()
 	// AddFlags registers the logging flag set that Complete() dereferences.
@@ -111,8 +111,8 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 		common.GKNN{NamespacedName: types.NamespacedName{Name: "pool", Namespace: "ns"}},
 		server.NewControllerConfig(true), ds, director, registry, sd, bands)
 
-	v := reflect.ValueOf(*r)
-	fields := reflect.VisibleFields(reflect.TypeOf(*r))
+	v := reflect.ValueOf(r).Elem() // not a copy: the runner holds an atomic.Bool
+	fields := reflect.VisibleFields(v.Type())
 	require.NotEmpty(t, fields) // never vacuous
 	for _, f := range fields {
 		// FieldByIndex, not Field(i): VisibleFields flattens promoted fields.

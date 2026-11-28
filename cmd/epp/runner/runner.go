@@ -365,6 +365,23 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, elected, drainTimeout)
 }
 
+// extProcReadiness keeps readiness NOT_SERVING until the ext_proc server has
+// finished TLS setup and is serving on its port.
+type extProcReadiness struct {
+	sr *runserver.ExtProcServerRunner
+}
+
+func (extProcReadiness) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "ext-proc", Name: "server"}
+}
+
+func (c extProcReadiness) CheckReady() error {
+	if !c.sr.Serving() {
+		return errors.New("ext-proc server is not serving yet")
+	}
+	return nil
+}
+
 func (r *Runner) stopServing() {
 	if r.cancelServing != nil {
 		r.cancelServing()
@@ -621,7 +638,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	r.serverRunner = serverRunner
 	r.healthGRPCPort = opts.GRPCHealthPort
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
-	readinessCheckers = append(readinessCheckers, r.dlRuntime)
+	readinessCheckers = append(readinessCheckers, r.dlRuntime, extProcReadiness{serverRunner})
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
 }
@@ -1498,7 +1515,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
 		supporters:            ps,
-		readinessCheckers:     pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()),
+		readinessCheckers: append(pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()),
+			extProcReadiness{serverRunner}),
 	})
 
 	g := newRunnableGroup()
