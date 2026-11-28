@@ -25,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -68,7 +69,35 @@ func buildFlowControlConfig(
 		return nil, fmt.Errorf("failed to resolve band selection policy: %w", err)
 	}
 
-	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy, bandSelectionPolicy), nil
+	cfg := flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy, bandSelectionPolicy)
+	if apiConfig != nil && apiConfig.CrossReplica != nil {
+		cfg.CrossReplica, err = buildFlowControlCrossReplica(apiConfig.CrossReplica, handle)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
+}
+
+func buildFlowControlCrossReplica(raw *configapiv1.CrossReplicaConfig, handle fwkplugin.Handle) (controller.CrossReplicaConfig, error) {
+	var cfg controller.CrossReplicaConfig
+	if ref := raw.SyncerPluginRef; ref != "" {
+		syncer, err := resolvePlugin[fwkdl.CrossReplicaSyncer](handle, ref)
+		if err != nil {
+			return cfg, fmt.Errorf("failed to resolve flowControl.crossReplica syncer: %w", err)
+		}
+		cfg.Syncer = syncer
+	}
+	if raw.SyncInterval != nil {
+		cfg.SyncInterval = raw.SyncInterval.Duration
+	}
+	if timeout := raw.PublishTimeout; timeout != nil {
+		if timeout.Duration <= 0 {
+			return cfg, fmt.Errorf("flowControl.crossReplica.publishTimeout must be positive, got %s", timeout.Duration)
+		}
+		cfg.PublishTimeout = timeout.Duration
+	}
+	return cfg, nil
 }
 
 func buildPriorityBandPolicyDefaults(handle fwkplugin.Handle) (registry.PriorityBandPolicyDefaults, error) {

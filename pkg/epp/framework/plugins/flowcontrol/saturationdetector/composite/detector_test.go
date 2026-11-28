@@ -19,6 +19,7 @@ package composite
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -282,4 +283,32 @@ func TestReservationsReachStageScopedChildren(t *testing.T) {
 	require.True(t, tracker.ReleaseDispatch("r2"))
 	assert.False(t, tracker.ReleaseDispatch("r2"), "duplicate release is a no-op")
 	assert.InDelta(t, 0.0, sd.Saturation(ctx, endpoints), 1e-9)
+}
+
+type peerDispatches uint64
+
+func (n peerDispatches) QueuedRequests(int) (uint64, bool)   { return 0, true }
+func (n peerDispatches) DispatchingRequests() (uint64, bool) { return uint64(n), true }
+func (n peerDispatches) SyncInterval() time.Duration         { return 20 * time.Millisecond }
+
+func TestPeerDemandReachesStageScopedChildren(t *testing.T) {
+	handle := newHandle(t)
+	c, err := concurrency.ConcurrencyDetectorFactory("decode-concurrency", fwkplugin.StrictDecoder([]byte(
+		`{"concurrencyMode":"requests","maxConcurrency":2}`)), handle)
+	require.NoError(t, err)
+	handle.AddPlugin("decode-concurrency", c)
+	p, err := MaxSaturationDetectorFactory("admission-split", fwkplugin.StrictDecoder([]byte(
+		`{"detectors":["decode-concurrency"],"stages":{"decode-concurrency":["decode"]}}`)), handle)
+	require.NoError(t, err)
+
+	consumer, ok := p.(flowcontrol.PeerDemandConsumer)
+	require.True(t, ok, "flow control must see a peer demand consumer through the composite")
+	consumer.SetPeerDemand(peerDispatches(1))
+
+	decode := datalayer.NewEndpoint(&datalayer.EndpointMetadata{
+		ID: types.NamespacedName{Name: "d0", Namespace: "ns"},
+	}, nil)
+	ctx := flowcontrol.WithSaturationStage(context.Background(), "decode")
+	assert.InDelta(t, 0.5, p.(flowcontrol.SaturationDetector).Saturation(ctx, []datalayer.Endpoint{decode}), 1e-9,
+		"a peer's dispatched request counts against the child's capacity")
 }

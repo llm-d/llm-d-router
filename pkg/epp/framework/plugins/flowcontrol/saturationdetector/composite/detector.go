@@ -134,6 +134,7 @@ func MaxSaturationDetectorFactory(
 var (
 	_ flowcontrol.SaturationDetector         = &detector{}
 	_ flowcontrol.DispatchReservationTracker = &detector{}
+	_ flowcontrol.PeerDemandConsumer         = &detector{}
 )
 
 // detector combines child saturation detectors, reporting the maximum of their signals.
@@ -214,6 +215,15 @@ func (d *detector) ReserveDispatch(requestID string) bool {
 		}
 	}
 	return reserved
+}
+
+// SetPeerDemand forwards the peer view to every child that reads it, for the same reason ReserveDispatch forwards.
+func (d *detector) SetPeerDemand(peers flowcontrol.PeerDemand) {
+	for _, child := range d.children {
+		if consumer, ok := child.(flowcontrol.PeerDemandConsumer); ok {
+			consumer.SetPeerDemand(peers)
+		}
+	}
 }
 
 // ReleaseDispatch forwards the release to every child that tracks reservations.
