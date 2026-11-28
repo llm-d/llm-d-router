@@ -284,6 +284,11 @@ Without `--pool-name` or `--endpoint-selector` this exits with code 1 and
  `either pool-name or endpoint-selector must be set`, as a real start would. With file discovery,
  `--objectives-file` is loaded and checked too.
 
+Hot reload is disabled by default. Set `--watch-config-file` with `--config-file` to apply
+supported changes to existing `schedulingProfiles` without restarting the EPP. Profile names
+and all fields outside `schedulingProfiles` are set at startup; changes to them are rejected
+and the last valid configuration remains active. `--config-text` cannot be watched.
+
 Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
  comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
  entries are applied after the configuration's own `featureGates` list, so they override it.
