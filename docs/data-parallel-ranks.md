@@ -65,6 +65,7 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 - **One scrape per rank.** Each rank endpoint scrapes its pod's `/metrics` on its own, so a pod with N ranks is scraped N times per interval, each time for every engine's series.
 - **KV events from engines on another pod.** When one frontend serves engines on other pods (vLLM internal load balancing, SGLang with one HTTP server per group), those engines publish KV events on their own pods, which the EPP does not know. The precise prefix cache then sees only the frontend pod's ranks. vLLM v0.32.0 reports each engine's reachable publisher in `/kv_event_sources` when the publisher is configured with `tcp://*:0`; the EPP does not read it. SGLang has no per-node frontend ([sgl-project/sglang#47657](https://github.com/sgl-project/sglang/issues/47657)).
 - **Mooncake with `--data-parallel-start-rank-label`.** vLLM registers Mooncake engines under the pod-local rank, while the EPP sends the global one.
+- **Global ranks with one port for each rank.** The EPP ignores `--data-parallel-start-rank-label` when a pod uses multiple target ports. Every pod gets local rank offsets from `0`. When a data-parallel group spans pods, vLLM numbers its KV-event ports by global rank instead.
 
 ## Example
 
