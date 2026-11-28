@@ -21,8 +21,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // A new session is admitted only when a pod has room for its estimate.
@@ -185,9 +188,9 @@ func TestOversizedSessionFitsWhenPodReclaimable(t *testing.T) {
 	require.True(t, isPaused(a, "s2"))
 }
 
-// A paused session resumes only on its own pod, even when another pod has
-// room (strict origin affinity); it goes ahead of new sessions once its pod
-// has room again.
+// By default, a paused session resumes only on its own pod, even when
+// another pod has room (strict origin affinity); it goes ahead of new
+// sessions once its pod has room again.
 func TestPausedResumesOnlyOnItsOwnPod(t *testing.T) {
 	a := newTestAgent(testConfig())
 	seed(t, a, "s1", "pod-a", 600)
@@ -214,6 +217,128 @@ func TestPausedResumesOnlyOnItsOwnPod(t *testing.T) {
 	req := newRequest("s2", 2000)
 	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(schedEndpoint("pod-a", 0, 0))))
 	require.False(t, isPaused(a, "s2"))
+}
+
+func resumeOnOtherPodConfig() Config {
+	cfg := testConfig()
+	cfg.ResumeOnOtherPod = true
+	return cfg
+}
+
+// With resumeOnOtherPod, a paused session whose own pod has no room resumes
+// on another pod with room: the session is rebound there, the old pod's
+// working set is unchanged, and the scorer pins the new pod.
+func TestPausedResumesOnOtherPodWhenOwnPodFull(t *testing.T) {
+	a := newTestAgent(resumeOnOtherPodConfig())
+	seed(t, a, "s1", "pod-a", 600)
+	seed(t, a, "s2", "pod-a", 500)
+	pause(a, "s2")
+	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
+
+	q2 := makeQueue("s2", time.Now(), 2000) // estimate 500 > room 400 on pod-a
+	require.Equal(t, q2, pick(t, a, q2))
+	s, _ := sessionOf(a, "s2")
+	require.Equal(t, "default/pod-b", s.endpoint.id)
+	require.Equal(t, float64(600), endpointTokens(a, "default/pod-a"))
+	require.Equal(t, float64(500), endpointTokens(a, "default/pod-b"))
+
+	podA, podB := schedEndpoint("pod-a", 0, 0), schedEndpoint("pod-b", 0, 0)
+	scores := a.Score(context.Background(), newRequest("s2", 2000), []fwksched.Endpoint{podA, podB})
+	require.Equal(t, 1.0, scores[podB])
+	require.Equal(t, 0.0, scores[podA])
+
+	startTurn(t, a, "s2", podB, 2000)
+	require.False(t, isPaused(a, "s2"))
+	require.Equal(t, 1.0, testutil.ToFloat64(a.metrics.resumes))
+}
+
+// With resumeOnOtherPod, a paused session that fits another pod only by
+// reclaiming an idle session there pauses that session, as a new session
+// would.
+func TestPausedResumesOnOtherPodByReclaim(t *testing.T) {
+	a := newTestAgent(resumeOnOtherPodConfig())
+	seed(t, a, "s1", "pod-a", 600)
+	seed(t, a, "s2", "pod-a", 500)
+	seed(t, a, "s3", "pod-b", 700)
+	pause(a, "s2")
+	idleFor(a, "s3", time.Minute)
+	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
+
+	q2 := makeQueue("s2", time.Now(), 2000)
+	require.Equal(t, q2, pick(t, a, q2))
+	s, _ := sessionOf(a, "s2")
+	require.Equal(t, "default/pod-b", s.endpoint.id)
+	require.True(t, isPaused(a, "s3"))
+	require.False(t, isPaused(a, "s1"))
+}
+
+// With resumeOnOtherPod, a paused session that fits its own pod by
+// reclaiming idle sessions stays there.
+func TestPausedPrefersOwnPodWhenItFitsByReclaim(t *testing.T) {
+	a := newTestAgent(resumeOnOtherPodConfig())
+	seed(t, a, "s1", "pod-a", 600)
+	seed(t, a, "s2", "pod-a", 500)
+	pause(a, "s2")
+	idleFor(a, "s1", time.Minute)
+	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
+
+	q2 := makeQueue("s2", time.Now(), 2000)
+	require.Equal(t, q2, pick(t, a, q2))
+	s, _ := sessionOf(a, "s2")
+	require.Equal(t, "default/pod-a", s.endpoint.id)
+	require.True(t, isPaused(a, "s1"))
+}
+
+// With resumeOnOtherPod, a paused session that fits no pod holds on its own
+// pod.
+func TestPausedHoldsWhenNoPodFits(t *testing.T) {
+	a := newTestAgent(resumeOnOtherPodConfig())
+	seed(t, a, "s1", "pod-a", 600)
+	seed(t, a, "s2", "pod-a", 500)
+	seed(t, a, "s3", "pod-b", 700) // inside its lease
+	pause(a, "s2")
+	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
+
+	require.Nil(t, pick(t, a, makeQueue("s2", time.Now(), 2000)))
+	s, _ := sessionOf(a, "s2")
+	require.Equal(t, "default/pod-a", s.endpoint.id)
+}
+
+// A second turn of a resuming session, picked before PreRequest confirms the
+// first, holds: it does not move the session and drop the first turn's
+// reservation, whether the first turn resumed in place or on another pod.
+func TestPausedSecondTurnNotMovedBeforePreRequest(t *testing.T) {
+	t.Run("resumed in place", func(t *testing.T) {
+		a := newTestAgent(resumeOnOtherPodConfig())
+		seed(t, a, "s1", "pod-a", 300)
+		seed(t, a, "s2", "pod-a", 500)
+		pause(a, "s2")
+		primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
+
+		q := makeQueue("s2", time.Now(), 2000)
+		require.Equal(t, q, pick(t, a, q))
+		require.Nil(t, pick(t, a, makeQueue("s2", time.Now(), 2000)))
+		s, _ := sessionOf(a, "s2")
+		require.Equal(t, "default/pod-a", s.endpoint.id)
+		require.Equal(t, float64(800), endpointTokens(a, "default/pod-a"))
+	})
+	t.Run("resumed on another pod", func(t *testing.T) {
+		a := newTestAgent(resumeOnOtherPodConfig())
+		seed(t, a, "s1", "pod-a", 600)
+		seed(t, a, "s2", "pod-a", 500)
+		seed(t, a, "s3", "pod-b", 300)
+		seed(t, a, "s4", "pod-c", 400)
+		pause(a, "s2")
+		primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"), dlEndpoint("pod-c"))
+
+		q := makeQueue("s2", time.Now(), 2000)
+		require.Equal(t, q, pick(t, a, q))
+		require.Nil(t, pick(t, a, makeQueue("s2", time.Now(), 2000)))
+		s, _ := sessionOf(a, "s2")
+		require.Equal(t, "default/pod-b", s.endpoint.id)
+		require.Equal(t, float64(800), endpointTokens(a, "default/pod-b"))
+		require.Equal(t, float64(400), endpointTokens(a, "default/pod-c"))
+	})
 }
 
 // An admission reservation blocks a second admit into the same room until

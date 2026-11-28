@@ -60,8 +60,9 @@ func TestFactoryParameters(t *testing.T) {
 	require.Equal(t, 5*time.Minute, a.forceAdmitTimeout)
 	require.Equal(t, 30*time.Second, a.mgr.idleGracePeriod)
 	require.Equal(t, 10*time.Minute, a.mgr.ttl)
+	require.False(t, a.resumeOnOtherPod)
 
-	raw := []byte(`{"fallbackCapacityTokens": 2048, "usableCapacityRatio": 0.5, "idleGracePeriod": "0s", "forceAdmitTimeout": "45m"}`)
+	raw := []byte(`{"fallbackCapacityTokens": 2048, "usableCapacityRatio": 0.5, "idleGracePeriod": "0s", "forceAdmitTimeout": "45m", "resumeOnOtherPod": true}`)
 	p, err = Factory(ThunderAgentPluginType, fwkplugin.StrictDecoder(raw), nil)
 	require.NoError(t, err)
 	a = p.(*ThunderAgent)
@@ -70,6 +71,7 @@ func TestFactoryParameters(t *testing.T) {
 	require.Zero(t, a.mgr.idleGracePeriod)
 	require.Equal(t, 45*time.Minute, a.forceAdmitTimeout)
 	require.Equal(t, 90*time.Minute, a.mgr.ttl)
+	require.True(t, a.resumeOnOtherPod)
 
 	partial := []byte(`{"forceAdmitTimeout": "30m"}`)
 	p, err = Factory(ThunderAgentPluginType, fwkplugin.StrictDecoder(partial), nil)
