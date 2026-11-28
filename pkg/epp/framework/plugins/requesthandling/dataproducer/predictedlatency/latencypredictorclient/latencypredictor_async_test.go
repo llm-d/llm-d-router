@@ -1748,62 +1748,13 @@ func BenchmarkBulkPrediction(b *testing.B) {
 
 // Test to verify config loading from environment
 func TestConfigFromEnv(t *testing.T) {
-	// Save original env vars
-	originalLatencyURL := os.Getenv("PREDICTION_SERVER_URL")
-	originalTrainingURL := os.Getenv("TRAINING_SERVER_URL")
-	originalSample := os.Getenv("LATENCY_MAX_SAMPLE_SIZE")
-	originalInterval := os.Getenv("LATENCY_FLUSH_INTERVAL_SEC")
-	originalNative := os.Getenv("LATENCY_USE_NATIVE_XGBOOST")
-	originalTimeout := os.Getenv("LATENCY_HTTP_TIMEOUT_SEC")
-	originalBulkSize := os.Getenv("LATENCY_MAX_BULK_SIZE")
-
-	// Set test env vars
-	os.Setenv("PREDICTION_SERVER_URL", "http://pred1.example.com,http://pred2.example.com,http://pred3.example.com")
-	os.Setenv("TRAINING_SERVER_URL", "http://training.example.com")
-	os.Setenv("LATENCY_MAX_SAMPLE_SIZE", "500")
-	os.Setenv("LATENCY_FLUSH_INTERVAL_SEC", "5")
-	os.Setenv("LATENCY_USE_NATIVE_XGBOOST", "false")
-	os.Setenv("LATENCY_HTTP_TIMEOUT_SEC", "20")
-	os.Setenv("LATENCY_MAX_BULK_SIZE", "75")
-
-	defer func() {
-		// Restore original env vars (handle empty strings properly)
-		if originalLatencyURL != "" {
-			os.Setenv("PREDICTION_SERVER_URL", originalLatencyURL)
-		} else {
-			os.Unsetenv("PREDICTION_SERVER_URL")
-		}
-		if originalTrainingURL != "" {
-			os.Setenv("TRAINING_SERVER_URL", originalTrainingURL)
-		} else {
-			os.Unsetenv("TRAINING_SERVER_URL")
-		}
-		if originalSample != "" {
-			os.Setenv("LATENCY_MAX_SAMPLE_SIZE", originalSample)
-		} else {
-			os.Unsetenv("LATENCY_MAX_SAMPLE_SIZE")
-		}
-		if originalInterval != "" {
-			os.Setenv("LATENCY_FLUSH_INTERVAL_SEC", originalInterval)
-		} else {
-			os.Unsetenv("LATENCY_FLUSH_INTERVAL_SEC")
-		}
-		if originalNative != "" {
-			os.Setenv("LATENCY_USE_NATIVE_XGBOOST", originalNative)
-		} else {
-			os.Unsetenv("LATENCY_USE_NATIVE_XGBOOST")
-		}
-		if originalTimeout != "" {
-			os.Setenv("LATENCY_HTTP_TIMEOUT_SEC", originalTimeout)
-		} else {
-			os.Unsetenv("LATENCY_HTTP_TIMEOUT_SEC")
-		}
-		if originalBulkSize != "" {
-			os.Setenv("LATENCY_MAX_BULK_SIZE", originalBulkSize)
-		} else {
-			os.Unsetenv("LATENCY_MAX_BULK_SIZE")
-		}
-	}()
+	t.Setenv("PREDICTION_SERVER_URL", "http://pred1.example.com,http://pred2.example.com,http://pred3.example.com")
+	t.Setenv("TRAINING_SERVER_URL", "http://training.example.com")
+	t.Setenv("LATENCY_MAX_SAMPLE_SIZE", "500")
+	t.Setenv("LATENCY_FLUSH_INTERVAL_SEC", "5")
+	t.Setenv("LATENCY_USE_NATIVE_XGBOOST", "false")
+	t.Setenv("LATENCY_HTTP_TIMEOUT_SEC", "20")
+	t.Setenv("LATENCY_MAX_BULK_SIZE", "75")
 
 	config := ConfigFromEnv()
 
