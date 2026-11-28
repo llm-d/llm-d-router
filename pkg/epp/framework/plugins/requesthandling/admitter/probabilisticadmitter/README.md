@@ -99,7 +99,8 @@ registered - you can't omit it, only neuter it.
 
 ### 1. Create InferenceObjective resources
 
-Define one `InferenceObjective` per traffic tier pointing to the same model and pool.
+Define one `InferenceObjective` per traffic tier pointing to the same pool. Clients pick a tier by
+setting the `x-llm-d-inference-objective` request header to the `InferenceObjective` name.
 
 **Sheddable tier** - batch jobs, background processing, non-interactive workloads:
 
@@ -110,7 +111,6 @@ metadata:
   name: batch-workload
   namespace: default
 spec:
-  modelName: my-model
   poolRef:
     name: my-inference-pool
   priority: -1
@@ -125,7 +125,6 @@ metadata:
   name: interactive-workload
   namespace: default
 spec:
-  modelName: my-model
   poolRef:
     name: my-inference-pool
   priority: 1

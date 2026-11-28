@@ -35,7 +35,7 @@ var (
 	requestLabelsWithAPISurfaceStreaming = append(append([]string{}, requestLabelsWithAPISurface...), "streaming")
 )
 
-// --- llm-d Inference Objective Metrics ---
+// --- llm-d Request Metrics ---
 var (
 	llmdRequestCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
