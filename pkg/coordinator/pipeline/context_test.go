@@ -182,3 +182,45 @@ func TestForwardedHeaders_UsesRevisionDecisionIDWithoutOriginalHeaders(t *testin
 		t.Errorf("revision decision ID = %q, want %q", got, rc.RevisionDecisionID)
 	}
 }
+
+func TestForwardedHeaders_ExcludesConnectionNominatedHeaders(t *testing.T) {
+	rc := &RequestContext{
+		OriginalHeaders: http.Header{
+			"Connection":   {"keep-alive, X-Hop-Secret, x-second-hop"},
+			"X-Hop-Secret": {"secret"},
+			"X-Second-Hop": {"drop"},
+			"X-Keep":       {"kept"},
+		},
+	}
+
+	out := rc.ForwardedHeaders()
+
+	for _, excluded := range []string{"connection", "x-hop-secret", "x-second-hop"} {
+		if _, ok := out[excluded]; ok {
+			t.Errorf("header %q should be excluded: %v", excluded, out)
+		}
+	}
+	if got := out["x-keep"]; got != "kept" {
+		t.Errorf("x-keep = %q, want %q", got, "kept")
+	}
+}
+
+func TestStripHopByHopHeaders_RemovesConnectionNominatedHeaders(t *testing.T) {
+	headers := http.Header{
+		"Connection":       {"X-Hop-Secret, keep-alive"},
+		"Proxy-Connection": {"keep-alive"},
+		"X-Hop-Secret":     {"secret"},
+		"X-Keep":           {"kept"},
+	}
+
+	StripHopByHopHeaders(headers)
+
+	for _, excluded := range []string{"Connection", "Proxy-Connection", "X-Hop-Secret"} {
+		if got := headers.Values(excluded); len(got) != 0 {
+			t.Errorf("%s should be stripped: %v", excluded, headers)
+		}
+	}
+	if got := headers.Get("x-keep"); got != "kept" {
+		t.Errorf("X-Keep = %q, want %q", got, "kept")
+	}
+}

@@ -98,21 +98,42 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // newPassthroughProxy builds the reverse proxy that streams to the gateway.
-// The director rewrites the outbound scheme/host to the gateway, strips the
+// The rewrite routes the outbound scheme/host to the gateway, strips the
 // coordinator-owned headers, and stamps the decode profile and sanitized
 // request id. Transport errors return 502; a failure after the upstream
 // response has started can only surface through ErrorLog, so it is wired to
 // the request-scoped logger.
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Director: func(r *http.Request) { //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
-			r.URL.Scheme = gatewayURL.Scheme
-			r.URL.Host = gatewayURL.Host
-			r.Host = gatewayURL.Host
-			pipeline.StripInternalHeaders(r.Header)
-			r.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
-			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
-			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			inClone := pr.In.Header.Clone()
+			pipeline.StripHopByHopHeaders(inClone)
+			priorXFF := inClone["X-Forwarded-For"]
+
+			if len(priorXFF) > 0 {
+				pr.Out.Header["X-Forwarded-For"] = priorXFF
+			}
+
+			pr.SetXForwarded()
+
+			if len(priorXFF) > 0 && pr.Out.Header.Get("X-Forwarded-For") == "" {
+				pr.Out.Header.Set("X-Forwarded-For", strings.Join(priorXFF, ", "))
+			}
+
+			for _, h := range []string{"Forwarded", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+				if vals := inClone.Values(h); len(vals) > 0 {
+					pr.Out.Header[h] = vals
+				}
+			}
+
+			pr.Out.URL.Scheme = gatewayURL.Scheme
+			pr.Out.URL.Host = gatewayURL.Host
+			pr.Out.Host = gatewayURL.Host
+
+			pipeline.StripInternalHeaders(pr.Out.Header)
+			pr.Out.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
+			pr.Out.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
+			pr.Out.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 		},
 		// A plugin on the decode profile can stamp coordinator-owned headers on
 		// the response.

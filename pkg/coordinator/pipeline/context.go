@@ -18,6 +18,7 @@ package pipeline
 
 import (
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ var hopByHopHeaders = map[string]bool{
 	"keep-alive":          true,
 	"proxy-authenticate":  true,
 	"proxy-authorization": true,
+	"proxy-connection":    true,
 	"te":                  true,
 	"trailer":             true,
 	"transfer-encoding":   true,
@@ -75,8 +77,13 @@ func StripInternalHeaders(headers http.Header) {
 // StripHopByHopHeaders removes the hop-by-hop headers, which describe one
 // connection and must not be relayed to the next.
 func StripHopByHopHeaders(headers http.Header) {
-	for key := range hopByHopHeaders {
-		headers.Del(key)
+	nominated := connectionTokens(headers)
+
+	for key := range headers {
+		lower := strings.ToLower(key)
+		if hopByHopHeaders[lower] || nominated[lower] {
+			delete(headers, key)
+		}
 	}
 }
 
@@ -87,9 +94,11 @@ func StripHopByHopHeaders(headers http.Header) {
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
 	out := make(map[string]string)
+	nominated := connectionTokens(rc.OriginalHeaders)
+
 	for key, vals := range rc.OriginalHeaders {
 		lower := strings.ToLower(key)
-		if !isForwardableHeader(lower) {
+		if !isForwardableHeader(lower) || nominated[lower] {
 			continue
 		}
 		if _, reserved := rc.forwardResponseHeaders[lower]; reserved {
@@ -387,4 +396,29 @@ type MultimodalEntry struct {
 type PlaceholderRange struct {
 	Offset int `json:"offset"`
 	Length int `json:"length"`
+}
+
+func connectionTokens(headers http.Header) map[string]bool {
+	var tokens map[string]bool
+
+	for key, vals := range headers {
+		if !strings.EqualFold(key, "connection") {
+			continue
+		}
+
+		for _, val := range vals {
+			for token := range strings.SplitSeq(val, ",") {
+				token = strings.ToLower(textproto.TrimString(token))
+				if token == "" {
+					continue
+				}
+				if tokens == nil {
+					tokens = make(map[string]bool)
+				}
+				tokens[token] = true
+			}
+		}
+	}
+
+	return tokens
 }

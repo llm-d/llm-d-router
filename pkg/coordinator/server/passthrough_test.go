@@ -597,3 +597,36 @@ func TestPassthrough_RegisteredPathsBypass(t *testing.T) {
 		t.Fatalf("registered path expected 200, got %d", rec.Code)
 	}
 }
+
+func TestPassthrough_ConnectionHeaderCannotStripStampedHeaders(t *testing.T) {
+	upstream, cap := newCapturingUpstream(t, http.StatusOK, `{"data":[]}`)
+	srv := newTestServerWithGateway(nil, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Add("Connection", "x-llm-d-epp-profile, x-request-id, x-hop-only")
+	req.Header.Set("X-Hop-Only", "drop-me")
+	req.Header.Set("Forwarded", "for=10.0.0.1;proto=https;host=api.example.com")
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	req.Header.Set("X-Forwarded-Host", "api.example.com")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Request-Id", "evil\r\nInjected: 1")
+	req.Header.Set("X-Keep", "kept")
+
+	rec := doPassthrough(t, srv, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	_, _, _, headers, _ := cap.get()
+	require.Equal(t, gateway.PhaseDecode, headers.Get(reqcommon.EPPProfileHeaderKey))
+
+	requestID := headers.Get(reqcommon.RequestIDHeaderKey)
+	require.NotEmpty(t, requestID)
+	require.NotContains(t, requestID, "evil")
+
+	require.Equal(t, "for=10.0.0.1;proto=https;host=api.example.com", headers.Get("Forwarded"))
+	require.Contains(t, headers.Get("X-Forwarded-For"), "10.0.0.1")
+	require.Equal(t, "api.example.com", headers.Get("X-Forwarded-Host"))
+	require.Equal(t, "https", headers.Get("X-Forwarded-Proto"))
+	require.Empty(t, headers.Values("X-Hop-Only"))
+	require.Equal(t, "kept", headers.Get("X-Keep"))
+}

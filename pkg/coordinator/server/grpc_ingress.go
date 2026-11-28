@@ -175,6 +175,7 @@ func (s *Server) serveGRPC(w http.ResponseWriter, r *http.Request, scan grpcScan
 
 	headers := r.Header.Clone()
 	pipeline.StripInternalHeaders(headers)
+	pipeline.StripHopByHopHeaders(headers)
 
 	reqCtx = &pipeline.RequestContext{
 		RequestID:        requestID,
