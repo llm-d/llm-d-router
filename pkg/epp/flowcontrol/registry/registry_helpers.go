@@ -57,6 +57,9 @@ type priorityBand struct {
 	// The priority is implicit from the parent priorityBand.
 	queues map[string]*managedQueue
 
+	// standing tracks band-wide backlog. It is nil unless the band sets StandingRequestTTL.
+	standing *contracts.StandingBand
+
 	// activeQueues indexes the subset of `queues` that currently hold items, keyed by logical ID
 	// (values are *managedQueue). It is maintained by each queue's empty<->non-empty transitions
 	// (serialized per queue under the queue's own mutex) and read lock-free by IterateQueues, which
@@ -102,6 +105,10 @@ func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 		queues:         make(map[string]*managedQueue),
 		fairnessPolicy: bandConfig.FairnessPolicy,
 		policyState:    policyState,
+	}
+	if bandConfig.StandingRequestTTL > 0 {
+		band.standing = contracts.NewStandingBand(
+			*bandConfig.DefaultRequestTTL, bandConfig.StandingRequestTTL, fr.clock, band.stats.len.Load)
 	}
 	band.priorityBandAccessor = &priorityBandAccessor{registry: fr, band: band}
 	fr.priorityBands.Store(bandConfig.Priority, band)
@@ -211,6 +218,9 @@ func (fr *FlowRegistry) synchronizeFlow(
 	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.", "flowKey", key)
 
 	mq := newManagedQueue(q, policy, key, fr.logger, &band.stats, &fr.totals, band.setQueueActivity)
+	if band.standing != nil {
+		mq.standing = band.standing.NewQueue()
+	}
 	band.queues[key.ID] = mq
 }
 

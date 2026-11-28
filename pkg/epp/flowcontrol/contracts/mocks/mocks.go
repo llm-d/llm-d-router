@@ -227,6 +227,8 @@ var _ contracts.SafeQueue = &MockSafeQueue{}
 //  3. **Self-Wiring**: The `FlowQueueAccessor()` method returns the mock itself, ensuring the accessor is always
 //     correctly connected to the queue's state without manual wiring in tests.
 type MockManagedQueue struct {
+	Standing *contracts.StandingQueue
+
 	// FlowKeyV defines the flow specification for this mock queue. It should be set by the test.
 	FlowKeyV flowcontrol.FlowKey
 
@@ -245,6 +247,8 @@ type MockManagedQueue struct {
 	mu    sync.Mutex
 	items []flowcontrol.QueueItemAccessor
 }
+
+func (m *MockManagedQueue) StandingQueue() *contracts.StandingQueue { return m.Standing }
 
 // FlowQueueAccessor returns the mock itself, as it fully implements the `flowcontrol.FlowQueueAccessor` interface.
 func (m *MockManagedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor {
@@ -274,6 +278,9 @@ func (m *MockManagedQueue) Add(item flowcontrol.QueueItemAccessor) error {
 			m.items[i] = item
 			return nil
 		}
+	}
+	if len(m.items) == 0 && m.Standing != nil {
+		m.Standing.Start()
 	}
 	m.items = append(m.items, item)
 	return nil

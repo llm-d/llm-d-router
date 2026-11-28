@@ -21,10 +21,12 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	testclock "k8s.io/utils/clock/testing"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
@@ -435,4 +437,20 @@ func TestManagedQueue_MeasuredDeltas_CannotUnderflow(t *testing.T) {
 	}
 
 	h.assertStatsDelta(int64(0), int64(0))
+}
+
+func TestStandingObservationFollowsQueueActivity(t *testing.T) {
+	key := flowcontrol.FlowKey{ID: "flow", Priority: 1}
+	q := newRealMqHarness(t, key).mq
+	clk := testclock.NewFakeClock(time.Unix(100, 0))
+	q.standing = contracts.NewStandingQueue(10*time.Second, time.Second, clk)
+
+	require.NoError(t, q.Add(fwkfcmocks.NewMockQueueItemAccessor(1, "first", key)))
+	clk.Step(12 * time.Second)
+	require.NoError(t, q.Add(fwkfcmocks.NewMockQueueItemAccessor(1, "second", key)))
+	require.False(t, q.standing.ExpiryCutoff(clk.Now(), time.Time{}).IsZero(), "adding to a busy queue preserves the observation window")
+
+	q.Drain()
+	require.NoError(t, q.Add(fwkfcmocks.NewMockQueueItemAccessor(1, "third", key)))
+	require.True(t, q.standing.ExpiryCutoff(clk.Now(), time.Time{}).IsZero(), "refilling a drained queue starts a fresh window")
 }

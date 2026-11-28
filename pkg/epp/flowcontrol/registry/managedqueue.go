@@ -71,6 +71,7 @@ type managedQueue struct {
 	// Its state must only be modified while holding `mu`.
 	queue contracts.SafeQueue
 
+	standing          *contracts.StandingQueue
 	flowQueueAccessor *flowQueueAccessor
 }
 
@@ -99,6 +100,8 @@ func newManagedQueue(
 	mq.flowQueueAccessor = &flowQueueAccessor{mq: mq}
 	return mq
 }
+
+func (mq *managedQueue) StandingQueue() *contracts.StandingQueue { return mq.standing }
 
 // FlowQueueAccessor returns a read-only, flow-aware view of this queue.
 func (mq *managedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor {
@@ -202,6 +205,10 @@ func (mq *managedQueue) applyAndPropagateLocked(mutate func()) {
 	byteSizeDelta := clamp.Int64(mq.queue.ByteSize()) - clamp.Int64(beforeBytes)
 	if lenDelta == 0 && byteSizeDelta == 0 {
 		return
+	}
+
+	if beforeLen == 0 && afterLen > 0 && mq.standing != nil {
+		mq.standing.Start()
 	}
 
 	// Maintain the band's active-queue index on empty<->non-empty transitions. `mu` is held, so

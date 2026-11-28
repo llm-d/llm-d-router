@@ -625,6 +625,16 @@ type PriorityBandConfig struct {
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
 
 	// +optional
+	// StandingRequestTTL shortens the queue-wait budget while a flow, or the band as a whole,
+	// stays backlogged with endpoints available. A flow shows backlog when it dispatches a
+	// request that waited at least half StandingRequestTTL. A band shows backlog when it holds
+	// at least as many requests as it dispatched during the last half StandingRequestTTL. After
+	// one band DefaultRequestTTL of backlog, queued requests receive the shorter budget from the
+	// later of enqueue or entry into that state. Omitted or zero disables this policy. A positive
+	// value must be shorter than the band's effective DefaultRequestTTL.
+	StandingRequestTTL *metav1.Duration `json:"standingRequestTTL,omitempty"`
+
+	// +optional
 	// FairnessPolicyRef specifies the name of the policy that governs flow selection.
 	// If omitted, the system default ("global-strict-fairness-policy") is used.
 	FairnessPolicyRef string `json:"fairnessPolicyRef,omitempty"`
@@ -657,6 +667,10 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.DefaultRequestTTL != nil {
 		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", pbc.DefaultRequestTTL.Duration))
+	}
+
+	if pbc.StandingRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("StandingRequestTTL: %s", pbc.StandingRequestTTL.Duration))
 	}
 
 	if pbc.FairnessPolicyRef != "" {

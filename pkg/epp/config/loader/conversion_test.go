@@ -193,6 +193,7 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 		MaxBytes:           resource.NewQuantity(1024, resource.DecimalSI),
 		MaxRequests:        resource.NewQuantity(64, resource.DecimalSI),
 		DefaultRequestTTL:  &metav1.Duration{Duration: 5 * time.Second},
+		StandingRequestTTL: &metav1.Duration{Duration: time.Second},
 		FairnessPolicyRef:  "fairness",
 		OrderingPolicyRef:  "ordering",
 	}

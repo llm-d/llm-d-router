@@ -173,6 +173,10 @@ type ActiveFlowConnection interface {
 //
 // Conformance: Implementations MUST be goroutine-safe.
 type ManagedQueue interface {
+	// StandingQueue holds the backlog observations of this flow and its band when the band enables
+	// standingRequestTTL.
+	StandingQueue() *StandingQueue
+
 	// Add attempts to enqueue an item.
 	Add(item flowcontrol.QueueItemAccessor) error
 

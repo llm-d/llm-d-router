@@ -737,3 +737,100 @@ func TestRegistry_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) 
 	assert.Equal(t, []int{highPriority, lowPriority, 0}, h.registry.AllOrderedPriorityLevels(),
 		"After all add/delete cycles, only original priority levels should remain")
 }
+
+// newStandingBandHarness builds a registry whose only configured band uses queue-wait budgets of 10s and 2s.
+func newStandingBandHarness(t *testing.T) (*testHarness, *testclock.FakeClock) {
+	t.Helper()
+	long := 10 * time.Second
+	cfg, err := NewConfig(newTestPriorityBandPolicyDefaults(), WithPriorityBand(&PriorityBandConfig{
+		Priority: highPriority, DefaultRequestTTL: &long, StandingRequestTTL: 2 * time.Second,
+	}))
+	require.NoError(t, err)
+	clk := testclock.NewFakeClock(time.Unix(100, 0))
+	return &testHarness{t: t, registry: NewFlowRegistry(cfg, logr.Discard(), withClock(clk))}, clk
+}
+
+func TestStandingBandCoversRefilledFlow(t *testing.T) {
+	h, clk := newStandingBandHarness(t)
+	steady := flowcontrol.FlowKey{ID: "steady", Priority: highPriority}
+	late := flowcontrol.FlowKey{ID: "late", Priority: highPriority}
+	h.synchronizeFlow(steady)
+	h.synchronizeFlow(late)
+
+	h.addItem(steady, 1)
+	clk.Step(11 * time.Second)
+	h.addItem(late, 1)
+	clk.Step(2 * time.Second)
+
+	q, err := h.registry.ManagedQueue(late)
+	require.NoError(t, err)
+	assert.True(t, q.StandingQueue().ExpiryCutoff(clk.Now(), time.Time{}).Equal(clk.Now().Add(-2*time.Second)),
+		"a flow that refilled 2s ago gets the short budget while its band has stayed backlogged")
+}
+
+func TestStandingBandRelief(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		queuedBehind int
+		every        time.Duration
+		dispatches   int
+		wantStanding bool
+	}{
+		// The window of recent dispatches is 1s. Every 300ms it holds up to 4 dispatches against 1 queued.
+		{"relief_shorter_than_the_short_budget_is_ignored", 1, 300 * time.Millisecond, 4, true},
+		{"relief_lasting_a_short_budget_restarts_the_window", 1, 300 * time.Millisecond, 8, false},
+		// Every 600ms it holds 2 dispatches against 2 queued.
+		{"backlog_equal_to_recent_dispatches_keeps_the_window", 2, 600 * time.Millisecond, 8, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, clk := newStandingBandHarness(t)
+			steady := flowcontrol.FlowKey{ID: "steady", Priority: highPriority}
+			late := flowcontrol.FlowKey{ID: "late", Priority: highPriority}
+			h.synchronizeFlow(steady)
+			h.synchronizeFlow(late)
+			q, err := h.registry.ManagedQueue(steady)
+			require.NoError(t, err)
+
+			queued := []flowcontrol.QueueItemAccessor{h.addItem(steady, 1)}
+			enqueued := []time.Time{clk.Now()}
+			clk.Step(12 * time.Second)
+			for range tc.dispatches {
+				for len(queued) <= tc.queuedBehind {
+					queued, enqueued = append(queued, h.addItem(steady, 1)), append(enqueued, clk.Now())
+				}
+				h.removeItem(steady, queued[0])
+				q.StandingQueue().RecordDispatch(enqueued[0], clk.Now())
+				queued, enqueued = queued[1:], enqueued[1:]
+				clk.Step(tc.every)
+			}
+
+			h.addItem(late, 1)
+			clk.Step(2 * time.Second)
+			lateQ, err := h.registry.ManagedQueue(late)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStanding, !lateQ.StandingQueue().ExpiryCutoff(clk.Now(), time.Time{}).IsZero())
+		})
+	}
+}
+
+func TestStandingBandRefillAfterIdleStartsFreshWindow(t *testing.T) {
+	h, clk := newStandingBandHarness(t)
+	steady := flowcontrol.FlowKey{ID: "steady", Priority: highPriority}
+	h.synchronizeFlow(steady)
+	q, err := h.registry.ManagedQueue(steady)
+	require.NoError(t, err)
+
+	first, second := h.addItem(steady, 1), h.addItem(steady, 1)
+	enqueued := clk.Now()
+	clk.Step(12 * time.Second)
+	h.removeItem(steady, first)
+	q.StandingQueue().RecordDispatch(enqueued, clk.Now())
+	h.removeItem(steady, second)
+	q.StandingQueue().RecordDispatch(enqueued, clk.Now())
+
+	clk.Step(30 * time.Second)
+	h.addItem(steady, 1)
+	clk.Step(2 * time.Second)
+	assert.True(t, q.StandingQueue().ExpiryCutoff(clk.Now(), time.Time{}).IsZero(),
+		"a burst into a band that sat empty gets the long budget")
+}
