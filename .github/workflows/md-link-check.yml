@@ -25,15 +25,28 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       src: ${{ steps.filter.outputs.src }}
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+      - name: Resolve base commit
+        id: base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote origin "refs/heads/${BASE_REF}" | awk -v ref="refs/heads/${BASE_REF}" '$2 == ref {print $1; exit}')
+          test -n "$sha"
+          echo "sha=${RUN_ATTEMPT}:${sha}" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
             src:
               - '**/*.md'
+              - '.github/actions/merge-pr-onto-base/action.yml'
 
   lychee:
     name: Check Markdown Links
@@ -49,6 +62,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+
+      - name: Merge PR onto live base branch
+        uses: ./.github/actions/merge-pr-onto-base
+        with:
+          base-sha: ${{ needs.check-for-markdown-files.outputs.base_sha }}
 
       # A missing cache is fine. Lychee then checks every link.
       - id: cache-key
