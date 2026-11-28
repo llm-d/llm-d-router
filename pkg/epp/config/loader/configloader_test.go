@@ -1274,6 +1274,147 @@ schedulingProfiles:
 	}
 }
 
+func TestProfileWithoutPickerGetsDefaultPicker(t *testing.T) {
+	registerTestPlugins(t)
+
+	tests := []struct {
+		name       string
+		configText string
+		wantPicker string
+	}{
+		{
+			name: "only another picker type is configured",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+- name: otherPicker
+  type: test-picker
+schedulingProfiles:
+- name: a
+  plugins:
+  - pluginRef: otherPicker
+- name: b
+  plugins:
+  - pluginRef: test-scorer
+`,
+			wantPicker: "otherPicker",
+		},
+		{
+			name: "configured max-score-picker is reused next to another picker type",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+- name: otherPicker
+  type: test-picker
+- name: myMaxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: a
+  plugins:
+  - pluginRef: otherPicker
+- name: b
+  plugins:
+  - pluginRef: myMaxScore
+- name: c
+  plugins:
+  - pluginRef: test-scorer
+`,
+			wantPicker: "myMaxScore",
+		},
+		{
+			name: "first configured max-score-picker is used",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+- name: firstMaxScore
+  type: max-score-picker
+- name: secondMaxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: a
+  plugins:
+  - pluginRef: secondMaxScore
+- name: b
+  plugins:
+  - pluginRef: test-scorer
+`,
+			wantPicker: "firstMaxScore",
+		},
+		{
+			name: "first configured picker is used when none is a max-score-picker",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+- name: firstPicker
+  type: test-picker
+- name: secondPicker
+  type: test-picker
+schedulingProfiles:
+- name: a
+  plugins:
+  - pluginRef: secondPicker
+- name: b
+  plugins:
+  - pluginRef: test-scorer
+`,
+			wantPicker: "firstPicker",
+		},
+		{
+			name: "no picker is configured",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+schedulingProfiles:
+- name: a
+  plugins:
+  - pluginRef: test-scorer
+- name: b
+  plugins:
+  - pluginRef: test-scorer
+`,
+			wantPicker: maxscore.MaxScorePickerType,
+		},
+	}
+
+	logger := logging.NewTestLogger()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// The loader keeps plugins in a map, so repeat to cover its iteration orders.
+			for range 20 {
+				rawConfig, _, err := LoadRawConfig([]byte(tc.configText), logger)
+				require.NoError(t, err)
+				handle := testutils.NewTestHandle(t.Context())
+				_, err = InstantiateAndConfigure(rawConfig, handle, logger)
+				require.NoError(t, err)
+
+				last := rawConfig.SchedulingProfiles[len(rawConfig.SchedulingProfiles)-1]
+				var pickers []string
+				for _, ref := range last.Plugins {
+					if _, ok := handle.Plugin(ref.PluginRef).(fwksched.Picker); ok {
+						pickers = append(pickers, ref.PluginRef)
+					}
+				}
+				require.Equal(t, []string{tc.wantPicker}, pickers, "profile %q", last.Name)
+			}
+		})
+	}
+}
+
 func TestSessionAffinityProfileNameValidation(t *testing.T) {
 	registerTestPlugins(t)
 	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityStable, sessionaffinityfilter.Factory)
