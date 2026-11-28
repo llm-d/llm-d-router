@@ -17,9 +17,13 @@ limitations under the License.
 package tls
 
 import (
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,4 +118,49 @@ func TestParseCipherSuites(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestCreateSelfSignedTLSCertificate(t *testing.T) {
+	var logged []string
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+
+	before := time.Now().Add(-time.Second)
+	cert, err := CreateSelfSignedTLSCertificate(logger)
+	require.NoError(t, err)
+
+	require.Len(t, logged, 1)
+	require.Contains(t, logged[0], "creating self-signed TLS certificate")
+
+	require.Len(t, cert.Certificate, 1, "want a single self-signed leaf, no chain")
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	require.NoError(t, err)
+
+	require.NoError(t, leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature),
+		"certificate must be signed by its own key")
+	require.Equal(t, leaf.Subject.String(), leaf.Issuer.String())
+	require.Equal(t, []string{"llm-d"}, leaf.Subject.Organization)
+	require.Equal(t, 1, leaf.SerialNumber.Sign(), "serial number must be positive")
+
+	require.Equal(t, x509.KeyUsageKeyEncipherment|x509.KeyUsageDigitalSignature, leaf.KeyUsage)
+	require.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, leaf.ExtKeyUsage)
+	require.True(t, leaf.BasicConstraintsValid)
+	require.False(t, leaf.IsCA)
+
+	// The doc comment promises no subject alternative names.
+	require.Empty(t, leaf.DNSNames)
+	require.Empty(t, leaf.IPAddresses)
+	require.Empty(t, leaf.URIs)
+	require.Empty(t, leaf.EmailAddresses)
+
+	require.False(t, leaf.NotBefore.Before(before.Truncate(time.Second)), "NotBefore %v is before the call", leaf.NotBefore)
+	require.False(t, leaf.NotBefore.After(time.Now()), "NotBefore %v is in the future", leaf.NotBefore)
+	require.WithinDuration(t, leaf.NotBefore.AddDate(10, 0, 0), leaf.NotAfter, 72*time.Hour, "want roughly ten years of validity")
+
+	// The coordinator's RSA cipher suite tests rely on the fallback serving an RSA key.
+	pub, ok := leaf.PublicKey.(*rsa.PublicKey)
+	require.True(t, ok, "want an RSA public key, got %T", leaf.PublicKey)
+	require.Equal(t, 4096, pub.N.BitLen())
+	priv, ok := cert.PrivateKey.(*rsa.PrivateKey)
+	require.True(t, ok, "want an RSA private key, got %T", cert.PrivateKey)
+	require.True(t, priv.PublicKey.Equal(pub), "private key does not match the certificate")
 }
