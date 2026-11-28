@@ -36,6 +36,7 @@ linters:
     - unparam
     - unused
     - unconvert
+    - usetesting
   exclusions:
     presets:
       - comments        # suppress missing comment violations on packages and exported symbols
@@ -69,6 +70,10 @@ linters:
         linters:
           - forbidigo
   settings:
+    usetesting:
+      os-setenv: true
+      context-background: false
+      context-todo: false
     forbidigo:
       forbid:
         - pattern: ^panic$
