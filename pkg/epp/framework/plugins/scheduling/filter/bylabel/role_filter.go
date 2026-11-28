@@ -101,9 +101,24 @@ func PrefillRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.P
 	return NewPrefillRole().WithName(name), nil
 }
 
+// prefillRoles is the single list of role label values that identify endpoints capable of running
+// prefill. NewPrefillRole and PrefillCapableRoles both derive from it.
+var prefillRoles = []string{RolePrefill, RoleEncodePrefill, RolePrefillDecode, RoleEncodePrefillDecode}
+
 // NewPrefillRole creates and returns an instance of the Filter configured for prefill role.
 func NewPrefillRole() *RoleFilter {
-	return newRoleFilter(PrefillRoleType, false, RolePrefill, RoleEncodePrefill, RolePrefillDecode, RoleEncodePrefillDecode)
+	return newRoleFilter(PrefillRoleType, false, prefillRoles...)
+}
+
+// PrefillCapableRoles returns the set of role label values that identify endpoints capable of
+// running prefill. Callers that need to test whether a role is prefill-capable should use this
+// set rather than re-declaring the roles.
+func PrefillCapableRoles() map[string]struct{} {
+	m := make(map[string]struct{}, len(prefillRoles))
+	for _, r := range prefillRoles {
+		m[r] = struct{}{}
+	}
+	return m
 }
 
 // EncodeRoleFactory defines the factory function for the Encode filter.
