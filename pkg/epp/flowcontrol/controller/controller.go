@@ -31,6 +31,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/crossreplica"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -110,6 +111,9 @@ type Deps struct {
 	// Satisfied by *eviction.RequestEvictor. The FlowController registers the reclamation
 	// controller's Confirm as the evictor's eviction-terminated listener.
 	InFlightEvictor internal.InFlightEvictor
+
+	// CrossReplica enables publishing this replica's queued work per priority band when its Syncer is set.
+	CrossReplica CrossReplicaConfig
 }
 
 // NewFlowController creates and starts a new FlowController instance.
@@ -217,6 +221,14 @@ func NewFlowController(
 		fc.logger,
 		reclamation,
 	)
+
+	if cr := deps.CrossReplica; cr.Syncer != nil {
+		publisher := crossreplica.NewPublisher(cr.Syncer, fc.flowRegistry, poolName,
+			cr.SyncInterval, cr.PublishTimeout, fc.clock)
+		fc.logger.V(logutil.DEFAULT).Info("Starting the cross-replica band demand publisher.",
+			"syncer", cr.Syncer.TypedName(), "scope", poolName)
+		go publisher.Run(fc.parentCtx)
+	}
 
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
 
