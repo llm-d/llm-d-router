@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 106 20" width="106" height="20" role="img" aria-label="Unsupported">
+  <rect x="0.75" y="0.75" width="104.5" height="18.5" rx="9.25" ry="9.25" fill="#ffebe9" stroke="#cf222e" stroke-width="1.2"/>
+  <circle cx="11.5" cy="10" r="3.5" fill="#cf222e"/>
+  <text x="20" y="13.8" font-family='Helvetica, Arial, "Liberation Sans", sans-serif' font-size="11" font-weight="700" fill="#a40e26">Unsupported</text>
+</svg>
