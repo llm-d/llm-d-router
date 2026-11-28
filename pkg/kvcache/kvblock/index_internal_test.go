@@ -44,10 +44,57 @@ func TestEngineToRequestMapping_ManyToOne(t *testing.T) {
 	mappings := engineToRequestMapping(engineKeys, requestKeys)
 
 	require.Len(t, mappings, 4)
-	for _, ek := range engineKeys {
+	// Only the last engine key ends the canonical block; the others end inside it.
+	for _, ek := range engineKeys[:3] {
 		rks, ok := mappings[ek]
 		require.True(t, ok, "engine key %d should be present", ek)
-		assert.Equal(t, []BlockHash{9000}, rks, "each engine key should map to the single request key")
+		assert.Equal(t, []BlockHash{9000, EmptyBlockHash}, rks,
+			"engine key %d ends inside the canonical block", ek)
+	}
+	assert.Equal(t, []BlockHash{9000}, mappings[engineKeys[3]])
+}
+
+func TestEngineToRequestMapping_NonDividing(t *testing.T) {
+	// 8 engine blocks of 24 tokens over 3 canonical blocks of 64: only block 7
+	// ends a canonical block at token 192. Blocks 2 and 5 end at tokens 72 and
+	// 144, inside canonical blocks 1 and 2.
+	engineKeys := []BlockHash{10, 11, 12, 13, 14, 15, 16, 17}
+	requestKeys := []BlockHash{9000, 9001, 9002}
+
+	mappings := engineToRequestMapping(engineKeys, requestKeys)
+
+	require.Len(t, mappings, 8)
+	want := [][]BlockHash{
+		{9000, EmptyBlockHash}, {9000, EmptyBlockHash}, {9000, EmptyBlockHash},
+		{9001, EmptyBlockHash}, {9001, EmptyBlockHash}, {9001, EmptyBlockHash},
+		{9002, EmptyBlockHash}, {9002},
+	}
+	for i, ek := range engineKeys {
+		assert.Equal(t, want[i], mappings[ek], "engine block %d", i)
+	}
+}
+
+func TestEngineToRequestMapping_StraddlingStore(t *testing.T) {
+	// A sub-canonical store that stops short of a canonical block boundary keeps
+	// an engine block that straddles one, so the key counts no longer say where a
+	// canonical block ends; the block sizes do.
+	geometry := EngineGeometry{BlockSize: 24, CanonicalBlockSize: 64}
+
+	threeBlocks := []BlockHash{10, 11, 12}
+	mappings := engineToRequestMapping(threeBlocks, []BlockHash{9000}, geometry)
+	require.Len(t, mappings, 3)
+	for i, ek := range threeBlocks {
+		assert.Equal(t, []BlockHash{9000, EmptyBlockHash}, mappings[ek],
+			"engine block %d ends at token %d, inside canonical block 0", i, (i+1)*24)
+	}
+
+	sixBlocks := []BlockHash{20, 21, 22, 23, 24, 25}
+	requestKeys := []BlockHash{9000, 9001}
+	mappings = engineToRequestMapping(sixBlocks, requestKeys, geometry)
+	require.Len(t, mappings, 6)
+	for i, ek := range sixBlocks {
+		assert.Equal(t, []BlockHash{requestKeys[i/3], EmptyBlockHash}, mappings[ek],
+			"engine block %d ends at token %d, inside a canonical block", i, (i+1)*24)
 	}
 }
 
@@ -85,5 +132,29 @@ func TestEngineToRequestMapping_ScoreOrder(t *testing.T) {
 	for j, rk := range rks {
 		assert.Equal(t, requestKeys[j], rk,
 			"relative index %d should correspond to requestKeys[%d]", j, j)
+	}
+}
+
+func TestEngineToRequestMapping_StraddlingTail(t *testing.T) {
+	// 10 engine blocks of 48 tokens leave 7 request keys, so the last kept block
+	// stops at token 480 while the canonical chain ends at 448. Blocks 3 and 7 end
+	// at tokens 192 and 384, on canonical boundaries, and the count ratio puts
+	// block 7 on request key 4 instead of 5.
+	geometry := EngineGeometry{BlockSize: 48, CanonicalBlockSize: 64}
+	engineKeys := []BlockHash{10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	requestKeys := []BlockHash{9000, 9001, 9002, 9003, 9004, 9005, 9006}
+
+	mappings := engineToRequestMapping(engineKeys, requestKeys, geometry)
+
+	want := [][]BlockHash{
+		{9000, EmptyBlockHash}, {9000, EmptyBlockHash}, {9001, EmptyBlockHash},
+		{9002},
+		{9002, EmptyBlockHash}, {9003, EmptyBlockHash}, {9004, EmptyBlockHash},
+		{9005},
+		{9005, EmptyBlockHash}, {9006, EmptyBlockHash},
+	}
+	require.Len(t, mappings, len(engineKeys))
+	for i, ek := range engineKeys {
+		assert.Equal(t, want[i], mappings[ek], "engine block %d", i)
 	}
 }

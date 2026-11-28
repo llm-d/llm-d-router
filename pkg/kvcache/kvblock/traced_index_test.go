@@ -290,7 +290,7 @@ func (f *failingIndex) Lookup(
 	return nil, f.err
 }
 
-func (f *failingIndex) Add(context.Context, []kvblock.BlockHash, []kvblock.BlockHash, []kvblock.PodEntry) error {
+func (f *failingIndex) Add(context.Context, []kvblock.BlockHash, []kvblock.BlockHash, []kvblock.PodEntry, ...kvblock.EngineGeometry) error {
 	return f.err
 }
 
