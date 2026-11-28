@@ -275,14 +275,35 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 	}
 }
 
-// A path may carry a query string, as for SGLang's /v1/loads?format=prometheus.
+// A path may carry a query string, as for SGLang's /v1/loads?format=prometheus,
+// and escaped path separators such as %2F stay preserved.
 func TestGetEndpoint_PathWithQuery(t *testing.T) {
 	parser := func(r io.Reader) (int, error) { return 0, nil }
 	ep := &fwkdl.EndpointMetadata{Address: "10.0.0.1", MetricsHost: "10.0.0.1:8000"}
-	s, err := NewHTTPDataSource("http", "/v1/loads?format=prometheus&include=core", TLSOptions{}, "test", "test", parser)
-	require.NoError(t, err)
-	got := s.getEndpoint(ep)
-	assert.Equal(t, "http://10.0.0.1:8000/v1/loads?format=prometheus&include=core", got.String())
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "path with query string",
+			path: "/v1/loads?format=prometheus&include=core",
+			want: "http://10.0.0.1:8000/v1/loads?format=prometheus&include=core",
+		},
+		{
+			name: "escaped path separator preserved",
+			path: "/tenant%2Fmodel/metrics?format=prometheus",
+			want: "http://10.0.0.1:8000/tenant%2Fmodel/metrics?format=prometheus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := NewHTTPDataSource("http", tc.path, TLSOptions{}, "test", "test", parser)
+			require.NoError(t, err)
+			got := s.getEndpoint(ep)
+			assert.Equal(t, tc.want, got.String())
+		})
+	}
 }
 
 func TestNewHTTPDataSource_RejectsMalformedPath(t *testing.T) {
