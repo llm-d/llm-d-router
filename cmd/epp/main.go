@@ -39,9 +39,6 @@ func main() {
 func run() int {
 	ctx := ctrl.SetupSignalHandler()
 
-	// Note: GIE built-in plugins are automatically registered by the runner
-	// when it processes configuration in runner.parsePluginsConfiguration()
-
 	if err := runner.NewRunner().
 		Run(ctx); err != nil {
 		return 1
