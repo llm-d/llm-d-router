@@ -42,7 +42,12 @@ no `TokenizedPrompt` is a no-op.
 | `seedDecodeWhenDisaggregated` | bool | `false` | Also seed a disaggregated request's speculative entries on its decode endpoint. By default only the prefill endpoint is seeded: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
 
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
-to `vllm` when omitted.
+to `vllm` when omitted. SGLang publishes the configured `topic` verbatim without
+a model suffix. In SGLang's `--kv-events-config`, set `topic` to
+`kv@<model-name>` for pod discovery, or `kv@<pod-id>@<model-name>` for
+`zmqEndpoint`. Keep `kvEventsConfig.topicFilter` at `kv@`. Without
+`@<model-name>`, the adapter records an empty model name and lookups miss
+stored blocks.
 
 The producer subscribes to each discovered endpoint's event socket and
 attributes events to the endpoint it dialed. `kvEventsConfig.zmqEndpoint` is a
