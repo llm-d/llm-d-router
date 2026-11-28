@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/wspt"
 )
 
 // TestOrderingPolicyConformance is the main conformance test suite for OrderingPolicy implementations.
@@ -41,6 +42,7 @@ func TestOrderingPolicyConformance(t *testing.T) {
 		fcfs.FCFSOrderingPolicyType:               fcfs.FCFSOrderingPolicyFactory,
 		edf.EDFOrderingPolicyType:                 edf.EDFOrderingPolicyFactory,
 		slodeadline.SLODeadlineOrderingPolicyType: slodeadline.SLODeadlineOrderingPolicyFactory,
+		wspt.WSPTOrderingPolicyType:               wspt.WSPTOrderingPolicyFactory,
 	}
 
 	for name, factory := range policies {

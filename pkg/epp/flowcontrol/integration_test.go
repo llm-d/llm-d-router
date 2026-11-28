@@ -18,8 +18,10 @@ package flowcontrol_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,6 +52,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/wspt"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
@@ -276,6 +279,106 @@ func TestDispatchOrderingSLODeadline(t *testing.T) {
 	require.Equal(t, "tight-500ms", dispatchOrder[0], "tightest SLO should dispatch first")
 	require.Equal(t, "mid-2s", dispatchOrder[1], "middle SLO should dispatch second")
 	require.Equal(t, "loose-10s", dispatchOrder[2], "loosest SLO should dispatch last")
+}
+
+// ============================================================================
+// Dispatch Ordering Tests (WSPT)
+// ============================================================================
+
+// TestDispatchOrderingWSPT verifies that the WSPT ordering policy, built from its config parameters,
+// orders a saturated flow's queue through the real controller, registry, and heap queue.
+func TestDispatchOrderingWSPT(t *testing.T) {
+	t.Parallel()
+
+	type reqSpec struct {
+		id       string
+		byteSize uint64
+		gapAfter time.Duration // wait after enqueueing, before the next request
+	}
+
+	testCases := []struct {
+		name   string
+		params string
+		specs  []reqSpec
+		want   []string
+	}{
+		{
+			name: "smallest first without parameters",
+			specs: []reqSpec{
+				{"10KB", 10_000, 5 * time.Millisecond},
+				{"100B", 100, 5 * time.Millisecond},
+				{"1KB", 1_000, 0},
+			},
+			want: []string{"100B", "1KB", "10KB"},
+		},
+		{
+			name:   "small request passes a large one that waited less than its delay",
+			params: `{"maxDelaySeconds": 0.2, "referenceBytes": 10000}`,
+			specs: []reqSpec{
+				{"10KB", 10_000, 5 * time.Millisecond}, // delayed by 200ms
+				{"100B", 100, 0},                       // delayed by 2ms
+			},
+			want: []string{"100B", "10KB"},
+		},
+		{
+			name:   "large request that waited past its delay is not passed",
+			params: `{"maxDelaySeconds": 0.2, "referenceBytes": 10000}`,
+			specs: []reqSpec{
+				{"10KB", 10_000, 300 * time.Millisecond},
+				{"100B", 100, 0},
+			},
+			want: []string{"10KB", "100B"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var params *json.Decoder
+			if tc.params != "" {
+				params = json.NewDecoder(strings.NewReader(tc.params))
+			}
+			wsptPlugin, err := wspt.WSPTOrderingPolicyFactory("wspt", params, testutils.NewTestHandle(t.Context()))
+			require.NoError(t, err)
+
+			detector := newBlockedDetector()
+			h := newHarness(t, harnessOpts{
+				ordering: wsptPlugin.(flowcontrol.OrderingPolicy),
+				detector: detector,
+			})
+
+			key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+			results := make(chan dispatchResult, len(tc.specs))
+			for i, s := range tc.specs {
+				go func() {
+					req := &testRequest{id: s.id, key: key, byteSize: s.byteSize, ttl: 5 * time.Minute}
+					outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+					results <- dispatchResult{id: s.id, outcome: outcome, err: err}
+					detector.Release()
+				}()
+				// Wait until this request is queued so enqueue times follow spec order.
+				require.Eventually(t, func() bool {
+					return h.reg.Stats().Global.Len == uint64(i+1)
+				}, time.Second, time.Millisecond, "request %s should be queued", s.id)
+				time.Sleep(s.gapAfter)
+			}
+			detector.Unblock(1)
+
+			var dispatchOrder []string
+			for i := range tc.specs {
+				select {
+				case r := <-results:
+					require.NoError(t, r.err)
+					require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome)
+					dispatchOrder = append(dispatchOrder, r.id)
+				case <-time.After(5 * time.Second):
+					t.Fatalf("timed out waiting for dispatch %d", i)
+				}
+			}
+			require.Equal(t, tc.want, dispatchOrder)
+		})
+	}
 }
 
 // ============================================================================
