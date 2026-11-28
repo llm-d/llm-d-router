@@ -19,6 +19,7 @@ package disagg
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
@@ -38,6 +39,42 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
+
+	// LlmdHeteroPDDecisionCount records hetero-pd-decider decisions by reason.
+	LlmdHeteroPDDecisionCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "hetero_pd_decision_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of hetero-pd-decider decisions by reason", compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name", "reason", "remote_prefill"},
+	)
+
+	// LlmdKVCompatDeclinedCount records remote prefill declined by kv-compat-pd-decider because no
+	// prefill endpoint can exchange KV with the decode endpoint.
+	LlmdKVCompatDeclinedCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "kv_compat_prefill_declined_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of requests served decode-only because no prefill endpoint could exchange KV with the decode endpoint",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name"},
+	)
+
+	// LlmdKVCompatExclusionCount records prefill/decode pairs excluded by kv-compat-pd-decider
+	// after consecutive failed requests.
+	LlmdKVCompatExclusionCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "kv_compat_pair_exclusions_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of prefill/decode pairs excluded after consecutive failed disaggregated requests",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -46,6 +83,9 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	}
 	for _, collector := range []prometheus.Collector{
 		LlmdDisaggDecisionCount,
+		LlmdKVCompatDeclinedCount,
+		LlmdKVCompatExclusionCount,
+		LlmdHeteroPDDecisionCount,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -88,4 +128,19 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 	default:
 		return metricsutil.DisaggPathDecodeOnly
 	}
+}
+
+// recordKVCompatDeclined increments the counter of remote prefill declined for KV compatibility.
+func recordKVCompatDeclined(pluginName string) {
+	LlmdKVCompatDeclinedCount.WithLabelValues(pluginName).Inc()
+}
+
+// recordKVCompatExclusion increments the counter of excluded prefill/decode pairs.
+func recordKVCompatExclusion(pluginName string) {
+	LlmdKVCompatExclusionCount.WithLabelValues(pluginName).Inc()
+}
+
+// recordHeteroPDDecision increments the counter of hetero-pd-decider decisions.
+func recordHeteroPDDecision(pluginName, reason string, remote bool) {
+	LlmdHeteroPDDecisionCount.WithLabelValues(pluginName, reason, strconv.FormatBool(remote)).Inc()
 }
