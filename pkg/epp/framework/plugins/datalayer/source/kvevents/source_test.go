@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	events "github.com/llm-d/llm-d-router/pkg/kvevents"
+	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
 
 type recordingRegistrar struct{ registrations []fwkdl.PendingRegistration }
@@ -54,6 +55,12 @@ func TestSourceRegistersForEndpointEvents(t *testing.T) {
 	require.Equal(t, sourcenotifications.EndpointNotificationSourceType, registration.SourceType)
 	require.Same(t, s, registration.Extractor)
 	require.NotNil(t, registration.DefaultSource)
+}
+
+func TestSourceEngineType(t *testing.T) {
+	require.Equal(t, engineadapter.EngineTypeVLLM, (&Source{}).EngineType())
+	require.Equal(t, engineadapter.EngineTypeVLLM, (&Source{config: &events.Config{}}).EngineType())
+	require.Equal(t, engineadapter.EngineTypeSGLang, (&Source{config: &events.Config{EngineType: engineadapter.EngineTypeSGLang}}).EngineType())
 }
 
 type recordingConsumer struct {

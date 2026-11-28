@@ -140,6 +140,15 @@ func New(ctx context.Context, name string, cfg *events.Config) (*Source, error) 
 
 func (s *Source) TypedName() plugin.TypedName { return s.typedName }
 
+// EngineType returns the engine type the source decodes events for, defaulting
+// an empty configured value to vLLM to match New.
+func (s *Source) EngineType() string {
+	if s.config == nil || s.config.EngineType == "" {
+		return engineadapter.EngineTypeVLLM
+	}
+	return s.config.EngineType
+}
+
 // RegisterDependencies subscribes the source to endpoint lifecycle events.
 func (s *Source) RegisterDependencies(r fwkdl.Registrar) error {
 	return r.Register(fwkdl.PendingRegistration{
