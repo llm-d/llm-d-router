@@ -82,6 +82,15 @@ var (
 		append(append([]string{}, requestLabelsWithAPISurface...), "outcome", "reason"),
 	)
 
+	llmdPromptIDsSanitizedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "prompt_ids_sanitized_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of external text-route requests where client-supplied prompt token, fingerprint, KV transfer, or EC transfer fields were stripped or rejected.", compbasemetrics.ALPHA),
+		},
+		[]string{"component", "route", "action"},
+	)
+
 	llmdRequestLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,

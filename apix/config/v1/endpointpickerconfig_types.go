@@ -414,6 +414,23 @@ type RequestHandlerConfig struct {
 	ForwardInputControlHeaders bool `json:"forwardInputControlHeaders,omitempty"`
 
 	// +optional
+	// RejectClientPromptIDs, when true, rejects external text-route requests
+	// (/v1/chat/completions, string /v1/completions, /v1/messages, /v1/responses)
+	// that carry client-supplied prompt_token_ids, prompt_render_fingerprint,
+	// render_fingerprint, kv_transfer_params, ec_transfer_params, or input_ids
+	// with 400 Bad Request instead of stripping those fields. Mutually exclusive
+	// with TrustCallerFields.
+	RejectClientPromptIDs bool `json:"rejectClientPromptIDs,omitempty"`
+
+	// +optional
+	// TrustCallerFields, when true, preserves caller-supplied prompt-token and
+	// fingerprint fields on text routes, and kv_transfer_params and
+	// ec_transfer_params on text routes and dedicated token routes. Enable this only when a trusted ingress
+	// component such as the Coordinator sits in front of the EPP and sanitizes
+	// external client requests. Mutually exclusive with RejectClientPromptIDs.
+	TrustCallerFields bool `json:"trustCallerFields,omitempty"`
+
+	// +optional
 	// DataProducers lists DataProducer plugins that run during request
 	// handling, on the located endpoints before screeners. A DataProducer not
 	// listed runs on the screened endpoints before admission and scheduling,
@@ -457,6 +474,12 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.ForwardInputControlHeaders {
 		parts = append(parts, "ForwardInputControlHeaders: true")
+	}
+	if rhc.RejectClientPromptIDs {
+		parts = append(parts, "RejectClientPromptIDs: true")
+	}
+	if rhc.TrustCallerFields {
+		parts = append(parts, "TrustCallerFields: true")
 	}
 	if len(rhc.DataProducers) > 0 {
 		producerStrs := make([]string, len(rhc.DataProducers))

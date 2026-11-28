@@ -113,6 +113,7 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			r.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
 			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
 			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
+			r.Header.Set(reqcommon.UnsanitizedBodyHeaderKey, "true")
 		},
 		// A plugin on the decode profile can stamp coordinator-owned headers on
 		// the response.

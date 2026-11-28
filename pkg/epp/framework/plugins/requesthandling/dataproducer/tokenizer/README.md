@@ -21,7 +21,10 @@ IDs is not rendered either. This covers a token-array Completions `prompt`
 without a non-null `truncate_prompt_tokens`, and
 `kv_transfer_params.prompt_token_ids` on a text-only Chat Completions,
 Messages, or Responses request, which vLLM's chat path consumes in place of
-templating and tokenizing the messages. A request with media content or `echo`
+templating and tokenizing the messages. The EPP drops a client-supplied
+`kv_transfer_params` before this plugin runs unless
+`requestHandler.trustCallerFields` is `true`, so only a trusted caller or an EPP
+plugin supplies these IDs. A request with media content or `echo`
 set is rendered, since vLLM then ignores the field; for media, the render also
 supplies the multimodal features. The supplied IDs are stored in
 `TokenizedRequest` as sent, so other engine-side preprocessing such as

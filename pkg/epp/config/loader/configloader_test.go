@@ -710,6 +710,45 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - rejectClientPromptIDs and trustCallerFields default off",
+			configText: successSchedulerConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.False(t, rawCfg.RequestHandler.RejectClientPromptIDs)
+				require.False(t, rawCfg.RequestHandler.TrustCallerFields)
+				require.False(t, cfg.RejectClientPromptIDs)
+				require.False(t, cfg.TrustCallerFields)
+			},
+		},
+		{
+			name:       "Success - rejectClientPromptIDs enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  rejectClientPromptIDs: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.True(t, rawCfg.RequestHandler.RejectClientPromptIDs)
+				require.True(t, cfg.RejectClientPromptIDs)
+				require.False(t, cfg.TrustCallerFields)
+			},
+		},
+		{
+			name:       "Success - trustCallerFields enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  trustCallerFields: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.True(t, rawCfg.RequestHandler.TrustCallerFields)
+				require.True(t, cfg.TrustCallerFields)
+				require.False(t, cfg.RejectClientPromptIDs)
+			},
+		},
+		{
+			name:       "Error - trustCallerFields and rejectClientPromptIDs mutually exclusive",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  trustCallerFields: true\n  rejectClientPromptIDs: true\n",
+			wantErr:    true,
+		},
+		{
 			name:       "Success - Default Scorer Weight",
 			configText: successWithNoWeightText,
 			wantErr:    false,

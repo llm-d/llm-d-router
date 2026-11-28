@@ -34,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genproto/googleapis/api/httpbody"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -42,6 +43,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -55,6 +57,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
@@ -240,6 +243,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Record the client-facing model for every request, including forwarded-unchanged ones.
 	reqCtx.IncomingModelName = inferenceRequestBody.Model
+
+	// Remove untrusted client fields before model rewrite, token-producer, and
+	// PreRequest plugins (p2psource, forwardtokens, selectivekv) run so
+	// untrusted caller fields cannot steer tokenization or KV transfer.
+	if err := d.sanitizeClientFields(ctx, reqCtx.Request.Headers, inferenceRequestBody); err != nil {
+		return reqCtx, err
+	}
 
 	if err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
@@ -471,6 +481,150 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, err
 	}
 	return reqCtx, nil
+}
+
+// sanitizeClientFields removes request fields that only a trusted caller may
+// set, before token-producer or PreRequest plugins run. An EPP behind a trusted
+// Coordinator opts out with requestHandler.trustCallerFields, unless the
+// coordinator marked the request with x-llm-d-unsanitized-body (passthrough).
+//
+// On external text routes it strips the client-supplied prompt-token,
+// fingerprint, KV-transfer, and EC-transfer fields, or rejects the request
+// with 400 when rejectClientPromptIDs is enabled. On all other non-render JSON
+// PayloadMap routes (token routes, audio, embeddings, images, conversations,
+// count_tokens) it keeps any client token IDs and drops kv_transfer_params and
+// ec_transfer_params. It does not inspect native gRPC requests
+// (vllm.Inference, sglang.api.v1).
+func (d *Director) sanitizeClientFields(ctx context.Context, headers map[string]string, body *fwkrequest.InferenceRequestBody) error {
+	if d.requestControlPlugins.TrustCallerFields() && !hasUnsanitizedBodyHeader(headers) {
+		return nil
+	}
+	route, ok := externalTextRouteName(body)
+	if !ok {
+		dropTransferParams(ctx, body)
+		return nil
+	}
+	payload, ok := body.Payload.(fwkrequest.PayloadMap)
+	if !ok {
+		return rejectHTTPBodyFields(route, body)
+	}
+	found := reqcommon.FindExternalTextFields(payload)
+	if len(found) == 0 {
+		return nil
+	}
+	if d.requestControlPlugins.RejectClientPromptIDs() {
+		return rejectClientFields(route, found)
+	}
+	body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
+		reqcommon.StripExternalTextFields(m)
+	})
+	metrics.RecordPromptIDsSanitized(route, metricsutil.SanitizeActionStripped)
+	// Field names only: the values are client-controlled.
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropped client-supplied fields", "route", route, "fields", found)
+	return nil
+}
+
+// rejectClientFields counts the rejection and returns the 400 error. The
+// message names a field from a fixed list, so it reflects no client-controlled
+// content. The request handler logs the error.
+func rejectClientFields(route string, found []string) error {
+	metrics.RecordPromptIDsSanitized(route, metricsutil.SanitizeActionRejected)
+	return errcommon.Error{
+		Code: errcommon.BadRequest,
+		Msg:  fmt.Sprintf("client-supplied field %q is not allowed on %s", found[0], route),
+	}
+}
+
+// httpBodyCarrier is a gRPC request that wraps a JSON body in a
+// google.api.HttpBody, as the Vertex AI ChatCompletions and RawPredict requests
+// do.
+type httpBodyCarrier interface {
+	GetHttpBody() *httpbody.HttpBody
+}
+
+// rejectHTTPBodyFields rejects a gRPC text request whose wrapped JSON body
+// carries a forbidden field. The parser keeps such a request as a proto, and
+// the director strips fields from a PayloadMap only. It therefore rejects the
+// request under both settings and does not forward the field.
+func rejectHTTPBodyFields(route string, body *fwkrequest.InferenceRequestBody) error {
+	payload, ok := body.Payload.(fwkrequest.PayloadProto)
+	if !ok {
+		return nil
+	}
+	carrier, ok := payload.Message.(httpBodyCarrier)
+	if !ok || carrier.GetHttpBody() == nil {
+		return nil
+	}
+	// The parser does not keep its decode of this JSON, so the top-level fields
+	// are decoded again. The large string fields stay raw to avoid a copy.
+	fields, err := parserutil.UnmarshalEnvelope(carrier.GetHttpBody().GetData(),
+		reqcommon.FieldPrompt, reqcommon.FieldInput, reqcommon.FieldInstructions)
+	if err != nil {
+		return errcommon.Error{Code: errcommon.BadRequest, Msg: "request body is not a JSON object"}
+	}
+	found := reqcommon.FindExternalTextFields(fields)
+	if len(found) == 0 {
+		return nil
+	}
+	return rejectClientFields(route, found)
+}
+
+// externalTextRouteName returns the bounded route label when body represents
+// an external text route (/v1/chat/completions, string /v1/completions,
+// /v1/messages, or /v1/responses).
+func externalTextRouteName(body *fwkrequest.InferenceRequestBody) (string, bool) {
+	if body == nil || body.RenderRequest {
+		return "", false
+	}
+	switch {
+	case body.ChatCompletions != nil:
+		return reqcommon.APITypeChatCompletions.String(), true
+	case body.Messages != nil:
+		return reqcommon.APITypeMessages.String(), true
+	case body.Responses != nil:
+		return reqcommon.APITypeResponses.String(), true
+	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) == 0:
+		return reqcommon.APITypeCompletions.String(), true
+	default:
+		return "", false
+	}
+}
+
+// hasUnsanitizedBodyHeader reports whether the caller marked the request body
+// as unsanitized passthrough traffic via x-llm-d-unsanitized-body.
+func hasUnsanitizedBodyHeader(headers map[string]string) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	v, ok := headers[reqcommon.UnsanitizedBodyHeaderKey]
+	return ok && strings.EqualFold(strings.TrimSpace(v), "true")
+}
+
+// dropTransferParams removes each client-supplied copy of kv_transfer_params
+// and ec_transfer_params on non-render JSON PayloadMap routes: the top-level
+// fields and the copies in vllm_xargs and sampling_params, from which a vLLM
+// worker also reads them. On dedicated token routes, client token IDs stay
+// because sending them is the purpose of the route. The transfer fields tell a
+// model server which pod to pull KV blocks or encoder outputs from, so only the
+// Coordinator, the EPP plugins, and the sidecar may write them. The fields are
+// dropped and never rejected, as in the Coordinator.
+func dropTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
+	if body == nil || body.RenderRequest {
+		return
+	}
+	payload, ok := body.Payload.(fwkrequest.PayloadMap)
+	if !ok {
+		return
+	}
+	found := reqcommon.FindTransferParams(payload)
+	if len(found) == 0 {
+		return
+	}
+	body.MutatePayloadMap(func(m fwkrequest.PayloadMap) {
+		reqcommon.StripTransferParams(m)
+	})
+	// Field names only: the values carry a host, a port and a request id.
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropped client-supplied fields", "fields", found)
 }
 
 // escapeFairnessTenant percent-encodes the characters that would otherwise make

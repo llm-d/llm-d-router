@@ -442,10 +442,12 @@ func TestGenerateRequestHeaderResponse_HubForwardsInputControlHeaders(t *testing
 		metadata.FlowFairnessIDKey:            "tenant-a",
 		metadata.InferenceTTLHeaderKey:        "30s",
 		reqcommon.RevisionDecisionIDHeaderKey: "rev-7",
+		reqcommon.UnsanitizedBodyHeaderKey:    "true",
 		metadata.DestinationEndpointKey:       "1.1.1.1:666",
 	}
 	inputControl := []string{metadata.ObjectiveKey, metadata.FlowFairnessIDKey,
-		metadata.InferenceTTLHeaderKey, reqcommon.RevisionDecisionIDHeaderKey}
+		metadata.InferenceTTLHeaderKey, reqcommon.RevisionDecisionIDHeaderKey,
+		reqcommon.UnsanitizedBodyHeaderKey}
 	mutate := func(forward bool, resolvedTenant string) (map[string]string, []string) {
 		server := &StreamingServer{}
 		server.SetForwardInputControlHeaders(forward)

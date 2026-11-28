@@ -384,6 +384,22 @@ type RequestHandlerConfig struct {
 	// hub, whose endpoints are cluster EPPs that apply those headers themselves.
 	// It is off by default: a model server has no use for them.
 	ForwardInputControlHeaders bool `json:"forwardInputControlHeaders,omitempty"`
+
+	// +optional
+	// RejectClientPromptIDs, when true, rejects external text-route requests
+	// carrying client-supplied prompt_token_ids, prompt_render_fingerprint,
+	// render_fingerprint, kv_transfer_params, ec_transfer_params, or input_ids
+	// with 400 Bad Request instead of stripping them. Mutually exclusive with
+	// TrustCallerFields.
+	RejectClientPromptIDs bool `json:"rejectClientPromptIDs,omitempty"`
+
+	// +optional
+	// TrustCallerFields, when true, preserves caller-supplied prompt-token and
+	// fingerprint fields on text routes, and kv_transfer_params and
+	// ec_transfer_params on text routes and dedicated token routes, for internal
+	// EPPs behind a trusted Coordinator. Mutually exclusive with
+	// RejectClientPromptIDs.
+	TrustCallerFields bool `json:"trustCallerFields,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -409,6 +425,12 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.ForwardInputControlHeaders {
 		parts = append(parts, "ForwardInputControlHeaders: true")
+	}
+	if rhc.RejectClientPromptIDs {
+		parts = append(parts, "RejectClientPromptIDs: true")
+	}
+	if rhc.TrustCallerFields {
+		parts = append(parts, "TrustCallerFields: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }

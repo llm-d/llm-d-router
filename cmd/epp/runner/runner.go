@@ -1020,6 +1020,8 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	r.requestControlConfig.WithPropagatePriority(cfg.PropagatePriority)
 	r.requestControlConfig.WithComposeFairnessIDs(cfg.ComposeFairnessIDs)
 	r.requestControlConfig.WithRequestStreamUsage(cfg.RequestStreamUsage)
+	r.requestControlConfig.WithRejectClientPromptIDs(cfg.RejectClientPromptIDs)
+	r.requestControlConfig.WithTrustCallerFields(cfg.TrustCallerFields)
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil

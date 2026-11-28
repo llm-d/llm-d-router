@@ -50,6 +50,7 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.AudioDurationHeaderKey,
 		metadata.AudioBytesPerSecondHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
+		reqcommon.UnsanitizedBodyHeaderKey,
 		routing.EndpointPinHeader,
 		metadata.DestinationEndpointKey,
 		metadata.DestinationEndpointServedKey,

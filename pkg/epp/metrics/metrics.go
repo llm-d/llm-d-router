@@ -83,6 +83,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdFairnessIDResolvedCounter)
 		metrics.Registry.MustRegister(llmdFairnessIDOverflowCounter)
 		metrics.Registry.MustRegister(llmdRequestOutcomeCounter)
+		metrics.Registry.MustRegister(llmdPromptIDsSanitizedTotal)
 		metrics.Registry.MustRegister(llmdRequestLatencies)
 		metrics.Registry.MustRegister(llmdRequestSizes)
 		metrics.Registry.MustRegister(llmdResponseSizes)
@@ -154,6 +155,7 @@ func Reset() {
 	llmdFairnessIDResolvedCounter.Reset()
 	llmdFairnessIDOverflowCounter.Reset()
 	llmdRequestOutcomeCounter.Reset()
+	llmdPromptIDsSanitizedTotal.Reset()
 	llmdRequestLatencies.Reset()
 	llmdRequestSizes.Reset()
 	llmdResponseSizes.Reset()
@@ -261,6 +263,12 @@ func RecordRequestOutcome(modelName, targetModelName string, apiSurface reqcommo
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	llmdRequestOutcomeCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), outcome, reason).Inc()
+}
+
+// RecordPromptIDsSanitized increments prompt_ids_sanitized_total when EPP
+// strips or rejects forbidden client-supplied fields on an external text route.
+func RecordPromptIDsSanitized(route, action string) {
+	llmdPromptIDsSanitizedTotal.WithLabelValues(metricsutil.SanitizeComponentEPP, route, action).Inc()
 }
 
 // RecordRequestSizes records the request sizes.

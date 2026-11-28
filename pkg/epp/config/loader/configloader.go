@@ -182,17 +182,22 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("plugin '%s' is not a fwkfc.SaturationDetector", rawConfig.FlowControl.SaturationDetector.PluginRef)
 	}
 
-	return &config.Config{
-		SchedulerConfig:    schedulerConfig,
-		SaturationDetector: saturationDetector,
-		DataConfig:         dataConfig,
-		FlowControlConfig:  flowControlConfig,
-		ParserRegistry:     parserRegistry,
-		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
-		ComposeFairnessIDs: rawConfig.RequestHandler.ComposeFairnessIDs,
-		RequestStreamUsage: rawConfig.RequestHandler.RequestStreamUsage,
+	if rawConfig.RequestHandler.TrustCallerFields && rawConfig.RequestHandler.RejectClientPromptIDs {
+		return nil, errors.New("requestHandler.trustCallerFields and requestHandler.rejectClientPromptIDs cannot both be true")
+	}
 
+	return &config.Config{
+		SchedulerConfig:            schedulerConfig,
+		SaturationDetector:         saturationDetector,
+		DataConfig:                 dataConfig,
+		FlowControlConfig:          flowControlConfig,
+		ParserRegistry:             parserRegistry,
+		PropagatePriority:          rawConfig.RequestHandler.PropagatePriority,
+		ComposeFairnessIDs:         rawConfig.RequestHandler.ComposeFairnessIDs,
+		RequestStreamUsage:         rawConfig.RequestHandler.RequestStreamUsage,
 		ForwardInputControlHeaders: rawConfig.RequestHandler.ForwardInputControlHeaders,
+		RejectClientPromptIDs:      rawConfig.RequestHandler.RejectClientPromptIDs,
+		TrustCallerFields:          rawConfig.RequestHandler.TrustCallerFields,
 		DataProducerPhases:         dataProducerPhases,
 	}, nil
 }

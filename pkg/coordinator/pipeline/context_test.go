@@ -153,12 +153,13 @@ func TestStripInternalHeaders(t *testing.T) {
 	headers := http.Header{
 		"X-Llm-D-Kv-Cache-Prefill-P2p-Host-Port": {"10.0.0.9:7777"},
 		"X-Llm-D-Peer-Topology":                  {"host=spoofed"},
+		"X-Llm-D-Unsanitized-Body":               {"true"},
 		"X-Request-Id":                           {"abc-123"},
 	}
 
 	StripInternalHeaders(headers)
 
-	for _, name := range []string{routing.KVCachePrefillHeader, reqcommon.PeerTopologyHeaderKey} {
+	for _, name := range []string{routing.KVCachePrefillHeader, reqcommon.PeerTopologyHeaderKey, reqcommon.UnsanitizedBodyHeaderKey} {
 		if headers.Get(name) != "" {
 			t.Fatalf("%s should be stripped: %v", name, headers)
 		}

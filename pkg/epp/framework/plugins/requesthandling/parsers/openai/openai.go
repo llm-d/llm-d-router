@@ -197,6 +197,11 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
 	}
+	if apiType == completionsAPI {
+		if err := decodeCompletionsPrompt(extractedBody.Completions, bodyMap); err != nil {
+			return nil, fmt.Errorf("error extracting request body: %w", err)
+		}
+	}
 
 	extractedBody.Payload = bodyMap
 	if model, ok := bodyMap[reqcommon.FieldModel].(string); ok {
@@ -596,19 +601,22 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		return &request.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
 
 	case completionsAPI:
-		validationErr := errors.New("invalid completions request: must have prompt field")
+		// Prompt is decoded after UnmarshalEnvelope from exact-case bodyMap["prompt"]
+		// so encoding/json case-insensitive matching cannot let a case-variant key
+		// populate Prompt.TokenIDs when the engine reads exact-case "prompt".
 		var completions struct {
-			request.CompletionsRequest
-			// vLLM accepts prompt_embeds in place of prompt.
-			PromptEmbeds jsonPresent `json:"prompt_embeds"`
+			CacheSalt string          `json:"cache_salt,omitempty"`
+			Echo      json.RawMessage `json:"echo,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &completions); err != nil {
-			return nil, requestBodyDecodeError(err, "completions", validationErr)
+			return nil, requestBodyDecodeError(err, "completions", errInvalidCompletionsPrompt)
 		}
-		if completions.Prompt.IsEmpty() && !bool(completions.PromptEmbeds) {
-			return nil, validationErr
-		}
-		return &request.InferenceRequestBody{Completions: &completions.CompletionsRequest}, nil
+		return &request.InferenceRequestBody{
+			Completions: &request.CompletionsRequest{
+				CacheSalt: completions.CacheSalt,
+				Echo:      completions.Echo,
+			},
+		}, nil
 
 	case embeddingsAPI:
 		validationErr := errors.New("invalid embeddings request: must have input field")
@@ -867,11 +875,20 @@ func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseRes
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 }
 
-// jsonPresent records whether a field holds a non-null value without copying it.
-type jsonPresent bool
+var errInvalidCompletionsPrompt = errors.New("invalid completions request: must have prompt field")
 
-func (p *jsonPresent) UnmarshalJSON(data []byte) error {
-	*p = jsonPresent(!bytes.Equal(data, []byte("null")))
+// decodeCompletionsPrompt populates req.Prompt from the exact-case "prompt"
+// entry of bodyMap (kept raw by UnmarshalEnvelope) and verifies that either
+// prompt or vLLM's prompt_embeds is non-empty.
+func decodeCompletionsPrompt(req *request.CompletionsRequest, bodyMap request.PayloadMap) error {
+	if rawPrompt, ok := bodyMap[reqcommon.FieldPrompt].(json.RawMessage); ok {
+		if err := req.Prompt.UnmarshalJSON(rawPrompt); err != nil {
+			return requestBodyDecodeError(err, "completions", errInvalidCompletionsPrompt)
+		}
+	}
+	if req.Prompt.IsEmpty() && bodyMap["prompt_embeds"] == nil {
+		return errInvalidCompletionsPrompt
+	}
 	return nil
 }
 

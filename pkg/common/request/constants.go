@@ -36,6 +36,11 @@ const (
 	// EPP's request, for topology-affinity-filter and topology-affinity-scorer
 	// running in coordinator deployments.
 	PeerTopologyHeaderKey = "x-llm-d-peer-topology"
+	// UnsanitizedBodyHeaderKey tells an EPP configured with
+	// requestHandler.trustCallerFields to still sanitize the request body. The
+	// coordinator sets it on passthrough requests, whose bodies it forwards
+	// verbatim without parsing.
+	UnsanitizedBodyHeaderKey = "x-llm-d-unsanitized-body"
 
 	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
 	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control
@@ -86,6 +91,7 @@ const (
 	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
 	FieldExtraArgs            = "extra_args" // sampling_params field: vLLM reads kv_transfer_params from it
+	FieldVLLMXArgs            = "vllm_xargs" // vllm-rs name of extra_args, also a top-level field of the OpenAI routes
 	FieldN                    = "n"
 	FieldCacheSalt            = "cache_salt"
 	FieldPriority             = "priority"

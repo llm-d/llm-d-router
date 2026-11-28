@@ -49,6 +49,7 @@ var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
+	reqcommon.UnsanitizedBodyHeaderKey:    true,
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
 	routing.KVCachePrefillHeader:          true,

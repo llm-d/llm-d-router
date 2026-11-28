@@ -101,6 +101,7 @@ error, 413, invalid JSON) count as `bad_request` with `model_name=unknown`.
 | `request_size_bytes` | Histogram | Request body size; `RequestSizeBuckets` (64 B to 1 GiB, powers of two). |
 | `request_input_tokens` | Histogram | Prompt token count, recorded after the render step; `TokenCountBuckets` (1 to ~1 M). |
 | `request_running` | Gauge | Requests in flight. |
+| `prompt_ids_sanitized_total` | Counter | External text requests where the coordinator stripped or rejected client prompt token IDs, render fingerprints, KV transfer fields, or EC transfer fields. Uses labels `component`, `route`, and `action`. |
 
 ### Pipeline step family
 

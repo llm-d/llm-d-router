@@ -1963,6 +1963,70 @@ func TestOpenAIParser_ParseRequestCompletionsPromptEmbeds(t *testing.T) {
 	}
 }
 
+func TestOpenAIParser_ParseRequestCompletionsExactCasePrompt(t *testing.T) {
+	parser := NewOpenAIParser()
+	headers := map[string]string{":path": "/v1/completions"}
+
+	for _, tt := range []struct {
+		name    string
+		body    string
+		wantRaw string
+		wantIDs [][]uint32
+		wantErr bool
+	}{
+		{
+			name:    "token array overwritten by string prompt",
+			body:    `{"model":"m","prompt":[1,2,3],"prompt":"hello"}`,
+			wantRaw: "hello",
+		},
+		{
+			name: "token array overwritten by null with prompt_embeds",
+			body: `{"model":"m","prompt":[1,2,3],"prompt":null,"prompt_embeds":"AAAA"}`,
+		},
+		{
+			name:    "string prompt ignores uppercase PROMPT token array",
+			body:    `{"model":"m","prompt":"hello","PROMPT":[1,2,3]}`,
+			wantRaw: "hello",
+		},
+		{
+			name: "prompt_embeds ignores uppercase PROMPT token array",
+			body: `{"model":"m","PROMPT":[1,2,3],"prompt_embeds":"AAAA"}`,
+		},
+		{
+			name:    "token array prompt ignores uppercase PROMPT null",
+			body:    `{"model":"m","prompt":[1,2,3],"PROMPT":null}`,
+			wantIDs: [][]uint32{{1, 2, 3}},
+		},
+		{
+			name:    "uppercase PROMPT alone is rejected",
+			body:    `{"model":"m","PROMPT":"hello"}`,
+			wantErr: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseRequest(context.Background(), []byte(tt.body), headers)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseRequest() error = nil, want prompt validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if got.Body.Completions == nil {
+				t.Fatal("ParseRequest() Completions = nil")
+			}
+			if got.Body.Completions.Prompt.Raw != tt.wantRaw {
+				t.Fatalf("Prompt.Raw = %q, want %q", got.Body.Completions.Prompt.Raw, tt.wantRaw)
+			}
+			if diff := cmp.Diff(tt.wantIDs, got.Body.Completions.Prompt.TokenIDs); diff != "" {
+				t.Fatalf("Prompt.TokenIDs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestOpenAIParser_RequestFieldErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name      string

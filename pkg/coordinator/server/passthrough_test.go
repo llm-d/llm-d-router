@@ -213,6 +213,7 @@ func TestPassthrough_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	req.Header.Set(reqcommon.RevisionDecisionIDHeaderKey, "shared-by-everyone")
 	req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "revision-a")
 	req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "revision-b")
+	req.Header.Set(reqcommon.UnsanitizedBodyHeaderKey, "false")
 	req.Header.Set("X-Keep", "kept")
 	doPassthrough(t, srv, req)
 
@@ -225,6 +226,9 @@ func TestPassthrough_StripsClientSuppliedInternalHeaders(t *testing.T) {
 		if got := headers.Values(name); len(got) != 0 {
 			t.Fatalf("client %s reached the gateway: %q", name, got)
 		}
+	}
+	if got := headers.Values(reqcommon.UnsanitizedBodyHeaderKey); len(got) != 1 || got[0] != "true" {
+		t.Fatalf("%s = %q, want [\"true\"]", reqcommon.UnsanitizedBodyHeaderKey, got)
 	}
 	if got := headers.Get("X-Keep"); got != "kept" {
 		t.Fatalf("X-Keep: got %q want %q, other client headers must still be forwarded", got, "kept")

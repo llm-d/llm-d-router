@@ -104,6 +104,7 @@ schedulingProfiles:
       - pluginRef: kv-cache-utilization-scorer
 requestHandler:
   propagatePriority: true
+  trustCallerFields: true
   parsers:
   - pluginRef: openai-parser
 dataLayer:
@@ -231,6 +232,7 @@ schedulingProfiles:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
 requestHandler:
+  trustCallerFields: true
   parsers:
   - pluginRef: openai-parser
 dataLayer:
@@ -337,6 +339,7 @@ schedulingProfiles:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
 requestHandler:
+  trustCallerFields: true
   parsers:
   - pluginRef: openai-parser
 dataLayer:
@@ -447,4 +450,137 @@ dataLayer:
 	require.Eventually(t, func() bool {
 		return route(`[101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116]`, "retry after mid-stream teardown") == "192.168.1.1:8000"
 	}, 5*time.Second, 100*time.Millisecond, "a stream torn down after a body chunk keeps its cached prefix")
+}
+
+// TestExternalTextRouteSanitization checks the untrusted external-text-route
+// boundary through the ext-proc stream. By default, EPP strips client-supplied
+// prompt token IDs, render fingerprints, and KV and EC transfer fields before
+// token-producer runs, so the request renders normally and the forwarded body
+// omits those fields. With rejectClientPromptIDs enabled, EPP rejects the
+// request with HTTP 400.
+func TestExternalTextRouteSanitization(t *testing.T) {
+	t.Run("default strips untrusted fields before token-producer", func(t *testing.T) {
+		recorder := &renderRecorder{}
+		renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
+		t.Cleanup(renderSrv.Close)
+
+		configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+		h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+		pods := []eppharness.PodState{
+			eppharness.P(0, 0, 0.1, modelMyModelTarget),
+			eppharness.P(1, 5, 0.5, modelMyModelTarget),
+		}
+		h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"untrusted-marker"}],` +
+			`"max_tokens":100,` +
+			`"prompt_token_ids":[1,2,3],` +
+			`"prompt_render_fingerprint":"forged",` +
+			`"render_fingerprint":"forged-2",` +
+			`"input_ids":[4,5],` +
+			`"kv_transfer_params":{"prompt_token_ids":[7,8,9],"do_remote_prefill":true}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			reqcommon.RequestIDHeaderKey: "sanitize-strip-req",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+
+		responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
+		require.NoError(t, err)
+		require.Len(t, responses, 2)
+
+		mutatedBody := responses[1].GetRequestBody().GetResponse().GetBodyMutation().GetStreamedResponse().GetBody()
+		require.NotEmpty(t, mutatedBody, "stripped request must emit a body mutation")
+		var forwarded map[string]any
+		require.NoError(t, json.Unmarshal(mutatedBody, &forwarded))
+		for _, field := range reqcommon.ExternalTextRouteSanitizedFields {
+			require.NotContains(t, forwarded, field, "forwarded body must omit %s", field)
+		}
+		require.Equal(t, modelMyModelTarget, forwarded["model"])
+		require.Equal(t, 1, recorder.callsContaining("untrusted-marker"),
+			"token-producer must render after client kv_transfer_params.prompt_token_ids is stripped")
+	})
+
+	t.Run("rejectClientPromptIDs returns 400", func(t *testing.T) {
+		recorder := &renderRecorder{}
+		renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
+		t.Cleanup(renderSrv.Close)
+
+		configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: queue-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: queue-scorer
+requestHandler:
+  rejectClientPromptIDs: true
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+		h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+		pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget)}
+		h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"rejected-marker"}],` +
+			`"kv_transfer_params":{"prompt_token_ids":[7,8,9]}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			reqcommon.RequestIDHeaderKey: "sanitize-reject-req",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+
+		responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 1)
+		require.NoError(t, err)
+		require.Len(t, responses, 1)
+		imm := responses[0].GetImmediateResponse()
+		require.NotNil(t, imm, "rejected request must return an immediate response")
+		require.Equal(t, uint32(http.StatusBadRequest), uint32(imm.GetStatus().GetCode()))
+		require.Zero(t, recorder.callsContaining("rejected-marker"),
+			"rejected request must not reach token-producer")
+	})
 }
