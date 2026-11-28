@@ -36,6 +36,11 @@ const (
 	// EPP's request, for topology-affinity-filter and topology-affinity-scorer
 	// running in coordinator deployments.
 	PeerTopologyHeaderKey = "x-llm-d-peer-topology"
+	// UnsanitizedBodyHeaderKey tells an EPP configured with
+	// requestHandler.trustCallerFields to still sanitize the request body. The
+	// coordinator sets it on passthrough requests, whose bodies it forwards
+	// verbatim without parsing.
+	UnsanitizedBodyHeaderKey = "x-llm-d-unsanitized-body"
 
 	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
 	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control

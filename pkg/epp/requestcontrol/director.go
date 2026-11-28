@@ -247,7 +247,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// Remove untrusted client fields before model rewrite, token-producer, and
 	// PreRequest plugins (p2psource, forwardtokens, selectivekv) run so
 	// untrusted caller fields cannot steer tokenization or KV transfer.
-	if err := d.sanitizeClientFields(ctx, inferenceRequestBody); err != nil {
+	if err := d.sanitizeClientFields(ctx, reqCtx.Request.Headers, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
 
@@ -485,21 +485,23 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 // sanitizeClientFields removes request fields that only a trusted caller may
 // set, before token-producer or PreRequest plugins run. An EPP behind a trusted
-// Coordinator opts out with requestHandler.trustCallerFields.
+// Coordinator opts out with requestHandler.trustCallerFields, unless the
+// coordinator marked the request with x-llm-d-unsanitized-body (passthrough).
 //
 // On external text routes it strips the client-supplied prompt-token,
 // fingerprint, KV-transfer, and EC-transfer fields, or rejects the request
-// with 400 when rejectClientPromptIDs is enabled. On dedicated HTTP token
-// routes it keeps the client token IDs and drops kv_transfer_params and
+// with 400 when rejectClientPromptIDs is enabled. On all other non-render JSON
+// PayloadMap routes (token routes, audio, embeddings, images, conversations,
+// count_tokens) it keeps any client token IDs and drops kv_transfer_params and
 // ec_transfer_params. It does not inspect native gRPC requests
 // (vllm.Inference, sglang.api.v1).
-func (d *Director) sanitizeClientFields(ctx context.Context, body *fwkrequest.InferenceRequestBody) error {
-	if d.requestControlPlugins.TrustCallerFields() {
+func (d *Director) sanitizeClientFields(ctx context.Context, headers map[string]string, body *fwkrequest.InferenceRequestBody) error {
+	if d.requestControlPlugins.TrustCallerFields() && !hasUnsanitizedBodyHeader(headers) {
 		return nil
 	}
 	route, ok := externalTextRouteName(body)
 	if !ok {
-		dropTokenRouteTransferParams(ctx, body)
+		dropTransferParams(ctx, body)
 		return nil
 	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)
@@ -588,26 +590,26 @@ func externalTextRouteName(body *fwkrequest.InferenceRequestBody) (string, bool)
 	}
 }
 
-// isTokenRoute reports whether body is a dedicated token route: a generate
-// request (/inference/v1/generate, /generate) or a token-array /v1/completions
-// request.
-func isTokenRoute(body *fwkrequest.InferenceRequestBody) bool {
-	if body == nil || body.RenderRequest {
+// hasUnsanitizedBodyHeader reports whether the caller marked the request body
+// as unsanitized passthrough traffic via x-llm-d-unsanitized-body.
+func hasUnsanitizedBodyHeader(headers map[string]string) bool {
+	if len(headers) == 0 {
 		return false
 	}
-	return body.Generate != nil || (body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0)
+	v, ok := headers[reqcommon.UnsanitizedBodyHeaderKey]
+	return ok && strings.EqualFold(strings.TrimSpace(v), "true")
 }
 
-// dropTokenRouteTransferParams removes each client-supplied copy of
-// kv_transfer_params and ec_transfer_params on a dedicated token route: the
-// top-level fields and the copies in vllm_xargs and sampling_params, from which
-// a vLLM worker also reads them. The client token IDs stay, because sending
-// them is the purpose of the route. The transfer fields tell a model server
-// which pod to pull KV blocks or encoder outputs from, so only the Coordinator,
-// the EPP plugins, and the sidecar may write them. The fields are dropped and
-// never rejected, as in the Coordinator.
-func dropTokenRouteTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
-	if !isTokenRoute(body) {
+// dropTransferParams removes each client-supplied copy of kv_transfer_params
+// and ec_transfer_params on non-render JSON PayloadMap routes: the top-level
+// fields and the copies in vllm_xargs and sampling_params, from which a vLLM
+// worker also reads them. On dedicated token routes, client token IDs stay
+// because sending them is the purpose of the route. The transfer fields tell a
+// model server which pod to pull KV blocks or encoder outputs from, so only the
+// Coordinator, the EPP plugins, and the sidecar may write them. The fields are
+// dropped and never rejected, as in the Coordinator.
+func dropTransferParams(ctx context.Context, body *fwkrequest.InferenceRequestBody) {
+	if body == nil || body.RenderRequest {
 		return
 	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)

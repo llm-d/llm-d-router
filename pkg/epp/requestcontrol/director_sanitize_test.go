@@ -725,3 +725,221 @@ func TestDirector_RejectClientPromptIDsRejectsECTransferParams(t *testing.T) {
 		})
 	}
 }
+
+func TestDirector_CompletionsDuplicateAndCaseVariantPromptCannotBypassSanitization(t *testing.T) {
+	metrics.Register()
+
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "token array prompt overwritten by string prompt",
+			raw:  `{"model":"llama-3-8b","prompt":[1,2,3],"prompt":"hello","prompt_token_ids":[9,9,9]}`,
+		},
+		{
+			name: "token array prompt overwritten by null with prompt_embeds",
+			raw:  `{"model":"llama-3-8b","prompt":[1,2,3],"prompt":null,"prompt_embeds":"AAAA","prompt_token_ids":[9,9,9]}`,
+		},
+		{
+			name: "string prompt followed by uppercase PROMPT token array",
+			raw:  `{"model":"llama-3-8b","prompt":"hello","PROMPT":[1,2,3],"prompt_token_ids":[9,9,9]}`,
+		},
+		{
+			name: "prompt_embeds with uppercase PROMPT token array",
+			raw:  `{"model":"llama-3-8b","PROMPT":[1,2,3],"prompt_embeds":"AAAA","prompt_token_ids":[9,9,9]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"/strip", func(t *testing.T) {
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig(), openai.NewOpenAIParser(), reqcommon.PathCompletions, []byte(tc.raw))
+
+			require.NoError(t, err)
+			require.Empty(t, body.Completions.Prompt.TokenIDs)
+			require.True(t, body.Mutated)
+			out := forwardedBody(t, reqCtx)
+			require.NotContains(t, out, reqcommon.FieldPromptTokenIDs)
+		})
+
+		t.Run(tc.name+"/reject", func(t *testing.T) {
+			_, _, err := handleSanitizeRequest(t, NewConfig().WithRejectClientPromptIDs(true), openai.NewOpenAIParser(), reqcommon.PathCompletions, []byte(tc.raw))
+
+			var reqErr errcommon.Error
+			require.ErrorAs(t, err, &reqErr)
+			require.Equal(t, errcommon.BadRequest, reqErr.Code)
+			require.Contains(t, reqErr.Msg, reqcommon.FieldPromptTokenIDs)
+		})
+	}
+}
+
+func TestDirector_OtherPayloadMapRoutesDropTransferParams(t *testing.T) {
+	metrics.Register()
+
+	const clientTransfer = `,"kv_transfer_params":{"remote_prefiller":"10.0.0.1:8000"},"ec_transfer_params":{"image":[]},"vllm_xargs":{"kv_transfer_params":{"do_remote_prefill":true},"keep":1}`
+	routes := []struct {
+		name   string
+		path   string
+		parser fwkrh.Parser
+		body   string // without closing brace
+	}{
+		{
+			name:   "audio_speech",
+			path:   reqcommon.PathAudioSpeech,
+			parser: openai.NewOpenAIParser(),
+			body:   `{"model":"tts-1","input":"hello","voice":"alloy"`,
+		},
+		{
+			name:   "embeddings",
+			path:   "/v1/embeddings",
+			parser: openai.NewOpenAIParser(),
+			body:   `{"model":"embed-1","input":"hello"`,
+		},
+		{
+			name:   "audio_generate",
+			path:   "/v1/audio/generate",
+			parser: openai.NewOpenAIParser(),
+			body:   `{"model":"audio-1","input":"rain"`,
+		},
+		{
+			name:   "images_generations",
+			path:   "/v1/images/generations",
+			parser: openai.NewOpenAIParser(),
+			body:   `{"model":"img-1","prompt":"sunset"`,
+		},
+		{
+			name:   "conversations",
+			path:   "/v1/conversations",
+			parser: openai.NewOpenAIParser(),
+			body:   `{"model":"llama-3-8b","items":[{"type":"message","role":"user","content":"hi"}]`,
+		},
+		{
+			name:   "messages_count_tokens",
+			path:   "/v1/messages/count_tokens",
+			parser: anthropic.NewAnthropicParser(),
+			body:   `{"model":"claude-3","messages":[{"role":"user","content":"hi"}]`,
+		},
+	}
+
+	for _, tc := range routes {
+		t.Run(tc.name+"/drops_transfer_params", func(t *testing.T) {
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig(), tc.parser, tc.path, []byte(tc.body+clientTransfer+"}"))
+
+			require.NoError(t, err)
+			require.True(t, body.Mutated)
+			out := forwardedBody(t, reqCtx)
+			require.NotContains(t, out, reqcommon.FieldKVTransferParams)
+			require.NotContains(t, out, reqcommon.FieldECTransferParams)
+			xargs, ok := out[reqcommon.FieldVLLMXArgs].(map[string]any)
+			require.True(t, ok)
+			require.NotContains(t, xargs, reqcommon.FieldKVTransferParams)
+			require.Equal(t, float64(1), xargs["keep"])
+			requireNoSanitizeMetric(t)
+		})
+
+		t.Run(tc.name+"/clean_request_unchanged", func(t *testing.T) {
+			raw := []byte(tc.body + "}")
+			reqCtx, body, err := handleSanitizeRequest(t, NewConfig(), tc.parser, tc.path, raw)
+
+			require.NoError(t, err)
+			require.False(t, body.Mutated)
+			require.Equal(t, raw, reqCtx.Request.RawBody)
+		})
+	}
+}
+
+func TestDirector_UnsanitizedBodyHeaderOverridesTrustCallerFields(t *testing.T) {
+	metrics.Register()
+
+	runWithHeaders := func(t *testing.T, parser fwkrh.Parser, path string, extraHeaders map[string]string, raw []byte) (*handlers.RequestContext, *fwkrequest.InferenceRequestBody, error) {
+		t.Helper()
+		metrics.Reset()
+		dir, ctx := newSinglePodDirector(t, newSanitizeScheduleResult())
+		dir.requestControlPlugins = *NewConfig().
+			WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
+			WithTrustCallerFields(true)
+
+		headers := map[string]string{":path": path}
+		for k, v := range extraHeaders {
+			headers[k] = v
+		}
+		parsed, err := parser.ParseRequest(ctx, raw, headers)
+		require.NoError(t, err)
+		reqCtx := &handlers.RequestContext{
+			Request: &handlers.Request{ID: "req-passthrough", Headers: headers, RawBody: raw},
+			Parser:  parser,
+		}
+		_, err = dir.HandleRequest(ctx, reqCtx, parsed.Body)
+		return reqCtx, parsed.Body, err
+	}
+
+	passthroughHeaders := map[string]string{reqcommon.UnsanitizedBodyHeaderKey: "true"}
+
+	t.Run("text route strips client fields when marked unsanitized", func(t *testing.T) {
+		raw := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"prompt_token_ids":[1,2,3],"kv_transfer_params":{"do_remote_prefill":true}}`)
+		reqCtx, body, err := runWithHeaders(t, openai.NewOpenAIParser(), reqcommon.PathChatCompletions, passthroughHeaders, raw)
+
+		require.NoError(t, err)
+		require.True(t, body.Mutated)
+		out := forwardedBody(t, reqCtx)
+		require.NotContains(t, out, reqcommon.FieldPromptTokenIDs)
+		require.NotContains(t, out, reqcommon.FieldKVTransferParams)
+	})
+
+	t.Run("false header value still trusts caller", func(t *testing.T) {
+		raw := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"kv_transfer_params":{"do_remote_prefill":true}}`)
+		reqCtx, body, err := runWithHeaders(t, openai.NewOpenAIParser(), reqcommon.PathChatCompletions, map[string]string{reqcommon.UnsanitizedBodyHeaderKey: "false"}, raw)
+
+		require.NoError(t, err)
+		require.False(t, body.Mutated)
+		require.Equal(t, raw, reqCtx.Request.RawBody)
+	})
+
+	t.Run("non-render payload routes drop transfer params when marked unsanitized", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			path   string
+			parser fwkrh.Parser
+			raw    string
+		}{
+			{
+				name:   "sglang_generate",
+				path:   reqcommon.PathSGLangGenerate,
+				parser: sglanghttp.NewSGLangHTTPParser(),
+				raw:    `{"input_ids":[1,2,3],"kv_transfer_params":{"do_remote_prefill":true}}`,
+			},
+			{
+				name:   "embeddings",
+				path:   "/v1/embeddings",
+				parser: openai.NewOpenAIParser(),
+				raw:    `{"model":"embed-1","input":"hello","kv_transfer_params":{"remote_prefiller":"10.0.0.1:8000"}}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				reqCtx, body, err := runWithHeaders(t, tc.parser, tc.path, passthroughHeaders, []byte(tc.raw))
+
+				require.NoError(t, err)
+				require.True(t, body.Mutated)
+				out := forwardedBody(t, reqCtx)
+				require.NotContains(t, out, reqcommon.FieldKVTransferParams)
+			})
+		}
+	})
+
+	t.Run("vertex ai gRPC text route rejects forbidden field when marked unsanitized", func(t *testing.T) {
+		payload := []byte(`{"model":"llama-3-8b","messages":[{"role":"user","content":"hi"}],"prompt_token_ids":[1,2,3]}`)
+		msg := &aiplatformpb.ChatCompletionsRequest{
+			Endpoint: "projects/p/locations/l/endpoints/e",
+			HttpBody: &httpbody.HttpBody{ContentType: reqcommon.ContentTypeJSON, Data: payload},
+		}
+		framed, err := grpcframe.MarshalProto(msg)
+		require.NoError(t, err)
+
+		_, _, err = runWithHeaders(t, vertexai.NewVertexAIParser(), "/google.cloud.aiplatform.v1beta1.PredictionService/ChatCompletions", passthroughHeaders, framed)
+
+		var reqErr errcommon.Error
+		require.ErrorAs(t, err, &reqErr)
+		require.Equal(t, errcommon.BadRequest, reqErr.Code)
+		require.Contains(t, reqErr.Msg, reqcommon.FieldPromptTokenIDs)
+	})
+}

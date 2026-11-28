@@ -352,8 +352,8 @@ func parseArrayInput(v []any, errorPrefix string) (arrayInputResult, error) {
 }
 
 func (p *Prompt) UnmarshalJSON(data []byte) error {
+	*p = Prompt{}
 	if tokenIDs, ok := parseCanonicalTokenIDArrays(data); ok {
-		p.Strings = nil
 		p.TokenIDs = tokenIDs
 		return nil
 	}
@@ -594,8 +594,8 @@ type EmbeddingsInput struct {
 }
 
 func (e *EmbeddingsInput) UnmarshalJSON(data []byte) error {
+	*e = EmbeddingsInput{}
 	if tokenIDs, ok := parseCanonicalTokenIDArrays(data); ok {
-		e.Strings = nil
 		e.TokenIDs = tokenIDs
 		return nil
 	}

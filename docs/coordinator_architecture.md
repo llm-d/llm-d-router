@@ -306,8 +306,10 @@ On the text routes (`/v1/chat/completions`, string `/v1/completions`, `/v1/messa
 client token IDs in place of the chat template.
 With `server.reject_client_prompt_ids: true`, a text request that carries one of these
 fields gets HTTP 400. The token routes keep client token IDs.
-The passthrough forwards the body verbatim, so the fields reach EPP on every other path.
-[Caller fields](#caller-fields) describes the EPP setting that this behavior requires.
+The passthrough forwards the body verbatim and sets `x-llm-d-unsanitized-body: true`.
+That header instructs EPP to sanitize passthrough requests even when EPP sets
+`requestHandler.trustCallerFields: true`, and EPP removes the header before forwarding to
+the worker. [Caller fields](#caller-fields) describes the EPP setting for pipeline calls.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -346,7 +348,9 @@ requestHandler:
 
 Without this setting, the EPP drops the fields before the request reaches the worker.
 The EPP logs each drop, and `llm_d_epp_prompt_ids_sanitized_total` counts each drop on a
-text route. Use the setting only when clients cannot reach the EPP directly.
+text route. Passthrough requests carry `x-llm-d-unsanitized-body: true`, so EPP still
+sanitizes them when `requestHandler.trustCallerFields` is enabled. Use the setting only
+when clients cannot reach the EPP directly.
 
 ### Per-phase scheduling profiles
 

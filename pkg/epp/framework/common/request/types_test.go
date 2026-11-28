@@ -490,7 +490,7 @@ func TestAnthropicContentBlock_ToolResultContent(t *testing.T) {
 	}
 }
 
-func TestPrompt_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
+func TestPrompt_UnmarshalJSONClearsStaleFields(t *testing.T) {
 	stale := Prompt{
 		Raw:      "stale",
 		Strings:  []string{"stale"},
@@ -499,15 +499,19 @@ func TestPrompt_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
 
 	p := stale
 	require.NoError(t, p.UnmarshalJSON([]byte(`[1,2,3]`)))
-	assert.Equal(t, Prompt{Raw: "stale", TokenIDs: [][]uint32{{1, 2, 3}}}, p)
+	assert.Equal(t, Prompt{TokenIDs: [][]uint32{{1, 2, 3}}}, p)
 
 	p = stale
 	require.NoError(t, p.UnmarshalJSON([]byte(`[1.0]`)))
-	assert.Equal(t, Prompt{Raw: "stale", TokenIDs: [][]uint32{{1}}}, p)
+	assert.Equal(t, Prompt{TokenIDs: [][]uint32{{1}}}, p)
 
 	p = stale
 	require.NoError(t, p.UnmarshalJSON([]byte(`"hello"`)))
-	assert.Equal(t, Prompt{Raw: "hello", Strings: []string{"stale"}, TokenIDs: [][]uint32{{99}}}, p)
+	assert.Equal(t, Prompt{Raw: "hello"}, p)
+
+	p = stale
+	require.NoError(t, p.UnmarshalJSON([]byte(`null`)))
+	assert.Equal(t, Prompt{}, p)
 }
 
 func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
@@ -569,7 +573,7 @@ func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
 	}
 }
 
-func TestEmbeddingsInput_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
+func TestEmbeddingsInput_UnmarshalJSONClearsStaleFields(t *testing.T) {
 	stale := EmbeddingsInput{
 		Raw:      "stale",
 		Strings:  []string{"stale"},
@@ -578,15 +582,15 @@ func TestEmbeddingsInput_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
 
 	e := stale
 	require.NoError(t, e.UnmarshalJSON([]byte(`[1,2,3]`)))
-	assert.Equal(t, EmbeddingsInput{Raw: "stale", TokenIDs: [][]uint32{{1, 2, 3}}}, e)
+	assert.Equal(t, EmbeddingsInput{TokenIDs: [][]uint32{{1, 2, 3}}}, e)
 
 	e = stale
 	require.NoError(t, e.UnmarshalJSON([]byte(`[1e0]`)))
-	assert.Equal(t, EmbeddingsInput{Raw: "stale", TokenIDs: [][]uint32{{1}}}, e)
+	assert.Equal(t, EmbeddingsInput{TokenIDs: [][]uint32{{1}}}, e)
 
 	e = stale
 	require.NoError(t, e.UnmarshalJSON([]byte(`"hello"`)))
-	assert.Equal(t, EmbeddingsInput{Raw: "hello", Strings: []string{"stale"}, TokenIDs: [][]uint32{{99}}}, e)
+	assert.Equal(t, EmbeddingsInput{Raw: "hello"}, e)
 }
 
 func TestPrompt_PlainText(t *testing.T) {

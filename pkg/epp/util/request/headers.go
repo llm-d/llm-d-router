@@ -46,6 +46,7 @@ var (
 		metadata.AudioDurationHeaderKey,
 		metadata.AudioBytesPerSecondHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
+		reqcommon.UnsanitizedBodyHeaderKey,
 	)
 
 	// OutputInjectionHeaders are headers EPP injects for the backend.
