@@ -132,7 +132,8 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 		require.NoError(t, idx.Add(ctx, []BlockHash{11}, []BlockHash{2}, []PodEntry{podB}))
 
 		capacityBefore := evictions("capacity")
-		require.NoError(t, idx.Add(ctx, []BlockHash{12}, []BlockHash{3}, []PodEntry{podC}))
+		// Grow the request store without evicting an engine mapping first.
+		require.NoError(t, idx.Add(ctx, nil, []BlockHash{3}, []PodEntry{podC}))
 
 		stats := idx.Stats()
 		require.Equal(t, 2, stats.ResidentKeys)
@@ -189,7 +190,10 @@ func TestInMemoryStatsNoDrift(t *testing.T) {
 				key := keys[rng.Intn(numKeys)]
 				pod := pods[rng.Intn(numPods)]
 				switch i % 4 {
-				case 0, 1:
+				case 0:
+					// Exercise request-store capacity independently of the engine LRU.
+					_ = idx.Add(ctx, nil, []BlockHash{key}, []PodEntry{pod})
+				case 1:
 					engineKey := BlockHash(100 + rng.Intn(4))
 					_ = idx.Add(ctx, []BlockHash{engineKey}, []BlockHash{key}, []PodEntry{pod})
 				case 2:

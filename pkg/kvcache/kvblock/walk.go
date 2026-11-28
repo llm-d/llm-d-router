@@ -66,8 +66,7 @@ type EntryRef struct {
 //   - When the walk ends, for any reason, the prefix of requestKeys through
 //     the last key found is marked most recently used in position order
 //     under one acquisition, skipping keys absent by then. Positions after
-//     the last key found are not promoted. Lookup promotes the same way, so
-//     a prefix that is only read stays resident under capacity pressure.
+//     the last key found are not promoted. Lookup promotes the same way.
 type KeyWalker interface {
 	WalkKeys(ctx context.Context, requestKeys []BlockHash,
 		visit func(pos int, found bool, entries []EntryRef) bool) error
@@ -91,7 +90,7 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 ) error {
 	visited := 0
 	// Every exit, cancellation included, refreshes what was read.
-	defer func() { m.data.Promote(requestKeys[:visited]) }()
+	defer func() { m.promoteReadKeys(requestKeys[:visited]) }()
 	var buf [walkBatchMax]*PodCache
 	batch := walkBatchMin
 	for start := 0; start < len(requestKeys); {

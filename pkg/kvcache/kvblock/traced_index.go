@@ -186,3 +186,19 @@ func deviceTierCount(entries []PodEntry) int {
 	}
 	return len(deviceTiers)
 }
+
+func (t *tracedIndex) AddByEngineKeys(ctx context.Context, engineKeys []BlockHash, entries []PodEntry) (int, error) {
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "index_add", trace.WithSpanKind(trace.SpanKindInternal))
+	defer span.End()
+	count, err := AddByEngineKeys(ctx, t.next, engineKeys, entries)
+	span.SetAttributes(
+		semconv.LLMDKVCacheIndexAddEngineKeyCount(len(engineKeys)),
+		semconv.LLMDKVCacheIndexAddRequestKeyCount(count),
+		semconv.LLMDKVCacheIndexAddPodEntryCount(len(entries)),
+		semconv.LLMDKVCacheIndexAddDeviceTierCount(deviceTierCount(entries)),
+	)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return count, err
+}

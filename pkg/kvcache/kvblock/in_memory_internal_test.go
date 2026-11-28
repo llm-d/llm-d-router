@@ -31,8 +31,8 @@ import (
 
 // TestInMemoryIndexEvictKeepsEntryAddedConcurrently drives, for each public
 // eviction entrypoint, the interleaving where Add has fetched a key's PodCache
-// and the eviction empties that cache before Add writes to it. The test holds
-// m.mu as Add does, so the eviction must not remove the key until the write lands.
+// while eviction is waiting for the index lock. Eviction must leave the entry
+// written by Add reachable after the lock is released.
 func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 	const (
 		engineKey  BlockHash = 101
@@ -83,8 +83,7 @@ func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 			evicted := make(chan error, 1)
 			go func() { evicted <- tt.evict(ctx, idx) }()
 
-			require.Eventually(t, func() bool { return podCache.size() == 0 }, time.Second, time.Millisecond)
-			// Give an eviction that does not wait for m.mu the chance to remove the key.
+			// Eviction must wait for Add to finish its critical section.
 			var evictErr error
 			done := false
 			select {
@@ -98,6 +97,7 @@ func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 			if !done {
 				evictErr = <-evicted
 			}
+			require.False(t, done, "eviction completed while Add held the index lock")
 			require.NoError(t, evictErr)
 
 			got, err := idx.Lookup(ctx, []BlockHash{requestKey}, nil)
@@ -252,4 +252,27 @@ func TestInMemoryIndexConcurrentWritersMatchSequentialModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInMemoryIndexClearChunkOwnership(t *testing.T) {
+	ctx := t.Context()
+	idx, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 4096, PodCacheSize: 4})
+	require.NoError(t, err)
+	podA := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "pod-b", DeviceTier: "gpu"}
+	for key := BlockHash(1); key <= 2050; key++ {
+		require.NoError(t, idx.Add(ctx, []BlockHash{key}, []BlockHash{key}, []PodEntry{podA, podB}))
+	}
+	require.NoError(t, idx.Clear(ctx, podA.PodIdentifier))
+	for key := BlockHash(1); key <= 2050; key++ {
+		got, err := idx.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		require.Equal(t, []PodEntry{podB}, got[key])
+		require.NotContains(t, idx.owners[key], podA)
+		require.NotContains(t, idx.engineEntries[key][key], podA)
+	}
+	require.NoError(t, idx.Clear(ctx, podB.PodIdentifier))
+	require.Empty(t, idx.data.Keys())
+	require.Empty(t, idx.owners)
+	require.Empty(t, idx.engineEntries)
 }
