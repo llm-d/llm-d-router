@@ -18,15 +18,21 @@ package proxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -35,23 +41,66 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
-func writeSelfSignedCert(t *testing.T, dir string) {
+// testKeyPair is a PEM-encoded certificate and key, plus the certificate's DER.
+type testKeyPair struct {
+	certPEM, keyPEM, der []byte
+}
+
+// cachedTestKeyPair is an ECDSA P-256 key pair generated once and shared by
+// every test that only needs some certificate on disk. The serving listener's
+// self-signed fallback generates an RSA-4096 key instead, which can take over
+// a second under -race, so only TestStartHTTP_SelfSignedFallback pays for it.
+var cachedTestKeyPair = sync.OnceValues(func() (testKeyPair, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return testKeyPair{}, err
+	}
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{Organization: []string{"llm-d test"}},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return testKeyPair{}, err
+	}
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return testKeyPair{}, err
+	}
+	return testKeyPair{
+		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		keyPEM:  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}),
+		der:     der,
+	}, nil
+})
+
+func testCert(t *testing.T) testKeyPair {
 	t.Helper()
 
-	cert, err := tlsutil.CreateSelfSignedTLSCertificate(logr.Discard())
+	kp, err := cachedTestKeyPair()
 	require.NoError(t, err)
+	return kp
+}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
-	keyBytes, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
-	require.NoError(t, err)
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
+// testCertDir returns a temporary directory holding the cached key pair as
+// tls.crt and tls.key.
+func testCertDir(t *testing.T) string {
+	t.Helper()
 
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.crt"), certPEM, 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"), keyPEM, 0o600))
+	kp := testCert(t)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.crt"), kp.certPEM, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"), kp.keyPEM, 0o600))
+	return dir
 }
 
 func reserveListener(t *testing.T) net.Listener {
@@ -133,8 +182,7 @@ func TestServeMetrics_ListenError(t *testing.T) {
 }
 
 func TestServeMetrics_TLS(t *testing.T) {
-	certDir := t.TempDir()
-	writeSelfSignedCert(t, certDir)
+	certDir := testCertDir(t)
 
 	ln := reserveListener(t)
 	s := &Server{
@@ -190,19 +238,12 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			certDir := t.TempDir()
-			if tt.writeCert || tt.writeKey {
-				cert, err := tlsutil.CreateSelfSignedTLSCertificate(logr.Discard())
-				require.NoError(t, err)
-				if tt.writeCert {
-					certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
-					require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.crt"), certPEM, 0o600))
-				}
-				if tt.writeKey {
-					keyBytes, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
-					require.NoError(t, err)
-					keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
-					require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.key"), keyPEM, 0o600))
-				}
+			kp := testCert(t)
+			if tt.writeCert {
+				require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.crt"), kp.certPEM, 0o600))
+			}
+			if tt.writeKey {
+				require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.key"), kp.keyPEM, 0o600))
 			}
 
 			s := &Server{
