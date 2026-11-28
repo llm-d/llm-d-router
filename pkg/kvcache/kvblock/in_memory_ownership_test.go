@@ -174,3 +174,45 @@ func TestEngineOwnershipOversizedTierUpdate(t *testing.T) {
 	require.Zero(t, count)
 	require.LessOrEqual(t, len(idx.constituents), idx.engineToRequestKeys.Len())
 }
+
+func TestEngineOwnershipReadPromotesMapping(t *testing.T) {
+	for _, walk := range []bool{false, true} {
+		idx, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 2})
+		require.NoError(t, err)
+		ctx := t.Context()
+		pods := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}}
+		require.NoError(t, idx.Add(ctx, []BlockHash{1}, []BlockHash{11}, pods))
+		require.NoError(t, idx.Add(ctx, []BlockHash{2}, []BlockHash{12}, pods))
+		if walk {
+			require.NoError(t, idx.WalkKeys(ctx, []BlockHash{11}, func(_ int, found bool, _ []EntryRef) bool {
+				require.True(t, found)
+				return true
+			}))
+		} else {
+			hits, err := idx.Lookup(ctx, []BlockHash{11}, nil)
+			require.NoError(t, err)
+			require.Equal(t, pods, hits[11])
+		}
+		// Keep key 12 in the request LRU until mapping pressure evicts engine 2.
+		require.NoError(t, idx.Add(ctx, []BlockHash{3}, []BlockHash{11}, pods))
+		require.True(t, idx.engineToRequestKeys.Contains(1))
+		require.False(t, idx.engineToRequestKeys.Contains(2))
+	}
+}
+
+func TestEngineOwnershipTierUpdateSkipsInteriorSentinel(t *testing.T) {
+	idx, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 8})
+	require.NoError(t, err)
+	ctx := t.Context()
+	gpu := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}}
+	cpu := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "cpu"}}
+	require.NoError(t, idx.Add(ctx, []BlockHash{1, 2}, []BlockHash{11}, gpu,
+		EngineGeometry{BlockSize: 16, CanonicalBlockSize: 32}))
+	_, err = idx.GetRequestKey(ctx, 1)
+	require.Error(t, err)
+	count, err := idx.AddByEngineKeys(ctx, []BlockHash{1}, cpu)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.NotContains(t, idx.data.Keys(), EmptyBlockHash)
+	require.NotContains(t, idx.owners, EmptyBlockHash)
+}

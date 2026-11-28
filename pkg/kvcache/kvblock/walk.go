@@ -90,7 +90,7 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 ) error {
 	visited := 0
 	// Every exit, cancellation included, refreshes what was read.
-	defer func() { m.data.Promote(requestKeys[:visited]) }()
+	defer func() { m.promoteReadKeys(requestKeys[:visited]) }()
 	var buf [walkBatchMax]*PodCache
 	batch := walkBatchMin
 	for start := 0; start < len(requestKeys); {

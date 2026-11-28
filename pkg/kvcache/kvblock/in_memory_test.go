@@ -546,6 +546,9 @@ func TestInMemoryIndexMappingCapacityInvalidatesResidency(t *testing.T) {
 					require.NoError(t, lookupErr)
 					require.Len(t, hits[hotKey], len(entries))
 				}
+				// Make the other engine mapping newer without touching request-key recency.
+				_, err = index.GetRequestKey(ctx, 104)
+				require.NoError(t, err)
 				require.NoError(t, index.Add(ctx, []BlockHash{105}, []BlockHash{204}, entries))
 			}
 			// A missing engine mapping cannot support residency that later removes must resolve.

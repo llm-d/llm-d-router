@@ -362,7 +362,7 @@ func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	highestHitIdx := 0
 	visited := 0
 	// Every exit, cancellation included, refreshes what was read.
-	defer func() { m.data.Promote(requestKeys[:visited]) }()
+	defer func() { m.promoteReadKeys(requestKeys[:visited]) }()
 
 	for idx, requestKey := range requestKeys {
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
@@ -403,10 +403,32 @@ func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	return podsPerKey, nil
 }
 
+// A read refreshes the mappings needed to keep its resident entries evictable.
+func (m *InMemoryIndex) promoteReadKeys(keys []BlockHash) {
+	if len(keys) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data.Promote(keys)
+	for _, key := range keys {
+		for _, engines := range m.owners[key] {
+			for engine := range engines {
+				m.engineToRequestKeys.Get(engine)
+				for peer := range m.constituents[engine] {
+					if peer != engine {
+						m.engineToRequestKeys.Get(peer)
+					}
+				}
+			}
+		}
+	}
+}
+
 // Add adds a set of engineKeys/requestKeys and their associated pod entries to the index backend.
 // If engineKeys is nil, only requestKey -> PodEntry mappings are created (no engineKey -> requestKey mapping).
 // This is used for speculative entries where engine keys are not yet known.
-// When engineKeys is non-nil, the mapping type is inferred from the ratio of array lengths.
+// Geometry identifies canonical boundaries for sub-canonical engine blocks.
 func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry, geometry ...EngineGeometry) error {
 	if len(requestKeys) == 0 || len(entries) == 0 {
 		return fmt.Errorf("no keys or entries provided for adding to index")
@@ -456,6 +478,9 @@ func (m *InMemoryIndex) AddByEngineKeys(ctx context.Context, engineKeys []BlockH
 			continue
 		}
 		for _, requestKey := range mappedKeys {
+			if requestKey == EmptyBlockHash {
+				continue
+			}
 			if pending[requestKey] == nil {
 				pending[requestKey] = sets.New[BlockHash]()
 			}
@@ -494,6 +519,9 @@ func (m *InMemoryIndex) addLocked(ctx context.Context, engineKeys, requestKeys [
 			}
 			evicted = m.engineToRequestKeys.Add(ek, rks) || evicted
 			for _, rk := range rks {
+				if rk == EmptyBlockHash {
+					continue
+				}
 				if pending[rk] == nil {
 					pending[rk] = sets.New[BlockHash]()
 				}
@@ -569,7 +597,9 @@ func (m *InMemoryIndex) addLocked(ctx context.Context, engineKeys, requestKeys [
 				m.addOwners(engine, requestKey, records)
 			}
 		}
-		m.pruneOwners(requestKey, podCache)
+		if truncated > 0 {
+			m.pruneOwners(requestKey, podCache)
+		}
 
 		if traceLogger.Enabled() {
 			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", records)
@@ -695,7 +725,7 @@ func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash, cause promethe
 // Clear removes every entry for the pod from the index, across all device tiers.
 // O(N) over the index for a pod it has held, and O(1) for a pod it never held.
 // Clear serializes ownership cleanup with Add and Evict in chunks of keys.
-// Lookup does not acquire the ownership lock.
+// Reads acquire the ownership lock only when promoting recency.
 //
 // Context cancellation does not interrupt Clear.
 //
