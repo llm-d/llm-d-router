@@ -46,7 +46,8 @@ type EventSource struct {
 // ProcessEvents resets that source.
 type EventConsumer interface {
 	// ProcessEvents delivers one decoded batch, including wire
-	// AllBlocksCleared events.
+	// AllBlocksCleared and vLLM recovery-unit events. SkippedTags identifies
+	// events the adapter consumed without delivering.
 	ProcessEvents(ctx context.Context, source EventSource, batch EventBatch) error
 	// Reset invalidates observations from the endpoint's stream. The pool
 	// calls it on a publisher restart, a failed replay, before a rebuild
