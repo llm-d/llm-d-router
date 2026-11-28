@@ -25,6 +25,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -42,12 +43,116 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-func vllmMethodPath(stream bool) string {
-	if stream {
-		return vllmpb.Inference_GenerateStream_FullMethodName
+// mergeVLLMStreamBody drains a GenerateStream response and replaces its body
+// with the single frame a unary Generate would return, so the unary relay and
+// HTTP paths read it unchanged. A non-OK final grpc-status drops the frame,
+// as a failed unary call carries none. A read error, an unparsable frame or an
+// OK stream with no frame is returned by the replacement body's Read.
+func mergeVLLMStreamBody(resp *http.Response) {
+	var body io.Reader
+	frame, err := readMergedVLLMStream(resp.Body)
+	switch {
+	case err != nil:
+		// An oversize merge maps like a single oversize unary frame.
+		body = errReader{err}
+	case finalGRPCStatusIsError(resp):
+		body = bytes.NewReader(nil)
+	case frame == nil:
+		body = errReader{errors.New("upstream GenerateStream returned no message")}
+	default:
+		body = bytes.NewReader(frame)
 	}
-	return vllmpb.Inference_Generate_FullMethodName
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{body, resp.Body}
 }
+
+func finalGRPCStatusIsError(resp *http.Response) bool {
+	st, ok := finalGRPCStatus(resp)
+	return ok && st.status != grpcframe.StatusOK
+}
+
+// readMergedVLLMStream returns one framed GenerateResponse merged from every
+// stream frame, or nil when the stream carried none. prompt_info comes from
+// the first frame that has it; finish_info and sampling_mask from the last
+// output that has them; the per-token fields and unknown fields are
+// concatenated and num_tokens summed.
+func readMergedVLLMStream(r io.Reader) ([]byte, error) {
+	frames := grpcframe.NewReader(r, maxGRPCFrameBytes)
+	defer frames.Release()
+
+	var (
+		merged   vllmpb.GenerateResponse
+		out      vllmpb.SequenceOutput
+		text     strings.Builder
+		msg      vllmpb.GenerateResponse
+		nFrames  int
+		hasOut   bool
+		payloads int
+	)
+	for {
+		frame, err := frames.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		payloads += len(frame) - grpcframe.HeaderLen
+		if payloads > maxGRPCFrameBytes {
+			return nil, fmt.Errorf("%w: merged GenerateStream response exceeds %d bytes", grpcframe.ErrTooLarge, maxGRPCFrameBytes)
+		}
+		msg.Reset()
+		if err := proto.Unmarshal(frame[grpcframe.HeaderLen:], &msg); err != nil {
+			return nil, fmt.Errorf("invalid GenerateResponse: %w", err)
+		}
+		nFrames++
+		if merged.PromptInfo == nil {
+			merged.PromptInfo = msg.PromptInfo
+		}
+		appendUnknown(&merged, &msg)
+		seq := msg.GetOutputs()
+		if seq == nil {
+			continue
+		}
+		hasOut = true
+		appendUnknown(&out, seq)
+		out.Index = seq.GetIndex()
+		text.WriteString(seq.GetText())
+		out.NumTokens += seq.GetNumTokens()
+		out.TokenIds = append(out.TokenIds, seq.GetTokenIds()...)
+		out.Logprobs = append(out.Logprobs, seq.GetLogprobs()...)
+		out.Ranks = append(out.Ranks, seq.GetRanks()...)
+		out.CandidateTokens = append(out.CandidateTokens, seq.GetCandidateTokens()...)
+		if fi := seq.GetFinishInfo(); fi != nil {
+			out.FinishInfo = fi
+		}
+		if sm := seq.GetSamplingMask(); sm != nil {
+			out.SamplingMask = sm
+		}
+	}
+	if nFrames == 0 {
+		return nil, nil
+	}
+	if hasOut {
+		out.Text = text.String()
+		merged.Outputs = &out
+	}
+	return grpcframe.MarshalProto(&merged)
+}
+
+// appendUnknown keeps fields from a newer worker proto that dst cannot name.
+func appendUnknown(dst, src proto.Message) {
+	if u := src.ProtoReflect().GetUnknown(); len(u) > 0 {
+		d := dst.ProtoReflect()
+		d.SetUnknown(append(d.GetUnknown(), u...))
+	}
+}
+
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
 
 // vllmUnaryResult holds the scanned fields and decoded transfer-parameter maps
 // from a unary /vllm.Inference/Generate worker response.
@@ -71,7 +176,7 @@ func (s *ConditionalDecodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pip
 
 	headers := gatewayHeaders(reqCtx, gateway.PhaseDecode)
 	headers["Prefer"] = "if-available"
-	path := vllmMethodPath(reqCtx.Stream)
+	path := vllmpb.Inference_GenerateStream_FullMethodName
 	logger.V(logutil.DEFAULT).Info("sending gRPC request", "path", path, "stream", reqCtx.Stream)
 
 	resp, err := streamGRPCToGateway(ctx, s.gwClient, coordmetrics.UpstreamConditionalDecode, path, headers, segs...)
@@ -102,6 +207,9 @@ func (s *ConditionalDecodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pip
 		}
 		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultError)
 		return upstreamGRPCError(ConditionalDecodeStepName, reqCtx, st)
+	}
+	if !reqCtx.Stream {
+		mergeVLLMStreamBody(resp)
 	}
 
 	outcome, err := forwardVLLMDecodeResponse(ctx, logger, ConditionalDecodeStepName, reqCtx, vllmReq, resp, true, s.promptTokenParity)
@@ -279,7 +387,9 @@ func (s *DecodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Reque
 	}
 
 	headers := decodeLegHeaders(reqCtx)
-	path := vllmMethodPath(reqCtx.Stream)
+	// Unary clients are streamed too: EPP reads the end of prefill from the
+	// first stream chunk (#3519).
+	path := vllmpb.Inference_GenerateStream_FullMethodName
 	logger.V(logutil.DEFAULT).Info("sending gRPC request", "path", path, "stream", reqCtx.Stream)
 
 	resp, err := streamGRPCToGateway(ctx, s.gwClient, coordmetrics.UpstreamDecode, path, headers, segs...)
@@ -290,6 +400,9 @@ func (s *DecodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Reque
 
 	if err := checkGRPCDecodeHeaders(reqCtx, resp); err != nil {
 		return err
+	}
+	if !reqCtx.Stream {
+		mergeVLLMStreamBody(resp)
 	}
 
 	_, err = forwardVLLMDecodeResponse(ctx, logger, DecodeStepName, reqCtx, vllmReq, resp, false, s.promptTokenParity)

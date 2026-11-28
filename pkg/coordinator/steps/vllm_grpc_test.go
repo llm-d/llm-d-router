@@ -19,16 +19,24 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
@@ -614,4 +622,385 @@ func TestBuildHTTPGenerateResponse_OutputMode(t *testing.T) {
 	txtVal, hasTxtText := txtMap["choices"].([]any)[0].(map[string]any)["text"]
 	require.True(t, hasTxtText)
 	require.Equal(t, "", txtVal)
+}
+
+func TestUnaryTokenClientGetsMergedStreamedResponse(t *testing.T) {
+	cand := func(id uint32) *vllmpb.CandidateTokenInfo {
+		return &vllmpb.CandidateTokenInfo{Tokens: []*vllmpb.CandidateTokenInfo_TokenInfo{{Id: id, Logprob: -1, Rank: 1}}}
+	}
+	finish := &vllmpb.FinishInfo{
+		FinishReason:    vllmpb.FinishInfo_STOP,
+		NumOutputTokens: 4,
+		NumCachedTokens: proto.Uint32(0),
+	}
+	// vLLM GenerateStream sends prompt_info on the first frame and
+	// finish_info / sampling_mask on the last.
+	threeFrames := []*vllmpb.GenerateResponse{
+		{
+			PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 5},
+			Outputs: &vllmpb.SequenceOutput{
+				Text: "Hello", NumTokens: 2, TokenIds: []uint32{11, 12},
+				Logprobs: []float32{-0.1, -0.2}, Ranks: []uint32{1, 2},
+				CandidateTokens: []*vllmpb.CandidateTokenInfo{cand(11), cand(12)},
+			},
+		},
+		{
+			Outputs: &vllmpb.SequenceOutput{
+				Text: " ", NumTokens: 1, TokenIds: []uint32{13},
+				Logprobs: []float32{-0.3}, Ranks: []uint32{3},
+				CandidateTokens: []*vllmpb.CandidateTokenInfo{cand(13)},
+			},
+		},
+		{
+			Outputs: &vllmpb.SequenceOutput{
+				Text: "world", NumTokens: 1, TokenIds: []uint32{14},
+				Logprobs: []float32{-0.4}, Ranks: []uint32{4},
+				CandidateTokens: []*vllmpb.CandidateTokenInfo{cand(14)},
+				FinishInfo:      finish,
+				SamplingMask:    []*vllmpb.TokenIds{{Ids: []uint32{14, 15}}},
+			},
+		},
+	}
+	mergedThree := &vllmpb.GenerateResponse{
+		PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 5},
+		Outputs: &vllmpb.SequenceOutput{
+			Text: "Hello world", NumTokens: 4, TokenIds: []uint32{11, 12, 13, 14},
+			Logprobs: []float32{-0.1, -0.2, -0.3, -0.4}, Ranks: []uint32{1, 2, 3, 4},
+			CandidateTokens: []*vllmpb.CandidateTokenInfo{cand(11), cand(12), cand(13), cand(14)},
+			FinishInfo:      finish,
+			SamplingMask:    []*vllmpb.TokenIds{{Ids: []uint32{14, 15}}},
+		},
+	}
+	// finish_info and sampling_mask arrive on a middle frame; the last frame
+	// carries neither.
+	finishMidFrames := []*vllmpb.GenerateResponse{
+		threeFrames[0],
+		threeFrames[2],
+		{Outputs: &vllmpb.SequenceOutput{Text: "!", NumTokens: 1, TokenIds: []uint32{15}}},
+	}
+	mergedFinishMid := &vllmpb.GenerateResponse{
+		PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 5},
+		Outputs: &vllmpb.SequenceOutput{
+			Text: "Helloworld!", NumTokens: 4, TokenIds: []uint32{11, 12, 14, 15},
+			Logprobs: []float32{-0.1, -0.2, -0.4}, Ranks: []uint32{1, 2, 4},
+			CandidateTokens: []*vllmpb.CandidateTokenInfo{cand(11), cand(12), cand(14)},
+			FinishInfo:      finish,
+			SamplingMask:    []*vllmpb.TokenIds{{Ids: []uint32{14, 15}}},
+		},
+	}
+	// withUnknown returns a copy of m carrying raw unknown-field bytes, as a
+	// newer worker proto would send.
+	withUnknown := func(m proto.Message, raw []byte) proto.Message {
+		m = proto.Clone(m)
+		m.ProtoReflect().SetUnknown(raw)
+		return m
+	}
+	unknownTop := protowire.AppendVarint(protowire.AppendTag(nil, 9001, protowire.VarintType), 7)
+	unknownOut := protowire.AppendBytes(protowire.AppendTag(nil, 9002, protowire.BytesType), []byte("x"))
+	unknownFrames := []*vllmpb.GenerateResponse{
+		withUnknown(threeFrames[0], unknownTop).(*vllmpb.GenerateResponse),
+		threeFrames[1],
+		{Outputs: withUnknown(threeFrames[2].GetOutputs(), unknownOut).(*vllmpb.SequenceOutput)},
+	}
+	mergedUnknown := withUnknown(mergedThree, unknownTop).(*vllmpb.GenerateResponse)
+	mergedUnknown.Outputs = withUnknown(mergedThree.GetOutputs(), unknownOut).(*vllmpb.SequenceOutput)
+	// A truncated tag makes the frame fail to parse.
+	badFrame := withUnknown(grpctest.DefaultVLLMResponse(), []byte{0xff, 0xff}).(*vllmpb.GenerateResponse)
+	// Two frames under the per-frame limit whose sum exceeds the merge limit.
+	bigText := strings.Repeat("a", maxGRPCFrameBytes/2+1)
+	bigFrames := []*vllmpb.GenerateResponse{
+		{Outputs: &vllmpb.SequenceOutput{Text: bigText, NumTokens: 1, TokenIds: []uint32{11}}},
+		{Outputs: &vllmpb.SequenceOutput{Text: bigText, NumTokens: 1, TokenIds: []uint32{12}}},
+	}
+	// abortAfterOneFrame resets the stream after one frame, before trailers.
+	abortAfterOneFrame := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+		w.WriteHeader(http.StatusOK)
+		b, err := grpcframe.MarshalProto(threeFrames[0])
+		if err != nil {
+			panic(err)
+		}
+		_, _ = w.Write(b)
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
+	oneFrame := []*vllmpb.GenerateResponse{grpctest.DefaultVLLMResponse()}
+	prefillFrame := []*vllmpb.GenerateResponse{{
+		PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 5},
+		Outputs:    &vllmpb.SequenceOutput{FinishInfo: &vllmpb.FinishInfo{FinishReason: vllmpb.FinishInfo_LENGTH, NumOutputTokens: 1}},
+	}}
+	ecOut, err := structpb.NewStruct(map[string]any{"img-1": map[string]any{"remote_host": "10.0.0.1"}})
+	require.NoError(t, err)
+	encodeFrame := []*vllmpb.GenerateResponse{{
+		Outputs: &vllmpb.SequenceOutput{FinishInfo: &vllmpb.FinishInfo{FinishReason: vllmpb.FinishInfo_LENGTH, NumOutputTokens: 1, EcTransferParams: ecOut}},
+	}}
+
+	textReq := &vllmpb.GenerateRequest{Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2, 3, 4, 5}}}}
+	mediaReq := &vllmpb.GenerateRequest{
+		Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 32000, 2}}},
+		Media: []*vllmpb.MediaItem{{
+			Modality: vllmpb.Modality_MODALITY_IMAGE,
+			Uuid:     "img-1",
+			Source:   &vllmpb.MediaItem_DataUri{DataUri: "data:image/png;base64,AAAA"},
+		}},
+	}
+
+	type httpWant struct {
+		text             string
+		tokenIDs         []uint32
+		finishReason     string
+		promptTokens     int
+		completionTokens int
+	}
+
+	tests := []struct {
+		name    string
+		step    string // encode, prefill, conditional-decode, decode
+		stream  bool
+		http    bool
+		req     *vllmpb.GenerateRequest
+		frames  []*vllmpb.GenerateResponse
+		respErr error // gRPC status the worker ends the stream with
+		// handler replaces the scripted worker; the call is not recorded.
+		handler http.HandlerFunc
+
+		wantPath string
+		wantErr  bool
+		// wantCode is the grpc-status a unary gRPC client sees on error.
+		wantCode codes.Code
+		// wantStatus is the upstream HTTP status an HTTP client's error
+		// carries; 0 is a 502 transport-class failure.
+		wantStatus int
+		wantErrIs  error
+		// wantDeferred means conditional-decode leaves the request to the
+		// rest of the pipeline.
+		wantDeferred bool
+		// wantClient is the gRPC frames the client receives; nil means none.
+		wantClient []*vllmpb.GenerateResponse
+		wantHTTP   *httpWant
+	}{
+		{
+			name: "decode unary client with one worker frame gets that frame", step: "decode",
+			req: textReq, frames: oneFrame,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantClient: oneFrame,
+		},
+		{
+			name: "decode unary client with three worker frames gets one merged frame", step: "decode",
+			req: textReq, frames: threeFrames,
+			wantPath:   vllmpb.Inference_GenerateStream_FullMethodName,
+			wantClient: []*vllmpb.GenerateResponse{mergedThree},
+		},
+		{
+			name: "conditional-decode unary client with one worker frame gets that frame", step: "conditional-decode",
+			req: textReq, frames: oneFrame,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantClient: oneFrame,
+		},
+		{
+			name: "conditional-decode unary client with three worker frames gets one merged frame", step: "conditional-decode",
+			req: textReq, frames: threeFrames,
+			wantPath:   vllmpb.Inference_GenerateStream_FullMethodName,
+			wantClient: []*vllmpb.GenerateResponse{mergedThree},
+		},
+		{
+			name: "decode streaming client gets worker frames unchanged", step: "decode", stream: true,
+			req: textReq, frames: threeFrames,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantClient: threeFrames,
+		},
+		{
+			name: "decode HTTP generate stream false builds one JSON body from all frames", step: "decode", http: true,
+			req: textReq, frames: threeFrames,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName,
+			wantHTTP: &httpWant{
+				text: "Hello world", tokenIDs: []uint32{11, 12, 13, 14},
+				finishReason: "stop", promptTokens: 5, completionTokens: 4,
+			},
+		},
+		{
+			name: "decode unary client gets the worker error and no frame when the stream fails after frames", step: "decode",
+			req: textReq, frames: threeFrames[:2], respErr: status.Error(codes.Internal, "engine died"),
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true, wantCode: codes.Internal,
+		},
+		{
+			name: "decode HTTP generate stream false writes nothing when the stream fails after frames", step: "decode", http: true,
+			req: textReq, frames: threeFrames[:2], respErr: status.Error(codes.Internal, "engine died"),
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true, wantStatus: http.StatusBadGateway,
+		},
+		{
+			name: "decode unary client fails with no worker frame and OK status", step: "decode",
+			req:      textReq,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true, wantCode: codes.Unavailable,
+		},
+		{
+			name: "decode HTTP generate stream false fails with no worker frame and OK status", step: "decode", http: true,
+			req:      textReq,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true,
+		},
+		{
+			name: "decode unary client keeps unknown fields from worker frames", step: "decode",
+			req: textReq, frames: unknownFrames,
+			wantPath:   vllmpb.Inference_GenerateStream_FullMethodName,
+			wantClient: []*vllmpb.GenerateResponse{mergedUnknown},
+		},
+		{
+			name: "decode unary client keeps finish_info and sampling_mask sent before the last frame", step: "decode",
+			req: textReq, frames: finishMidFrames,
+			wantPath:   vllmpb.Inference_GenerateStream_FullMethodName,
+			wantClient: []*vllmpb.GenerateResponse{mergedFinishMid},
+		},
+		{
+			name: "decode unary client fails when a worker frame does not parse", step: "decode",
+			req: textReq, frames: []*vllmpb.GenerateResponse{threeFrames[0], badFrame},
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true, wantCode: codes.Unavailable,
+		},
+		{
+			name: "decode HTTP generate stream false fails when a worker frame does not parse", step: "decode", http: true,
+			req: textReq, frames: []*vllmpb.GenerateResponse{threeFrames[0], badFrame},
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true,
+		},
+		{
+			name: "decode unary client fails when worker frames together exceed the message limit", step: "decode",
+			req: textReq, frames: bigFrames,
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantErr: true, wantCode: codes.Unavailable,
+			wantErrIs: grpcframe.ErrTooLarge,
+		},
+		{
+			name: "decode unary client fails when the worker stream resets after a frame", step: "decode",
+			req: textReq, handler: abortAfterOneFrame,
+			wantErr: true, wantCode: codes.Unavailable,
+		},
+		{
+			name: "decode HTTP generate stream false fails when the worker stream resets after a frame", step: "decode", http: true,
+			req: textReq, handler: abortAfterOneFrame,
+			wantErr: true,
+		},
+		{
+			name: "conditional-decode unary client defers on cache miss", step: "conditional-decode",
+			req: textReq, respErr: status.Error(codes.FailedPrecondition, "kv cache miss"),
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantDeferred: true,
+		},
+		{
+			name: "conditional-decode unary client defers on cache miss after frames", step: "conditional-decode",
+			req: textReq, frames: oneFrame, respErr: status.Error(codes.FailedPrecondition, "kv cache miss"),
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantDeferred: true,
+		},
+		{
+			name: "conditional-decode HTTP generate stream false defers on cache miss after frames", step: "conditional-decode", http: true,
+			req: textReq, frames: oneFrame, respErr: status.Error(codes.FailedPrecondition, "kv cache miss"),
+			wantPath: vllmpb.Inference_GenerateStream_FullMethodName, wantDeferred: true,
+		},
+		{
+			name: "prefill stays unary", step: "prefill",
+			req: textReq, frames: prefillFrame,
+			wantPath: vllmpb.Inference_Generate_FullMethodName,
+		},
+		{
+			name: "encode stays unary", step: "encode",
+			req: mediaReq, frames: encodeFrame,
+			wantPath: vllmpb.Inference_Generate_FullMethodName,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			up := grpctest.NewVLLMUpstream(t, grpctest.VLLMUpstreamOptions{
+				Respond: func(grpctest.VLLMCall) ([]*vllmpb.GenerateResponse, error) { return tc.frames, tc.respErr },
+			})
+			upURL := up.URL()
+			if tc.handler != nil {
+				upURL = grpctest.NewH2CServer(t, tc.handler).URL
+			}
+			gwClient := gateway.New(config.GatewayConfig{Address: upURL})
+
+			rec := httptest.NewRecorder()
+			vllmReq := &pipeline.VLLMGRPCRequest{Req: scanTestVLLMRequest(t, tc.req)}
+			if tc.http {
+				vllmReq.HTTP = &pipeline.HTTPGenerateReply{OutputMode: pipeline.GenerateOutputModeText}
+			}
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-merge",
+				Model:            "llama",
+				Stream:           tc.stream,
+				KVTransferParams: map[string]any{},
+				ResponseWriter:   rec,
+				GRPC:             vllmReq,
+			}
+
+			switch tc.step {
+			case "decode":
+				s, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.SharedStorage})
+				require.NoError(t, err)
+				if execErr := s.Execute(ctx, reqCtx); tc.wantErr {
+					require.Error(t, execErr)
+					if tc.wantErrIs != nil {
+						require.ErrorIs(t, execErr, tc.wantErrIs)
+					}
+					if tc.http {
+						upstreamErr, ok := errors.AsType[*pipeline.UpstreamError](execErr)
+						require.True(t, ok, "HTTP client error must be an upstream error: %v", execErr)
+						require.Equal(t, tc.wantStatus, upstreamErr.StatusCode)
+					} else {
+						require.Equal(t, strconv.Itoa(int(tc.wantCode)), rec.Header().Get(grpcframe.HeaderStatus), "client grpc-status")
+					}
+				} else {
+					require.NoError(t, execErr)
+				}
+			case "conditional-decode":
+				s, err := NewConditionalDecodeStep(gwClient, nil)
+				require.NoError(t, err)
+				if execErr := s.Execute(ctx, reqCtx); tc.wantDeferred {
+					require.NoError(t, execErr)
+				} else {
+					require.ErrorIs(t, execErr, pipeline.ErrPipelineDone)
+				}
+			case "prefill":
+				s, err := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.SharedStorage})
+				require.NoError(t, err)
+				require.NoError(t, s.Execute(ctx, reqCtx))
+			case "encode":
+				s, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+				require.NoError(t, err)
+				require.NoError(t, s.Execute(ctx, reqCtx))
+			default:
+				t.Fatalf("unknown step %q", tc.step)
+			}
+
+			if tc.handler == nil {
+				calls := up.Calls()
+				require.Len(t, calls, 1)
+				require.Equal(t, tc.wantPath, calls[0].Path, "worker RPC method")
+			}
+
+			switch {
+			case tc.wantHTTP != nil:
+				var got httpGenerateUnaryResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+				choice := got.Choices[0]
+				require.NotNil(t, choice.Text)
+				require.Equal(t, tc.wantHTTP.text, *choice.Text)
+				require.Equal(t, tc.wantHTTP.tokenIDs, choice.TokenIDs)
+				require.NotNil(t, choice.FinishReason)
+				require.Equal(t, tc.wantHTTP.finishReason, *choice.FinishReason)
+				require.NotNil(t, choice.Logprobs)
+				require.Len(t, choice.Logprobs.Content, len(tc.wantHTTP.tokenIDs))
+				require.Equal(t, tc.wantHTTP.promptTokens, got.Usage.PromptTokens)
+				require.Equal(t, tc.wantHTTP.completionTokens, got.Usage.CompletionTokens)
+			case tc.wantClient != nil:
+				raw := grpctest.ReadFrames(t, rec.Body)
+				got := make([]*vllmpb.GenerateResponse, len(raw))
+				for i, f := range raw {
+					got[i] = &vllmpb.GenerateResponse{}
+					grpctest.Unmarshal(t, f, got[i])
+				}
+				require.Empty(t, cmp.Diff(tc.wantClient, got, protocmp.Transform()), "client frames (-want +got)")
+			case tc.http || tc.wantDeferred:
+				require.Zero(t, rec.Body.Len(), "step must not write to the client")
+			default:
+				require.Empty(t, grpctest.ReadFrames(t, rec.Body), "client must get no message")
+			}
+		})
+	}
 }
