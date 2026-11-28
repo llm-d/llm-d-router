@@ -24,6 +24,7 @@ import (
 	"errors"
 	"image"
 	"io"
+	"math"
 	"strings"
 
 	// Registers decoders so image.DecodeConfig can read dimensions.
@@ -151,10 +152,44 @@ func (e imageEstimator) countFromDims(decW, decH int, decoded bool) int {
 	if factor <= 0 {
 		factor = imageTokenFactor
 	}
-	if n := (w * h) / factor; n > 0 {
+	if n := scaledPixels(w, h, factor); n > 0 {
 		return n
 	}
 	return 1
+}
+
+// saturatingIntFromFloat converts v to a non-negative int, saturating at math.MaxInt.
+func saturatingIntFromFloat(v float64) int {
+	if math.IsNaN(v) || v <= 0 {
+		return 0
+	}
+	// float64(math.MaxInt) rounds up to 2^63 on 64-bit platforms, which overflows int.
+	if math.IsInf(v, 1) || v >= float64(math.MaxInt) {
+		return math.MaxInt
+	}
+	return int(v)
+}
+
+// saturatingMul multiplies positive ints, saturating at math.MaxInt on overflow.
+func saturatingMul(a, b int) int {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	if a > math.MaxInt/b {
+		return math.MaxInt
+	}
+	return a * b
+}
+
+// scaledPixels divides w*h by factor without signed integer multiplication overflow.
+func scaledPixels(w, h, factor int) int {
+	if w <= 0 || h <= 0 || factor <= 0 {
+		return 0
+	}
+	if w <= math.MaxInt/h {
+		return (w * h) / factor
+	}
+	return saturatingIntFromFloat(float64(w) * float64(h) / float64(factor))
 }
 
 // imageDimensionsFromBase64 decodes a data:image/...;base64 URL and returns its
@@ -291,7 +326,7 @@ func newVideoEstimator(cfg *estimateConfig) videoEstimator {
 // placeholderCount estimates placeholder tokens for a video from its request
 // metadata. Always >= 1 so every video carries weight.
 func (e videoEstimator) placeholderCount(meta videoMetadata) int {
-	tokens := e.frameCount(meta) * e.tokensPerFrame(meta)
+	tokens := saturatingMul(e.frameCount(meta), e.tokensPerFrame(meta))
 	if e.maxVideoTokens > 0 && tokens > e.maxVideoTokens {
 		tokens = e.maxVideoTokens
 	}
@@ -310,25 +345,25 @@ func (e videoEstimator) placeholderCount(meta videoMetadata) int {
 // property, so it is never overridden.
 func (e videoEstimator) frameCount(meta videoMetadata) int {
 	duration := meta.duration
-	if duration <= 0 {
+	if !isFinitePositive(duration) {
 		duration = e.defDuration
 	}
-	if duration <= 0 {
+	if !isFinitePositive(duration) {
 		duration = defaultVideoDuration
 	}
 	if e.framesMode == videoFramesModeStrided {
 		fps := meta.fps
-		if fps <= 0 {
+		if !isFinitePositive(fps) {
 			fps = e.sourceFPS
 		}
-		if fps <= 0 {
+		if !isFinitePositive(fps) {
 			fps = defaultVideoSourceFPS
 		}
 		stride := e.frameStride
 		if stride < 1 {
 			stride = 1
 		}
-		n := int(duration*fps) / stride
+		n := saturatingIntFromFloat(duration*fps) / stride
 		if e.minFrames > 0 && n < e.minFrames {
 			n = e.minFrames
 		}
@@ -338,10 +373,10 @@ func (e videoEstimator) frameCount(meta videoMetadata) int {
 		return n
 	}
 	fps := e.sampleFPS
-	if fps <= 0 {
+	if !isFinitePositive(fps) {
 		fps = defaultVideoSampleFPS
 	}
-	n := int(duration * fps)
+	n := saturatingIntFromFloat(duration * fps)
 	if e.minFrames > 0 && n < e.minFrames {
 		n = e.minFrames
 	}
@@ -378,7 +413,7 @@ func (e videoEstimator) tokensPerFrame(meta videoMetadata) int {
 	if factor <= 0 {
 		factor = videoTokenFactor
 	}
-	if n := (w * h) / factor; n > 0 {
+	if n := scaledPixels(w, h, factor); n > 0 {
 		return n
 	}
 	return 1
@@ -461,11 +496,15 @@ func (e audioEstimator) tokensForDuration(seconds float64) int {
 
 	// The cap applies to the tower's tokens only. Models add their begin/end
 	// markers outside their own limit, so the overhead goes on after it.
-	tokens := int(tokensPerSec * seconds)
+	tokens := saturatingIntFromFloat(tokensPerSec * seconds)
 	if e.maxTokens > 0 {
 		tokens = min(tokens, e.maxTokens)
 	}
-	tokens += overhead
+	if tokens > math.MaxInt-overhead {
+		tokens = math.MaxInt
+	} else {
+		tokens += overhead
+	}
 	if tokens < 1 {
 		tokens = 1
 	}
@@ -479,7 +518,7 @@ func (e audioEstimator) tokensForDuration(seconds float64) int {
 // It is the base64 twin of durationSecondsUploaded: it decodes the payload's
 // bounded head and full decoded length and shares the one resolution order.
 func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64 {
-	if meta.duration > 0 {
+	if isFinitePositive(meta.duration) {
 		return meta.duration
 	}
 	head, size := decodeAudioHead(data)
@@ -511,7 +550,7 @@ func decodeAudioHead(data string) ([]byte, int64) {
 // payload, which is exact for PCM WAV and size/bytesPerSecond for everything
 // else, then configuration, then the built-in default.
 func (e audioEstimator) durationSecondsUploaded(head []byte, size int64, meta audioMetadata) float64 {
-	if meta.duration > 0 {
+	if isFinitePositive(meta.duration) {
 		return meta.duration
 	}
 	if size > 0 {
