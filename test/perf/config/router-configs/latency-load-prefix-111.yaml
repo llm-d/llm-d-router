@@ -1,0 +1,24 @@
+# Load and prefix baseline for predicted-latency acceptance.
+router:
+  modelServers:
+    protocol: http
+  epp:
+    pluginsConfigFile: latency-load-prefix-111.yaml
+    pluginsCustomConfig:
+      latency-load-prefix-111.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: approx-prefix-cache-producer
+        - type: prefix-cache-scorer
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+            weight: 1
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 1
+          - pluginRef: prefix-cache-scorer
+            weight: 1
