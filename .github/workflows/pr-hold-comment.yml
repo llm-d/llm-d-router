@@ -47,6 +47,7 @@ jobs:
           echo "cmd=$cmd" >> "$GITHUB_OUTPUT"
 
       - name: Check commenter is PR author or has write access
+        id: check-access
         if: steps.cmd.outputs.cmd != ''
         env:
           COMMENTER: ${{ github.event.comment.user.login || github.event.review.user.login }}
@@ -87,7 +88,7 @@ jobs:
         run: gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label hold || true
 
       - name: React to comment
-        if: steps.check-access.outputs.skip != 'true' && github.event.comment.id
+        if: steps.cmd.outputs.cmd != '' && steps.check-access.outputs.skip != 'true' && github.event.comment.id
         run: |
           gh api "repos/$REPO/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content='+1' --silent
