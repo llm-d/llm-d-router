@@ -698,6 +698,26 @@ func TestPredictedLatency_ResponseBody_TTFTSLOViolationCountsTimeSinceReceived(t
 	}
 }
 
+func TestPredictedLatency_ResponseBody_TPOTSLOViolationWithoutTTFTSLO(t *testing.T) {
+	router := createTestRouter()
+	router.latencypredictor = new(mockPredictor)
+	endpoint := createTestEndpoint("test-pod", 1, 1, 1)
+	request := createTestInferenceRequest("test", 0, 50)
+
+	predictedLatencyCtx := newPredictedLatencyContext(request)
+	predictedLatencyCtx.ttft = 700
+	predictedLatencyCtx.avgTPOT = 60
+	predictedLatencyCtx.avgTPOTSLO = 50
+	predictedLatencyCtx.incomingModelName = testModelName
+	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
+
+	violations := llmdSloViolationCounter.WithLabelValues("", "", testModelName, "", typeTPOT)
+	before := testutil.ToFloat64(violations)
+	router.ResponseBody(context.Background(), request, &fwkrh.Response{EndOfStream: true}, endpoint.GetMetadata())
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(violations)-before)
+}
+
 func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NoSLOs(t *testing.T) {
 	router := createTestRouter()
 	mockPredictor := new(mockPredictor)
@@ -1178,52 +1198,6 @@ func TestPredictedLatency_MultipleRequests_DifferentPods(t *testing.T) {
 	queue1 := value1.(*requestPriorityQueue)
 	queue2 := value2.(*requestPriorityQueue)
 	assert.NotEqual(t, queue1, queue2)
-}
-
-func TestPredictedLatencyContext_SLOValidation(t *testing.T) {
-	tests := []struct {
-		name       string
-		ttftSLO    float64
-		tpotSLO    float64
-		expectSLOs bool
-	}{
-		{
-			name:       "Both SLOs set",
-			ttftSLO:    100,
-			tpotSLO:    50,
-			expectSLOs: true,
-		},
-		{
-			name:       "No SLOs",
-			ttftSLO:    0,
-			tpotSLO:    0,
-			expectSLOs: false,
-		},
-		{
-			name:       "Only TTFT SLO",
-			ttftSLO:    100,
-			tpotSLO:    0,
-			expectSLOs: false,
-		},
-		{
-			name:       "Only TPOT SLO",
-			ttftSLO:    0,
-			tpotSLO:    50,
-			expectSLOs: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			request := createTestInferenceRequest("test-id", tt.ttftSLO, tt.tpotSLO)
-			ctx := newPredictedLatencyContext(request)
-			ctx.ttftSLO = tt.ttftSLO
-			ctx.avgTPOTSLO = tt.tpotSLO
-
-			hasBothSLOs := ctx.ttftSLO > 0 && ctx.avgTPOTSLO > 0
-			assert.Equal(t, tt.expectSLOs, hasBothSLOs)
-		})
-	}
 }
 
 // Benchmark tests
