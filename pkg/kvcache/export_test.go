@@ -31,3 +31,7 @@ func NewIndexerForTest(tp kvblock.TokenProcessor, idx kvblock.Index, backends []
 func NewIndexerForTestWithoutMetrics(tp kvblock.TokenProcessor, idx kvblock.Index, backends []*KVCacheBackendConfig) *Indexer {
 	return newIndexer(tp, idx, backends, false)
 }
+
+// Rotate retires the current hint generation and drops the previous one, as
+// Run does once per TTL.
+func (s *SpeculativeIndex) Rotate() { s.rotate() }

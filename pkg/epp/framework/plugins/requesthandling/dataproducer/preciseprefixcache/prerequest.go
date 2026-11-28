@@ -20,11 +20,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
-	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"go.opentelemetry.io/otel/trace"
@@ -50,100 +47,20 @@ const (
 
 var _ fwkrh.PreRequest = &Producer{}
 
-// speculativeEntries records the speculative rows added on a routing decision
-// so the TTL-eviction callback can roll them back.
-type speculativeEntries struct {
-	perPodKeys map[string][][]kvblock.BlockHash
-}
-
-// speculativeRow identifies one speculative index row: a block key held by a pod.
-type speculativeRow struct {
-	key kvblock.BlockHash
-	pod string
-}
-
-// speculativeLeases counts the live requests that seeded each speculative row.
-// Requests routing the same prefix to the same pod write the same row, so a
-// request's TTL expiry removes a row only when no later request still holds it.
-// mu guards counts; index calls run outside it so that index round trips
-// (e.g. Redis) don't serialize PreRequest behind other requests' expiries.
-type speculativeLeases struct {
-	mu     sync.Mutex
-	counts map[speculativeRow]int
-	index  kvblock.Index
-	logger logr.Logger
-}
-
-func newSpeculativeLeases(index kvblock.Index, logger logr.Logger) *speculativeLeases {
-	return &speculativeLeases{counts: make(map[speculativeRow]int), index: index, logger: logger}
-}
-
-// acquire takes one lease on every row of entries. The caller holds mu.
-func (l *speculativeLeases) acquire(entries *speculativeEntries) {
-	for podID, prompts := range entries.perPodKeys {
-		for _, promptKeys := range prompts {
-			for _, key := range promptKeys {
-				l.counts[speculativeRow{key: key, pod: podID}]++
-			}
-		}
+// parseSpeculativeTTL parses the configured hint lifetime. Empty and
+// non-positive values select defaultSpeculativeTTL.
+func parseSpeculativeTTL(raw string) (time.Duration, error) {
+	if raw == "" {
+		return defaultSpeculativeTTL, nil
 	}
-}
-
-// release drops one lease on every row of entries and evicts from the index the
-// rows whose last lease it dropped. Another request can lease and add one of
-// those rows while the Evict runs, so release then re-adds every evicted row
-// that is leased again. The re-check and the re-add are not atomic: if index
-// calls stall for about a TTL, a row can be left in the index without a lease,
-// which stays until the pod clears or a later lease on it expires, or be
-// missing while still leased.
-func (l *speculativeLeases) release(ctx context.Context, requestID string, entries *speculativeEntries) {
-	l.mu.Lock()
-	dropped := make(map[string][]kvblock.BlockHash, len(entries.perPodKeys))
-	for podID, prompts := range entries.perPodKeys {
-		for _, promptKeys := range prompts {
-			for _, key := range promptKeys {
-				row := speculativeRow{key: key, pod: podID}
-				if n := l.counts[row]; n > 1 {
-					l.counts[row] = n - 1
-					continue
-				}
-				delete(l.counts, row)
-				dropped[podID] = append(dropped[podID], key)
-			}
-		}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid speculativeTTL %q: %w", raw, err)
 	}
-	l.mu.Unlock()
-	if len(dropped) == 0 {
-		return
+	if parsed <= 0 {
+		return defaultSpeculativeTTL, nil
 	}
-
-	for podID, keys := range dropped {
-		// Failed evictions remain until the pod clears or a later routed request expires.
-		pods := []kvblock.PodEntry{{PodIdentifier: podID, Speculative: true}}
-		if err := l.index.Evict(ctx, kvblock.RequestKey, keys, pods); err != nil {
-			l.logger.Error(err, "Failed to evict speculative entries on TTL expiry",
-				"requestID", requestID, "pod", podID, "keys", len(keys))
-		}
-	}
-
-	l.mu.Lock()
-	revived := make(map[string][]kvblock.BlockHash)
-	for podID, keys := range dropped {
-		for _, key := range keys {
-			if l.counts[speculativeRow{key: key, pod: podID}] > 0 {
-				revived[podID] = append(revived[podID], key)
-			}
-		}
-	}
-	l.mu.Unlock()
-
-	for podID, keys := range revived {
-		pods := []kvblock.PodEntry{{PodIdentifier: podID, Speculative: true}}
-		if err := l.index.Add(ctx, nil, keys, pods); err != nil {
-			l.logger.Error(err, "Failed to re-add speculative entries leased during eviction",
-				"requestID", requestID, "pod", podID, "keys", len(keys))
-		}
-	}
+	return parsed, nil
 }
 
 // blockKeysState carries the block keys computed in Produce to PreRequest
@@ -328,55 +245,11 @@ func (p *Producer) recordMMPrediction(ctx context.Context, request *scheduling.I
 		mm.MatchTokens, mmPromptTokens)
 }
 
-// buildSpeculativeCache constructs the TTL cache used to evict speculative
-// index entries, and the leases that let requests share a row. Returns
-// (nil, nil, 0, nil) when speculative indexing is disabled. The cache and its
-// background goroutine are bound to ctx.
-func buildSpeculativeCache(ctx context.Context, config PluginConfig,
-	index kvblock.Index,
-) (*ttlcache.Cache[string, *speculativeEntries], *speculativeLeases, time.Duration, error) {
-	if !config.SpeculativeIndexing {
-		return nil, nil, 0, nil
-	}
-
-	ttl := defaultSpeculativeTTL
-	if config.SpeculativeTTL != "" {
-		parsed, err := time.ParseDuration(config.SpeculativeTTL)
-		if err != nil {
-			return nil, nil, 0, fmt.Errorf("invalid speculativeTTL %q: %w", config.SpeculativeTTL, err)
-		}
-		if parsed > 0 {
-			ttl = parsed
-		}
-	}
-
-	cache := ttlcache.New[string, *speculativeEntries](
-		ttlcache.WithTTL[string, *speculativeEntries](ttl),
-	)
-	leases := newSpeculativeLeases(index, log.FromContext(ctx).WithName(PluginType))
-	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
-		item *ttlcache.Item[string, *speculativeEntries],
-	) {
-		if reason != ttlcache.EvictionReasonExpired {
-			return
-		}
-		leases.release(ctx, item.Key(), item.Value())
-	})
-	go cache.Start()
-	go func() {
-		<-ctx.Done()
-		cache.Stop()
-	}()
-
-	return cache, leases, ttl, nil
-}
-
 // PreRequest records the prefix-cache hit predicted for the selected endpoint,
-// then seeds speculative KV-block index entries for the endpoint(s) selected by
-// the scheduler, so the next same-prefix request hits without waiting for
-// confirmed KV-events from the engine. Speculative entries are tracked in a TTL
-// cache and evicted automatically; seeding is skipped when speculativeIndexing
-// is disabled.
+// then hints the request's block keys as held by the endpoint(s) the scheduler
+// selected, so the next same-prefix request matches them without waiting for
+// confirmed KV-events from the engine. Hints expire after speculativeTTL;
+// hinting is skipped when speculativeIndexing is disabled.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
@@ -391,7 +264,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 
 	p.recordPrediction(ctx, request, schedulingResult)
 
-	if !p.speculativeEnabled {
+	if p.speculative == nil {
 		return nil
 	}
 
@@ -412,7 +285,6 @@ func (p *Producer) PreRequest(ctx context.Context,
 	if targetEndpoint == nil || targetEndpoint.GetMetadata() == nil {
 		return nil
 	}
-	index := p.kvCacheIndexer.KVBlockIndex()
 	targets := []scheduling.Endpoint{targetEndpoint}
 	if prefill := schedulingResult.PrefillProfile().FirstEndpoint(); prefill != nil {
 		if p.seedDecode {
@@ -421,8 +293,6 @@ func (p *Producer) PreRequest(ctx context.Context,
 			targets = []scheduling.Endpoint{prefill}
 		}
 	}
-	perPodKeys := make(map[string][][]kvblock.BlockHash, len(targets))
-	var podIDs []string // seeding order follows targets
 	for _, target := range targets {
 		md := target.GetMetadata()
 		if md == nil {
@@ -434,15 +304,13 @@ func (p *Producer) PreRequest(ctx context.Context,
 		if metrics := target.GetMetrics(); metrics != nil {
 			engineBlockSize = metrics.CacheBlockSize
 		}
-		var prompts [][]kvblock.BlockHash
 		kept, dropped := 0, 0
+		// Each prompt's keys form their own chain.
 		for _, promptKeys := range state.perFormatKeys[format] {
 			n := engineReusableKeys(len(promptKeys), format.BlockSize, engineBlockSize)
 			kept += n
 			dropped += len(promptKeys) - n
-			if n > 0 {
-				prompts = append(prompts, promptKeys[:n])
-			}
+			p.speculative.Add(promptKeys[:n], podID)
 		}
 		logger.V(logging.TRACE).Info("Speculative keys within whole engine blocks",
 			"requestID", request.RequestID,
@@ -451,35 +319,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 			"engineBlockSize", engineBlockSize,
 			"keptKeys", kept,
 			"droppedKeys", dropped)
-		if len(prompts) > 0 {
-			perPodKeys[podID] = prompts
-			podIDs = append(podIDs, podID)
-		}
 	}
-	if len(perPodKeys) == 0 {
-		return nil
-	}
-	// The leases are taken before Add; release relies on that order.
-	entries := &speculativeEntries{perPodKeys: perPodKeys}
-	p.speculativeLeases.mu.Lock()
-	p.speculativeLeases.acquire(entries)
-	p.speculativeCache.Set(request.RequestID, entries, p.speculativeTTL)
-	p.speculativeLeases.mu.Unlock()
-
-	for _, podID := range podIDs {
-		pod := kvblock.PodEntry{PodIdentifier: podID, Speculative: true}
-		// Insert per-prompt keys separately to preserve correct block adjacency.
-		for _, promptKeys := range perPodKeys[podID] {
-			if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{pod}); err != nil {
-				logger.Error(err, "Failed to add speculative entries to index", "pod", podID)
-			}
-		}
-	}
-
-	logger.V(logging.TRACE).Info("Added speculative entries",
-		"requestID", request.RequestID,
-		"pods", len(perPodKeys),
-		"ttl", p.speculativeTTL)
 	return nil
 }
 

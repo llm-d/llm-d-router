@@ -21,11 +21,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jellydator/ttlcache/v3"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -38,19 +37,14 @@ func TestRenamedPrefillProfile_SeedsSpeculativeForPrefill(t *testing.T) {
 	for _, prefillProfile := range []string{"prefill", "prefill-h200"} {
 		t.Run(prefillProfile, func(t *testing.T) {
 			ctx := utils.NewTestContext(t)
-			index, err := kvblock.NewInMemoryIndex(nil)
-			require.NoError(t, err)
 			keys := []kvblock.BlockHash{0xA1, 0xA2}
 			idx := &fakeKVCacheIndexer{
 				computeFromTokens: func(context.Context, []uint32, string, []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
 					return keys, nil
 				},
-				index: index,
 			}
 			p := newProducerForProduceAndPreRequest(ctx, "renamed-prefill-"+prefillProfile, idx)
-			p.speculativeEnabled = true
-			p.speculativeCache = ttlcache.New[string, *speculativeEntries]()
-			p.speculativeTTL = time.Minute
+			p.speculative = kvcache.NewSpeculativeIndex(time.Minute)
 
 			endpoints := freshEndpoints()
 			req := tokenizedRequest("req-renamed-prefill", len(keys)*testBlockSize)
@@ -65,12 +59,8 @@ func TestRenamedPrefillProfile_SeedsSpeculativeForPrefill(t *testing.T) {
 				},
 			}))
 
-			hits, err := index.Lookup(ctx, keys, sets.New("10.0.0.2:8080"))
-			require.NoError(t, err)
-			for _, key := range keys {
-				assert.Equal(t, []kvblock.PodEntry{{PodIdentifier: "10.0.0.2:8080", Speculative: true}}, hits[key],
-					"the prefill endpoint must hold a speculative entry for key %v", key)
-			}
+			assert.Equal(t, map[string]int{"10.0.0.2:8080": len(keys)}, p.speculative.Match(keys, nil),
+				"only the prefill endpoint is hinted")
 		})
 	}
 }

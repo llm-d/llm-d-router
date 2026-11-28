@@ -20,14 +20,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"maps"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/go-logr/logr"
-	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -51,36 +47,35 @@ import (
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
-// addCall captures one fakeKVBlockIndex.Add invocation.
-type addCall struct {
-	keys    []kvblock.BlockHash
-	entries []kvblock.PodEntry
-}
-
-// evictCall captures one fakeKVBlockIndex.Evict invocation.
-type evictCall struct {
-	keyType kvblock.KeyType
-	keys    []kvblock.BlockHash
-	entries []kvblock.PodEntry
-}
-
 func newProducerForPreRequest(ctx context.Context, speculativeEnabled bool, idx *fakeKVBlockIndex) *Producer {
 	return newNamedProducerForPreRequest(ctx, "test", speculativeEnabled, idx)
 }
 
 func newNamedProducerForPreRequest(ctx context.Context, name string, speculativeEnabled bool, idx *fakeKVBlockIndex) *Producer {
-	cache := ttlcache.New[string, *speculativeEntries](
-		ttlcache.WithTTL[string, *speculativeEntries](time.Minute),
-	)
-	return &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: name},
-		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
-		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
-		speculativeCache:   cache,
-		speculativeLeases:  newSpeculativeLeases(idx, logr.Discard()),
-		speculativeTTL:     time.Minute,
-		speculativeEnabled: speculativeEnabled,
-		pluginState:        plugin.NewPluginState(ctx),
+	p := &Producer{
+		typedName:      plugin.TypedName{Type: PluginType, Name: name},
+		kvCacheIndexer: &fakeKVCacheIndexer{index: idx},
+		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		pluginState:    plugin.NewPluginState(ctx),
+	}
+	if speculativeEnabled {
+		p.speculative = kvcache.NewSpeculativeIndex(time.Minute)
+	}
+	return p
+}
+
+// writeRejectingIndex fails the test on any write to the KV-block index.
+func writeRejectingIndex(t *testing.T) *fakeKVBlockIndex {
+	t.Helper()
+	return &fakeKVBlockIndex{
+		addFn: func(context.Context, []kvblock.BlockHash, []kvblock.BlockHash, []kvblock.PodEntry) error {
+			t.Error("unexpected Add to the KV-block index")
+			return nil
+		},
+		evictFn: func(context.Context, kvblock.KeyType, []kvblock.BlockHash, []kvblock.PodEntry) error {
+			t.Error("unexpected Evict from the KV-block index")
+			return nil
+		},
 	}
 }
 
@@ -93,25 +88,13 @@ func primaryOnly(name string, endpoint scheduling.Endpoint) *scheduling.Scheduli
 	}
 }
 
-// newSpeculativeTTLProducer returns a Producer that seeds speculative entries
-// into idx, with the TTL cache and its eviction callback built as in New.
-func newSpeculativeTTLProducer(ctx context.Context, t *testing.T, ttl string, idx kvblock.Index) *Producer {
-	t.Helper()
-	cache, leases, parsed, err := buildSpeculativeCache(ctx, PluginConfig{
-		SpeculativeIndexing: true,
-		SpeculativeTTL:      ttl,
-	}, idx)
-	require.NoError(t, err)
-	return &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: "speculative-ttl"},
-		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
-		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("speculative-ttl"),
-		speculativeCache:   cache,
-		speculativeLeases:  leases,
-		speculativeTTL:     parsed,
-		speculativeEnabled: true,
-		pluginState:        plugin.NewPluginState(ctx),
-	}
+// newSpeculativeTTLProducer returns a Producer whose hints live for ttl and are
+// reclaimed in the background, as in New.
+func newSpeculativeTTLProducer(ctx context.Context, ttl time.Duration) *Producer {
+	p := newNamedProducerForPreRequest(ctx, "speculative-ttl", false, &fakeKVBlockIndex{})
+	p.speculative = kvcache.NewSpeculativeIndex(ttl)
+	go p.speculative.Run(ctx)
+	return p
 }
 
 // seedSpeculative runs PreRequest for request id with keys routed to endpoint.
@@ -127,23 +110,9 @@ func seedSpeculative(ctx context.Context, t *testing.T, p *Producer, id string,
 		primaryOnly("default", endpoint)))
 }
 
-// speculativeChainLen waits for the synctest bubble to settle, then returns how
-// many of keys the index holds for endpoint.
-func speculativeChainLen(ctx context.Context, t *testing.T, idx kvblock.Index,
-	keys []kvblock.BlockHash, endpoint scheduling.Endpoint,
-) int {
-	t.Helper()
-	synctest.Wait()
-	got, err := idx.Lookup(ctx, keys, sets.New(endpointPodID(endpoint)))
-	require.NoError(t, err)
-	return len(got)
-}
-
-// leaseCounts returns a copy of the lease counts, read under the lease lock.
-func leaseCounts(p *Producer) map[speculativeRow]int {
-	p.speculativeLeases.mu.Lock()
-	defer p.speculativeLeases.mu.Unlock()
-	return maps.Clone(p.speculativeLeases.counts)
+// hintedKeys returns how many leading keys are hinted for endpoint.
+func hintedKeys(p *Producer, keys []kvblock.BlockHash, endpoint scheduling.Endpoint) int {
+	return p.speculative.Match(keys, nil)[endpointPodID(endpoint)]
 }
 
 // endpointPodID returns the speculative pod identifier PreRequest uses for endpoint.
@@ -152,33 +121,11 @@ func endpointPodID(endpoint scheduling.Endpoint) string {
 	return md.Address + ":" + md.Port
 }
 
-// slowEvictIndex delays every Evict, so requests that seed while an expiry's
-// Evict is in flight land in the window between its release and its Evict.
-type slowEvictIndex struct {
-	kvblock.Index
-	delay time.Duration
-}
-
-func (s *slowEvictIndex) Evict(ctx context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash,
-	entries []kvblock.PodEntry,
-) error {
-	time.Sleep(s.delay)
-	return s.Index.Evict(ctx, keyType, keys, entries)
-}
-
-// speculativeEnabled=true with populated block keys: index.Add called once
-// with the primary pod identifier, and a speculative cache entry is created.
+// With speculative indexing on, PreRequest hints the request's block keys for
+// the primary endpoint and writes nothing to the KV-block index.
 func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-
-	var calls []addCall
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
-			calls = append(calls, addCall{keys: keys, entries: entries})
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, true, idx)
+	p := newProducerForPreRequest(ctx, true, writeRejectingIndex(t))
 
 	blockKeys := []kvblock.BlockHash{0xAA, 0xBB}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-1"}
@@ -188,52 +135,26 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
-	require.Len(t, calls, 1)
-	assert.Equal(t, blockKeys, calls[0].keys)
-	require.Len(t, calls[0].entries, 1)
-	assert.Equal(t, "10.0.0.1:8080", calls[0].entries[0].PodIdentifier)
-	assert.True(t, calls[0].entries[0].Speculative)
-
-	cached := p.speculativeCache.Get(req.RequestID)
-	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 1)
-	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.1:8080"])
+	assert.Equal(t, map[string]int{"10.0.0.1:8080": len(blockKeys)}, p.speculative.Match(blockKeys, nil))
 }
 
-// speculativeEnabled=true with empty blockKeys: PreRequest must not call
-// index.Add and must not create a cache entry.
-func TestPreRequest_EmptyBlockKeys_NoAdd(t *testing.T) {
+// Empty block keys leave no hint.
+func TestPreRequest_EmptyBlockKeys_NoHint(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, _ []kvblock.BlockHash, _ []kvblock.PodEntry) error {
-			t.Fatalf("index.Add must not be called when blockKeys are empty")
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, true, idx)
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-empty"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{})
 
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
-	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
+	assert.Zero(t, p.speculative.Len())
 }
 
-// seedDecodeWhenDisaggregated: index.Add called twice (primary + prefill), and
-// the cache entry tracks both pod identifiers.
+// seedDecodeWhenDisaggregated hints both the primary and the prefill endpoint.
 func TestPreRequest_PrefillProfile_SeedDecode_SeedsBoth(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-
-	var calls []addCall
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
-			calls = append(calls, addCall{keys: keys, entries: entries})
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, true, idx)
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
 	p.seedDecode = true
 
 	blockKeys := []kvblock.BlockHash{0xCC}
@@ -252,29 +173,13 @@ func TestPreRequest_PrefillProfile_SeedDecode_SeedsBoth(t *testing.T) {
 	}
 	_ = p.PreRequest(ctx, req, result)
 
-	require.Len(t, calls, 2)
-	assert.Equal(t, "10.0.0.1:8080", calls[0].entries[0].PodIdentifier)
-	assert.Equal(t, "10.0.0.2:8080", calls[1].entries[0].PodIdentifier)
-
-	cached := p.speculativeCache.Get(req.RequestID)
-	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 2)
-	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.1:8080"])
-	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.2:8080"])
+	assert.Equal(t, map[string]int{"10.0.0.1:8080": 1, "10.0.0.2:8080": 1}, p.speculative.Match(blockKeys, nil))
 }
 
 // By default a disaggregated request seeds the prefill endpoint only.
 func TestPreRequest_PrefillProfile_SeedsPrefillOnly(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-
-	var calls []addCall
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
-			calls = append(calls, addCall{keys: keys, entries: entries})
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, true, idx)
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
 
 	blockKeys := []kvblock.BlockHash{0xCC}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-pd-prefill-only"}
@@ -292,37 +197,22 @@ func TestPreRequest_PrefillProfile_SeedsPrefillOnly(t *testing.T) {
 	}
 	_ = p.PreRequest(ctx, req, result)
 
-	require.Len(t, calls, 1)
-	assert.Equal(t, "10.0.0.2:8080", calls[0].entries[0].PodIdentifier)
-
-	cached := p.speculativeCache.Get(req.RequestID)
-	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 1)
-	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.2:8080"])
+	assert.Equal(t, map[string]int{"10.0.0.2:8080": 1}, p.speculative.Match(blockKeys, nil))
 
 	// A decode-only request still seeds its decode endpoint.
-	calls = nil
+	decodeKeys := []kvblock.BlockHash{0xDD}
 	decodeOnly := &scheduling.InferenceRequest{RequestID: "req-pre-decode-only"}
 	p.pluginState.Write(decodeOnly.RequestID, blockKeysStateKey, &blockKeysState{
-		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {blockKeys}},
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {decodeKeys}},
 	})
 	_ = p.PreRequest(ctx, decodeOnly, primaryOnly("decode", testEndpoints[0]))
-	require.Len(t, calls, 1)
-	assert.Equal(t, "10.0.0.1:8080", calls[0].entries[0].PodIdentifier)
+	assert.Equal(t, map[string]int{"10.0.0.1:8080": 1}, p.speculative.Match(decodeKeys, nil))
 }
 
-// speculativeEnabled=false: early return — no index writes, no cache entry,
-// and PluginState is left untouched.
+// With speculative indexing off, PreRequest records no hint.
 func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, _ []kvblock.BlockHash, _ []kvblock.PodEntry) error {
-			t.Fatalf("index.Add must not be called when speculative indexing is disabled")
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, false, idx)
+	p := newProducerForPreRequest(ctx, false, &fakeKVBlockIndex{})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-off"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey,
@@ -330,9 +220,7 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 			{BlockSize: testBlockSize}: {{0xDD}},
 		}})
 
-	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
-
-	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
+	require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0])))
 }
 
 // The predicted token count comes from the chosen endpoint's unweighted cached
@@ -871,12 +759,11 @@ func TestProduceThenPreRequest_NoScoredCandidates_BothMaximaFallBack(t *testing.
 // through to the recorded metric.
 func newProducerForProduceAndPreRequest(ctx context.Context, name string, idx kvCacheIndexer) *Producer {
 	return &Producer{
-		typedName:         plugin.TypedName{Type: PluginType, Name: name},
-		kvCacheIndexer:    idx,
-		dk:                attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
-		pluginState:       plugin.NewPluginState(ctx),
-		blockSizeTokens:   testBlockSize,
-		speculativeLeases: newSpeculativeLeases(idx.KVBlockIndex(), logr.Discard()),
+		typedName:       plugin.TypedName{Type: PluginType, Name: name},
+		kvCacheIndexer:  idx,
+		dk:              attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		pluginState:     plugin.NewPluginState(ctx),
+		blockSizeTokens: testBlockSize,
 	}
 }
 
@@ -1223,59 +1110,19 @@ func sharedPrefixModality(t *testing.T, metricName, pluginName string) string {
 	return modalities[0]
 }
 
-// TTL expiry of a speculative entry evicts every key of every prompt in the
-// request, with RequestKey semantics and the seeded pod entries.
-func TestSpeculativeTTLExpiry_EvictsAllPromptKeys(t *testing.T) {
-	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
-	t.Cleanup(cancel)
-
-	var mu sync.Mutex
-	var evictions []evictCall
-	idx := &fakeKVBlockIndex{
-		evictFn: func(_ context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
-			mu.Lock()
-			defer mu.Unlock()
-			evictions = append(evictions, evictCall{keyType: keyType, keys: keys, entries: entries})
-			return nil
-		},
+func TestParseSpeculativeTTL(t *testing.T) {
+	for raw, want := range map[string]time.Duration{
+		"":     defaultSpeculativeTTL,
+		"0s":   defaultSpeculativeTTL,
+		"-1s":  defaultSpeculativeTTL,
+		"20ms": 20 * time.Millisecond,
+	} {
+		got, err := parseSpeculativeTTL(raw)
+		require.NoError(t, err, "raw %q", raw)
+		assert.Equal(t, want, got, "raw %q", raw)
 	}
-
-	cache, _, ttl, err := buildSpeculativeCache(ctx, PluginConfig{
-		SpeculativeIndexing: true,
-		SpeculativeTTL:      "20ms",
-	}, idx)
-	require.NoError(t, err)
-	require.Equal(t, 20*time.Millisecond, ttl)
-
-	perPrompt := [][]kvblock.BlockHash{{0xA1, 0xA2}, {0xB1}}
-	pods := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8080", Speculative: true}}
-	cache.Set("req-ttl", &speculativeEntries{
-		perPodKeys: map[string][][]kvblock.BlockHash{
-			"10.0.0.1:8080": perPrompt,
-			"10.0.0.2:8080": {{0xC1}},
-		},
-	}, ttl)
-
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(evictions) == 2
-	}, 2*time.Second, time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, evictions, 2)
-	for _, eviction := range evictions {
-		assert.Equal(t, kvblock.RequestKey, eviction.keyType)
-		require.Len(t, eviction.entries, 1)
-		assert.True(t, eviction.entries[0].Speculative)
-		if eviction.entries[0].PodIdentifier == pods[0].PodIdentifier {
-			assert.Equal(t, []kvblock.BlockHash{0xA1, 0xA2, 0xB1}, eviction.keys)
-		} else {
-			assert.Equal(t, "10.0.0.2:8080", eviction.entries[0].PodIdentifier)
-			assert.Equal(t, []kvblock.BlockHash{0xC1}, eviction.keys)
-		}
-	}
+	_, err := parseSpeculativeTTL("soon")
+	require.Error(t, err)
 }
 
 func TestBlockKeysStateClone(t *testing.T) {
@@ -1292,10 +1139,10 @@ func TestBlockKeysStateClone(t *testing.T) {
 	require.Equal(t, [][]kvblock.BlockHash{{3}}, cloned.perFormatKeys[bigram])
 }
 
-// Requests that route the same prefix to the same pod share one speculative
-// index entry. An older request's TTL expiry must not remove that entry while
-// a newer request that seeded it is still live.
-func TestSpeculativeTTLExpiry_KeepsEntryOfLiveRequest(t *testing.T) {
+// Requests that route the same prefix to the same pod share one hint. An older
+// request's TTL must not expire it while a newer request that renewed it is
+// still live.
+func TestSpeculativeTTLExpiry_KeepsHintOfLiveRequest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
 		defer func() {
@@ -1303,9 +1150,7 @@ func TestSpeculativeTTLExpiry_KeepsEntryOfLiveRequest(t *testing.T) {
 			synctest.Wait()
 		}()
 
-		idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
-		require.NoError(t, err)
-		p := newSpeculativeTTLProducer(ctx, t, "200ms", idx)
+		p := newSpeculativeTTLProducer(ctx, 200*time.Millisecond)
 
 		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
 		pod := testEndpoints[0]
@@ -1314,21 +1159,19 @@ func TestSpeculativeTTLExpiry_KeepsEntryOfLiveRequest(t *testing.T) {
 		time.Sleep(120 * time.Millisecond)
 		seedSpeculative(ctx, t, p, "B", keys, pod) // expires at 320ms
 		time.Sleep(90 * time.Millisecond)
-		assert.Equal(t, len(keys), speculativeChainLen(ctx, t, idx, keys, pod), "A expired while B is live")
+		assert.Equal(t, len(keys), hintedKeys(p, keys, pod), "A expired while B is live")
 
 		seedSpeculative(ctx, t, p, "C", keys, pod) // expires at 410ms
 		time.Sleep(120 * time.Millisecond)
-		require.True(t, p.speculativeCache.Has("C"))
-		assert.Equal(t, len(keys), speculativeChainLen(ctx, t, idx, keys, pod), "B expired while C is live")
+		assert.Equal(t, len(keys), hintedKeys(p, keys, pod), "B expired while C is live")
 
 		time.Sleep(100 * time.Millisecond)
-		require.False(t, p.speculativeCache.Has("C"))
-		assert.Zero(t, speculativeChainLen(ctx, t, idx, keys, pod), "the last live request expired")
+		assert.Zero(t, hintedKeys(p, keys, pod), "the last live request expired")
 	})
 }
 
-// Leases are kept per (block, pod): the same blocks routed to two pods must
-// leave each pod's rows until that pod's own last request expires.
+// Hints expire per (block, pod): the same blocks routed to two pods stay hinted
+// for each pod until that pod's own last request expires.
 func TestSpeculativeTTLExpiry_SameBlocksOnTwoPods(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
@@ -1337,13 +1180,11 @@ func TestSpeculativeTTLExpiry_SameBlocksOnTwoPods(t *testing.T) {
 			synctest.Wait()
 		}()
 
-		idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
-		require.NoError(t, err)
-		p := newSpeculativeTTLProducer(ctx, t, "200ms", idx)
+		p := newSpeculativeTTLProducer(ctx, 200*time.Millisecond)
 
 		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
 		podA, podB := testEndpoints[0], testEndpoints[1]
-		chain := func(pod scheduling.Endpoint) int { return speculativeChainLen(ctx, t, idx, keys, pod) }
+		chain := func(pod scheduling.Endpoint) int { return hintedKeys(p, keys, pod) }
 
 		seedSpeculative(ctx, t, p, "A1", keys, podA) // expires at 200ms
 		time.Sleep(120 * time.Millisecond)
@@ -1361,66 +1202,10 @@ func TestSpeculativeTTLExpiry_SameBlocksOnTwoPods(t *testing.T) {
 
 		time.Sleep(30 * time.Millisecond) // 360ms
 		assert.Zero(t, chain(podA), "A2, the last request on pod A, expired")
-		assert.Empty(t, leaseCounts(p))
-	})
-}
 
-// Each round, a batch of concurrent requests seeds the same rows on one pod
-// while the previous batch's expiry, having dropped the rows' last leases, is
-// still evicting them. The expiry runs concurrently with the batch's leasing
-// and Add, so it must add the rows back once its Evict returns. Once the
-// goroutines settle, the rows must be present with one lease per live request,
-// and gone once every request has expired. Run with -race.
-func TestSpeculativeTTLExpiry_ConcurrentSeedingAndExpiry(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
-		defer func() {
-			cancel()
-			synctest.Wait()
-		}()
-
-		inMemory, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
-		require.NoError(t, err)
-		idx := &slowEvictIndex{Index: inMemory, delay: 5 * time.Millisecond}
-		const ttl = 100 * time.Millisecond
-		p := newSpeculativeTTLProducer(ctx, t, ttl.String(), idx)
-
-		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
-		pod := testEndpoints[0]
-		row := func(key kvblock.BlockHash) speculativeRow {
-			return speculativeRow{key: key, pod: endpointPodID(pod)}
-		}
-		seedBatch := func(round, size int) {
-			var wg sync.WaitGroup
-			for i := range size {
-				wg.Go(func() {
-					seedSpeculative(ctx, t, p, fmt.Sprintf("req-%d-%d", round, i), keys, pod)
-				})
-			}
-			wg.Wait()
-		}
-
-		const rounds, batch = 5, 8
-		seedBatch(0, batch)
-		seededAt := time.Now()
-		for round := 1; round < rounds; round++ {
-			// The previous batch expires ttl after it seeded, and its Evict
-			// returns 5ms later; this batch seeds in between.
-			time.Sleep(time.Until(seededAt.Add(ttl + 2*time.Millisecond)))
-			seedBatch(round, batch)
-			seededAt = time.Now()
-			time.Sleep(8 * time.Millisecond)
-			assert.Equal(t, len(keys), speculativeChainLen(ctx, t, idx, keys, pod),
-				"round %d: rows are leased by live requests", round)
-			counts := leaseCounts(p)
-			for _, key := range keys {
-				assert.Equal(t, batch, counts[row(key)], "round %d: one lease per live request", round)
-			}
-		}
-
-		time.Sleep(ttl + 10*time.Millisecond)
-		assert.Zero(t, speculativeChainLen(ctx, t, idx, keys, pod), "every request expired")
-		assert.Empty(t, leaseCounts(p))
+		time.Sleep(50 * time.Millisecond) // 410ms, past the second rotation at 400ms
+		synctest.Wait()
+		assert.Zero(t, p.speculative.Len(), "the expired hints are reclaimed")
 	})
 }
 
@@ -1473,66 +1258,60 @@ func TestPreRequest_SpeculativeKeysStopAtEngineBlock(t *testing.T) {
 		name    string
 		metrics *datalayer.Metrics
 		prompts [][]kvblock.BlockHash
-		want    [][]kvblock.BlockHash
+		want    []int // leading keys hinted, per prompt
 	}{
 		{
 			name:    "prompt shorter than one engine block",
 			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    []int{0},
 		},
 		{
 			name:    "partial engine block at the tail",
 			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 6)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 4)},
+			want:    []int{4},
 		},
 		{
 			name:    "whole engine blocks",
 			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 8)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 8)},
+			want:    []int{8},
 		},
 		{
 			name:    "engine block not a multiple of the router block",
 			metrics: &datalayer.Metrics{CacheBlockSize: 40},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 4)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 2)},
+			want:    []int{2},
 		},
 		{
 			name:    "engine block smaller than the router block",
 			metrics: &datalayer.Metrics{CacheBlockSize: testBlockSize / 2},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    []int{3},
 		},
 		{
 			name:    "engine block size not scraped yet",
 			metrics: &datalayer.Metrics{},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    []int{3},
 		},
 		{
 			name:    "no metrics",
 			prompts: [][]kvblock.BlockHash{keyRange(1, 3)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 3)},
+			want:    []int{3},
 		},
 		{
 			name:    "each prompt stops at its own engine block",
 			metrics: &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize},
 			prompts: [][]kvblock.BlockHash{keyRange(1, 6), keyRange(100, 3)},
-			want:    [][]kvblock.BlockHash{keyRange(1, 4)},
+			want:    []int{4, 0},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := utils.NewTestContext(t)
-			var added [][]kvblock.BlockHash
-			idx := &fakeKVBlockIndex{
-				addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, _ []kvblock.PodEntry) error {
-					added = append(added, keys)
-					return nil
-				},
-			}
-			p := newProducerForPreRequest(ctx, true, idx)
+			p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
 			endpoint := endpointWithMetrics("pod-a", "10.0.0.1", tc.metrics)
 			req := &scheduling.InferenceRequest{RequestID: "req-engine-block"}
 			p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
@@ -1541,14 +1320,11 @@ func TestPreRequest_SpeculativeKeysStopAtEngineBlock(t *testing.T) {
 
 			require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", endpoint)))
 
-			assert.Equal(t, tc.want, added)
-			cached := p.speculativeCache.Get(req.RequestID)
-			if tc.want == nil {
-				assert.Nil(t, cached)
-				return
+			got := make([]int, len(tc.prompts))
+			for i, prompt := range tc.prompts {
+				got[i] = p.speculative.Match(prompt, nil)["10.0.0.1:8080"]
 			}
-			require.NotNil(t, cached)
-			assert.Equal(t, map[string][][]kvblock.BlockHash{"10.0.0.1:8080": tc.want}, cached.Value().perPodKeys)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -1557,14 +1333,7 @@ func TestPreRequest_SpeculativeKeysStopAtEngineBlock(t *testing.T) {
 func TestPreRequest_PrefillProfile_EngineBlockPerTarget(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	added := map[string][]kvblock.BlockHash{}
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
-			added[entries[0].PodIdentifier] = keys
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, true, idx)
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
 	p.seedDecode = true
 
 	keys := keyRange(1, 6)
@@ -1587,16 +1356,7 @@ func TestPreRequest_PrefillProfile_EngineBlockPerTarget(t *testing.T) {
 
 	require.NoError(t, p.PreRequest(ctx, req, result))
 
-	assert.Equal(t, map[string][]kvblock.BlockHash{
-		"10.0.0.1:8080": keyRange(1, 4),
-		"10.0.0.2:8080": keys,
-	}, added)
-	cached := p.speculativeCache.Get(req.RequestID)
-	require.NotNil(t, cached)
-	assert.Equal(t, map[string][][]kvblock.BlockHash{
-		"10.0.0.1:8080": {keyRange(1, 4)},
-		"10.0.0.2:8080": {keys},
-	}, cached.Value().perPodKeys)
+	assert.Equal(t, map[string]int{"10.0.0.1:8080": 4, "10.0.0.2:8080": len(keys)}, p.speculative.Match(keys, nil))
 }
 
 // The per-target trace log shows how many speculative keys the engine block
@@ -1682,14 +1442,7 @@ func TestProduceThenPreRequest_SpeculativeMatchStopsAtEngineBlock(t *testing.T) 
 func TestPreRequest_RankEndpointSeedsItsOwnRank(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	var calls []addCall
-	idx := &fakeKVBlockIndex{
-		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
-			calls = append(calls, addCall{keys: keys, entries: entries})
-			return nil
-		},
-	}
-	p := newProducerForPreRequest(ctx, true, idx)
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
 	p.kvEventsConfig = &kvevents.Config{DiscoverPods: true, PodDiscoveryConfig: kvevents.DefaultPodReconcilerConfig()}
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-rank"}
@@ -1699,7 +1452,5 @@ func TestPreRequest_RankEndpointSeedsItsOwnRank(t *testing.T) {
 
 	_ = p.PreRequest(ctx, req, primaryOnly("default", rankEndpoints()[1]))
 
-	require.Len(t, calls, 1)
-	require.Len(t, calls[0].entries, 1)
-	assert.Equal(t, "10.0.0.1:8000/rank-1", calls[0].entries[0].PodIdentifier)
+	assert.Equal(t, map[string]int{"10.0.0.1:8000/rank-1": 1}, p.speculative.Match([]kvblock.BlockHash{0xAA}, nil))
 }

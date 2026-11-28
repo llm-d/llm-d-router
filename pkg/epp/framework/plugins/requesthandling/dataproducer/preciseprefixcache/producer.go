@@ -24,9 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
-	"time"
 
-	"github.com/jellydator/ttlcache/v3"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -64,13 +62,13 @@ type PluginConfig struct {
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
 	IndexerConfig        *kvcache.Config               `json:"indexerConfig"`
 	KVEventsConfig       *kvevents.Config              `json:"kvEventsConfig"`
-	// SpeculativeIndexing seeds predicted cache entries for the selected
+	// SpeculativeIndexing hints the request's blocks as held by the selected
 	// endpoint(s) immediately after a routing decision, so the next
-	// same-prefix request hits without waiting for engine confirmation.
+	// same-prefix request matches them without waiting for engine
+	// confirmation.
 	SpeculativeIndexing bool `json:"speculativeIndexing"`
-	// SpeculativeTTL bounds how long speculative entries live before
-	// eviction. Go duration string; defaults to defaultSpeculativeTTL when
-	// empty.
+	// SpeculativeTTL is how long a speculative hint lives. Go duration
+	// string; defaults to defaultSpeculativeTTL when empty.
 	SpeculativeTTL string `json:"speculativeTTL"`
 	// SeedDecodeWhenDisaggregated also seeds a disaggregated request's decode
 	// endpoint. Off by default: the decoder holds no KV until the P/D transfer
@@ -117,11 +115,10 @@ type Producer struct {
 
 	pluginState *plugin.PluginState
 
-	speculativeCache   *ttlcache.Cache[string, *speculativeEntries]
-	speculativeLeases  *speculativeLeases
-	speculativeTTL     time.Duration
-	speculativeEnabled bool
-	seedDecode         bool
+	// speculative holds the routing-decision hints the indexer matches next
+	// to the KV-block index; nil when speculativeIndexing is disabled.
+	speculative *kvcache.SpeculativeIndex
+	seedDecode  bool
 
 	blockSizeTokens int
 
@@ -270,28 +267,31 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		}
 	}
 
-	speculativeCache, speculativeLeases, speculativeTTL, err := buildSpeculativeCache(ctx, config, indexer.KVBlockIndex())
-	if err != nil {
-		return nil, err
+	var speculative *kvcache.SpeculativeIndex
+	if config.SpeculativeIndexing {
+		ttl, err := parseSpeculativeTTL(config.SpeculativeTTL)
+		if err != nil {
+			return nil, err
+		}
+		speculative = kvcache.NewSpeculativeIndex(ttl)
+		indexer.SetSpeculativeIndex(speculative)
+		go speculative.Run(ctx)
 	}
 
 	prefixmetrics.Register()
 
 	producer := &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: name},
-		kvCacheIndexer:     indexer,
-		sharedEvents:       sharedEvents,
-		kvEventsConfig:     config.KVEventsConfig,
-		podSelector:        podSelector,
-		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
-		pluginState:        plugin.NewPluginState(ctx),
-		speculativeCache:   speculativeCache,
-		speculativeLeases:  speculativeLeases,
-		speculativeTTL:     speculativeTTL,
-		speculativeEnabled: config.SpeculativeIndexing,
-		seedDecode:         config.SeedDecodeWhenDisaggregated,
-		blockSizeTokens:    tokenProcessor.BlockSize(),
-		subscriberCtx:      ctx,
+		typedName:       plugin.TypedName{Type: PluginType, Name: name},
+		kvCacheIndexer:  indexer,
+		sharedEvents:    sharedEvents,
+		kvEventsConfig:  config.KVEventsConfig,
+		podSelector:     podSelector,
+		dk:              attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		pluginState:     plugin.NewPluginState(ctx),
+		speculative:     speculative,
+		seedDecode:      config.SeedDecodeWhenDisaggregated,
+		blockSizeTokens: tokenProcessor.BlockSize(),
+		subscriberCtx:   ctx,
 	}
 	if subscribersManager != nil {
 		producer.subscribersManager = subscribersManager
@@ -304,32 +304,28 @@ func (p *Producer) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// Debug-dump caps keep the payload bounded. A list is partial when its matching
-// TotalX exceeds MaxX.
-const (
-	maxDumpSubscribers        = 100
-	maxDumpSpeculativeEntries = 100
-)
+// maxDumpSubscribers caps the subscriber list in the debug dump. The list is
+// partial when TotalSubscribers exceeds it.
+const maxDumpSubscribers = 100
 
 // precisePrefixState is the snapshot returned by DumpState. The KV-block index
-// is keyed by prompt-derived block hashes and is not enumerable, so it is not
-// reported; the active subscriber pod identities and the live speculative
-// request ids are enumerated (sorted and capped) for debugging.
+// and the speculative hints are keyed by prompt-derived block hashes and are
+// not enumerable, so only the count of hinted block keys is reported; the
+// active subscriber pod identities are enumerated (sorted and capped) for
+// debugging.
 type precisePrefixState struct {
-	Subscribers             []string `json:"subscribers"`
-	TotalSubscribers        int      `json:"totalSubscribers"`
-	MaxSubscribers          int      `json:"maxSubscribers"`
-	SpeculativeIndexing     bool     `json:"speculativeIndexing"`
-	SpeculativeEntries      []string `json:"speculativeEntries"`
-	TotalSpeculativeEntries int      `json:"totalSpeculativeEntries"`
-	MaxSpeculativeEntries   int      `json:"maxSpeculativeEntries"`
-	BlockSizeTokens         int      `json:"blockSizeTokens"`
+	Subscribers         []string `json:"subscribers"`
+	TotalSubscribers    int      `json:"totalSubscribers"`
+	MaxSubscribers      int      `json:"maxSubscribers"`
+	SpeculativeIndexing bool     `json:"speculativeIndexing"`
+	SpeculativeBlocks   int      `json:"speculativeBlocks"`
+	BlockSizeTokens     int      `json:"blockSizeTokens"`
 }
 
 // DumpState reports the producer's bounded operational state: the active
-// KV-event subscriber pod identities, whether speculative indexing is on and
-// the live speculative request ids, and the block size in tokens. Both lists
-// are sorted and capped; the prompt-derived block index is not exposed.
+// KV-event subscriber pod identities (sorted and capped), whether speculative
+// indexing is on and how many block keys it hints, and the block size in
+// tokens.
 func (p *Producer) DumpState() (json.RawMessage, error) {
 	subscribers := []string{}
 	var totalSubscribers int
@@ -338,22 +334,17 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 		totalSubscribers = len(ids)
 		subscribers = sortedCapped(ids, maxDumpSubscribers)
 	}
-	speculativeEntries := []string{}
-	var totalSpeculativeEntries int
-	if p.speculativeCache != nil {
-		keys := p.speculativeCache.Keys()
-		totalSpeculativeEntries = len(keys)
-		speculativeEntries = sortedCapped(keys, maxDumpSpeculativeEntries)
+	var speculativeBlocks int
+	if p.speculative != nil {
+		speculativeBlocks = p.speculative.Len()
 	}
 	return json.Marshal(precisePrefixState{
-		Subscribers:             subscribers,
-		TotalSubscribers:        totalSubscribers,
-		MaxSubscribers:          maxDumpSubscribers,
-		SpeculativeIndexing:     p.speculativeEnabled,
-		SpeculativeEntries:      speculativeEntries,
-		TotalSpeculativeEntries: totalSpeculativeEntries,
-		MaxSpeculativeEntries:   maxDumpSpeculativeEntries,
-		BlockSizeTokens:         p.blockSizeTokens,
+		Subscribers:         subscribers,
+		TotalSubscribers:    totalSubscribers,
+		MaxSubscribers:      maxDumpSubscribers,
+		SpeculativeIndexing: p.speculative != nil,
+		SpeculativeBlocks:   speculativeBlocks,
+		BlockSizeTokens:     p.blockSizeTokens,
 	})
 }
 
@@ -392,11 +383,12 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 	}
 }
 
-// Produce hashes the request's TokenizedRequest into KV-block keys, looks
-// them up in the per-endpoint KV-block index, and writes PrefixCacheMatchInfo
-// to each candidate endpoint. No-op when the request carries no tokens.
-// With speculativeIndexing enabled, the computed block keys are stashed
-// for PreRequest to seed the index after a routing decision is made.
+// Produce hashes the request's TokenizedRequest into KV-block keys, matches
+// them against the per-endpoint KV-block index and the speculative hints, and
+// writes PrefixCacheMatchInfo to each candidate endpoint. No-op when the
+// request carries no tokens. With speculativeIndexing enabled, the computed
+// block keys are stashed for PreRequest to hint after a routing decision is
+// made.
 func (p *Producer) Produce(ctx context.Context,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) error {
@@ -486,7 +478,7 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 	p.pluginState.Write(request.RequestID, bestAvailableStateKey, state)
-	if p.speculativeEnabled {
+	if p.speculative != nil {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
 			&blockKeysState{perFormatKeys: keysByFormat})
 	}

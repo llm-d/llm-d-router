@@ -34,7 +34,8 @@ import (
 // SpeculativeTier is the tier name under which speculative entries count in
 // PodMatch.BlocksByTier. Speculative entries carry no engine-reported device
 // tier; an entry whose device tier is reported under this name counts in the
-// same chain.
+// same chain. A SpeculativeIndex hint counts as a speculative entry at every
+// key it covers.
 const SpeculativeTier = "speculative"
 
 // speculativeTierWeight scores speculative entries when the speculative tier
@@ -70,9 +71,9 @@ type PodMatch struct {
 
 // MatchBlockKeys runs the prefix matcher over keys for the pods in podFilter
 // (every pod when empty) and returns one PodMatch per pod that holds the
-// first key. Empty keys match nothing. The matcher walks the index when the
-// backend is a kvblock.KeyWalker and otherwise materializes Lookup; both
-// feed the same accumulator.
+// first key or is hinted for it. Empty keys match nothing. The matcher walks
+// the index when the backend is a kvblock.KeyWalker and otherwise
+// materializes Lookup; both feed the same accumulator.
 func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 	podFilter sets.Set[string],
 ) (map[string]PodMatch, error) {
@@ -91,12 +92,17 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 		semconv.LLMDKVCachePrefixMatchWalked(k.keyWalker != nil),
 	)
 
+	var hints map[string]int
+	if k.speculative != nil {
+		hints = k.speculative.Match(keys, podFilter)
+	}
+
 	var matches map[string]PodMatch
 	var err error
 	if k.keyWalker != nil {
-		matches, err = matchWalk(ctx, k.keyWalker, keys, k.tierScoring, podFilter)
+		matches, err = matchWalk(ctx, k.keyWalker, keys, k.tierScoring, podFilter, hints)
 	} else {
-		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierScoring, podFilter)
+		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierScoring, podFilter, hints)
 	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -127,15 +133,16 @@ func maxMatchedBlocks(matches map[string]PodMatch) int {
 }
 
 // matchWalk feeds the accumulator from an ordered index walk. The walk ends
-// at the first key without entries or once no chain is alive.
+// at the first key with neither entries nor a hint, or once no chain is
+// alive.
 func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash,
-	ts tierScoring, filter sets.Set[string],
+	ts tierScoring, filter sets.Set[string], hints map[string]int,
 ) (map[string]PodMatch, error) {
-	acc := acquireAccumulator(ts, filter)
+	acc := acquireAccumulator(ts, filter, hints)
 	defer releaseAccumulator(acc)
 
-	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.EntryRef) bool {
-		return found && len(entries) > 0 && acc.key(entries)
+	err := walker.WalkKeys(ctx, keys, func(pos int, found bool, entries []kvblock.EntryRef) bool {
+		return ((found && len(entries) > 0) || acc.hinted(pos)) && acc.key(entries)
 	})
 	if err != nil {
 		return nil, err
@@ -144,25 +151,27 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 }
 
 // matchLookup feeds the accumulator from a materialized Lookup result, for
-// backends without the walk capability.
+// backends without the walk capability. Lookup returns nothing past the
+// first key the index lacks, so beyond that key only hints extend a chain.
 func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockHash,
-	ts tierScoring, filter sets.Set[string],
+	ts tierScoring, filter sets.Set[string], hints map[string]int,
 ) (map[string]PodMatch, error) {
 	keyToPods, err := index.Lookup(ctx, keys, filter)
 	if err != nil {
 		return nil, err
 	}
-	return matchMaterialized(ctx, keys, keyToPods, ts, filter)
+	return matchMaterialized(ctx, keys, keyToPods, ts, filter, hints)
 }
 
 // matchMaterialized feeds the accumulator from a Lookup result, walking keys
-// in order and stopping at the first key without entries. Pod and tier
-// ordinals are assigned per call, since materialized entries carry none.
+// in order and stopping at the first key with neither entries nor a hint.
+// Pod and tier ordinals are assigned per call, since materialized entries
+// carry none.
 func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
-	ts tierScoring, filter sets.Set[string],
+	ts tierScoring, filter sets.Set[string], hints map[string]int,
 ) (map[string]PodMatch, error) {
-	acc := acquireAccumulator(ts, filter)
+	acc := acquireAccumulator(ts, filter, hints)
 	defer releaseAccumulator(acc)
 
 	refs := acc.refs[:0]
@@ -176,7 +185,7 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 			return nil, ctx.Err()
 		}
 		entries := keyToPods[key]
-		if len(entries) == 0 {
+		if len(entries) == 0 && !acc.hinted(pos) {
 			break
 		}
 		// Keys along a cached prefix usually hold the same entries in the same
@@ -191,8 +200,8 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 				break
 			}
 		}
-		if same {
-			acc.pendingRun++
+		if same && !acc.hintEnds() {
+			acc.repeat()
 			continue
 		}
 		refs = refs[:j]
@@ -353,11 +362,14 @@ type matchSlot struct {
 // candidates are the pods holding the first key, each chain ends at the
 // first key its pod does not hold, duplicate entries for a pod at one key
 // take the highest weight, and every tier tracks its own contiguous prefix.
+// A hint gives its pod one speculative entry at each of the leading keys it
+// covers, under the same rules.
 //
 // Feeders present each key's entries through key, in key order, and stop at
-// the first key without entries or once key reports no live chain. Ordinals
-// only need to be stable within one accumulation; they key request-local
-// tables and never size state, so sparse or large values cost nothing.
+// the first key with neither entries nor a hint, or once key reports no live
+// chain. Ordinals only need to be stable within one accumulation; they key
+// request-local tables and never size state, so sparse or large values cost
+// nothing.
 type prefixAccumulator struct {
 	weights  map[string]float64
 	tailOnly map[string]bool
@@ -374,6 +386,17 @@ type prefixAccumulator struct {
 	prev       []entrySig
 	pendingRun int
 
+	// hints maps a pod passing filter to the number of leading keys a
+	// speculative hint covers for it, and hintReach is the longest of them.
+	// hintSlots ties each hinted pod to its slot from the first key on;
+	// unbound counts those no entry has tied to a pod ordinal yet. pos is the
+	// position of the next key, pending runs included.
+	hints     map[string]int
+	hintReach int
+	hintSlots []hintSlot
+	unbound   int
+	pos       int
+
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
@@ -385,11 +408,24 @@ type prefixAccumulator struct {
 	refs         []kvblock.EntryRef
 }
 
+// hintSlot is one hinted pod's slot and the number of leading keys its hint
+// covers. bound reports whether an entry has tied the slot to a pod ordinal.
+type hintSlot struct {
+	slot   int32
+	length int
+	bound  bool
+}
+
 var accumulatorPool = sync.Pool{New: func() any { return &prefixAccumulator{} }}
 
-func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumulator {
+func acquireAccumulator(ts tierScoring, filter sets.Set[string], hints map[string]int) *prefixAccumulator {
 	a, _ := accumulatorPool.Get().(*prefixAccumulator)
 	a.weights, a.tailOnly, a.filter = ts.weights, ts.tailOnly, filter
+	a.hints, a.hintReach, a.unbound, a.pos = hints, 0, 0, 0
+	for _, length := range hints {
+		a.hintReach = max(a.hintReach, length)
+	}
+	a.hintSlots = a.hintSlots[:0]
 	a.slots = a.slots[:0]
 	a.active = a.active[:0]
 	a.keyStamp = 0
@@ -405,7 +441,7 @@ func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumula
 }
 
 func releaseAccumulator(a *prefixAccumulator) {
-	a.weights, a.tailOnly, a.filter = nil, nil, nil
+	a.weights, a.tailOnly, a.filter, a.hints = nil, nil, nil, nil
 	for i := range a.slots {
 		a.slots[i].pod = ""
 		clear(a.slots[i].tiers)
@@ -464,14 +500,14 @@ func (a *prefixAccumulator) flushRun() {
 func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 	// When entries match the previous key, every live slot holds this key in
 	// the same tiers; batch the increments until the run ends.
-	if !a.first && a.samePrev(entries) {
-		a.pendingRun++
+	if !a.first && a.samePrev(entries) && !a.hintEnds() {
+		a.repeat()
 		return len(a.active) > 0
 	}
 	a.flushRun()
 	a.keyStamp++
 	if a.first {
-		a.table.reset(len(entries))
+		a.table.reset(len(entries) + len(a.hints))
 	}
 	if cap(a.prev) < len(entries) {
 		a.prev = make([]entrySig, len(entries))
@@ -494,11 +530,19 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 
 		s, ok := a.table.lookup(ref.PodOrdinal)
 		if !ok {
-			if !a.first || (hasFilter && !a.filter.Has(ref.PodIdentifier)) {
-				continue // the first key fixes the candidate set
+			switch {
+			case !a.first:
+				// The first key fixes the candidate set; a pod hinted there
+				// without an entry is a candidate its first entry binds.
+				if s, ok = a.bindHint(ref); !ok {
+					continue
+				}
+			case hasFilter && !a.filter.Has(ref.PodIdentifier):
+				continue
+			default:
+				s = a.newSlot(ref.PodIdentifier)
+				a.table.insert(ref.PodOrdinal, s)
 			}
-			s = a.newSlot(ref.PodIdentifier)
-			a.table.insert(ref.PodOrdinal, s)
 		}
 		slot := &a.slots[s]
 		if !a.first && !slot.alive {
@@ -511,27 +555,104 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		} else {
 			slot.confirmedSeen = a.keyStamp
 		}
+		a.fold(slot, tier, tierOrdinal)
+	}
+	if len(a.hints) > 0 {
+		a.foldHints()
+	}
+	a.pos++
+	return a.endKey()
+}
 
-		w, primary := a.weightOf(tier, tierOrdinal)
-		if slot.seen != a.keyStamp {
-			slot.seen = a.keyStamp
-			slot.primaryWeight, slot.otherWeight = 0, 0
-		}
-		switch {
-		case !primary:
-			slot.otherWeight = max(slot.otherWeight, w)
-		case slot.primarySeen != a.keyStamp:
-			slot.primarySeen = a.keyStamp
-			slot.primaryWeight = w
-		default:
-			slot.primaryWeight = max(slot.primaryWeight, w)
-		}
+// fold records one entry of tier for slot at the current key.
+func (a *prefixAccumulator) fold(slot *matchSlot, tier string, tierOrdinal uint32) {
+	w, primary := a.weightOf(tier, tierOrdinal)
+	if slot.seen != a.keyStamp {
+		slot.seen = a.keyStamp
+		slot.primaryWeight, slot.otherWeight = 0, 0
+	}
+	switch {
+	case !primary:
+		slot.otherWeight = max(slot.otherWeight, w)
+	case slot.primarySeen != a.keyStamp:
+		slot.primarySeen = a.keyStamp
+		slot.primaryWeight = w
+	default:
+		slot.primaryWeight = max(slot.primaryWeight, w)
+	}
 
-		if !a.stampTier(slot, tierOrdinal) && a.first {
-			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
+	if !a.stampTier(slot, tierOrdinal) && a.first {
+		slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
+	}
+}
+
+// foldHints folds a speculative entry into every hinted pod's slot whose hint
+// covers the current key. At the first key it ties each hinted pod to the
+// slot its entries created, or to a new one.
+func (a *prefixAccumulator) foldHints() {
+	if a.first {
+		for pod, length := range a.hints {
+			h := hintSlot{slot: -1, length: length, bound: true}
+			for i := range a.slots {
+				if a.slots[i].pod == pod {
+					h.slot = int32(i) //#nosec G115 -- newSlot keeps slot indexes within int32
+					break
+				}
+			}
+			if h.slot < 0 {
+				h.slot, h.bound = a.newSlot(pod), false
+				a.unbound++
+			}
+			a.hintSlots = append(a.hintSlots, h)
 		}
 	}
-	return a.endKey()
+	for i := range a.hintSlots {
+		if h := &a.hintSlots[i]; h.length > a.pos {
+			a.fold(&a.slots[h.slot], SpeculativeTier, speculativeTierOrdinal)
+		}
+	}
+}
+
+// bindHint ties ref's pod ordinal to the slot a hint created for that pod at
+// the first key, where the pod had no entry.
+func (a *prefixAccumulator) bindHint(ref *kvblock.EntryRef) (int32, bool) {
+	if a.unbound == 0 {
+		return 0, false
+	}
+	for i := range a.hintSlots {
+		h := &a.hintSlots[i]
+		if !h.bound && a.slots[h.slot].pod == ref.PodIdentifier {
+			h.bound = true
+			a.unbound--
+			a.table.insert(ref.PodOrdinal, h.slot)
+			return h.slot, true
+		}
+	}
+	return 0, false
+}
+
+// hinted reports whether a hint covers the key at pos.
+func (a *prefixAccumulator) hinted(pos int) bool {
+	return pos < a.hintReach
+}
+
+// hintEnds reports whether a hint covers the previous key and not the next
+// one. Such a key cannot join a run: its pod's entries differ from the
+// previous key's by the speculative one.
+func (a *prefixAccumulator) hintEnds() bool {
+	for i := range a.hintSlots {
+		if a.hintSlots[i].length == a.pos {
+			return true
+		}
+	}
+	return false
+}
+
+// repeat defers the next key's increments: it holds the previous key's
+// entries and hints.
+func (a *prefixAccumulator) repeat() {
+	a.pendingRun++
+	a.pos++
 }
 
 // entrySig packs the fields of an EntryRef that affect matching into one

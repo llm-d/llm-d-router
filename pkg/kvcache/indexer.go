@@ -56,6 +56,7 @@ type Indexer struct {
 	keyWalker      kvblock.KeyWalker      // kvBlockIndex's walk capability; nil without one
 	tierScoring    tierScoring            // device tier weights for the prefix matcher
 	cacheFormats   *kvblock.CacheFormatCatalog
+	speculative    *SpeculativeIndex // hints the matcher scores as speculative entries; nil without any
 	// recordHits enables the contiguous-chain hit metrics, under the same
 	// option that instruments the index.
 	recordHits bool
@@ -115,6 +116,12 @@ func (k *Indexer) KVBlockIndex() kvblock.Index {
 // SetCacheFormats connects event metadata before request processing starts.
 func (k *Indexer) SetCacheFormats(formats *kvblock.CacheFormatCatalog) {
 	k.cacheFormats = formats
+}
+
+// SetSpeculativeIndex connects the hints MatchBlockKeys scores next to the
+// index, before request processing starts.
+func (k *Indexer) SetSpeculativeIndex(speculative *SpeculativeIndex) {
+	k.speculative = speculative
 }
 
 // CacheFormat returns the learned pod format, or the canonical plain format.
