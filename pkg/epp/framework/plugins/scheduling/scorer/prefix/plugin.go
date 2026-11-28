@@ -136,6 +136,7 @@ func (p *Plugin) Score(ctx context.Context, request *fwksched.InferenceRequest, 
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 	missingMatchInfo := 0
+	zeroTotalBlocks := 0
 
 	for _, endpoint := range endpoints {
 		// Default to score 0 if PrefixCacheMatchInfo is missing or invalid.
@@ -155,7 +156,7 @@ func (p *Plugin) Score(ctx context.Context, request *fwksched.InferenceRequest, 
 		matchBlocks := prefixMatchInfo.MatchBlocks()
 		totalBlocks := prefixMatchInfo.TotalBlocks()
 		if totalBlocks == 0 {
-			logger.V(logutil.DEFAULT).Error(nil, "totalBlocks is set to 0, assigning score 0", "endpoint", endpoint)
+			zeroTotalBlocks++
 			continue
 		}
 
@@ -173,6 +174,10 @@ func (p *Plugin) Score(ctx context.Context, request *fwksched.InferenceRequest, 
 	if missingMatchInfo > 0 {
 		logger.V(logutil.DEFAULT).Info("PrefixCacheMatchInfo not found for endpoints, assigning score 0",
 			"count", missingMatchInfo, "key", p.prefixMatchDataKey.String())
+	}
+	if zeroTotalBlocks > 0 {
+		// Expected when the prompt is shorter than one block or was not tokenized.
+		logger.V(logutil.DEBUG).Info("totalBlocks is set to 0 for endpoints, assigning score 0", "count", zeroTotalBlocks)
 	}
 
 	span := trace.SpanFromContext(ctx)
