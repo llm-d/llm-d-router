@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -113,6 +114,11 @@ type responseBodyWork struct {
 	targetEndpoint *fwkdl.EndpointMetadata
 }
 
+type scopedResponseStreamingPlugin struct {
+	request         *fwksched.InferenceRequest
+	latencyObserver prometheus.Observer
+}
+
 // responseBodyQueue is a per-request async queue for processing response body plugin calls.
 // It ensures chunks are processed in order via a channel while keeping plugin execution
 // off the critical streaming path.
@@ -121,9 +127,9 @@ type responseBodyQueue struct {
 	done   chan struct{} // closed when the processing goroutine exits
 	mu     sync.Mutex
 	closed bool
-	// requests holds the request scoped to each ResponseStreaming plugin, in
-	// plugin order, for every chunk of the response.
-	requests []*fwksched.InferenceRequest
+	// plugins holds the per-request scoped input and metric observer for each
+	// ResponseStreaming plugin, in plugin order, for every chunk of the response.
+	plugins []scopedResponseStreamingPlugin
 }
 
 func newResponseBodyQueue() *responseBodyQueue {
@@ -862,13 +868,13 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 		response.Streaming = reqCtx.ModelServerStreaming()
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
-		var requests []*fwksched.InferenceRequest
+		var plugins []scopedResponseStreamingPlugin
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
 			q := val.(*responseBodyQueue)
 			q.closeAndWait()
-			requests = q.requests
+			plugins = q.plugins
 		} else {
-			requests = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
+			plugins = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
 		}
 		// A gRPC response's final status arrives in trailers, after the headers
 		// were already reported to the plugins. Write it onto the response
@@ -883,7 +889,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 			response.Headers[grpcframe.HeaderStatus] = reqCtx.ResponseGRPCStatus
 		}
 		// Run the final chunk synchronously so DynamicMetadata is available for the response.
-		d.runResponseBodyPlugins(ctx, requests, response, reqCtx.TargetPod)
+		d.runResponseBodyPlugins(ctx, plugins, response, reqCtx.TargetPod)
 		reqCtx.Response.DynamicMetadata = response.DynamicMetadata
 	} else {
 		// Get or create the async queue for this request.
@@ -908,7 +914,7 @@ func (d *Director) loadOrCreateResponseBodyQueue(ctx context.Context, reqCtx *ha
 		return val.(*responseBodyQueue)
 	}
 	q := newResponseBodyQueue()
-	q.requests = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
+	q.plugins = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
 	val, loaded := d.responseBodyQueues.LoadOrStore(reqCtx, q)
 	if loaded {
 		return val.(*responseBodyQueue)
@@ -1186,36 +1192,40 @@ func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.I
 }
 
 // scopeResponseStreamingPlugins confines each ResponseStreaming plugin to its
-// declarations. It runs once per response rather than per chunk: no request
-// field is written after scheduling, so one scoped copy per plugin serves every
-// chunk without the per-chunk allocation. Violations are dropped: ResponseBody
-// has no error return.
-func (d *Director) scopeResponseStreamingPlugins(ctx context.Context, request *fwksched.InferenceRequest) []*fwksched.InferenceRequest {
+// declarations and resolves its latency observer once per response. No request
+// field is written after scheduling, so one scoped entry per plugin serves
+// every chunk without per-chunk allocations or metric vector lookups.
+// Violations are dropped: ResponseBody has no error return.
+func (d *Director) scopeResponseStreamingPlugins(ctx context.Context, request *fwksched.InferenceRequest) []scopedResponseStreamingPlugin {
 	logger := log.FromContext(ctx)
 	plugins := d.requestControlPlugins.responseStreamingPlugins
-	requests := make([]*fwksched.InferenceRequest, len(plugins))
+	scoped := make([]scopedResponseStreamingPlugin, len(plugins))
 	for i, plugin := range plugins {
-		requests[i], _ = datalayer.ScopeRequest(logger, fwkrh.ResponseStreamingExtensionPoint, plugin, request)
+		name := plugin.TypedName()
+		scopedReq, _ := datalayer.ScopeRequest(logger, fwkrh.ResponseStreamingExtensionPoint, plugin, request)
+		scoped[i] = scopedResponseStreamingPlugin{
+			request:         scopedReq,
+			latencyObserver: metrics.PluginProcessingLatencyObserver(fwkrh.ResponseStreamingExtensionPoint, name.Type, name.Name),
+		}
 	}
-	return requests
+	return scoped
 }
 
-// runResponseBodyPlugins runs each ResponseStreaming plugin with its request
-// from scopeResponseStreamingPlugins.
-func (d *Director) runResponseBodyPlugins(ctx context.Context, requests []*fwksched.InferenceRequest, response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+// runResponseBodyPlugins runs each ResponseStreaming plugin with its scoped
+// state from scopeResponseStreamingPlugins.
+func (d *Director) runResponseBodyPlugins(ctx context.Context, scoped []scopedResponseStreamingPlugin, response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
+	traceEnabled := loggerTrace.Enabled()
 	for i, plugin := range d.requestControlPlugins.responseStreamingPlugins {
-		// This loop runs per response chunk, so it caches TypedName and guards
-		// the log calls: passing arguments to a disabled logger still boxes them
-		// into a heap-allocated slice.
-		name := plugin.TypedName()
-		if loggerTrace.Enabled() {
+		var name fwkplugin.TypedName
+		if traceEnabled {
+			name = plugin.TypedName()
 			loggerTrace.Info("Running ResponseStreaming plugin", "plugin", name)
 		}
 		before := time.Now()
-		plugin.ResponseBody(ctx, requests[i], response, targetEndpoint)
-		metrics.RecordPluginProcessingLatency(fwkrh.ResponseStreamingExtensionPoint, name.Type, name.Name, time.Since(before))
-		if loggerTrace.Enabled() {
+		plugin.ResponseBody(ctx, scoped[i].request, response, targetEndpoint)
+		scoped[i].latencyObserver.Observe(time.Since(before).Seconds())
+		if traceEnabled {
 			loggerTrace.Info("Completed running ResponseStreaming plugin successfully", "plugin", name)
 		}
 	}
@@ -1227,6 +1237,6 @@ func (d *Director) runResponseBodyPlugins(ctx context.Context, requests []*fwksc
 func (d *Director) processResponseBodyQueue(q *responseBodyQueue) {
 	defer close(q.done)
 	for work := range q.ch {
-		d.runResponseBodyPlugins(work.ctx, q.requests, work.response, work.targetEndpoint)
+		d.runResponseBodyPlugins(work.ctx, q.plugins, work.response, work.targetEndpoint)
 	}
 }

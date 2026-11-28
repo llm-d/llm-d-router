@@ -31,6 +31,7 @@ import (
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -39,13 +40,16 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
@@ -53,6 +57,7 @@ import (
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -2331,5 +2336,231 @@ func TestHandleResponseBodyCompletion(t *testing.T) {
 				t.Errorf("Completion mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// BenchmarkHandleResponseBody_Streaming measures StreamingServer.HandleResponseBody
+// across a 64-chunk OpenAI SSE stream: 62 content chunks carrying "usage":null,
+// one final usage chunk, and the [DONE] terminator.
+func BenchmarkHandleResponseBody_Streaming(b *testing.B) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+
+	const contentChunks = 62
+	contentChunk := []byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1740002445,\"model\":\"meta-llama/Llama-3.1-8B-Instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"token\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\n")
+	usageChunk := []byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1740002445,\"model\":\"meta-llama/Llama-3.1-8B-Instruct\",\"choices\":[],\"usage\":{\"prompt_tokens\":128,\"completion_tokens\":62,\"total_tokens\":190}}\n\n")
+	doneChunk := []byte("data: [DONE]\n\n")
+
+	logger := crzap.New(crzap.Level(uberzap.NewAtomicLevelAt(zapcore.InfoLevel)))
+	ctx := log.IntoContext(context.Background(), logger)
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqHeaders := map[string]string{":path": reqcommon.PathChatCompletions}
+	respHeaders := map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}
+	schedReq := &fwksched.InferenceRequest{FairnessID: "tenant-a"}
+	received := time.Now().Add(-time.Second)
+
+	runStream := func(priority int) {
+		reqCtx := &RequestContext{
+			IncomingModelName:        "meta-llama/Llama-3.1-8B-Instruct",
+			TargetModelName:          "meta-llama/Llama-3.1-8B-Instruct",
+			Priority:                 priority,
+			RequestReceivedTimestamp: received,
+			apiSurface:               reqcommon.APITypeChatCompletions.Surface(),
+			modelServerStreaming:     true,
+			Request:                  &Request{Headers: reqHeaders},
+			Response:                 &Response{Headers: respHeaders},
+			SchedulingRequest:        schedReq,
+		}
+		for range contentChunks {
+			server.HandleResponseBody(ctx, reqCtx, contentChunk, false)
+		}
+		server.HandleResponseBody(ctx, reqCtx, usageChunk, false)
+		reqCtx.responseCompleteTimestamp = time.Now().Add(time.Millisecond)
+		server.HandleResponseBody(ctx, reqCtx, doneChunk, true)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		priority int
+	}{
+		{name: "priority_0", priority: 0},
+		{name: "priority_1000", priority: 1000},
+	} {
+		b.Run("serial_"+tc.name, func(b *testing.B) {
+			eppmetrics.Reset()
+			b.ReportAllocs()
+			for b.Loop() {
+				runStream(tc.priority)
+			}
+		})
+
+		b.Run("parallel_"+tc.name, func(b *testing.B) {
+			eppmetrics.Reset()
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					runStream(tc.priority)
+				}
+			})
+		})
+	}
+}
+
+func TestHandleResponseBody_StreamingMetricsAndReset(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	chunks := [][]byte{
+		[]byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n"),
+		[]byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\" there\"}}],\"usage\":null}\n\n"),
+		[]byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n"),
+		[]byte("data: [DONE]\n\n"),
+	}
+	itlLabels := map[string]string{
+		"model_name":        "model-a",
+		"target_model_name": "target-a",
+		"fairness_id":       "tenant-a",
+		"priority":          "1000",
+		"api_surface":       reqcommon.APITypeChatCompletions.String(),
+	}
+	parserLabels := map[string]string{
+		"extension_point": fwkrh.ResponseParsingExtensionPoint,
+		"plugin_type":     openai.OpenAIParserType,
+		"plugin_name":     openai.OpenAIParserType,
+	}
+
+	runRequest := func() trace.SpanContext {
+		ctx := logutil.NewTestLoggerIntoContext(t.Context())
+		ctx, span := tp.Tracer("handlers-test").Start(ctx, "request")
+		defer span.End()
+
+		received := time.Now().Add(-time.Second)
+		reqCtx := &RequestContext{
+			IncomingModelName:        "model-a",
+			TargetModelName:          "target-a",
+			Priority:                 1000,
+			RequestReceivedTimestamp: received,
+			apiSurface:               reqcommon.APITypeChatCompletions.Surface(),
+			modelServerStreaming:     true,
+			Request:                  &Request{Headers: map[string]string{":path": reqcommon.PathChatCompletions}},
+			Response:                 &Response{Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}},
+			SchedulingRequest:        &fwksched.InferenceRequest{FairnessID: "tenant-a"},
+		}
+		for i, chunk := range chunks {
+			eos := i == len(chunks)-1
+			if eos {
+				reqCtx.responseCompleteTimestamp = time.Now().Add(time.Millisecond)
+			}
+			server.HandleResponseBody(ctx, reqCtx, chunk, eos)
+		}
+		return span.SpanContext()
+	}
+
+	assertStreamMetrics := func(wantSpan trace.SpanContext) {
+		t.Helper()
+		itlHist := findHistogramMetric(t, "llm_d_epp_request_streaming_itl_seconds", itlLabels)
+		require.Equal(t, uint64(len(chunks)-1), itlHist.GetSampleCount())
+		require.Equal(t, uint64(len(chunks)), histogramSampleCount(t, "llm_d_epp_plugin_duration_seconds", parserLabels))
+
+		var foundExemplar bool
+		for _, bucket := range itlHist.GetBucket() {
+			if bucket.Exemplar == nil {
+				continue
+			}
+			labels := make(map[string]string, len(bucket.Exemplar.GetLabel()))
+			for _, l := range bucket.Exemplar.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			require.Equal(t, wantSpan.TraceID().String(), labels[metricsutil.ExemplarTraceIDLabel])
+			require.Equal(t, wantSpan.SpanID().String(), labels[metricsutil.ExemplarSpanIDLabel])
+			foundExemplar = true
+		}
+		require.True(t, foundExemplar, "sampled streaming request must attach a trace exemplar to ITL")
+	}
+
+	assertStreamMetrics(runRequest())
+
+	// Resetting collectors between requests on the same StreamingServer must
+	// resolve fresh observers on the next request.
+	eppmetrics.Reset()
+	assertStreamMetrics(runRequest())
+
+	// A single-chunk stream has no inter-token interval and must not create an ITL series.
+	eppmetrics.Reset()
+	singleCtx := &RequestContext{
+		IncomingModelName:         "model-a",
+		TargetModelName:           "target-a",
+		Priority:                  1000,
+		RequestReceivedTimestamp:  time.Now().Add(-time.Second),
+		responseCompleteTimestamp: time.Now().Add(time.Millisecond),
+		apiSurface:                reqcommon.APITypeChatCompletions.Surface(),
+		modelServerStreaming:      true,
+		Request:                   &Request{Headers: map[string]string{":path": reqcommon.PathChatCompletions}},
+		Response:                  &Response{Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}},
+		SchedulingRequest:         &fwksched.InferenceRequest{FairnessID: "tenant-a"},
+	}
+	server.HandleResponseBody(logutil.NewTestLoggerIntoContext(t.Context()), singleCtx, chunks[2], true)
+	require.Nil(t, singleCtx.itlObserver)
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_request_streaming_itl_seconds" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			require.False(t, metricHasLabels(metric, itlLabels), "single-chunk stream must not create an ITL series")
+		}
+	}
+}
+
+func TestHandleResponseBody_StreamingChunkAllocs(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	// Use logr.Discard to isolate handler, parser, and metric allocations from
+	// third-party logger implementation details.
+	ctx := log.IntoContext(t.Context(), logr.Discard())
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	chunk := []byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1740002445,\"model\":\"meta-llama/Llama-3.1-8B-Instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"token\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\n")
+	reqCtx := &RequestContext{
+		IncomingModelName:    "meta-llama/Llama-3.1-8B-Instruct",
+		TargetModelName:      "meta-llama/Llama-3.1-8B-Instruct",
+		Priority:             1000,
+		apiSurface:           reqcommon.APITypeChatCompletions.Surface(),
+		modelServerStreaming: true,
+		Request:              &Request{Headers: map[string]string{":path": reqcommon.PathChatCompletions}},
+		Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}},
+		SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: "tenant-a"},
+	}
+
+	// Warm the first two chunks so parser and per-request metric observers are resolved.
+	server.HandleResponseBody(ctx, reqCtx, chunk, false)
+	server.HandleResponseBody(ctx, reqCtx, chunk, false)
+
+	// Steady-state intermediate chunk allocates only the ParsedResponse struct (1 alloc).
+	// Reintroducing per-chunk extractFairnessAndPriority (Priority >= 100) or JSON
+	// unmarshal on "usage":null increases this count and fails the ceiling.
+	const maxAllocsPerChunk = 1
+	allocs := testing.AllocsPerRun(100, func() {
+		server.HandleResponseBody(ctx, reqCtx, chunk, false)
+	})
+	if allocs > maxAllocsPerChunk {
+		t.Errorf("steady-state streaming chunk allocations regressed: got %.1f, ceiling %d", allocs, maxAllocsPerChunk)
 	}
 }

@@ -18,6 +18,8 @@ package metrics
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,4 +236,161 @@ func BenchmarkRecordInterTokenLatency(b *testing.B) {
 			}
 		})
 	}
+
+	b.Run("parallel_unsampled", func(b *testing.B) {
+		Reset()
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				RecordInterTokenLatency(unsampledCtx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", 0.02)
+			}
+		})
+	})
+
+	b.Run("parallel_multi_series", func(b *testing.B) {
+		Reset()
+		const seriesCount = 16
+		models := make([]string, seriesCount)
+		tenants := make([]string, seriesCount)
+		for i := range seriesCount {
+			models[i] = fmt.Sprintf("model-%d", i)
+			tenants[i] = fmt.Sprintf("tenant-%d", i)
+		}
+		var workerID atomic.Uint64
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			idx := int(workerID.Add(1)-1) % seriesCount
+			model := models[idx]
+			tenant := tenants[idx]
+			for pb.Next() {
+				RecordInterTokenLatency(unsampledCtx, model, model, reqcommon.APITypeMessages.Surface(), tenant, "1", 0.02)
+			}
+		})
+	})
+}
+
+func TestObserveInterTokenLatencyAttachesTraceExemplars(t *testing.T) {
+	t.Cleanup(Reset)
+
+	t.Run("recording_span", func(t *testing.T) {
+		Reset()
+		ctx, span := ctxWithRecordingSpan(t)
+		defer span.End()
+
+		obs := InterTokenLatencyObserver("m", "t", reqcommon.APITypeMessages.Surface(), "f", "1")
+		require.True(t, ObserveInterTokenLatency(ctx, obs, 0.02))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m", "t", "f", "1", reqcommon.APITypeMessages.String())
+		require.NoError(t, err)
+		exemplars := bucketExemplars(h)
+		require.Len(t, exemplars, 1)
+		labels := exemplarLabels(exemplars[0])
+		require.Equal(t, span.SpanContext().TraceID().String(), labels[metricsutil.ExemplarTraceIDLabel])
+		require.Equal(t, span.SpanContext().SpanID().String(), labels[metricsutil.ExemplarSpanIDLabel])
+	})
+
+	t.Run("propagated_sampled_span", func(t *testing.T) {
+		Reset()
+		ctx := ctxWithSpan(t, true)
+
+		obs := InterTokenLatencyObserver("m", "t", reqcommon.APITypeMessages.Surface(), "f", "1")
+		require.True(t, ObserveInterTokenLatency(ctx, obs, 0.02))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m", "t", "f", "1", reqcommon.APITypeMessages.String())
+		require.NoError(t, err)
+		exemplars := bucketExemplars(h)
+		require.Len(t, exemplars, 1)
+		labels := exemplarLabels(exemplars[0])
+		require.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", labels[metricsutil.ExemplarTraceIDLabel])
+		_, hasSpanID := labels[metricsutil.ExemplarSpanIDLabel]
+		require.False(t, hasSpanID)
+	})
+
+	t.Run("unsampled_span", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m", "t", reqcommon.APITypeMessages.Surface(), "f", "1")
+		require.True(t, ObserveInterTokenLatency(ctxWithSpan(t, false), obs, 0.02))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m", "t", "f", "1", reqcommon.APITypeMessages.String())
+		require.NoError(t, err)
+		require.Empty(t, bucketExemplars(h))
+		require.Equal(t, uint64(1), h.GetSampleCount())
+	})
+
+	t.Run("no_span", func(t *testing.T) {
+		Reset()
+		obs := InterTokenLatencyObserver("m", "t", reqcommon.APITypeMessages.Surface(), "f", "1")
+		require.True(t, ObserveInterTokenLatency(t.Context(), obs, 0.02))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m", "t", "f", "1", reqcommon.APITypeMessages.String())
+		require.NoError(t, err)
+		require.Empty(t, bucketExemplars(h))
+		require.Equal(t, uint64(1), h.GetSampleCount())
+	})
+}
+
+// BenchmarkObserveInterTokenLatency measures per-chunk ITL observation using an
+// observer resolved once per request.
+func BenchmarkObserveInterTokenLatency(b *testing.B) {
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	b.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	sampledCtx, span := tp.Tracer("exemplar-bench").Start(context.Background(), "request")
+	defer span.End()
+
+	unsampledCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1},
+		SpanID:  trace.SpanID{1},
+	}))
+
+	for _, bc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"no-span", context.Background()},
+		{"unsampled", unsampledCtx},
+		{"sampled", sampledCtx},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			Reset()
+			obs := InterTokenLatencyObserver("m", "t", reqcommon.APITypeMessages.Surface(), "f", "1")
+			b.ReportAllocs()
+			for b.Loop() {
+				ObserveInterTokenLatency(bc.ctx, obs, 0.02)
+			}
+		})
+	}
+
+	b.Run("parallel_unsampled", func(b *testing.B) {
+		Reset()
+		obs := InterTokenLatencyObserver("m", "t", reqcommon.APITypeMessages.Surface(), "f", "1")
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				ObserveInterTokenLatency(unsampledCtx, obs, 0.02)
+			}
+		})
+	})
+
+	b.Run("parallel_multi_series", func(b *testing.B) {
+		Reset()
+		const seriesCount = 16
+		observers := make([]prometheus.Observer, seriesCount)
+		for i := range seriesCount {
+			m := fmt.Sprintf("model-%d", i)
+			tName := fmt.Sprintf("tenant-%d", i)
+			observers[i] = InterTokenLatencyObserver(m, m, reqcommon.APITypeMessages.Surface(), tName, "1")
+		}
+		var workerID atomic.Uint64
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			obs := observers[int(workerID.Add(1)-1)%seriesCount]
+			for pb.Next() {
+				ObserveInterTokenLatency(unsampledCtx, obs, 0.02)
+			}
+		})
+	})
 }

@@ -4466,3 +4466,74 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 		assert.Equal(t, []string{"enc1-rank-0", "enc2-rank-0"}, encTargets)
 	})
 }
+
+func TestDirector_HandleResponseBody_PluginLatencyAcrossReset(t *testing.T) {
+	metrics.Register()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+
+	plugin := newTestResponseStreaming("latency-plugin")
+	ctx := logutil.NewTestLoggerIntoContext(t.Context())
+	ds := datastore.NewDatastore(t.Context(), nil)
+	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, NewDatastoreEndpointCandidates(ds),
+		NewConfig().WithResponseStreamingPlugins(plugin), "")
+
+	newReqCtx := func(id string) *handlers.RequestContext {
+		return &handlers.RequestContext{
+			Request: &handlers.Request{
+				ID:      id,
+				Headers: map[string]string{reqcommon.RequestIDHeaderKey: id},
+			},
+			Response:  &handlers.Response{Headers: map[string]string{}},
+			TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "ns", Name: "pod"}},
+		}
+	}
+
+	pluginLatencySampleCount := func(t *testing.T) uint64 {
+		t.Helper()
+		families, err := ctrlmetrics.Registry.Gather()
+		require.NoError(t, err)
+		wantType := plugin.TypedName().Type
+		wantName := plugin.TypedName().Name
+		for _, family := range families {
+			if family.GetName() != "llm_d_epp_plugin_duration_seconds" {
+				continue
+			}
+			for _, m := range family.GetMetric() {
+				labels := make(map[string]string, len(m.GetLabel()))
+				for _, l := range m.GetLabel() {
+					labels[l.GetName()] = l.GetValue()
+				}
+				if labels["extension_point"] == fwkrh.ResponseStreamingExtensionPoint &&
+					labels["plugin_type"] == wantType &&
+					labels["plugin_name"] == wantName {
+					return m.GetHistogram().GetSampleCount()
+				}
+			}
+		}
+		return 0
+	}
+
+	req1 := newReqCtx("req-1")
+	director.HandleResponseBody(ctx, req1, false)
+	director.HandleResponseBody(ctx, req1, false)
+	director.HandleResponseBody(ctx, req1, true)
+	require.Equal(t, uint64(3), pluginLatencySampleCount(t))
+
+	// Resetting collectors between requests on the same Director resolves fresh
+	// observers for subsequent requests.
+	metrics.Reset()
+	require.Zero(t, pluginLatencySampleCount(t))
+
+	req2 := newReqCtx("req-2")
+	director.HandleResponseBody(ctx, req2, false)
+	director.HandleResponseBody(ctx, req2, false)
+	director.HandleResponseBody(ctx, req2, true)
+	require.Equal(t, uint64(3), pluginLatencySampleCount(t))
+
+	// A single-chunk response that skips the async queue also records latency after Reset.
+	metrics.Reset()
+	req3 := newReqCtx("req-3")
+	director.HandleResponseBody(ctx, req3, true)
+	require.Equal(t, uint64(1), pluginLatencySampleCount(t))
+}

@@ -2590,6 +2590,22 @@ func BenchmarkOpenAIParser_ParseResponse_Streaming(b *testing.B) {
 			name:  "with_usage",
 			chunk: []byte(`data: {"usage":{"prompt_tokens":7,"completion_tokens":10,"total_tokens":17}}`),
 		},
+		{
+			name:  "usage_null",
+			chunk: []byte(`data: {"id":"chatcmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"chat.completion.chunk","created":1740002445,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[{"index":0,"delta":{"content":"hello"},"logprobs":null,"finish_reason":null}],"usage":null}`),
+		},
+		{
+			name:  "usage_null_spaced",
+			chunk: []byte(`data: {"id": "chatcmpl-41764c93-f9d2-4f31-be08-3ba04fa25394", "object": "chat.completion.chunk", "created": 1740002445, "model": "meta-llama/Llama-3.1-8B-Instruct", "choices": [{"index": 0, "delta": {"content": "hello"}, "logprobs": null, "finish_reason": null}], "usage": null}`),
+		},
+		{
+			name:  "responses_completed",
+			chunk: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":512,\"output_tokens\":128,\"total_tokens\":640,\"input_tokens_details\":{\"cached_tokens\":256}}}}\n\n"),
+		},
+		{
+			name:  "speech_audio_done",
+			chunk: []byte("event: speech.audio.done\ndata: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":12,\"output_tokens\":24,\"total_tokens\":36}}\n\n"),
+		},
 	}
 
 	for _, tt := range tests {
