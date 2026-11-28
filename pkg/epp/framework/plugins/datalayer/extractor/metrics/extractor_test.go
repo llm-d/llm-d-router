@@ -489,6 +489,537 @@ func TestExtractorReadsEveryEngineOfDataParallelPod(t *testing.T) {
 	}
 }
 
+func TestExtractorReadsOwnEngineOfRankEndpoint(t *testing.T) {
+	ctx := context.Background()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+
+	perEngine := func(values ...float64) *dto.MetricFamily {
+		series := make([]*dto.Metric, 0, len(values))
+		for i, v := range values {
+			series = append(series, &dto.Metric{
+				Label: []*dto.LabelPair{
+					{Name: proto.String("engine"), Value: proto.String(strconv.Itoa(i))},
+					{Name: proto.String("model_name"), Value: proto.String("m")},
+				},
+				Gauge: &dto.Gauge{Value: ptr.To(v)},
+			})
+		}
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
+	}
+	cacheInfo := func(numBlocks ...string) *dto.MetricFamily {
+		series := make([]*dto.Metric, 0, len(numBlocks))
+		for i, n := range numBlocks {
+			series = append(series, &dto.Metric{
+				Label: []*dto.LabelPair{
+					{Name: proto.String("engine"), Value: proto.String(strconv.Itoa(i))},
+					{Name: proto.String(CacheConfigBlockSizeInfoMetricName), Value: proto.String("16")},
+					{Name: proto.String(CacheConfigNumGPUBlocksMetricName), Value: proto.String(n)},
+				},
+				Gauge: &dto.Gauge{Value: ptr.To(1.0)},
+			})
+		}
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
+	}
+	twoEngines := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    perEngine(6, 10),
+		defaultTotalRunningRequestsMetric:   perEngine(40, 38),
+		defaultKvCacheUsagePercentageMetric: perEngine(0.91, 0.52),
+		defaultCacheInfoMetric:              cacheInfo("1000", "2000"),
+	}
+
+	tests := []struct {
+		name        string
+		meta        *fwkdl.EndpointMetadata
+		wantWaiting int
+		wantRunning int
+		wantKV      float64
+		wantBlocks  int
+	}{
+		{
+			name:        "rank 0 endpoint reads engine 0",
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 0, RankByHeader: true},
+			wantWaiting: 6,
+			wantRunning: 40,
+			wantKV:      0.91,
+			wantBlocks:  1000,
+		},
+		{
+			name:        "rank 1 endpoint reads engine 1",
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 1, RankByHeader: true},
+			wantWaiting: 10,
+			wantRunning: 38,
+			wantKV:      0.52,
+			wantBlocks:  2000,
+		},
+		{
+			name:        "endpoint with one rank per port combines every engine",
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 1},
+			wantWaiting: 16,
+			wantRunning: 78,
+			wantKV:      0.91,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep := fwkdl.NewEndpoint(tt.meta, nil)
+			if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: twoEngines, Endpoint: ep}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := ep.GetMetrics()
+			if got.WaitingQueueSize != tt.wantWaiting {
+				t.Errorf("WaitingQueueSize: want %d, got %d", tt.wantWaiting, got.WaitingQueueSize)
+			}
+			if got.RunningRequestsSize != tt.wantRunning {
+				t.Errorf("RunningRequestsSize: want %d, got %d", tt.wantRunning, got.RunningRequestsSize)
+			}
+			if got.KVCacheUsagePercent != tt.wantKV {
+				t.Errorf("KVCacheUsagePercent: want %v, got %v", tt.wantKV, got.KVCacheUsagePercent)
+			}
+			if tt.wantBlocks != 0 && got.CacheNumBlocks != tt.wantBlocks {
+				t.Errorf("CacheNumBlocks: want %d, got %d", tt.wantBlocks, got.CacheNumBlocks)
+			}
+		})
+	}
+	if got := len(twoEngines[defaultTotalQueuedRequestsMetric].GetMetric()); got != 2 {
+		t.Errorf("Extract modified the scraped payload: %d series left, want 2", got)
+	}
+}
+
+// In a data-parallel group spanning pods, a pod's engines carry global ranks.
+func TestExtractorReadsGlobalEngineOfRankEndpoint(t *testing.T) {
+	ctx := context.Background()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	waiting := &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum()}
+	for engine, v := range map[string]float64{"2": 6, "3": 10} {
+		waiting.Metric = append(waiting.Metric, &dto.Metric{
+			Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String(engine)}},
+			Gauge: &dto.Gauge{Value: ptr.To(v)},
+		})
+	}
+	data := sourcemetrics.PrometheusMetricMap{defaultTotalQueuedRequestsMetric: waiting}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{RankIndex: 3, RankByHeader: true}, nil)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+	if got := ep.GetMetrics().WaitingQueueSize; got != 10 {
+		t.Errorf("WaitingQueueSize: want 10 (engine 3), got %d", got)
+	}
+}
+
+// SGLang labels its per-rank series dp_rank.
+func TestExtractorReadsOwnSGLangRank(t *testing.T) {
+	ctx := context.Background()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	queue := &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum()}
+	for rank, v := range map[string]float64{"0": 6, "1": 10} {
+		queue.Metric = append(queue.Metric, &dto.Metric{
+			Label: []*dto.LabelPair{{Name: proto.String("dp_rank"), Value: proto.String(rank)}},
+			Gauge: &dto.Gauge{Value: ptr.To(v)},
+		})
+	}
+	data := sourcemetrics.PrometheusMetricMap{"sglang:num_queue_reqs": queue}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels:       map[string]string{DefaultEngineTypeLabelKey: "sglang"},
+		RankIndex:    1,
+		RankByHeader: true,
+	}, nil)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+	if got := ep.GetMetrics().WaitingQueueSize; got != 10 {
+		t.Errorf("WaitingQueueSize: want 10 (dp_rank 1), got %d", got)
+	}
+}
+
+// Multi-port pools that scrape one shared /metrics port (such as SGLang Rust server
+// over gRPC with a metrics-data-source port override) set filterByRank to isolate
+// each endpoint's dp_rank series even when RankByHeader is false.
+func TestExtractorFilterByRankForMultiPortSharedMetrics(t *testing.T) {
+	ctx := t.Context()
+
+	plugin, err := CoreMetricsExtractorFactory(
+		MetricsExtractorType,
+		json.NewDecoder(strings.NewReader(`{"defaultEngine":"sglang","filterByRank":true}`)),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CoreMetricsExtractorFactory(filterByRank=true): %v", err)
+	}
+	filteredExtractor, ok := plugin.(*Extractor)
+	if !ok {
+		t.Fatalf("factory returned %T, want *Extractor", plugin)
+	}
+
+	defaultExtractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, &modelServerExtractorParams{
+		DefaultEngine: "sglang",
+	})
+	if err != nil {
+		t.Fatalf("newCoreMetricsExtractorPlugin(default): %v", err)
+	}
+
+	perRank := func(entries ...struct {
+		rank  string
+		value float64
+	}) *dto.MetricFamily {
+		series := make([]*dto.Metric, 0, len(entries))
+		for _, e := range entries {
+			series = append(series, &dto.Metric{
+				Label: []*dto.LabelPair{
+					{Name: proto.String("dp_rank"), Value: proto.String(e.rank)},
+					{Name: proto.String("model_name"), Value: proto.String("m")},
+				},
+				Gauge: &dto.Gauge{Value: ptr.To(e.value)},
+			})
+		}
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
+	}
+
+	sharedScrape := sourcemetrics.PrometheusMetricMap{
+		"sglang:num_queue_reqs": perRank(
+			struct {
+				rank  string
+				value float64
+			}{"0", 6},
+			struct {
+				rank  string
+				value float64
+			}{"1", 10},
+		),
+		"sglang:num_running_reqs": perRank(
+			struct {
+				rank  string
+				value float64
+			}{"0", 40},
+			struct {
+				rank  string
+				value float64
+			}{"1", 38},
+		),
+		"sglang:token_usage": perRank(
+			struct {
+				rank  string
+				value float64
+			}{"0", 0.91},
+			struct {
+				rank  string
+				value float64
+			}{"1", 0.52},
+		),
+		"sglang:page_size": &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(16.0)}}},
+		},
+		"sglang:num_pages": &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(2048.0)}}},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		extractor   *Extractor
+		meta        *fwkdl.EndpointMetadata
+		wantWaiting int
+		wantRunning int
+		wantKV      float64
+		wantBlock   int
+	}{
+		{
+			name:        "filterByRank isolates rank 0 on multi-port endpoint",
+			extractor:   filteredExtractor,
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 0, RankByHeader: false},
+			wantWaiting: 6,
+			wantRunning: 40,
+			wantKV:      0.91,
+			wantBlock:   16,
+		},
+		{
+			name:        "filterByRank isolates rank 1 on multi-port endpoint",
+			extractor:   filteredExtractor,
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 1, RankByHeader: false},
+			wantWaiting: 10,
+			wantRunning: 38,
+			wantKV:      0.52,
+			wantBlock:   16,
+		},
+		{
+			name:        "default filterByRank=false preserves pod aggregate on multi-port endpoint",
+			extractor:   defaultExtractor,
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 1, RankByHeader: false},
+			wantWaiting: 16,
+			wantRunning: 78,
+			wantKV:      0.91,
+			wantBlock:   16,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep := fwkdl.NewEndpoint(tt.meta, nil)
+			if err := tt.extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+				Payload:  sharedScrape,
+				Endpoint: ep,
+			}); err != nil {
+				t.Fatalf("Extract(): %v", err)
+			}
+			got := ep.GetMetrics()
+			if got.WaitingQueueSize != tt.wantWaiting {
+				t.Errorf("WaitingQueueSize = %d, want %d", got.WaitingQueueSize, tt.wantWaiting)
+			}
+			if got.RunningRequestsSize != tt.wantRunning {
+				t.Errorf("RunningRequestsSize = %d, want %d", got.RunningRequestsSize, tt.wantRunning)
+			}
+			if got.KVCacheUsagePercent != tt.wantKV {
+				t.Errorf("KVCacheUsagePercent = %v, want %v", got.KVCacheUsagePercent, tt.wantKV)
+			}
+			if got.CacheBlockSize != tt.wantBlock {
+				t.Errorf("CacheBlockSize = %d, want %d", got.CacheBlockSize, tt.wantBlock)
+			}
+		})
+	}
+
+	if got := len(sharedScrape["sglang:num_queue_reqs"].GetMetric()); got != 2 {
+		t.Errorf("Extract modified shared payload: %d series left, want 2", got)
+	}
+
+	t.Run("filterByRank isolates global rank on multi-node pod", func(t *testing.T) {
+		globalScrape := sourcemetrics.PrometheusMetricMap{
+			"sglang:num_queue_reqs": perRank(
+				struct {
+					rank  string
+					value float64
+				}{"2", 4},
+				struct {
+					rank  string
+					value float64
+				}{"3", 9},
+			),
+		}
+		ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{RankIndex: 3, RankByHeader: false}, nil)
+		_ = filteredExtractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+			Payload:  globalScrape,
+			Endpoint: ep,
+		})
+		if got := ep.GetMetrics().WaitingQueueSize; got != 9 {
+			t.Errorf("WaitingQueueSize = %d, want 9 (global dp_rank 3)", got)
+		}
+	})
+
+	t.Run("filterByRank is a no-op for engines without rankLabelName", func(t *testing.T) {
+		atomScrape := sourcemetrics.PrometheusMetricMap{
+			"atom:requests_waiting":     gaugeFamily(7),
+			"atom:requests_running":     gaugeFamily(3),
+			"atom:kv_cache_usage_ratio": gaugeFamily(0.25),
+		}
+		ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+			Labels:       map[string]string{DefaultEngineTypeLabelKey: "atom"},
+			RankIndex:    1,
+			RankByHeader: false,
+		}, nil)
+		if err := filteredExtractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+			Payload:  atomScrape,
+			Endpoint: ep,
+		}); err != nil {
+			t.Fatalf("Extract(atom): %v", err)
+		}
+		if got := ep.GetMetrics().WaitingQueueSize; got != 7 {
+			t.Errorf("WaitingQueueSize = %d, want 7", got)
+		}
+	})
+}
+
+func TestExtractorRankEndpointKeepsSeriesWithoutRankLabel(t *testing.T) {
+	ctx := context.Background()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	gauge := func(v float64) *dto.MetricFamily {
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(v)}}}}
+	}
+	data := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    gauge(3),
+		defaultTotalRunningRequestsMetric:   gauge(4),
+		defaultKvCacheUsagePercentageMetric: gauge(0.5),
+		defaultCacheInfoMetric:              gauge(1),
+	}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{RankIndex: 1, RankByHeader: true}, nil)
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := ep.GetMetrics().WaitingQueueSize; got != 3 {
+		t.Errorf("WaitingQueueSize: want 3, got %d", got)
+	}
+}
+
+func TestExtractorRankEndpointMissingRankKeepsPreviousMetrics(t *testing.T) {
+	ctx := t.Context()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	labeledGauge := func(entries map[string]float64) *dto.MetricFamily {
+		series := make([]*dto.Metric, 0, len(entries))
+		for engine, v := range entries {
+			series = append(series, &dto.Metric{
+				Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String(engine)}},
+				Gauge: &dto.Gauge{Value: ptr.To(v)},
+			})
+		}
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
+	}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{RankIndex: 2, RankByHeader: true}, nil)
+	initial := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    labeledGauge(map[string]float64{"0": 1, "2": 7}),
+		defaultTotalRunningRequestsMetric:   labeledGauge(map[string]float64{"0": 2, "2": 12}),
+		defaultKvCacheUsagePercentageMetric: labeledGauge(map[string]float64{"0": 0.1, "2": 0.42}),
+	}
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: initial, Endpoint: ep})
+
+	missingRank := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    labeledGauge(map[string]float64{"0": 6, "1": 10}),
+		defaultTotalRunningRequestsMetric:   labeledGauge(map[string]float64{"0": 40, "1": 38}),
+		defaultKvCacheUsagePercentageMetric: labeledGauge(map[string]float64{"0": 0.91, "1": 0.52}),
+	}
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: missingRank, Endpoint: ep}); err == nil {
+		t.Fatal("Extract error: want non-nil error when endpoint rank is absent from labeled families, got nil")
+	}
+	got := ep.GetMetrics()
+	if got.WaitingQueueSize != 7 {
+		t.Errorf("WaitingQueueSize: want 7, got %d", got.WaitingQueueSize)
+	}
+	if got.RunningRequestsSize != 12 {
+		t.Errorf("RunningRequestsSize: want 12, got %d", got.RunningRequestsSize)
+	}
+	if got.KVCacheUsagePercent != 0.42 {
+		t.Errorf("KVCacheUsagePercent: want 0.42, got %v", got.KVCacheUsagePercent)
+	}
+}
+
+func TestRankFilterZeroAllocs(t *testing.T) {
+	unlabeled := &dto.Metric{Gauge: &dto.Gauge{Value: ptr.To(1.0)}}
+	rank0 := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String("0")}},
+		Gauge: &dto.Gauge{Value: ptr.To(10.0)},
+	}
+	rank1 := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String("1")}},
+		Gauge: &dto.Gauge{Value: ptr.To(20.0)},
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"two_ranks": {
+			Name:   proto.String("two_ranks"),
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{rank0, rank1},
+		},
+		"unlabeled": {
+			Name:   proto.String("unlabeled"),
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{unlabeled},
+		},
+	}
+
+	twoRanksSpec := &Spec{Name: "two_ranks"}
+	unlabeledSpec := &Spec{Name: "unlabeled"}
+	loraSpec := &LoRASpec{Spec: twoRanksSpec}
+
+	t.Run("zero_allocations_on_multi_rank_scrape", func(t *testing.T) {
+		filter := rankFilter{label: "engine", value: "1"}
+		var (
+			aggVal     float64
+			latest     *dto.Metric
+			maxVal     int
+			maxOK      bool
+			detected   bool
+			detectedOK bool
+			loraLatest *dto.Metric
+			unlabeledV float64
+			err        error
+		)
+		allocs := testing.AllocsPerRun(50, func() {
+			aggVal, err = twoRanksSpec.aggregateMetric(families, aggregateSum, filter)
+			latest, _ = twoRanksSpec.getLatestMetric(families, filter)
+			maxVal, maxOK = twoRanksSpec.maxValue(families, "", filter)
+			detected, detectedOK = twoRanksSpec.hasPositiveValue(families, filter)
+			loraLatest = loraSpec.getLatestMetric(families, filter)
+			unlabeledV, _ = unlabeledSpec.aggregateMetric(families, aggregateSum, filter)
+		})
+		if err != nil {
+			t.Fatalf("aggregateMetric: %v", err)
+		}
+		if allocs != 0 {
+			t.Errorf("multi-rank readers allocs = %v, want 0", allocs)
+		}
+		if aggVal != 20 || extractValue(latest) != 20 || !maxOK || maxVal != 20 || !detected || !detectedOK || loraLatest != rank1 || unlabeledV != 1 {
+			t.Errorf("unexpected filtered values: agg=%v latest=%v max=(%d,%v) pos=(%v,%v) lora=%v unlabeled=%v",
+				aggVal, extractValue(latest), maxVal, maxOK, detected, detectedOK, loraLatest, unlabeledV)
+		}
+		if len(families["two_ranks"].GetMetric()) != 2 {
+			t.Errorf("input MetricFamily mutated: got %d series, want 2", len(families["two_ranks"].GetMetric()))
+		}
+	})
+
+	t.Run("matches_per_rank_and_keeps_unlabeled", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			filter   rankFilter
+			wantVal  float64
+			wantLora *dto.Metric
+		}{
+			{name: "keep_first", filter: rankFilter{label: "engine", value: "0"}, wantVal: 10, wantLora: rank0},
+			{name: "keep_second", filter: rankFilter{label: "engine", value: "1"}, wantVal: 20, wantLora: rank1},
+			{name: "disabled_filter", filter: rankFilter{}, wantVal: 30, wantLora: rank1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := twoRanksSpec.aggregateMetric(families, aggregateSum, tc.filter)
+				if err != nil {
+					t.Fatalf("aggregateMetric: %v", err)
+				}
+				if got != tc.wantVal {
+					t.Errorf("aggregateMetric = %v, want %v", got, tc.wantVal)
+				}
+				if gotLora := loraSpec.getLatestMetric(families, tc.filter); gotLora != tc.wantLora {
+					t.Errorf("LoRASpec.getLatestMetric = %v, want %v", gotLora, tc.wantLora)
+				}
+				if gotUnlabeled, uerr := unlabeledSpec.aggregateMetric(families, aggregateSum, tc.filter); uerr != nil || gotUnlabeled != 1 {
+					t.Errorf("unlabeled aggregateMetric = (%v, %v), want (1, nil)", gotUnlabeled, uerr)
+				}
+			})
+		}
+	})
+
+	t.Run("missing_rank_drops_labeled_and_keeps_unlabeled", func(t *testing.T) {
+		filter := rankFilter{label: "engine", value: "2"}
+		if _, err := twoRanksSpec.aggregateMetric(families, aggregateSum, filter); err == nil {
+			t.Fatal("aggregateMetric error = nil, want non-nil")
+		}
+		if _, err := twoRanksSpec.getLatestMetric(families, filter); err == nil {
+			t.Fatal("getLatestMetric error = nil, want non-nil")
+		}
+		if _, ok := twoRanksSpec.maxValue(families, "", filter); ok {
+			t.Fatal("maxValue ok = true, want false")
+		}
+		if det, ok := twoRanksSpec.hasPositiveValue(families, filter); det || !ok {
+			t.Fatalf("hasPositiveValue = (%v, %v), want (false, true)", det, ok)
+		}
+		if gotLora := loraSpec.getLatestMetric(families, filter); gotLora != nil {
+			t.Errorf("LoRASpec.getLatestMetric = %v, want nil", gotLora)
+		}
+		if gotUnlabeled, err := unlabeledSpec.aggregateMetric(families, aggregateSum, filter); err != nil || gotUnlabeled != 1 {
+			t.Errorf("unlabeled aggregateMetric = (%v, %v), want (1, nil)", gotUnlabeled, err)
+		}
+	})
+}
+
 func TestBackwardCompatibility(t *testing.T) {
 	ctx := context.Background()
 

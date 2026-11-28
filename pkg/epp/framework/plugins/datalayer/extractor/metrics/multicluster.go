@@ -196,7 +196,7 @@ func (e *MultiClusterMetricsExtractor) Extract(_ context.Context, in fwkdl.PollI
 	e.prune(endpointID(ep))
 	var errs []error
 	for _, m := range e.metrics {
-		metric, err := m.spec.getLatestMetric(in.Payload)
+		metric, err := m.spec.getLatestMetric(in.Payload, rankFilter{})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", m.key, err))
 			continue

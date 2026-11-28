@@ -78,6 +78,9 @@ type (
 		CacheOffloadDetectionSpec string `json:"cacheOffloadDetectionSpec,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
+		// RankLabelName is the label naming the data-parallel rank of a series. An endpoint
+		// with several ranks behind its port reads only the series of its own rank.
+		RankLabelName string `json:"rankLabelName,omitempty"`
 	}
 
 	customMetricConfigParams struct {
@@ -102,6 +105,10 @@ type (
 		// DefaultEngine specifies which engine to use as the default for unlabeled Pods.
 		// Can be any engine name from EngineConfigs. Defaults to "vllm".
 		DefaultEngine string `json:"defaultEngine"`
+		// FilterByRank filters scraped families to each endpoint's RankIndex using
+		// the engine's rankLabelName even when RankByHeader is false. Enable this
+		// for multi-port pools whose ranks share one scraped /metrics port.
+		FilterByRank bool `json:"filterByRank,omitempty"`
 		// EngineConfigs defines metric specifications for specific engine types.
 		// Built-in configs (vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
 		EngineConfigs []engineConfigParams `json:"engineConfigs"`
@@ -118,6 +125,7 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:          "vllm:kv_cache_usage_perc",
 		LoRASpec:             "vllm:lora_requests_info",
 		CacheInfoSpec:        "vllm:cache_config_info",
+		RankLabelName:        "engine",
 		// The CPU offload tier reports its capacity as a label of
 		// vllm:kv_offload_config_info (vLLM after v0.32.0, from the engine's first
 		// scheduler step). With TieringOffloadingSpec the label is on the
@@ -175,6 +183,7 @@ var defaultEngineConfigs = []engineConfigParams{
 		// larger than the device pool, and the host pool holds a copy of every
 		// device page, so this gauge alone is the cache's total capacity.
 		CacheTotalTokensSpec: "sglang:hicache_host_total_tokens",
+		RankLabelName:        "dp_rank",
 	},
 	{
 		Name:                "atom",
@@ -322,6 +331,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheTotalTokensLabel: engineConfig.CacheTotalTokensLabelName,
 			CacheOffloadDetection: engineConfig.CacheOffloadDetectionSpec,
 			CustomMetrics:         customMetrics,
+			RankLabel:             engineConfig.RankLabelName,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, err)
@@ -353,6 +363,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 		return nil, err
 	}
 	extractor.typedName.Name = name
+	extractor.filterByRank = params.FilterByRank
 	return extractor, nil
 }
 

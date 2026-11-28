@@ -57,6 +57,10 @@ type Mapping struct {
 	// engine has offloaded KV cache to another tier. Optional.
 	CacheOffloadDetection *Spec
 	CustomMetrics         []CustomMetric
+	// RankLabel is the label naming the data-parallel rank of a series. An
+	// endpoint with several ranks behind its port reads only the series of
+	// its own rank. Empty disables the filtering.
+	RankLabel string
 }
 
 // MappingConfig holds configuration used to build a Mapping.
@@ -75,6 +79,7 @@ type MappingConfig struct {
 	CacheTotalTokensLabel string
 	CacheOffloadDetection string
 	CustomMetrics         []CustomMetric
+	RankLabel             string
 }
 
 type metricAggregation string
@@ -237,6 +242,7 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		CacheTotalTokensLabel:  cfg.CacheTotalTokensLabel,
 		CacheOffloadDetection:  cacheOffloadDetectionSpec,
 		CustomMetrics:          customMetrics,
+		RankLabel:              cfg.RankLabel,
 	}, nil
 }
 

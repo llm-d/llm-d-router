@@ -67,7 +67,8 @@ func TestMetricsExtractionSGLangLoadsPath(t *testing.T) {
 			"name": "sglang",
 			"queuedRequestsSpec": "sglang_num_waiting_reqs",
 			"runningRequestsSpec": "sglang_num_running_reqs",
-			"kvUsageSpec": "sglang_token_usage"
+			"kvUsageSpec": "sglang_token_usage",
+			"rankLabelName": "dp_rank"
 		}]
 	}`)), nil)
 	require.NoError(t, err)
@@ -76,15 +77,39 @@ func TestMetricsExtractionSGLangLoadsPath(t *testing.T) {
 	require.NoError(t, source.AppendExtractor(ext))
 
 	ctx := context.Background()
-	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{DefaultEngineTypeLabelKey: "sglang"})
-	data, err := source.Poll(ctx, ep)
-	require.NoError(t, err)
-	require.NoError(t, ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
+	host := mustHost(t, srv.URL)
+	labels := map[string]string{DefaultEngineTypeLabelKey: "sglang"}
+	rankEndpoint := func(rank int) fwkdl.Endpoint {
+		return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+			MetricsHost:  host,
+			Labels:       labels,
+			RankIndex:    rank,
+			RankByHeader: true,
+		}, fwkdl.NewMetrics())
+	}
+	cases := []struct {
+		name        string
+		endpoint    fwkdl.Endpoint
+		wantWaiting int
+		wantRunning int
+		wantKVUsage float64
+	}{
+		// The endpoint is the whole server, so it reads every rank: the counts are sums and
+		// the usage is the maximum.
+		{name: "whole server", endpoint: newEndpointAt(host, labels), wantWaiting: 25, wantRunning: 43, wantKVUsage: 0.91},
+		{name: "rank 0 endpoint", endpoint: rankEndpoint(0), wantWaiting: 1, wantRunning: 3, wantKVUsage: 0.25},
+		{name: "rank 1 endpoint", endpoint: rankEndpoint(1), wantWaiting: 24, wantRunning: 40, wantKVUsage: 0.91},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := source.Poll(ctx, tc.endpoint)
+			require.NoError(t, err)
+			require.NoError(t, ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: tc.endpoint}))
 
-	// The endpoint is the whole server, so it reads every rank: the counts are sums and
-	// the usage is the maximum.
-	m := ep.GetMetrics()
-	assert.Equal(t, 25, m.WaitingQueueSize, "WaitingQueueSize")
-	assert.Equal(t, 43, m.RunningRequestsSize, "RunningRequestsSize")
-	assert.InDelta(t, 0.91, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
+			m := tc.endpoint.GetMetrics()
+			assert.Equal(t, tc.wantWaiting, m.WaitingQueueSize, "WaitingQueueSize")
+			assert.Equal(t, tc.wantRunning, m.RunningRequestsSize, "RunningRequestsSize")
+			assert.InDelta(t, tc.wantKVUsage, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
+		})
+	}
 }

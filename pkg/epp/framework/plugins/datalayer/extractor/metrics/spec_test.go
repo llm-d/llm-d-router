@@ -362,7 +362,7 @@ func TestGetMetric(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			metric, err := tt.spec.getLatestMetric(metricFamilies)
+			metric, err := tt.spec.getLatestMetric(metricFamilies, rankFilter{})
 			if tt.wantError {
 				assert.Error(t, err, "expected error but got nil")
 			} else {
@@ -432,7 +432,7 @@ func TestGetLoRAMetric(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			metric := tc.spec.getLatestMetric(tc.metricFamilies)
+			metric := tc.spec.getLatestMetric(tc.metricFamilies, rankFilter{})
 
 			if tc.spec == nil {
 				assert.Nil(t, metric)
@@ -560,10 +560,10 @@ func TestNoMatchingMetricErrorIncludesLabelMatchers(t *testing.T) {
 		),
 	}
 
-	_, err := spec.getLatestMetric(families)
+	_, err := spec.getLatestMetric(families, rankFilter{})
 	require.ErrorContains(t, err, "excluded label values map[tier:0:primary]")
 
-	_, err = spec.aggregateMetric(families, aggregateSum)
+	_, err = spec.aggregateMetric(families, aggregateSum, rankFilter{})
 	require.ErrorContains(t, err, "excluded label values map[tier:0:primary]")
 }
 
@@ -713,7 +713,7 @@ func TestAggregateMetric(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.spec.aggregateMetric(families, tt.agg)
+			got, err := tt.spec.aggregateMetric(families, tt.agg, rankFilter{})
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -766,7 +766,7 @@ func TestHasPositiveValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			detected, ok := tt.spec.hasPositiveValue(families)
+			detected, ok := tt.spec.hasPositiveValue(families, rankFilter{})
 			assert.Equal(t, tt.wantDetected, detected, "detected")
 			assert.Equal(t, tt.wantOK, ok, "ok")
 		})

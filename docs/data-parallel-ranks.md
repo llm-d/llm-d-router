@@ -33,6 +33,8 @@ When the scheduler picks a rank endpoint, the EPP:
 
 Requests to endpoints without ranks keep their headers and their fallbacks without ranks. The EPP drops a rank endpoint from the fallbacks of such a request, because it sets no rank for it.
 
+Each rank endpoint reads its own engine's metrics series (see the [metrics extractor](../pkg/epp/framework/plugins/datalayer/extractor/metrics/README.md#families-with-several-series)).
+
 With the [precise prefix cache](../pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache/README.md), each rank endpoint reads its own KV events.
 
 ## Global ranks across pods
@@ -45,7 +47,7 @@ Keep the KV-event and P2P base ports the same on every pod; see the wide-EP note
 
 ## SGLang
 
-SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`). SGLang's native `/generate` reads `x-override-routed-dp-rank` instead, and `sglang.api.v1` gRPC reads `routed_dp_rank` from the request body, so the EPP's `x-data-parallel-rank` header does not reach either route.
+SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`), and its metrics label each rank's series `dp_rank`, which the built-in `sglang` metrics config reads. SGLang's native `/generate` reads `x-override-routed-dp-rank` instead, and `sglang.api.v1` gRPC reads `routed_dp_rank` from the request body, so the EPP's `x-data-parallel-rank` header does not reach either route.
 
 With one HTTP server for a group that spans nodes, that server's `/metrics` covers only its own node's ranks. Its `/v1/loads?format=prometheus` covers every rank and can be the metrics source.
 
@@ -57,11 +59,10 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 
 ## Limitations
 
-- **Metrics are per pod.** Every rank endpoint of a pod reads the pod's `/metrics` without filtering by rank, so a family with one series per engine gives each rank the same value.
 - **P/D through the sidecar.** The sidecar sends the decode rank to the prefill worker.
 - **Rank count and start rank are configured, not discovered.** The EPP does not check the annotation, the file entries, or the start-rank label against the model server. A rank count above the server's sends requests to ranks the server rejects; a count below it leaves engines unscheduled.
 - **No failover for rank endpoints.** A request to a rank endpoint has one destination, so when the pod fails the proxy does not retry it on another pod.
-- **Health is per pod.** Pod readiness covers all of a pod's ranks. vLLM's Rust frontend reports one `/health` state for all its engines: it turns `503` after a fatal error in the frontend, and stays `200` while an engine that is still connected stops making progress. The [endpoint health filter](../pkg/epp/framework/plugins/scheduling/filter/endpointhealth/README.md) tracks each rank endpoint on its own, but its poll health does not see a stalled engine, because the frontend serves `/metrics`, and its response health counts only the configured failure statuses (`502` and `503` by default).
+- **Health is per pod.** Pod readiness covers all of a pod's ranks. vLLM's Rust frontend reports one `/health` state for all its engines: it turns `503` after a fatal error in the frontend, and stays `200` while an engine that is still connected stops making progress. The [endpoint health filter](../pkg/epp/framework/plugins/scheduling/filter/endpointhealth/README.md) tracks each rank endpoint on its own, but its poll health does not see a stalled engine, because the frontend serves `/metrics`, and its response health counts only the configured failure statuses (`502` and `503` by default). A stalled engine's metric series keep their last values, so the scorers do not see it as busy.
 - **One scrape per rank.** Each rank endpoint scrapes its pod's `/metrics` on its own, so a pod with N ranks is scraped N times per interval, each time for every engine's series.
 - **KV events from engines on another pod.** When one frontend serves engines on other pods (vLLM internal load balancing, SGLang with one HTTP server per group), those engines publish KV events on their own pods, which the EPP does not know. The precise prefix cache then sees only the frontend pod's ranks. vLLM v0.32.0 reports each engine's reachable publisher in `/kv_event_sources` when the publisher is configured with `tcp://*:0`; the EPP does not read it. SGLang has no per-node frontend ([sgl-project/sglang#47657](https://github.com/sgl-project/sglang/issues/47657)).
 - **Mooncake with `--data-parallel-start-rank-label`.** vLLM registers Mooncake engines under the pod-local rank, while the EPP sends the global one.

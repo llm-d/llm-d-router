@@ -58,7 +58,7 @@ func parseStringToLoRASpec(spec string) (*LoRASpec, error) {
 // present but no matching labels" are reported as a nil metric so the extractor
 // can skip the LoRA section silently rather than incrementing
 // LlmdDataLayerExtractErrorsTotal on every poll (#926).
-func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) *dto.Metric {
+func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap, rank rankFilter) *dto.Metric {
 	family, exists := families[spec.Name]
 	if !exists || len(family.GetMetric()) == 0 {
 		return nil
@@ -68,7 +68,7 @@ func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap
 	var recent float64 = -1
 
 	for _, metric := range family.GetMetric() {
-		if spec.labelsMatch(metric.GetLabel()) {
+		if rank.matches(metric) && spec.labelsMatch(metric.GetLabel()) {
 			value := extractValue(metric) // metric value is its creation timestamp
 			if value > recent {
 				recent = value
