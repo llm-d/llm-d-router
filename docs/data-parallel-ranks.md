@@ -51,7 +51,12 @@ With the P/D sidecar, one scheduling run picks the decode endpoint (primary prof
 
 ## SGLang
 
-SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`). SGLang's native `/generate` reads `x-override-routed-dp-rank` instead, and `sglang.api.v1` gRPC reads `routed_dp_rank` from the request body, so the EPP's `x-data-parallel-rank` header does not reach either route.
+SGLang Rust server (`sglang-server`) uses port-per-rank (`targetPorts`), with one HTTP and gRPC listener per DP rank. For disaggregated P/D on multi-rank SGLang pools:
+
+- **P/D sidecar:** Set `reportPrefillRank: true` on `disagg-profile-handler`. The EPP sends the selected prefill rank in `x-llm-d-prefiller-data-parallel-rank`, and the sidecar writes `disagg_prefill_dp_rank` on both prefill and decode requests.
+- **Coordinator (`sglang.api.v1` gRPC):** Set `SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK=1` on SGLang prefill pods so each rank accepts external routing without `follow_bootstrap_room conflict`. Set `reportPrefillRank: true` on `header-profile-handler` so the coordinator forwards `disagg_prefill_dp_rank` to decode.
+
+SGLang's legacy Python OpenAI `/v1/chat/completions` and `/v1/completions` routes also read `x-data-parallel-rank`. SGLang's native `/generate` reads `x-override-routed-dp-rank` instead, and `sglang.api.v1` gRPC reads `routed_dp_rank` from the request body, so the EPP's `x-data-parallel-rank` header does not reach either route. For an endpoint with several ranks behind one port, these routes get a rank only through the P/D sidecar, which writes `routed_dp_rank` (see [Routing headers](disaggregation.md#routing-headers)).
 
 With one HTTP server for a group that spans nodes, that server's `/metrics` covers only its own node's ranks. Its `/v1/loads?format=prometheus` covers every rank and can be the metrics source.
 

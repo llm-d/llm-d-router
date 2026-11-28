@@ -23,6 +23,7 @@ import (
 	"maps"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -71,6 +72,11 @@ type parameters struct {
 	// coordinator deployment sets to the same profile; both empty leave the
 	// SchedulingResult field unset for the scheduler to default.
 	PrefillProfileName string `json:"prefillProfileName"`
+	// ReportPrefillRank reports the selected prefill endpoint's RankIndex in
+	// x-llm-d-prefiller-data-parallel-rank even when RankByHeader is false.
+	// Enable this for multi-port prefill pools (such as SGLang Rust server) when
+	// the coordinator forwards disagg_prefill_dp_rank to decode.
+	ReportPrefillRank bool `json:"reportPrefillRank,omitempty"`
 }
 
 // HeaderProfileHandlerFactory defines the factory function for HeaderProfileHandler.
@@ -84,7 +90,9 @@ func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwk
 
 	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).
 		WithPrefillProfile(params.PrefillProfile).
-		WithPrefillProfileName(params.PrefillProfileName).WithName(name), nil
+		WithPrefillProfileName(params.PrefillProfileName).
+		WithReportPrefillRank(params.ReportPrefillRank).
+		WithName(name), nil
 }
 
 // NewHeaderProfileHandler trims and defaults both arguments, additionally
@@ -121,6 +129,7 @@ type HeaderProfileHandler struct {
 	defaultProfile     string
 	prefillProfile     string
 	prefillProfileName string
+	reportPrefillRank  bool
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -157,6 +166,13 @@ func (h *HeaderProfileHandler) resultPrefillProfileName() string {
 		return h.prefillProfileName
 	}
 	return h.prefillProfile
+}
+
+// WithReportPrefillRank controls whether ResponseHeader reports RankIndex in
+// x-llm-d-prefiller-data-parallel-rank for multi-port prefill endpoints.
+func (h *HeaderProfileHandler) WithReportPrefillRank(enabled bool) *HeaderProfileHandler {
+	h.reportPrefillRank = enabled
+	return h
 }
 
 // profileHeader returns the trimmed value of the profile-selecting header, or "" when
@@ -269,12 +285,21 @@ func (h *HeaderProfileHandler) ResponseHeader(_ context.Context, request *fwksch
 	if request.SchedulingResult.PrimaryProfileName != h.prefillProfile {
 		return
 	}
-	hostPort, _ := metadata.ServedEndpoint(response.ReqMetadata)
-	if hostPort == "" && targetEndpoint != nil {
-		hostPort = net.JoinHostPort(targetEndpoint.GetIPAddress(), targetEndpoint.GetPort())
+	served, _ := metadata.ServedEndpoint(response.ReqMetadata)
+	hostPort := served
+	var targetHostPort string
+	if targetEndpoint != nil {
+		targetHostPort = net.JoinHostPort(targetEndpoint.GetIPAddress(), targetEndpoint.GetPort())
+		if hostPort == "" {
+			hostPort = targetHostPort
+		}
 	}
 	if hostPort == "" {
 		return
 	}
 	response.Headers[routing.PrefillEndpointHeader] = hostPort
+	if targetEndpoint != nil && (served == "" || served == targetHostPort) &&
+		(targetEndpoint.RankByHeader || h.reportPrefillRank) && targetEndpoint.RankIndex >= 0 {
+		response.Headers[routing.PrefillDataParallelRankHeader] = strconv.Itoa(targetEndpoint.RankIndex)
+	}
 }

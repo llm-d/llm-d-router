@@ -719,3 +719,35 @@ func TestSGLangGRPCRerun_ClientDisconnectPreventsRerun(t *testing.T) {
 	require.Len(t, gw.requests(gateway.PhaseDecode), 1)
 	require.Zero(t, counterValue(t, reg, stepRerunMetric, nil))
 }
+
+func TestSGLangGRPCRerun_ClearsStalePrefillDPRank(t *testing.T) {
+	gwClient, gw := newSGLangRerunGateway(t, func(w http.ResponseWriter, _ *http.Request, _ *sglangapiv1.GenerateRequest, phase string, attempt int) {
+		switch phase {
+		case gateway.PhasePrefill:
+			if attempt == 1 {
+				w.Header().Set(routing.PrefillDataParallelRankHeader, "3")
+			}
+			writeSGLangPrefillHeaders(w, fmt.Sprintf("prefill-%d", attempt))
+			writeSGLangFrame(t, w, sglangTokenFrameItem("", 0, true))
+			w.Header().Set(grpcframe.HeaderStatus, grpcframe.StatusOK)
+		case gateway.PhaseDecode:
+			if attempt == 1 {
+				grpctest.WriteFrames(t, w, sglangStreamErrorItem(http.StatusInternalServerError, "transient decode failure", proto.Bool(true)))
+				return
+			}
+			grpctest.WriteFrames(t, w, sglangTokenFrameItem("ok", 0, true))
+		}
+	})
+
+	rec, err := runSGLangPipeline(rerunTestContext(t), t, gwClient, true, 2)
+	require.NoError(t, err)
+	items := readSGLangStreamItems(t, rec.Body.Bytes())
+	require.Len(t, items, 1)
+	require.Equal(t, "ok", items[0].GetFrame().GetText())
+
+	decodeReqs := gw.requests(gateway.PhaseDecode)
+	require.Len(t, decodeReqs, 2)
+	require.NotNil(t, decodeReqs[0].DisaggPrefillDpRank)
+	require.Equal(t, int64(3), *decodeReqs[0].DisaggPrefillDpRank)
+	require.Nil(t, decodeReqs[1].DisaggPrefillDpRank, "rerun attempt without prefill rank header must not reuse attempt 1's rank")
+}

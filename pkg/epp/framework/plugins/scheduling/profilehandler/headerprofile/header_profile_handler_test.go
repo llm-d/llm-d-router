@@ -733,4 +733,87 @@ func TestHeaderProfileResponseHeader(t *testing.T) {
 		h.ResponseHeader(context.Background(), request, nil, endpoint("10.0.0.7", "8000"))
 		h.ResponseHeader(context.Background(), request, &fwkrh.Response{}, endpoint("10.0.0.7", "8000"))
 	})
+
+	t.Run("prefill DP rank reporting", func(t *testing.T) {
+		plugin, err := HeaderProfileHandlerFactory(
+			"hp",
+			json.NewDecoder(strings.NewReader(`{"prefillProfile":"prefill","reportPrefillRank":true}`)),
+			nil,
+		)
+		if err != nil {
+			t.Fatalf("HeaderProfileHandlerFactory(reportPrefillRank=true): %v", err)
+		}
+		reportingHandler, ok := plugin.(*HeaderProfileHandler)
+		if !ok {
+			t.Fatalf("factory returned %T, want *HeaderProfileHandler", plugin)
+		}
+		defaultHandler := NewHeaderProfileHandler("", "").WithPrefillProfile("prefill")
+
+		rankCases := []struct {
+			name        string
+			handler     *HeaderProfileHandler
+			reqMetadata map[string]any
+			target      *fwkdl.EndpointMetadata
+			wantHeaders map[string]string
+		}{
+			{
+				name:        "RankByHeader endpoint reports rank 0 by default",
+				handler:     defaultHandler,
+				reqMetadata: served("10.0.0.7:8000"),
+				target:      &fwkdl.EndpointMetadata{Address: "10.0.0.7", Port: "8000", RankIndex: 0, RankByHeader: true},
+				wantHeaders: map[string]string{
+					routing.PrefillEndpointHeader:         "10.0.0.7:8000",
+					routing.PrefillDataParallelRankHeader: "0",
+				},
+			},
+			{
+				name:        "reportPrefillRank reports rank 0 on multi-port endpoint",
+				handler:     reportingHandler,
+				reqMetadata: served("10.0.0.7:30010"),
+				target:      &fwkdl.EndpointMetadata{Address: "10.0.0.7", Port: "30010", RankIndex: 0, RankByHeader: false},
+				wantHeaders: map[string]string{
+					routing.PrefillEndpointHeader:         "10.0.0.7:30010",
+					routing.PrefillDataParallelRankHeader: "0",
+				},
+			},
+			{
+				name:        "reportPrefillRank reports rank 1 on multi-port endpoint",
+				handler:     reportingHandler,
+				reqMetadata: served("10.0.0.7:30011"),
+				target:      &fwkdl.EndpointMetadata{Address: "10.0.0.7", Port: "30011", RankIndex: 1, RankByHeader: false},
+				wantHeaders: map[string]string{
+					routing.PrefillEndpointHeader:         "10.0.0.7:30011",
+					routing.PrefillDataParallelRankHeader: "1",
+				},
+			},
+			{
+				name:        "default omits rank on multi-port endpoint",
+				handler:     defaultHandler,
+				reqMetadata: served("10.0.0.7:30011"),
+				target:      &fwkdl.EndpointMetadata{Address: "10.0.0.7", Port: "30011", RankIndex: 1, RankByHeader: false},
+				wantHeaders: map[string]string{
+					routing.PrefillEndpointHeader: "10.0.0.7:30011",
+				},
+			},
+			{
+				name:        "fallback to different served endpoint omits picked endpoint rank",
+				handler:     reportingHandler,
+				reqMetadata: served("10.0.0.8:30010"),
+				target:      &fwkdl.EndpointMetadata{Address: "10.0.0.7", Port: "30011", RankIndex: 1, RankByHeader: false},
+				wantHeaders: map[string]string{
+					routing.PrefillEndpointHeader: "10.0.0.8:30010",
+				},
+			},
+		}
+		for _, tc := range rankCases {
+			t.Run(tc.name, func(t *testing.T) {
+				request := &fwksched.InferenceRequest{SchedulingResult: result("prefill")}
+				response := &fwkrh.Response{Headers: map[string]string{}, ReqMetadata: tc.reqMetadata}
+				tc.handler.ResponseHeader(context.Background(), request, response, tc.target)
+				if diff := cmp.Diff(tc.wantHeaders, response.Headers); diff != "" {
+					t.Errorf("response headers mismatch (-want +got):\n%s", diff)
+				}
+			})
+		}
+	})
 }

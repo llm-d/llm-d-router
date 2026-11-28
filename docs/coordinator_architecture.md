@@ -481,6 +481,14 @@ plugins:
     prefillProfile: prefill
 ```
 
+For multi-rank SGLang prefill pools (port-per-rank on `sglang-server`), set
+`SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK=1` on SGLang prefill pods. That setting
+makes each prefill rank register its `bootstrap_room` on the bootstrap server instead of
+rejecting requests whose room does not match `bootstrap_room % dp_size`. Set
+`reportPrefillRank: true` on `header-profile-handler` so the prefill EPP echoes
+`x-llm-d-prefiller-data-parallel-rank`. The coordinator forwards that rank as
+`disagg_prefill_dp_rank` on the decode request so decode skips the bootstrap lookup.
+
 The `prefill` step reads the header, strips it from client responses, and fails the
 request before decode is sent when a prefill response omits it. See the
 [header-profile-handler README](../pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile/README.md#reporting-the-prefill-pod-to-the-coordinator).
