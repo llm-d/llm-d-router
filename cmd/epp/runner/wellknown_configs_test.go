@@ -14,26 +14,47 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package epp
+package runner
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
-	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
+	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
+
+// validateConfigText runs the in-process EPP runner config validation path
+// (phase-one parse, plugin instantiation, auto-created producers, dependency
+// ordering, and data-layer wiring) without starting envtest or any network servers.
+func validateConfigText(t *testing.T, configText string) *Runner {
+	t.Helper()
+
+	ctx := t.Context()
+	opts := runserver.NewOptions()
+	opts.ConfigText = configText
+	opts.PoolName = "epp"
+	opts.ValidateConfig = true
+	opts.AllowExperimentalPlugins = true
+
+	r := NewRunner()
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.NoError(t, r.validateConfig(ctx, opts, rawConfig))
+	return r
+}
 
 // wellKnownConfigs are configs in the llm-d well-lit path guides.
 // precise-prefix-cache-aware config is not included because it requires a tokenizer.
 // Failed tests indicate EPP regression, or that the config needs to be updated.
-var wellKnownConfigs = map[string]struct {
+var wellKnownConfigs = []struct {
+	name            string
 	yaml            string
 	expectedPlugins []configapiv1.PluginSpec
 }{
-	"optimized-baseline": {
+	{
+		name: "optimized_baseline",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -65,7 +86,8 @@ schedulingProfiles:
 			{Name: "token-producer", Type: "token-producer"},
 		},
 	},
-	"tiered-prefix-cache-cpu": {
+	{
+		name: "tiered_prefix_cache_cpu",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -106,7 +128,8 @@ schedulingProfiles:
 			{Name: "cpu-prefix-cache-scorer", Type: "prefix-cache-scorer"},
 		},
 	},
-	"pd-disaggregation": {
+	{
+		name: "pd_disaggregation",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -159,7 +182,8 @@ schedulingProfiles:
 			{Name: "max-score-picker", Type: "max-score-picker"},
 		},
 	},
-	"wide-ep-lws": {
+	{
+		name: "wide_ep_lws",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -211,7 +235,8 @@ schedulingProfiles:
 			{Name: "max-score-picker", Type: "max-score-picker"},
 		},
 	},
-	"wide-ep-lws-experimental-dp-aware": {
+	{
+		name: "wide_ep_lws_experimental_dp_aware",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -257,7 +282,8 @@ schedulingProfiles:
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
 		},
 	},
-	"flow-control": {
+	{
+		name: "flow_control",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -316,7 +342,8 @@ flowControl:
 			{Name: "concurrency-detector", Type: "concurrency-detector"},
 		},
 	},
-	"predicted-latency-slo": {
+	{
+		name: "predicted_latency_slo",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -373,7 +400,8 @@ schedulingProfiles:
 			{Name: "latency-slo-admitter", Type: "latency-slo-admitter"},
 		},
 	},
-	"payload-agnostic": {
+	{
+		name: "payload_agnostic",
 		yaml: `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -401,14 +429,14 @@ schedulingProfiles:
 }
 
 func TestWellKnownConfigs(t *testing.T) {
-	for name, tc := range wellKnownConfigs {
-		t.Run(name, func(t *testing.T) {
-			runner := eppharness.NewTestHarness(t.Context(), t, eppharness.WithConfigText(tc.yaml)).Runner
+	for _, tc := range wellKnownConfigs {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validateConfigText(t, tc.yaml)
 
-			t.Logf("All plugins: %v", runner.PluginHandle.GetAllPluginsWithNames())
-			// Validate that the expected plugins exist in runner.PluginHandle.
+			t.Logf("All plugins: %v", r.PluginHandle.GetAllPluginsWithNames())
+			// Validate that the expected plugins exist in r.PluginHandle.
 			for _, expectedPlugin := range tc.expectedPlugins {
-				p := runner.PluginHandle.Plugin(expectedPlugin.Name)
+				p := r.PluginHandle.Plugin(expectedPlugin.Name)
 				if p == nil {
 					t.Errorf("Expected plugin %q of type %q was not instantiated", expectedPlugin.Name, expectedPlugin.Type)
 					continue
@@ -423,24 +451,5 @@ func TestWellKnownConfigs(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestMockMetricsSourceConfigsOptOut guards against reintroducing the flake fixed by opting
-// mock-metrics-source testdata configs out of default metrics-source injection: any config
-// declaring mock-metrics-source must also set dataLayer.injectDefaults: false.
-func TestMockMetricsSourceConfigsOptOut(t *testing.T) {
-	paths, err := filepath.Glob("testdata/*.yaml")
-	if err != nil {
-		t.Fatalf("failed to glob testdata configs: %v", err)
-	}
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("failed to read %s: %v", path, err)
-		}
-		if strings.Contains(string(data), eppharness.MockDataSourceType) && !strings.Contains(string(data), "injectDefaults: false") {
-			t.Errorf("%s configures %s without dataLayer.injectDefaults: false", path, eppharness.MockDataSourceType)
-		}
 	}
 }

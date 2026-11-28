@@ -1,0 +1,20 @@
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: approx-prefix-cache-producer
+  parameters:
+    maxPrefixTokensToMatch: 16384
+    lruCapacityPerServer: 256
+- type: prefix-cache-scorer
+- type: encode-filter
+- type: prefill-filter
+- type: decode-filter
+- type: max-score-picker
+- type: disagg-profile-handler
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
