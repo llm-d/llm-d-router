@@ -34,6 +34,11 @@ on:
         required: false
         type: string
         default: ''
+      # Environment for the jobs that push images. Empty means no environment.
+      environment:
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -43,6 +48,7 @@ permissions:
 jobs:
   build-epp:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       packages: write
@@ -93,6 +99,7 @@ jobs:
 
   build-sidecar:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       packages: write
@@ -141,6 +148,7 @@ jobs:
 
   build-coordinator:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       packages: write
@@ -193,6 +201,7 @@ jobs:
   # Not needed for push-helm-charts because the builder is unrelated to chart publishing.
   build-builder:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     timeout-minutes: 60
     permissions:
       contents: read
