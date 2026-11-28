@@ -19,16 +19,19 @@ package duration
 import (
 	"math"
 	"testing"
+	"time"
 )
 
-func TestValidateSeconds(t *testing.T) {
+func TestFromSeconds(t *testing.T) {
 	tests := []struct {
 		name    string
 		seconds float64
+		want    time.Duration
 		wantErr string
 	}{
-		{name: "one second", seconds: 1},
-		{name: "one nanosecond", seconds: 1e-9},
+		{name: "one second", seconds: 1, want: time.Second},
+		{name: "one nanosecond", seconds: 1e-9, want: time.Nanosecond},
+		{name: "fractional seconds", seconds: 2.5, want: 2500 * time.Millisecond},
 		{name: "zero", seconds: 0, wantErr: "sweep must be > 0, got 0"},
 		{name: "negative", seconds: -1, wantErr: "sweep must be > 0, got -1"},
 		{name: "below one nanosecond", seconds: 1e-10, wantErr: "sweep 1e-10 is too small to represent as a duration"},
@@ -37,15 +40,15 @@ func TestValidateSeconds(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateSeconds("sweep", tt.seconds)
+			got, err := FromSeconds("sweep", tt.seconds)
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("ValidateSeconds(%v) = %v, want nil", tt.seconds, err)
+				if err != nil || got != tt.want {
+					t.Fatalf("FromSeconds(%v) = %v, %v, want %v, nil", tt.seconds, got, err, tt.want)
 				}
 				return
 			}
-			if err == nil || err.Error() != tt.wantErr {
-				t.Fatalf("ValidateSeconds(%v) = %v, want %q", tt.seconds, err, tt.wantErr)
+			if err == nil || err.Error() != tt.wantErr || got != 0 {
+				t.Fatalf("FromSeconds(%v) = %v, %v, want 0, %q", tt.seconds, got, err, tt.wantErr)
 			}
 		})
 	}

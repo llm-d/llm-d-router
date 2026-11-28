@@ -62,18 +62,26 @@ type Parameters struct {
 	MaxIdentityBytes int `json:"maxIdentityBytes,omitempty"`
 }
 
-func (p Parameters) validate() error {
+// evictionDurations returns the eviction TTL and sweep interval. A zero TTL
+// disables eviction.
+func (p Parameters) evictionDurations() (ttl, sweep time.Duration, err error) {
 	if p.EvictionTTLSeconds < 0 {
-		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", p.EvictionTTLSeconds)
+		return 0, 0, fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", p.EvictionTTLSeconds)
 	}
 	if p.EvictionTTLSeconds > 0 {
-		if err := duration.ValidateSeconds("evictionTtlSeconds", p.EvictionTTLSeconds); err != nil {
-			return err
+		if ttl, err = duration.FromSeconds("evictionTtlSeconds", p.EvictionTTLSeconds); err != nil {
+			return 0, 0, err
 		}
 	}
-	if err := duration.ValidateSeconds("evictionSweepSeconds", p.EvictionSweepSeconds); err != nil {
-		return err
+	if sweep, err = duration.FromSeconds("evictionSweepSeconds", p.EvictionSweepSeconds); err != nil {
+		return 0, 0, err
 	}
+	return ttl, sweep, nil
+}
+
+// validate checks the parameters other than the eviction durations, which
+// evictionDurations checks.
+func (p Parameters) validate() error {
 	if p.MaxSessions < 0 {
 		return fmt.Errorf("maxSessions must be >= 0, got %d", p.MaxSessions)
 	}
@@ -117,6 +125,10 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", SessionStateProducerType, name, err)
 		}
 	}
+	ttl, sweep, err := params.evictionDurations()
+	if err != nil {
+		return nil, fmt.Errorf("%s plugin %q: %w", SessionStateProducerType, name, err)
+	}
 	if err := params.validate(); err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", SessionStateProducerType, name, err)
 	}
@@ -124,8 +136,8 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 	p := &Producer{
 		typedName:             fwkplugin.TypedName{Type: SessionStateProducerType, Name: name},
 		dk:                    SessionStateDataKey.WithNonEmptyProducerName(name),
-		evictionTTL:           time.Duration(params.EvictionTTLSeconds * float64(time.Second)),
-		evictionSweepInterval: time.Duration(params.EvictionSweepSeconds * float64(time.Second)),
+		evictionTTL:           ttl,
+		evictionSweepInterval: sweep,
 		maxIdentityBytes:      params.MaxIdentityBytes,
 	}
 	p.registry.maxSessions = params.MaxSessions
