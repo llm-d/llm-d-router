@@ -530,7 +530,9 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 			wantCachedCount:    40,
 			extraHeaders: func(prefillAddr string) map[string]string {
 				return map[string]string{
-					routing.KVCachePrefillHeader: net.JoinHostPort(routing.ExtractHost(prefillAddr), strconv.Itoa(p2pTierPort)),
+					routing.KVCachePrefillHeader:          net.JoinHostPort(routing.ExtractHost(prefillAddr), strconv.Itoa(p2pTierPort)),
+					routing.DataParallelRankHeader:        "0",
+					routing.PrefillDataParallelRankHeader: "2",
 				}
 			},
 			verifyLegs: func(t *testing.T, prefillCall, decodeCall grpctest.VLLMCall, prefillAddr string) {
@@ -543,6 +545,8 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 				assert.Equal(t, rd["kv_request_id"], rp["kv_request_id"])
 				assert.Equal(t, routing.ExtractHost(prefillAddr), rp["remote_host"])
 				assert.Equal(t, float64(p2pTierPort), rp["remote_port"])
+				assert.Equal(t, "2", prefillCall.Header.Get(routing.DataParallelRankHeader))
+				assert.Equal(t, "0", decodeCall.Header.Get(routing.DataParallelRankHeader))
 			},
 		},
 		{
@@ -550,9 +554,17 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 			connector:          constants.KVConnectorSharedStorage,
 			prefillCachedCount: 28,
 			wantCachedCount:    28,
+			extraHeaders: func(string) map[string]string {
+				return map[string]string{
+					routing.DataParallelRankHeader:        "1",
+					routing.PrefillDataParallelRankHeader: routing.NoDataParallelRank,
+				}
+			},
 			verifyLegs: func(t *testing.T, prefillCall, decodeCall grpctest.VLLMCall, _ string) {
 				assert.Nil(t, prefillCall.Request.GetKv().GetKvTransferParams())
 				assert.Nil(t, decodeCall.Request.GetKv().GetKvTransferParams())
+				assert.Empty(t, prefillCall.Header.Get(routing.DataParallelRankHeader))
+				assert.Equal(t, "1", decodeCall.Header.Get(routing.DataParallelRankHeader))
 			},
 		},
 	}
@@ -1017,7 +1029,11 @@ func TestVLLMGRPCECDisaggregationConnectors(t *testing.T) {
 				}
 			}
 
-			mdPairs := []string{routing.EncoderEndpointsHeader, encSrv0.Addr() + "," + encSrv1.Addr()}
+			// The EPP sets the rank of the decode endpoint on the client request.
+			mdPairs := []string{
+				routing.EncoderEndpointsHeader, encSrv0.Addr() + "," + encSrv1.Addr(),
+				routing.DataParallelRankHeader, "3",
+			}
 			if tc.withPrefill {
 				mdPairs = append(mdPairs, routing.PrefillEndpointHeader, prefillSrv.Addr())
 			}
@@ -1037,6 +1053,11 @@ func TestVLLMGRPCECDisaggregationConnectors(t *testing.T) {
 
 			e0Calls := encSrv0.Calls()
 			e1Calls := encSrv1.Calls()
+			// An encoder that got the decode rank would run the request on that rank
+			// of its own, or reject a rank it does not have.
+			for _, call := range append(append([]grpctest.VLLMCall{}, e0Calls...), e1Calls...) {
+				assert.Empty(t, call.Header.Get(routing.DataParallelRankHeader), "encoder request carries the decode rank")
+			}
 			if tc.useFeatures {
 				// Preprocessed features fan out one unary sub-request per item across encoders.
 				require.Len(t, e0Calls, 1)
@@ -1068,6 +1089,7 @@ func TestVLLMGRPCECDisaggregationConnectors(t *testing.T) {
 			dCalls := decodeSrv.Calls()
 			require.Len(t, dCalls, 1)
 			assert.True(t, dCalls[0].Stream)
+			assert.Equal(t, "3", dCalls[0].Header.Get(routing.DataParallelRankHeader))
 
 			if tc.withPrefill {
 				pCalls := prefillSrv.Calls()

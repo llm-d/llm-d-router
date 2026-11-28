@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
@@ -598,6 +599,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 
 	// Prefill header
 	routing.DeleteRoutingHeader(request.Headers, routing.PrefillEndpointHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader)
 	prefillProfileRunResult := schedulingResult.ProfileResults[h.prefillProfile]
 	switch {
 	case prefillProfileRunResult == nil:
@@ -614,6 +616,12 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
 		routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, prefillHostPort)
+		switch {
+		case targetPod.RankByHeader:
+			routing.SetRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader, strconv.Itoa(targetPod.RankIndex))
+		case hasRankEndpoint(schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]):
+			routing.SetRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader, routing.NoDataParallelRank)
+		}
 		span.SetAttributes(
 			semconv.LLMDEPPPDDisaggregationUsed(true),
 			semconv.LLMDEPPPDPrefillPodAddress(targetPod.Address),
@@ -652,4 +660,8 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		semconv.LLMDEPPEncodeEndpoints(strings.Join(encodeHostPorts, ",")),
 	)
 	return nil
+}
+
+func hasRankEndpoint(res *scheduling.ProfileRunResult) bool {
+	return res != nil && len(res.TargetEndpoints) > 0 && res.TargetEndpoints[0].GetMetadata().RankByHeader
 }

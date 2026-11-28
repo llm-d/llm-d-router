@@ -57,6 +57,15 @@ const (
 	// for a model server that runs several ranks behind one port.
 	DataParallelRankHeader = "x-data-parallel-rank"
 
+	// PrefillDataParallelRankHeader carries the data-parallel rank of the Prefill worker
+	// in PrefillEndpointHeader when that worker is a rank endpoint, or
+	// NoDataParallelRank when only the Decode worker is a rank endpoint.
+	PrefillDataParallelRankHeader = "x-llm-d-prefiller-data-parallel-rank"
+
+	// NoDataParallelRank tells the sidecar to remove DataParallelRankHeader from
+	// the prefill request when only the decode worker is a rank endpoint.
+	NoDataParallelRank = "none"
+
 	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
 	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
 

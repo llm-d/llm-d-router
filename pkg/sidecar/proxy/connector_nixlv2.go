@@ -315,6 +315,7 @@ func (s *Server) runNIXLV2Serial(
 	prefillStart := time.Now()
 
 	preq := r.Clone(pCtx)
+	setPrefillDPRank(preq)
 	preq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
 	// KV metadata uses global ranks; HTTP dispatch uses pod-local ranks.
@@ -719,6 +720,7 @@ func (s *Server) executeNIXLV2WriteParallel(
 		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	preq := r.Clone(pCtx)
+	setPrefillDPRank(preq)
 	preq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
 		preq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(dpRank))

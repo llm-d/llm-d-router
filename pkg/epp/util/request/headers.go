@@ -70,6 +70,7 @@ var (
 		routing.PrefillEndpointHeader,
 		routing.KVCachePrefillHeader,
 		routing.KVCacheSourceHeader,
+		routing.PrefillDataParallelRankHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
 	)...)
