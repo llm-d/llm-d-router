@@ -208,7 +208,7 @@ Each endpoint carries a compatibility key in a label (`llm-d.ai/kv-compat-key` b
 1. If no endpoint in the pool carries a key, ask the wrapped decider.
 2. If the decode endpoint has no key, return false.
 3. If a prefill-capable endpoint exists whose key the decode endpoint accepts, ask the wrapped decider.
-4. Otherwise return false, so the request is served decode-only. Set `rejectOnIncompatible: true` for strict P/D deployments where decode pods cannot run prefill; the decider forces disaggregation instead, and the prefill profile returns an explicit error.
+4. Otherwise return false, so the request is served decode-only. Set `rejectOnIncompatible: true` for strict P/D deployments where decode pods cannot run prefill; the decider forces disaggregation instead, and the prefill profile returns an explicit error. `rejectOnIncompatible` requires `kv-compat-filter` in the prefill profile; without the filter, forced disaggregation picks any prefill endpoint, including an incompatible one.
 
 The decider counts all prefill-capable endpoints in the pool, not the subset that survives other filters in the prefill profile. A compatible endpoint that is removed by a later filter (load, resource limits) can cause the prefill profile to produce no result even though the decider allowed disaggregation. This is a general property of the plugin pipeline: no decider can predict what downstream filters will remove.
 

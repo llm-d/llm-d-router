@@ -43,7 +43,8 @@ const (
 	// exchange KV with the decode endpoint picked earlier in the cycle.
 	KVCompatFilterPluginType = "kv-compat-filter"
 
-	defaultKVCompatKeyLabel          = "llm-d.ai/kv-compat-key"
+	// DefaultKVCompatKeyLabel is the default endpoint label holding the KV compatibility key.
+	DefaultKVCompatKeyLabel          = "llm-d.ai/kv-compat-key"
 	defaultKVCompatAcceptLabelPrefix = "accept.kv-compat.llm-d.ai/"
 	kvCompatPairSeparator            = "->"
 )
@@ -98,7 +99,7 @@ func newKVCompatRule(p KVCompatPDDeciderParameters) (kvCompatRule, error) {
 		approved:     map[string][]string{},
 	}
 	if r.keyLabel == "" {
-		r.keyLabel = defaultKVCompatKeyLabel
+		r.keyLabel = DefaultKVCompatKeyLabel
 	}
 	switch r.acceptPrefix {
 	case "":
@@ -163,6 +164,7 @@ type kvCompatEntry struct {
 var (
 	_ deciderPlugin           = &KVCompatPDDecider{}
 	_ prefixMatchInfoConsumer = &KVCompatPDDecider{}
+	_ plugin.ProducerPlugin   = &KVCompatPDDecider{}
 	_ fwkdl.EndpointExtractor = &KVCompatPDDecider{}
 	_ fwkdl.Registrant        = &KVCompatPDDecider{}
 )
@@ -245,18 +247,34 @@ func (d *KVCompatPDDecider) prefixMatchInfoDataKey() plugin.DataKey {
 	return attrprefix.PrefixCacheMatchInfoDataKey
 }
 
+// Produces forwards the wrapped decider's produced data keys so the profile handler's request
+// scope includes them.
+func (d *KVCompatPDDecider) Produces() map[plugin.DataKey]any {
+	if producer, ok := d.decider.(plugin.ProducerPlugin); ok {
+		return producer.Produces()
+	}
+	return nil
+}
+
+// Consumes is not forwarded: the profile handler already declares TokenizedPromptDataKey and
+// PrefixCacheMatchInfoDataKey as Required in its own Consumes(), and forwarding them here would
+// register the wrapper as a standalone consumer in the data graph, triggering an execution-order
+// conflict with the token-producer. The handler's merge loop (lines 310-315 of
+// disagg_profile_handler.go) will pick up any future decider dependencies that go beyond the
+// handler's hard-coded set.
+
 func (d *KVCompatPDDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {
 	if endpoint == nil || endpoint.GetMetadata() == nil {
 		return false
 	}
 	if !d.hasCompatiblePrefill(endpoint.GetMetadata().Labels) {
-		recordKVCompatDeclined(d.typedName.Name)
 		logger := log.FromContext(ctx)
 		if d.rejectOnIncompatible {
 			logger.V(logging.DEFAULT).Info("kv-compat-pd-decider: no compatible prefill, forcing disaggregation so the prefill profile fails explicitly",
 				"decode", endpoint.GetMetadata().ID)
 			return true
 		}
+		recordKVCompatDeclined(d.typedName.Name)
 		logger.V(logging.DEBUG).Info("kv-compat-pd-decider: no compatible prefill, falling back to decode-only",
 			"decode", endpoint.GetMetadata().ID)
 		return false

@@ -52,7 +52,7 @@ func (f *fakeDecider) disaggregate(context.Context, *scheduling.InferenceRequest
 func kvEndpoint(name, role, key string, extra map[string]string) scheduling.Endpoint {
 	labels := map[string]string{bylabel.RoleLabel: role}
 	if key != "" {
-		labels[defaultKVCompatKeyLabel] = key
+		labels[DefaultKVCompatKeyLabel] = key
 	}
 	for k, v := range extra {
 		labels[k] = v

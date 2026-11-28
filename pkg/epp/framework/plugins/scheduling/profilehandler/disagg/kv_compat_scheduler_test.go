@@ -44,7 +44,7 @@ import (
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
-const kvCompatKeyLabel = "llm-d.ai/kv-compat-key"
+const kvCompatKeyLabel = disagg.DefaultKVCompatKeyLabel
 
 func kvCompatSchedEndpoint(name, role, key string) (fwksched.Endpoint, fwkdl.Endpoint) {
 	md := &fwkdl.EndpointMetadata{
