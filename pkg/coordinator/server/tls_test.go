@@ -19,10 +19,15 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -34,7 +39,6 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 
-	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -42,22 +46,48 @@ import (
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
-// writeSelfSignedCert writes a tls.crt and tls.key pair into dir and returns
-// the DER bytes of the certificate.
-func writeSelfSignedCert(t *testing.T, dir string) []byte {
+// writeTestCert writes a fresh ECDSA P-256 tls.crt and tls.key pair into dir
+// and returns the DER bytes of the certificate. Tests that need a certificate
+// but do not exercise the self-signed fallback or RSA cipher suites use this:
+// a P-256 key takes microseconds to generate, where the fallback's RSA-4096 key
+// can take over a second under -race.
+func writeTestCert(t *testing.T, dir string) []byte {
 	t.Helper()
 
-	cert, err := tlsutil.CreateSelfSignedTLSCertificate(serverLog)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err)
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{Organization: []string{"llm-d test"}},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	require.NoError(t, err)
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
-	keyBytes, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(key)
 	require.NoError(t, err)
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.crt"), certPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"), keyPEM, 0o600))
-	return cert.Certificate[0]
+	return der
+}
+
+// testCertDir returns a temporary cert-path holding a fresh ECDSA key pair.
+func testCertDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	writeTestCert(t, dir)
+	return dir
 }
 
 // startServe starts a server for cfg on a free port and returns its address
@@ -198,7 +228,7 @@ func TestServe_SelfSignedTLSWithoutCertPath(t *testing.T) {
 
 func TestServe_TLSServesCertFromCertPath(t *testing.T) {
 	certDir := t.TempDir()
-	want := writeSelfSignedCert(t, certDir)
+	want := writeTestCert(t, certDir)
 
 	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: certDir})
 
@@ -207,12 +237,12 @@ func TestServe_TLSServesCertFromCertPath(t *testing.T) {
 
 func TestServe_TLSReloadsRotatedCert(t *testing.T) {
 	certDir := t.TempDir()
-	first := writeSelfSignedCert(t, certDir)
+	first := writeTestCert(t, certDir)
 
 	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: certDir})
 	require.Equal(t, first, servedCert(t, addr))
 
-	second := writeSelfSignedCert(t, certDir)
+	second := writeTestCert(t, certDir)
 	require.NotEqual(t, first, second, "rotation test needs a distinct second certificate")
 
 	require.Eventually(t, func() bool {
@@ -234,7 +264,7 @@ func servedCert(t *testing.T, addr string) []byte {
 }
 
 func TestServe_TLSMinVersionRejectsOlderClient(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS13"})
+	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: testCertDir(t), TLSMinVersion: "VersionTLS13"})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
 		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
@@ -338,7 +368,7 @@ func TestParseTLSProfile_RejectsBelowFloor(t *testing.T) {
 }
 
 func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureServing: true})
+	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: testCertDir(t)})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
 		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
@@ -374,6 +404,7 @@ func TestServe_TLSWithConfiguredCipherSuites(t *testing.T) {
 func TestServe_TLS13MinVersionSkipsHTTP2CipherRequirement(t *testing.T) {
 	addr := serve(t, config.ServerConfig{
 		SecureServing:   true,
+		CertPath:        testCertDir(t),
 		TLSMinVersion:   "VersionTLS13",
 		TLSCipherSuites: []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
 	})
