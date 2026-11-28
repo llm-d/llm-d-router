@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -610,13 +611,64 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 		_, _ = io.CopyN(io.Discard, httpResp.Body, maxErrorResponseDrainBytes)
 		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode}
 	}
-	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
+	if err := decodeRenderResponse(httpResp, out); err != nil {
 		// Connection failures can surface after successful response headers.
 		var networkErr net.Error
 		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 		return retryable, &renderPayloadError{summary: errRenderDecode, cause: err}
 	}
 	return false, nil
+}
+
+// maxPooledRenderResponseBytes is the largest response buffer returned to the pool, so a buffer
+// grown by an unusually large response is not held between renders.
+const maxPooledRenderResponseBytes = 16 << 20
+
+var renderResponseBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// decodeRenderResponse reads the body into a pooled buffer sized from Content-Length before
+// unmarshaling, because json.Decoder grows its buffer by doubling to hold the whole value.
+func decodeRenderResponse(httpResp *http.Response, out any) error {
+	buf := renderResponseBuffers.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		if buf.Cap() <= maxPooledRenderResponseBytes {
+			renderResponseBuffers.Put(buf)
+		}
+	}()
+	if n := httpResp.ContentLength; n > 0 {
+		// ReadFrom keeps MinRead bytes free for the read that returns EOF.
+		buf.Grow(int(min(n, maxPooledRenderResponseBytes)) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(httpResp.Body); err != nil {
+		return err
+	}
+	if buf.Len() == 0 {
+		return io.EOF
+	}
+	// Unmarshal appends to the existing slice, so one allocation holds every token ID.
+	if resp, ok := out.(*renderResponse); ok && resp.TokenIDs == nil {
+		if n := tokenIDsLen(buf.Bytes()); n > 0 {
+			resp.TokenIDs = make([]uint32, 0, n)
+		}
+	}
+	return json.Unmarshal(buf.Bytes(), out)
+}
+
+var tokenIDsKey = []byte(`"token_ids":[`)
+
+// tokenIDsLen counts the elements of the first token_ids array in a compact JSON body.
+func tokenIDsLen(body []byte) int {
+	start := bytes.Index(body, tokenIDsKey)
+	if start < 0 {
+		return 0
+	}
+	ids := body[start+len(tokenIDsKey):]
+	end := bytes.IndexByte(ids, ']')
+	if end <= 0 {
+		return 0
+	}
+	return bytes.Count(ids[:end], []byte{','}) + 1
 }
 
 // isRetryableRenderStatus reports whether a different endpoint may succeed.
