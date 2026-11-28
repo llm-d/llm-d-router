@@ -18,11 +18,16 @@ package tracing
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
@@ -34,6 +39,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/version"
 )
 
@@ -563,4 +569,125 @@ func TestNoneExporterReportsSelection(t *testing.T) {
 		}
 	}
 	t.Errorf("logged %q, want the selected exporter type reported", logged)
+}
+
+// An exporter that cannot reach its collector fails the same way on every batch.
+// The handler reports each distinct error once at Error, then repeats of it at most
+// once per repeatedErrorInterval at Info with the count it held back.
+func TestErrorHandlerThrottlesRepeatedErrors(t *testing.T) {
+	const (
+		refused  = "dial tcp 127.0.0.1:4317: connect: connection refused"
+		refused6 = "dial tcp [::1]:4317: connect: connection refused"
+		sampler  = "unsupported OTEL_TRACES_SAMPLER"
+	)
+	errLine := func(err string) string { return fmt.Sprintf("error %q %s", "trace error occurred", err) }
+	repeatLine := func(err string, n int) string {
+		return fmt.Sprintf("info(v%d) %q %s suppressed=%d", logging.DEFAULT, "trace error still occurring", err, n)
+	}
+	type event struct {
+		err   string
+		after time.Duration // since the first event
+	}
+
+	cases := []struct {
+		name   string
+		events []event
+		want   []string
+	}{
+		{
+			name:   "first error logs at error",
+			events: []event{{refused, 0}},
+			want:   []string{errLine(refused)},
+		},
+		{
+			name:   "repeats inside the interval are held back",
+			events: []event{{refused, 0}, {refused, time.Second}, {refused, time.Minute}},
+			want:   []string{errLine(refused)},
+		},
+		{
+			name: "a repeat after the interval logs at info with the held back count",
+			events: []event{
+				{refused, 0}, {refused, time.Second}, {refused, time.Minute},
+				{refused, repeatedErrorInterval},
+			},
+			want: []string{errLine(refused), repeatLine(refused, 2)},
+		},
+		{
+			name: "the interval restarts after a repeat is logged",
+			events: []event{
+				{refused, 0}, {refused, time.Minute}, {refused, repeatedErrorInterval},
+				{refused, repeatedErrorInterval + time.Minute},
+				{refused, 2*repeatedErrorInterval + time.Second},
+			},
+			want: []string{
+				errLine(refused),
+				repeatLine(refused, 1),
+				repeatLine(refused, 1),
+			},
+		},
+		{
+			name:   "an error that stops for the interval logs at error again",
+			events: []event{{refused, 0}, {refused, time.Second}, {refused, repeatedErrorInterval + time.Second}},
+			want:   []string{errLine(refused), errLine(refused)},
+		},
+		{
+			name:   "a different error logs at error right away",
+			events: []event{{refused, 0}, {sampler, time.Second}},
+			want:   []string{errLine(refused), errLine(sampler)},
+		},
+		{
+			// localhost resolves to both loopback addresses, so the dial error
+			// alternates between them against an absent collector.
+			name: "alternating errors are each throttled",
+			events: []event{
+				{refused, 0}, {refused6, time.Second}, {refused, 2 * time.Second},
+				{refused6, 3 * time.Second}, {refused, repeatedErrorInterval},
+			},
+			want: []string{
+				errLine(refused),
+				errLine(refused6),
+				repeatLine(refused, 1),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			logger := funcr.NewJSON(func(obj string) {
+				// funcr sets "level" only on Info entries, so its absence marks an
+				// Error call: the only kind a zap logger attaches a stack trace to.
+				var entry struct {
+					Level      *int   `json:"level"`
+					Msg        string `json:"msg"`
+					Error      string `json:"error"`
+					Suppressed *int   `json:"suppressed"`
+				}
+				if err := json.Unmarshal([]byte(obj), &entry); err != nil {
+					t.Fatalf("decode log entry %q: %v", obj, err)
+				}
+				if entry.Level == nil {
+					got = append(got, fmt.Sprintf("error %q %s", entry.Msg, entry.Error))
+					return
+				}
+				suppressed := "<missing>"
+				if entry.Suppressed != nil {
+					suppressed = strconv.Itoa(*entry.Suppressed)
+				}
+				got = append(got, fmt.Sprintf("info(v%d) %q %s suppressed=%s", *entry.Level, entry.Msg, entry.Error, suppressed))
+			}, funcr.Options{Verbosity: logging.DEBUG})
+
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var now time.Time
+			h := &errorHandler{logger: logger, now: func() time.Time { return now }}
+			for _, e := range tc.events {
+				now = start.Add(e.after)
+				h.Handle(errors.New(e.err))
+			}
+
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("logged\n  %q\nwant\n  %q", got, tc.want)
+			}
+		})
+	}
 }
