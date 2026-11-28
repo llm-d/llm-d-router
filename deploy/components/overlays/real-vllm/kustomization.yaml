@@ -1,0 +1,47 @@
+# ------------------------------------------------------------------------------
+# Real vLLM Overlay
+#
+# Adds real-vLLM-specific configuration to vLLM deployments:
+#   - --io-transfer-config on all instances.
+#
+# Uses JSON patches (op: add) to INSERT into args arrays without replacing
+# them, avoiding conflicts with scenario-specific strategic merge patches.
+#
+# Usage: include as a Kustomize component in scenario overlays:
+#   components:
+#   - ../../../components/overlays/real-vllm/
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+
+patches:
+# --- Preprocessing deployment (PRE_DEPLOYMENT_NAME) ---
+# Adds --io-transfer-config for IO data transfer.
+- target:
+    kind: Deployment
+    name: ${PRE_DEPLOYMENT_NAME}
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --io-transfer-config=${PRE_IO_TRANSFER_CONFIG}
+
+# --- Inference deployment (INF_DEPLOYMENT_NAME) ---
+# Adds --io-transfer-config for IO data transfer.
+- target:
+    kind: Deployment
+    name: ${INF_DEPLOYMENT_NAME}
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --io-transfer-config=${INF_IO_TRANSFER_CONFIG}
+
+# --- Postprocessing deployment (POST_DEPLOYMENT_NAME) ---
+# Adds --io-transfer-config for IO data transfer.
+- target:
+    kind: Deployment
+    name: ${POST_DEPLOYMENT_NAME}
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --io-transfer-config=${POST_IO_TRANSFER_CONFIG}

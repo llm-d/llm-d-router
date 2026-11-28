@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------------------
+# Minimal Inference Gateway
+#
+# This provides a working stack for a minimal inference gateway, including the
+# Envoy proxy and the Endpoint Picker (EPP) attached to it.
+#
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- service-accounts.yaml
+- rbac.yaml
+- envoy-cm.yaml
+- services.yaml
+- deployment.yaml

@@ -41,6 +41,7 @@ const (
 	PathMessages          = "/v1/messages"
 	PathVLLMGenerate      = "/inference/v1/generate"
 	PathSGLangGenerate    = "/generate"
+	PathPooling           = "/pooling"
 )
 
 // APISurface identifies a generation API for observability. Its zero value is unknown.

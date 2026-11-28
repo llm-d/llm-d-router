@@ -42,4 +42,10 @@ const (
 	// vLLM's ECMooncakeConnector, where the encoder pushes embeddings to the
 	// consumer over Mooncake Transfer Engine (E/PD, E/P/D)
 	ECConnectorMooncake = "ec-mooncake"
+
+	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
+	IOExampleConnector = "io-example"
+
+	// ECConnectorNIXL enables the Encoder disaggregation NIXL protocol (E/PD, E/P/D)
+	IOP2PConnector = "io-p2p"
 )

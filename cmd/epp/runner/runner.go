@@ -155,6 +155,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/weightedrandom"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/iodisagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/attributeweight"
@@ -800,6 +801,10 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(kvcacheutilization.MultiClusterScorerType, fwkplugin.StabilityAlpha, kvcacheutilization.MultiClusterScorerFactory)
 	fwkplugin.Register(prefix.MultiClusterScorerType, fwkplugin.StabilityAlpha, prefix.MultiClusterScorerFactory)
 	fwkplugin.Register(reqdataprodprefix.MultiClusterPluginType, fwkplugin.StabilityAlpha, reqdataprodprefix.MultiClusterFactory)
+	// IO disaggregation
+	fwkplugin.RegisterWithPluginDependencies(iodisagg.IODisaggProfileHandlerType, fwkplugin.StabilityBeta, iodisagg.HandlerFactory, iodisagg.IODisaggProfileHandlerConfigParser)
+	fwkplugin.Register(iodisagg.AlwaysDisaggPreprocessDeciderPluginType, fwkplugin.StabilityBeta, iodisagg.AlwaysDisaggPreprocessDeciderPluginFactory)
+	fwkplugin.Register(iodisagg.AlwaysDisaggInferenceDeciderPluginType, fwkplugin.StabilityBeta, iodisagg.AlwaysDisaggInferenceDeciderPluginFactory)
 
 	// Flow Control plugins
 	// Stable
