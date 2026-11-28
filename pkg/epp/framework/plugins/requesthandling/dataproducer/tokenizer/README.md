@@ -201,6 +201,11 @@ EPP contract does not establish parity for them.
 | `vllm.clientCertPath`      | –                       | Client certificate for mTLS with the render endpoint; requires `clientKeyPath`. |
 | `vllm.clientKeyPath`       | –                       | Client private key for mTLS; requires `clientCertPath`.                      |
 | `vllm.insecureSkipVerify`  | `false`                 | Skip server certificate verification when using `https://`; `caCertPath` is ignored when set. |
+| `vllm.prefixCache.enabled` | `false`                 | Serve chat renders from the conversation-prefix cache; see [Prefix cache](#prefix-cache). |
+| `vllm.prefixCache.maxEntries` | `4096`               | LRU bound on cached conversation prefixes.                                   |
+| `vllm.prefixCache.maxBytes`   | `256MiB`             | LRU bound on cached token IDs plus overhead.                                 |
+| `vllm.prefixCache.asyncWarm.concurrency` | `8`        | Cap on simultaneous background renders after a partial hit.                  |
+| `vllm.prefixCache.asyncWarm.timeout`     | `15s`     | Budget for one background render.                                            |
 
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):
@@ -274,6 +279,44 @@ estimated stream reaches 1,048,576 (2^20) tokens, and any further image, video,
 or audio part keeps a single placeholder. This bound applies after the
 per-modality caps above and sits above the context window of current
 multimodal models.
+
+## Prefix cache
+
+`vllm.prefixCache.enabled: true` turns on the conversation-prefix render cache
+for chat completions. The cache keys a rendered prompt by a hash chain over its
+messages: node *i* commits to the salt (the template-affecting envelope fields)
+plus the first *i* messages, so turn *N+1* of an agentic session — the same
+conversation with appended messages — repeats turn *N*'s deepest node.
+
+On a hit over a strict prefix of the conversation, the cached prefix tokens are
+published without a render round trip and the full prompt is rendered in the
+background for the session's next turn. This is safe for the precise prefix
+cache: a request's new suffix exists in no pod's KV index, so omitting it loses
+at most the suffix and the last partial KV block, and the published token IDs
+remain exact for the prefix they cover. Token-load scoring undercounts by the
+appended messages, typically a small fraction of a long conversation. On a
+miss, the render happens synchronously and its result is stored.
+
+Salting covers only fields that change how the prompt is templated (`model`,
+`tools`, `tool_choice`, `response_format`, `chat_template_kwargs`,
+`reasoning_effort`, `enable_thinking`, `thinking`, `parallel_tool_calls`,
+`modalities`, `audio`); generation-only fields such as `max_tokens` or
+`temperature` vary per request without affecting the rendered prompt and do
+not break the chain. Envelope key order does not affect the chain; per-message
+byte changes (including key reordering inside a message) do, and simply miss.
+
+Messages are hashed as raw JSON, so a prefix matches only when the client
+resends prior messages byte-identically modulo envelope key order, which
+agentic clients that replay the full conversation do. Background warming is
+limited to text-only payloads, because multimodal render metadata lives in
+request-scoped context that a background render cannot reconstruct;
+multimodal requests still hit over their text prefix but warm synchronously on
+their next miss. Completions, Messages, and Responses rendering are not chained
+and pass through unchanged.
+
+The `token_producer_prefix_cache_events_total` metric counts transitions
+(`hit_full`, `hit_partial`, `miss`, `store`, `evict`, `warm`, `warm_failure`,
+`bypass`).
 
 ## Failure mode
 

@@ -368,8 +368,12 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, err
 		}
+		var tk tokenizer = renderer
+		if cfg.PrefixCache != nil && cfg.PrefixCache.Enabled {
+			tk = newPrefixCachedRenderer(renderer, name, cfg.PrefixCache)
+		}
 		backend = renderBackend{
-			tk: renderer, modelName: config.ModelName,
+			tk: tk, modelName: config.ModelName,
 			legacyMessages: legacyMessages, legacyResponses: legacyResponses,
 			warmupAuth: vllmWarmupAuthHeader(),
 		}
