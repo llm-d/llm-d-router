@@ -91,8 +91,8 @@ type Config struct {
 
 	// MaxTTFTPenaltyMs is the max TTFT penalty (ms) before breaking stickiness.
 	// If the best sticky endpoint's TTFT exceeds the best non-sticky endpoint's
-	// TTFT by more than this value, all endpoints are kept. Set to 0 to always
-	// stick. Default: 18000.
+	// TTFT by more than this value, all endpoints are kept, or the set
+	// MaxSpillEndpoints bounds. Set to 0 to always stick. Default: 18000.
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
 
 	// TTFTSource selects where the load gate reads per-endpoint TTFT from.
@@ -111,6 +111,11 @@ type Config struct {
 	// TTFTEstimateBackLog (default) only accounts inFlightTokens and TTFTEstimateFull also handles
 	// the request's uncached tokens.
 	TTFTEstimate TTFTEstimate `json:"ttftEstimate,omitempty"`
+
+	// MaxSpillEndpoints bounds a load override: the filter keeps the sticky
+	// endpoints plus at most this many non-sticky ones, chosen per cached
+	// prefix (see spill). 0 keeps all endpoints. Default: 0.
+	MaxSpillEndpoints int `json:"maxSpillEndpoints,omitempty"`
 
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
@@ -197,6 +202,9 @@ func (c *Config) validate() error {
 	}
 	if c.PeakPrefillThroughput < 0 {
 		return fmt.Errorf("peakPrefillThroughput must be >= 0, got %f", c.PeakPrefillThroughput)
+	}
+	if c.MaxSpillEndpoints < 0 {
+		return fmt.Errorf("maxSpillEndpoints must be >= 0, got %d", c.MaxSpillEndpoints)
 	}
 	switch c.TTFTSource {
 	case TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput:
@@ -300,6 +308,9 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
 				"penalty", penalty, "maxPenalty", p.config.MaxTTFTPenaltyMs)
 			p.decide(request, span, outcomeLoadOverride)
+			if p.config.MaxSpillEndpoints > 0 {
+				return p.spill(request, endpoints, sticky, nonSticky, bestStickyTTFT)
+			}
 			return endpoints
 		}
 	}
