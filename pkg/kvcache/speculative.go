@@ -51,7 +51,8 @@ type speculativeHint struct {
 	expiresAt time.Time
 }
 
-// NewSpeculativeIndex builds an index whose hints live for ttl.
+// NewSpeculativeIndex builds an index whose hints live for ttl. With a
+// non-positive ttl the index records no hints.
 func NewSpeculativeIndex(ttl time.Duration) *SpeculativeIndex {
 	return &SpeculativeIndex{
 		ttl:     ttl,
@@ -67,13 +68,15 @@ func NewSpeculativeIndex(ttl time.Duration) *SpeculativeIndex {
 // Its live hints along any prompt are therefore a leading run of the prompt's
 // keys, which Match relies on.
 func (s *SpeculativeIndex) Add(keys []kvblock.BlockHash, pod string) {
-	if len(keys) == 0 {
+	if len(keys) == 0 || s.ttl <= 0 {
 		return
 	}
-	expiresAt := time.Now().Add(s.ttl)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Read under mu, so an Add that writes later never sets an earlier expiry
+	// and a renewed prefix does not expire before the keys past it.
+	expiresAt := time.Now().Add(s.ttl)
 	for _, key := range keys {
 		hints := s.current[key]
 		renewed := false
@@ -138,18 +141,29 @@ func (s *SpeculativeIndex) hinted(key kvblock.BlockHash, pod string, now time.Ti
 
 // rotate retires the current generation and drops the previous one. The new
 // generation is sized like the one it replaces, so steady traffic does not
-// regrow the map after every rotation.
+// regrow the map after every rotation. It is allocated before the write lock
+// is taken, so Add and Match do not wait on the allocation.
 func (s *SpeculativeIndex) rotate() {
+	s.mu.RLock()
+	size := len(s.current)
+	s.mu.RUnlock()
+	next := make(map[kvblock.BlockHash][]speculativeHint, size)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.previous = s.current
-	s.current = make(map[kvblock.BlockHash][]speculativeHint, len(s.previous))
+	s.current = next
 }
 
 // Run rotates the generations once per TTL until ctx is done. Rotations are
 // at least a TTL apart, so a generation is dropped only after the last hint
-// written to it has expired.
+// written to it has expired. With a non-positive TTL there is nothing to
+// rotate, and Run only waits for ctx.
 func (s *SpeculativeIndex) Run(ctx context.Context) {
+	if s.ttl <= 0 {
+		<-ctx.Done()
+		return
+	}
 	timer := time.NewTimer(s.ttl)
 	defer timer.Stop()
 	for {

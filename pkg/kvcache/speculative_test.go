@@ -95,6 +95,20 @@ func TestSpeculativeIndexExpiry(t *testing.T) {
 	})
 }
 
+// A non-positive TTL records no hints and leaves Run waiting on its context.
+func TestSpeculativeIndexNonPositiveTTL(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := kvcache.NewSpeculativeIndex(0)
+		go s.Run(t.Context())
+		keys := []kvblock.BlockHash{1, 2}
+		s.Add(keys, hintPodA)
+
+		synctest.Wait() // returns once Run is blocked
+		assert.Nil(t, s.Match(keys, nil))
+		assert.Equal(t, 0, s.Len())
+	})
+}
+
 // Add, Match and the rotation run concurrently. Run with -race.
 func TestSpeculativeIndexConcurrentUse(t *testing.T) {
 	s := kvcache.NewSpeculativeIndex(time.Minute)
