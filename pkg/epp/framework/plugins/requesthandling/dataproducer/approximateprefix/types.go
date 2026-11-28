@@ -124,6 +124,7 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 		PrefixCacheServers:        prefixCacheServers,
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
+		BlockSize:                 s.BlockSize,
 	}
 }
 

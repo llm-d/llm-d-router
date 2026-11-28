@@ -329,6 +329,12 @@ func TestProduce_BigramLookahead(t *testing.T) {
 }
 
 func TestProduce_MixedCacheFormats(t *testing.T) {
+	t.Run("ordinary", func(t *testing.T) { testMixedCacheFormats(t, false) })
+	t.Run("queued", func(t *testing.T) { testMixedCacheFormats(t, true) })
+}
+
+func testMixedCacheFormats(t *testing.T, prepare bool) {
+	t.Helper()
 	ctx := utils.NewTestContext(t)
 	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 2})
 	require.NoError(t, err)
@@ -367,21 +373,30 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 			Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens[:8]}},
 		}},
 	}
-	require.NoError(t, p.Produce(ctx, request, endpoints))
-	for i, want := range []struct{ cached, total, blockSize, weighted int }{{7, 8, 1, 7}, {4, 8, 1, 3}, {4, 4, 2, 4}} {
-		value, ok := endpoints[i].Get(p.dk)
-		require.True(t, ok)
-		info, ok := value.(*attrprefix.PrefixCacheMatchInfo)
-		require.True(t, ok)
-		require.Equal(t, want.cached, info.CachedBlockCount())
-		require.Equal(t, want.cached, info.ConfirmedCachedBlockCount())
-		require.Equal(t, want.total, info.TotalBlocks())
-		require.Equal(t, want.blockSize, info.BlockSizeTokens())
-		require.Equal(t, want.weighted, info.MatchBlocks())
-		if i == 1 {
-			require.Equal(t, map[string]int{"cpu": 4}, info.CachedBlocksByTier())
+	checkMatches := func() {
+		for i, want := range []struct{ cached, total, blockSize, weighted int }{{7, 8, 1, 7}, {4, 8, 1, 3}, {4, 4, 2, 4}} {
+			value, ok := endpoints[i].Get(p.dk)
+			require.True(t, ok)
+			info, ok := value.(*attrprefix.PrefixCacheMatchInfo)
+			require.True(t, ok)
+			require.Equal(t, want.cached, info.CachedBlockCount())
+			require.Equal(t, want.cached, info.ConfirmedCachedBlockCount())
+			require.Equal(t, want.total, info.TotalBlocks())
+			require.Equal(t, want.blockSize, info.BlockSizeTokens())
+			require.Equal(t, want.weighted, info.MatchBlocks())
+			if i == 1 {
+				require.Equal(t, map[string]int{"cpu": 4}, info.CachedBlocksByTier())
+			}
 		}
 	}
+	if prepare {
+		require.NoError(t, p.PrepareForAdmission(ctx, request, endpoints))
+		checkMatches()
+		_, err := plugin.ReadPluginStateKey[*blockKeysState](p.pluginState, request.RequestID, blockKeysStateKey)
+		require.Error(t, err, "queued preparation must not publish speculative state")
+	}
+	require.NoError(t, p.Produce(ctx, request, endpoints))
+	checkMatches()
 	scorer, err := prefixscorer.New(ctx, "test-scorer", p.TypedName().Name)
 	require.NoError(t, err)
 	scores := scorer.Score(ctx, request, endpoints)
