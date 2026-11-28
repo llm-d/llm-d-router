@@ -1298,7 +1298,15 @@ func deriveEvictionConfirmationGrace(detector fwkfc.SaturationDetector, opts *ru
 	}
 	// Scraped sensors (utilization detector, or any custom detector, conservatively): the freed
 	// capacity is visible only after the engine reclaims it and the next non-stale scrape lands.
-	return opts.RefreshMetricsInterval + opts.MetricsStalenessThreshold + evictionEngineReclaimBudget
+	// The utilization detector's staleness window is its metricsStalenessThreshold parameter. For
+	// any other detector the window is unknown, so the grace falls back to
+	// --metrics-staleness-threshold. The grace takes the larger of the two, so raising the
+	// detector's threshold above the flag lengthens the grace and the default is unchanged.
+	staleness := opts.MetricsStalenessThreshold
+	if d, ok := detector.(*utilization.Detector); ok {
+		staleness = max(staleness, d.MetricsStalenessThreshold())
+	}
+	return opts.RefreshMetricsInterval + staleness + evictionEngineReclaimBudget
 }
 
 // buildRequestEvictor assembles the in-flight eviction plumbing: the victim filter and ordering
