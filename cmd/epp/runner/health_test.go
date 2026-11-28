@@ -47,6 +47,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
 // Mock Datastore
@@ -573,27 +574,27 @@ func TestExtProcReadiness_FollowsServing(t *testing.T) {
 		isLeader:          &isLeader,
 		readinessCheckers: []fwkplugin.ReadinessChecker{extProcReadiness{sr}},
 	}
-	check := func(service string) healthPb.HealthCheckResponse_ServingStatus {
-		resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: service})
-		if err != nil {
-			t.Fatalf("Check failed: %v", err)
-		}
-		return resp.Status
+	check := func(service string) (healthPb.HealthCheckResponse_ServingStatus, error) {
+		resp, err := s.Check(t.Context(), &healthPb.HealthCheckRequest{Service: service})
+		return resp.GetStatus(), err
+	}
+	requireStatus := func(service string, want healthPb.HealthCheckResponse_ServingStatus, msg string) {
+		got, err := check(service)
+		require.NoError(t, err)
+		require.Equal(t, want, got, msg)
 	}
 
-	if got := check(ReadinessCheckService); got != healthPb.HealthCheckResponse_NOT_SERVING {
-		t.Fatalf("readiness before the server starts = %v, want NOT_SERVING", got)
-	}
-	if got := check(LivenessCheckService); got != healthPb.HealthCheckResponse_SERVING {
-		t.Fatalf("liveness before the server starts = %v, want SERVING", got)
-	}
+	requireStatus(ReadinessCheckService, healthPb.HealthCheckResponse_NOT_SERVING, "readiness before the server starts")
+	requireStatus(LivenessCheckService, healthPb.HealthCheckResponse_SERVING, "liveness before the server starts")
 
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
 	go func() { done <- sr.AsRunnable(logutil.NewTestLogger()).Start(ctx) }()
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.Equal(c, healthPb.HealthCheckResponse_SERVING, check(ReadinessCheckService))
+		got, err := check(ReadinessCheckService)
+		assert.NoError(c, err)
+		assert.Equal(c, healthPb.HealthCheckResponse_SERVING, got)
 	}, 10*time.Second, 10*time.Millisecond, "readiness never became SERVING while the server is serving")
 
 	cancel()
@@ -602,7 +603,56 @@ func TestExtProcReadiness_FollowsServing(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("server did not return after cancel")
 	}
-	if got := check(ReadinessCheckService); got != healthPb.HealthCheckResponse_NOT_SERVING {
-		t.Fatalf("readiness after the server returned = %v, want NOT_SERVING", got)
+	requireStatus(ReadinessCheckService, healthPb.HealthCheckResponse_NOT_SERVING, "readiness after the server returned")
+}
+
+// healthStatus asks the health server at addr for the status of service.
+func healthStatus(ctx context.Context, addr, service string) (healthPb.HealthCheckResponse_ServingStatus, error) {
+	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return healthPb.HealthCheckResponse_UNKNOWN, err
 	}
+	defer cc.Close()
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	resp, err := healthPb.NewHealthClient(cc).Check(ctx, &healthPb.HealthCheckRequest{Service: service})
+	return resp.GetStatus(), err
+}
+
+// TestSetup_ReadinessWaitsForExtProc checks that the health server built by
+// setup() reports NOT_SERVING until the ext_proc server is serving.
+func TestSetup_ReadinessWaitsForExtProc(t *testing.T) {
+	ctx := t.Context()
+	modelServer, _ := newDrainTestBackend(t, &atomic.Bool{})
+	opts := newDrainTestOptions(modelServer)
+	r, _ := setupDrainTestRunner(ctx, t, opts)
+
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	go func() { _ = r.healthGRPCServer.Serve(healthListener) }()
+	t.Cleanup(r.healthGRPCServer.Stop)
+	healthAddr := healthListener.Addr().String()
+
+	for _, service := range []string{ReadinessCheckService, "", extProcPb.ExternalProcessor_ServiceDesc.ServiceName} {
+		got, err := healthStatus(ctx, healthAddr, service)
+		require.NoError(t, err)
+		require.Equal(t, healthPb.HealthCheckResponse_NOT_SERVING, got, "service %q before ext_proc starts", service)
+	}
+
+	grpcListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	r.serverRunner.GrpcListener = grpcListener
+	serveCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- r.serverRunner.AsRunnable(logutil.NewTestLogger()).Start(serveCtx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		got, err := healthStatus(ctx, healthAddr, ReadinessCheckService)
+		assert.NoError(c, err)
+		assert.Equal(c, healthPb.HealthCheckResponse_SERVING, got)
+	}, 10*time.Second, 20*time.Millisecond, "readiness never became SERVING once ext_proc served")
 }

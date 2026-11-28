@@ -362,36 +362,11 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	if leaderElection {
 		elected = r.isLeader
 	}
-	closeListener, err := bindExtProcListener(r.serverRunner)
-	if err != nil {
-		return err
-	}
-	defer closeListener()
 	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, elected, drainTimeout)
 }
 
-// bindExtProcListener binds the ext_proc port before the serving runnables
-// start, unless sr already has a listener, so the port accepts connections
-// while the runnable builds its TLS credentials. The returned func closes the
-// listener. grpc.Server.Serve also closes it on return, so the deferred close
-// only matters when the runnable fails before it serves.
-func bindExtProcListener(sr *runserver.ExtProcServerRunner) (func(), error) {
-	if sr.GrpcListener != nil {
-		return func() {}, nil
-	}
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", sr.GrpcPort))
-	if err != nil {
-		return nil, fmt.Errorf("ext-proc gRPC server failed to listen - %w", err)
-	}
-	sr.GrpcListener = lis
-	return func() {
-		_ = lis.Close()
-		sr.GrpcListener = nil
-	}, nil
-}
-
-// extProcReadiness keeps readiness NOT_SERVING until the ext_proc server is
-// serving. Connections to the bound port wait until then.
+// extProcReadiness keeps readiness NOT_SERVING until the ext_proc server has
+// finished TLS setup and is serving on its port.
 type extProcReadiness struct {
 	sr *runserver.ExtProcServerRunner
 }
@@ -1543,12 +1518,6 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		readinessCheckers: append(pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()),
 			extProcReadiness{serverRunner}),
 	})
-
-	closeListener, err := bindExtProcListener(serverRunner)
-	if err != nil {
-		return err
-	}
-	defer closeListener()
 
 	g := newRunnableGroup()
 	g.Add("discovery", func(ctx context.Context) error {
